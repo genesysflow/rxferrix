@@ -35,10 +35,12 @@
 //! 3. set `self.ts = S.ts` and queue the closed queries. Runner tasks (one per snapshot at `S.ts`: `S`, plus snapshots
 //!    from idle readers while their ts is still `S.ts`) take queued jobs and run them at `S.ts`.
 //!
-//! A new generation starts as soon as commits wait and the queue is empty: it does not wait for queries that are still
-//! running, so a slow query holds up neither the next generation nor the connections that don't watch it. Commits that
-//! land while the queue is not empty are coalesced into one generation, and queries invalidated together run at the
-//! same ts. Jobs still queued when a generation starts run at the new one.
+//! The queue has two lanes: queries whose runs take `SLOW_RUN_US` (5 ms) or more on average wait in the slow lane,
+//! which has runners of its own. A new generation starts as soon as commits wait and the fast lane is empty: it waits neither for
+//! queries that are still running nor for slow ones, so a slow query holds up neither the next generation nor the
+//! connections that don't watch it. Commits that land while the fast lane is not empty are coalesced into one
+//! generation, and queries invalidated together run at the same ts. Jobs still queued when a generation starts run at
+//! the new one; a query already queued or running is not queued again.
 //!
 //! When a run finishes at ts `s` behind the frontier, its read set is checked against the commits in `(s, self.ts]`:
 //! if one wrote a key in it, the new version is closed there and the query is queued again at the frontier.

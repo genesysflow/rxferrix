@@ -10,6 +10,7 @@
   import Login from "./pages/Login.svelte";
   import Logs from "./pages/Logs.svelte";
   import Overview from "./pages/Overview.svelte";
+  import Scheduler from "./pages/Scheduler.svelte";
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
 
@@ -48,14 +49,15 @@
     { page: "functions", label: "Functions", icon: "ƒ" },
     { page: "logs", label: "Logs", icon: "≡" },
     { page: "users", label: "Users", icon: "◍" },
+    { page: "scheduler", label: "Scheduler", icon: "◷" },
   ];
 
   const route = $derived(router.route);
   const live = $derived(connection.current.isWebSocketConnected);
 
   function onkeydown(e: KeyboardEvent) {
-    // Alt+1…5 switches pages.
-    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-5]$/.test(e.key) && isAdmin) {
+    // Alt+1…6 switches pages.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-6]$/.test(e.key) && isAdmin) {
       e.preventDefault();
       router.navigate(href(nav[Number(e.key) - 1]!.page));
     }
@@ -119,6 +121,8 @@
         <Functions {route} />
       {:else if route.page === "logs"}
         <Logs />
+      {:else if route.page === "scheduler"}
+        <Scheduler {route} />
       {:else if route.page === "users"}
         <Users />
       {:else}

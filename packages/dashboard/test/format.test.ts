@@ -4,6 +4,7 @@ import {
   compactJson,
   formatBytes,
   formatDuration,
+  formatRelative,
   idTableNumber,
   parseFilterValue,
   parseJson,
@@ -74,5 +75,14 @@ describe("formatting", () => {
     expect(prettyArgs('{"a":1}')).toBe('{\n  "a": 1\n}');
     expect(prettyArgs('{"a":"trunc')).toBe('{"a":"trunc');
     expect(parseJson("{").ok).toBe(false);
+  });
+
+  it("formats times relative to now", () => {
+    const now = 1_000_000_000;
+    expect(formatRelative(now, now)).toBe("now");
+    expect(formatRelative(now + 5_000, now)).toBe("in 5s");
+    expect(formatRelative(now + 5 * 60_000, now)).toBe("in 5m");
+    expect(formatRelative(now - 3 * 3600_000, now)).toBe("3h ago");
+    expect(formatRelative(now + 2 * 86400_000, now)).toBe("in 2d");
   });
 });

@@ -121,6 +121,56 @@ export const dashboard = {
   me: q<Record<string, never>, { _id: string; email: string } | null>("me"),
 } as const;
 
+/** Scheduled job states (`JobState` in crates/ferrix/src/scheduler/tables.rs). */
+export type JobState = "pending" | "inProgress" | "success" | "failed" | "canceled";
+
+/** A `_scheduled_jobs` document. */
+export interface ScheduledJob {
+  _id: string;
+  _creationTime: number;
+  path: string;
+  kind: "mutation" | "action";
+  args: Json;
+  runAt: number;
+  state: JobState;
+  attempts: number;
+  maxAttempts: number;
+  /** The return value as (possibly cut) JSON text. */
+  result: string | null;
+  error: string | null;
+  scheduledAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  /** A function path, `cron:<name>` or `dashboard`. */
+  origin: string | null;
+}
+
+export interface CronSummary {
+  _id: string;
+  name: string;
+  schedule: string;
+  path: string;
+  args: Json;
+  lastRun: number | null;
+  nextRun: number | null;
+  lastJob: string | null;
+  lastJobState: JobState | null;
+}
+
+export type CancelOutcome = "canceled" | "alreadyFinished" | "running";
+
+const sq = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out>("query", `_system/scheduler:${name}`);
+const sm = <Args, Out>(name: string) =>
+  makeFunctionReference<"mutation", Args, Out>("mutation", `_system/scheduler:${name}`);
+
+/** The admin-only scheduler functions (`_system/scheduler:*`, crates/ferrix/src/scheduler/mod.rs). */
+export const scheduler = {
+  jobs: sq<{ state?: JobState | null; paginationOpts: PaginationOpts }, PaginationResult<ScheduledJob>>("jobs"),
+  cancelJob: sm<{ id: string }, CancelOutcome>("cancel_job"),
+  runJobNow: sm<{ id: string }, string>("run_job_now"),
+  crons: sq<Record<string, never>, CronSummary[]>("crons"),
+} as const;
+
 /** One execution from the execution log (`LogEntry` in Rust). */
 export interface LogEntry {
   id: number;

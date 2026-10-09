@@ -9,6 +9,9 @@ describe("router", () => {
     expect(r.rest).toEqual(["todos"]);
     expect(r.params.get("doc")).toBe("abc");
     expect(parseRoute("/_/setup", "").page).toBe("setup");
+    const s = parseRoute("/_/scheduler", "?state=failed");
+    expect(s.page).toBe("scheduler");
+    expect(s.params.get("state")).toBe("failed");
     expect(parseRoute("/_/nonsense", "").page).toBe("overview");
   });
 

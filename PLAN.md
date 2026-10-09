@@ -677,7 +677,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   cache in `<dir>/acme`) and `--tls-cert/--tls-key`; graceful shutdown on SIGTERM.
 - [x] Static frontend serving: `.static_dir()`, `.embed_static::<A>()`, `.routes(axum::Router)`; SPA fallback,
   caching, precompressed files. The todo example embeds its web app.
-- [x] Release builds: `scripts/release.sh` (static `x86_64-unknown-linux-musl` via cargo-zigbuild, ~18 MiB),
+- [x] Release builds: `scripts/release.sh` (static `x86_64-unknown-linux-musl` via cargo-zigbuild, ~20 MB),
   `Dockerfile` (`FROM scratch`), `.dockerignore`, `deploy/ferrix.service`.
 - [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`). Running them
   (not `status`) takes the data directory lock like `import`.

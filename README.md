@@ -325,7 +325,7 @@ next to a file are served to clients that accept them. The todo example embeds `
 exists.
 
 **Release binary.** `scripts/release.sh` builds the web app and a static `x86_64-unknown-linux-musl` binary of
-`todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 18 MiB). C code is
+`todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 20 MB). C code is
 cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not installed. For your app:
 `PACKAGE=my-server WEB=web scripts/release.sh`.
 

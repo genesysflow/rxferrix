@@ -58,7 +58,8 @@ enum Command {
 struct MigrateArgs {
     #[command(subcommand)]
     command: Option<MigrateCommand>,
-    /// Run only this migration (default: every migration that isn't done, in name order, stopping at a failure).
+    /// Run only this migration (default: every migration that isn't done, dependencies first, then in name order,
+    /// stopping at a failure).
     #[arg(long)]
     name: Option<String>,
     /// Run over every document and report what would change, without writing anything.
@@ -67,6 +68,9 @@ struct MigrateArgs {
     /// Start the migration over from the first document, even if it is done.
     #[arg(long, requires = "name")]
     restart: bool,
+    /// Run the migration even if some it runs after (`#[migration(after = [..])]`) are not done.
+    #[arg(long, requires = "name")]
+    force: bool,
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     dir: PathBuf,
@@ -369,7 +373,12 @@ fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, schedule
             print_migration_status(&app).await?;
             return Ok(());
         }
-        let options = crate::migrations::RunOptions { dry_run: args.dry_run, restart: args.restart, ..Default::default() };
+        let options = crate::migrations::RunOptions {
+            dry_run: args.dry_run,
+            restart: args.restart,
+            force: args.force,
+            ..Default::default()
+        };
         let reports = match &args.name {
             Some(name) => vec![app.run_migration_named(name, options).await?],
             None => app.run_pending_migrations(options).await?,
@@ -385,6 +394,9 @@ fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, schedule
         if failed {
             anyhow::bail!("a migration failed; fix it and run `migrate` again to resume");
         }
+        if reports.iter().any(|r| r.outcome == crate::migrations::RunOutcome::Blocked) {
+            anyhow::bail!("a migration is waiting for another one that is not done");
+        }
         Ok(())
     })
 }
@@ -396,6 +408,7 @@ fn describe_report(r: &crate::migrations::MigrationReport) -> String {
     s.push_str(&match r.outcome {
         RunOutcome::AlreadyDone => "already done".to_string(),
         RunOutcome::AlreadyRunning => "already running elsewhere".to_string(),
+        RunOutcome::Blocked => "blocked".to_string(),
         RunOutcome::DryRun => format!("dry run: would change {} of {} document(s)", r.changed, r.processed),
         outcome => format!(
             "{}: {} batch(es), {} document(s) processed, {} changed",
@@ -429,6 +442,9 @@ async fn print_migration_status(app: &App) -> crate::Result<()> {
     for m in migrations {
         let mut line =
             format!("{:<10} {}  (table `{}`, {}/{} processed", m.state.as_str(), m.name, m.table, m.processed, m.documents);
+        if !m.after.is_empty() {
+            line.push_str(&format!(", after {}", m.after.join(", ")));
+        }
         if !m.declared {
             line.push_str(", no longer declared");
         }

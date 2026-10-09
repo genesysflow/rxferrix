@@ -197,7 +197,11 @@ fn table_search_tokenizers_and_vector_kinds() {
             #[search_index(s_porter_keep, search = body, tokenizer = "porter", diacritics = "keep")]
             #[search_index(s_trigram, search = body, filter = [channel], tokenizer = "trigram")]
             #[search_index(s_plain, search = title, tokenizer = "unicode61", diacritics = "remove")]
+            #[search_index(s_ro, search = body, tokenizer = "snowball", language = "romanian")]
+            #[search_index(s_fr_keep, search = body, language = "french", tokenizer = "snowball", diacritics = "keep")]
             #[vector_index(v_hnsw, field = embedding, dims = 4, kind = "hnsw")]
+            #[vector_index(v_tuned, field = embedding, dims = 4, kind = "hnsw", m = 32, ef_construction = 400, ef_search = 64)]
+            #[vector_index(v_ef, field = embedding, dims = 4, ef_search = 20, kind = "hnsw")]
             #[vector_index(v_exact, field = embedding, dims = 4, filter = [channel], kind = "exact")]
             struct Doc { channel: String, body: String, title: Option<String>, embedding: Vec<f32> }
         }
@@ -212,6 +216,8 @@ fn table_search_tokenizer_errors() {
             quote!(),
             quote! {
                 #[search_index(s1, search = text, tokenizer = "snowball")]
+                #[search_index(s1b, search = text, tokenizer = "snowball", language = "klingon")]
+                #[search_index(s1c, search = text, tokenizer = "trigram", language = "french")]
                 #[search_index(s2, search = text, language = "english")]
                 #[search_index(s3, search = text, tokenizer = "porter", language = "french")]
                 #[search_index(s4, search = text, diacritics = "strip")]
@@ -221,6 +227,11 @@ fn table_search_tokenizer_errors() {
                 #[vector_index(v1, field = emb, dims = 2, kind = "ivf")]
                 #[vector_index(v2, field = emb, dims = 2, tokenizer = "porter")]
                 #[vector_index(v3, field = emb, dims = 2, kind = "hnsw", kind = "exact")]
+                #[vector_index(v4, field = emb, dims = 2, m = 16)]
+                #[vector_index(v5, field = emb, dims = 2, kind = "exact", ef_search = 10, ef_construction = 100)]
+                #[vector_index(v6, field = emb, dims = 2, kind = "hnsw", m = 2, ef_construction = 9000, ef_search = 0)]
+                #[vector_index(v7, field = emb, dims = 2, kind = "hnsw", m = 8, m = 9)]
+                #[vector_index(v8, field = emb, dims = 2, kind = "hnsw", m = "8")]
                 struct T { text: String, emb: Vec<f32> }
             }
         )
@@ -641,7 +652,7 @@ fn migration_contract_example() {
 #[test]
 fn migration_typed_named_table_by_name() {
     insta::assert_snapshot!(migration(
-        quote!(table = "todos", name = "0002_split-name", batch = 7),
+        quote!(table = "todos", name = "0002_split-name", batch = 7, after = ["0001_add_priority", "todos:fix"]),
         quote! {
             #[cfg(feature = "x")]
             async fn split(_ctx: &ferrix::MutationCtx, doc: Doc<OldTodo>) -> anyhow::Result<DocChange> {
@@ -656,7 +667,16 @@ fn migration_errors() {
     insta::assert_snapshot!(
         "migration_err_args",
         migration_err(
-            quote!(batch = 0, name = "has space", tables = X, name = "x"),
+            quote!(batch = 0, name = "has space", tables = X, name = "x", after = "0001", after = ["a"]),
+            quote!(
+                async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}
+            )
+        )
+    );
+    insta::assert_snapshot!(
+        "migration_err_after",
+        migration_err(
+            quote!(table = Todo, name = "0003_x", after = ["0001_ok", "bad name", 3, "0001_ok", "0003_x"]),
             quote!(
                 async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}
             )

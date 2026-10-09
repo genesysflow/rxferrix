@@ -221,7 +221,8 @@ pub mod hostile {
     #[index(by_a = [a])]
     #[search_index(search_b, search = b, filter = [a], tokenizer = "porter", language = "english", diacritics = "keep")]
     #[search_index(search_b_sub, search = b, tokenizer = "trigram")]
-    #[vector_index(by_v, field = v, dims = 2, filter = [a, b], kind = "hnsw")]
+    #[search_index(search_b_ro, search = b, tokenizer = "snowball", language = "romanian")]
+    #[vector_index(by_v, field = v, dims = 2, filter = [a, b], kind = "hnsw", m = 8)]
     pub struct Shadowed {
         pub a: u32,
         pub b: String,
@@ -273,7 +274,7 @@ pub mod data {
         pub title: String,
     }
 
-    #[migration(table = "todos", batch = 500, name = "0002_rename-title")]
+    #[migration(table = "todos", batch = 500, name = "0002_rename-title", after = ["data:add_priority"])]
     pub(crate) async fn rename_title(_ctx: &MutationCtx, doc: Doc<OldTodo>) -> anyhow::Result<DocChange> {
         if doc.title.is_empty() {
             return Ok(DocChange::Delete);
@@ -362,7 +363,7 @@ fn table_validate_deserializes_a_doc() {
 
 #[test]
 fn search_and_vector_indexes() {
-    use ferrix::{SearchIndexDef, Tokenizer, TokenizerKind, VectorIndexDef, VectorIndexKind};
+    use ferrix::{HnswParams, SearchIndexDef, Tokenizer, TokenizerKind, VectorIndexDef, VectorIndexKind};
     use hostile::Shadowed;
     let def = Shadowed::table_def();
     assert_eq!(
@@ -380,6 +381,12 @@ fn search_and_vector_indexes() {
                 filter_fields: vec![],
                 tokenizer: Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true },
             },
+            SearchIndexDef {
+                name: "search_b_ro",
+                search_field: "b",
+                filter_fields: vec![],
+                tokenizer: Tokenizer { kind: TokenizerKind::Snowball, language: Some("romanian"), remove_diacritics: true },
+            },
         ]
     );
     assert_eq!(
@@ -390,6 +397,7 @@ fn search_and_vector_indexes() {
             dimensions: 2,
             filter_fields: vec!["a", "b"],
             kind: VectorIndexKind::Hnsw,
+            hnsw: HnswParams { m: 8, ..HnswParams::DEFAULT },
         }]
     );
     let s: ferrix::SearchIndex<Shadowed> = Shadowed::search_b;
@@ -627,6 +635,8 @@ fn migrations_are_registered_and_run() {
     assert_eq!((add.name(), add.table, add.batch_size), ("data:add_priority".to_string(), "todos", 100));
     let rename = find("rename_title");
     assert_eq!((rename.name(), rename.table, rename.batch_size), ("0002_rename-title".to_string(), "todos", 500));
+    assert_eq!(rename.after, ["data:add_priority"]);
+    assert!(add.after.is_empty());
     let noop = find("noop");
     assert_eq!((noop.table, noop.batch_size), ("todo_item", 1));
     assert_eq!(MIGRATIONS.len(), 3);

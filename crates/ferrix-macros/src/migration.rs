@@ -1,4 +1,4 @@
-//! `#[migration(table = T, batch = N, name = "...")]` (CONTRACT.md §3.3).
+//! `#[migration(table = T, batch = N, name = "...", after = ["...", ...])]` (CONTRACT.md §3.3).
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
@@ -26,6 +26,8 @@ struct Args {
     table_seen: bool,
     batch: u64,
     name: Option<syn::LitStr>,
+    /// `after = ["0001_x", ...]`: names of migrations that must be done first.
+    after: Vec<syn::LitStr>,
 }
 
 /// The same rule as the runtime's (`migrations::check_name`): 1..=128 characters of `A-Z a-z 0-9 _ - . : /`.
@@ -40,14 +42,14 @@ fn check_name(name: &str) -> Result<(), String> {
 }
 
 fn parse_args(attr: TokenStream, errors: &mut Errors) -> Args {
-    let mut args = Args { table: None, table_seen: false, batch: DEFAULT_BATCH, name: None };
+    let mut args = Args { table: None, table_seen: false, batch: DEFAULT_BATCH, name: None, after: Vec::new() };
     let parser = Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
     let items = match syn::parse::Parser::parse2(parser, attr) {
         Ok(items) => items,
         Err(e) => {
             errors.push(syn::Error::new(
                 e.span(),
-                "expected `#[migration(table = TableType, batch = 100, name = \"...\")]` (`batch` and `name` are optional)",
+                "expected `#[migration(table = TableType, batch = 100, name = \"...\", after = [\"...\"])]` (`batch`, `name` and `after` are optional)",
             ));
             args.table_seen = true;
             return args;
@@ -88,8 +90,41 @@ fn parse_args(attr: TokenStream, errors: &mut Errors) -> Args {
                 }
                 other => errors.error(other, "`name` must be a string literal, e.g. `name = \"0002_add_priority\"`"),
             },
-            _ => errors.error(&item.path, format_args!("unknown argument `{key}` (expected `table`, `batch` or `name`)")),
+            "after" => match &item.value {
+                syn::Expr::Array(array) => {
+                    let mut seen_names = std::collections::HashSet::new();
+                    for elem in &array.elems {
+                        match elem {
+                            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => {
+                                if let Err(e) = check_name(&s.value()) {
+                                    errors.error(s, e);
+                                } else if !seen_names.insert(s.value()) {
+                                    errors.error(s, format_args!("`{}` is listed twice in `after`", s.value()));
+                                }
+                                args.after.push(s.clone());
+                            }
+                            other => errors.error(
+                                other,
+                                "`after` lists migration names as string literals, e.g. `after = [\"0001_add_priority\"]`",
+                            ),
+                        }
+                    }
+                }
+                other => errors.error(
+                    other,
+                    "`after` must be a list of migration names, e.g. `after = [\"0001_add_priority\", \"todos:split\"]`",
+                ),
+            },
+            _ => errors.error(
+                &item.path,
+                format_args!("unknown argument `{key}` (expected `table`, `batch`, `name` or `after`)"),
+            ),
         }
+    }
+    if let Some(name) = &args.name
+        && let Some(own) = args.after.iter().find(|a| a.value() == name.value())
+    {
+        errors.error(own, "a migration can't run after itself");
     }
     args
 }
@@ -196,6 +231,7 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
         TableArg::Name(s) => quote!(#s),
     };
     let batch = syn::LitInt::new(&format!("{}usize", args.batch), Span::call_site());
+    let after = &args.after;
     let ctx_var = syn::Ident::new("__ferrix_ctx", Span::mixed_site());
     let doc_var = syn::Ident::new("__ferrix_doc", Span::mixed_site());
     let out_var = syn::Ident::new("__ferrix_out", Span::mixed_site());
@@ -232,6 +268,7 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
             name: #name_opt,
             table: #table_expr,
             batch_size: #batch,
+            after: &[#(#after),*],
             handler: {
                 fn #handler_ident<'a>(
                     #ctx_var: &'a ::ferrix::MutationCtx,

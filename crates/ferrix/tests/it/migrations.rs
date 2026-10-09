@@ -170,6 +170,45 @@ pub mod m {
         tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(Some(json!({ "done": true })))
     }
+
+    // ---- deps: three migrations whose dependency order is the reverse of their name order.
+
+    #[table(name = "mig_deps")]
+    pub struct DepDoc {
+        pub trail: Vec<String>,
+    }
+
+    #[mutation]
+    pub async fn add_dep_doc(ctx: &MutationCtx) -> Result<Id<DepDoc>> {
+        ctx.db.insert(DepDoc { trail: Vec::new() }).await
+    }
+
+    #[query]
+    pub async fn dep_trails(ctx: &QueryCtx) -> Result<Vec<Vec<String>>> {
+        Ok(ctx.db.query::<DepDoc>().collect().await?.into_iter().map(|d| d.value.trail).collect())
+    }
+
+    /// Append `step` to the document's trail (the order the migrations ran in).
+    fn visit(doc: &Value, step: &str) -> Option<Value> {
+        let mut trail: Vec<Value> = doc["trail"].as_array().cloned().unwrap_or_default();
+        trail.push(json!(step));
+        Some(json!({ "trail": trail }))
+    }
+
+    #[migration(table = DepDoc, name = "dep/z_first")]
+    pub async fn dep_z(_ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+        Ok(visit(&doc, "z_first"))
+    }
+
+    #[migration(table = DepDoc, name = "dep/a_second", after = ["dep/z_first"])]
+    pub async fn dep_a(_ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+        Ok(visit(&doc, "a_second"))
+    }
+
+    #[migration(table = DepDoc, name = "dep/m_third", after = ["dep/a_second", "dep/z_first"])]
+    pub async fn dep_m(_ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+        Ok(visit(&doc, "m_third"))
+    }
 }
 
 use m::*;
@@ -452,4 +491,90 @@ async fn old_schema_documents_start_with_the_migration_pending_and_pass_the_chec
     assert!(err.contains("table `mig_tasks`: 5 of 5 document(s) do not match"), "{err}");
     assert!(err.contains("`0001_task_priority` have all run"), "{err}");
     assert!(err.contains("#[migration(table = \"mig_tasks\")]"), "{err}");
+}
+
+/// `after` dependencies: run order (topological, name order as the tie-break), `list` shows them, running one whose
+/// dependencies aren't done is refused unless forced, and "run all" (`run_pending_migrations`, the dashboard's `run`
+/// without a name) runs them in dependency order.
+#[tokio::test]
+async fn dependencies_order_runs_and_refuse_early_runs() {
+    let registry = ferrix::migrations::registry().unwrap();
+    let order: Vec<&str> = registry.iter().map(|(n, _)| n).filter(|n| n.starts_with("dep/")).collect();
+    assert_eq!(order, ["dep/z_first", "dep/a_second", "dep/m_third"], "dependencies first, not name order");
+    let all: Vec<&str> = registry.iter().map(|(n, _)| n).collect();
+    assert_eq!(all[..4], ["0001_task_priority", "dep/z_first", "dep/a_second", "dep/m_third"], "{all:?}");
+    assert_eq!(registry.dependencies("dep/m_third"), ["dep/a_second", "dep/z_first"]);
+
+    let t = TestApp::new().await.unwrap();
+    for _ in 0..3 {
+        t.mutation::<add_dep_doc>(()).await.unwrap();
+    }
+    let app = t.app();
+    // `list` (and the summaries) show the dependencies, in run order.
+    let list = app.run_query("_system/migrations:list", json!({}), &admin()).await.result.unwrap();
+    let deps: Vec<&Value> = list.as_array().unwrap().iter().filter(|m| m["name"].as_str().unwrap().starts_with("dep/")).collect();
+    assert_eq!(deps.iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("dep/z_first"), json!("dep/a_second"), json!("dep/m_third")]);
+    assert_eq!(deps[0]["after"], json!([]));
+    assert_eq!(deps[2]["after"], json!(["dep/a_second", "dep/z_first"]));
+
+    // Running one whose dependencies aren't done is refused (nothing runs), naming them.
+    let err = app.run_migration::<dep_m>(RunOptions::default()).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("runs after `dep/a_second` (pending), `dep/z_first` (pending)"), "{msg}");
+    assert_eq!(err.downcast_ref::<ferrix::UserError>().unwrap().code, "dependencies_not_done");
+    assert_eq!(summary(app, "dep/m_third").await.state, MigrationState::Pending);
+    let err = app.run_action("_system/migrations:run", json!({ "name": "dep/a_second" }), &admin()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("runs after `dep/z_first` (pending)"), "{err:#}");
+    // A dry run is allowed (it writes nothing).
+    let r = app.run_migration::<dep_m>(RunOptions { dry_run: true, ..Default::default() }).await.unwrap();
+    assert_eq!((r.outcome, r.changed), (RunOutcome::DryRun, 3));
+    // Once its dependency is done, it runs.
+    assert_eq!(app.run_migration::<dep_z>(RunOptions::default()).await.unwrap().outcome, RunOutcome::Completed);
+    assert_eq!(app.run_migration::<dep_a>(RunOptions::default()).await.unwrap().outcome, RunOutcome::Completed);
+    assert_eq!(app.run_migration::<dep_m>(RunOptions::default()).await.unwrap().outcome, RunOutcome::Completed);
+    assert_eq!(t.query::<dep_trails>(()).await.unwrap(), vec![vec!["z_first", "a_second", "m_third"]; 3]);
+
+    // Forced: runs without its dependencies.
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_dep_doc>(()).await.unwrap();
+    let r = t.app().run_migration::<dep_m>(RunOptions { force: true, ..Default::default() }).await.unwrap();
+    assert_eq!(r.outcome, RunOutcome::Completed);
+    assert_eq!(t.query::<dep_trails>(()).await.unwrap(), vec![vec!["m_third"]]);
+    // And `run_pending_migrations` runs the rest in dependency order.
+    let reports = t.app().run_pending_migrations(RunOptions::default()).await.unwrap();
+    let ran: Vec<&str> = reports.iter().map(|r| r.name.as_str()).filter(|n| n.starts_with("dep/")).collect();
+    assert_eq!(ran, ["dep/z_first", "dep/a_second"]);
+    assert!(reports.iter().all(|r| r.outcome == RunOutcome::Completed), "{reports:?}");
+    assert_eq!(t.query::<dep_trails>(()).await.unwrap(), vec![vec!["m_third", "z_first", "a_second"]]);
+
+    // The dashboard's "Run all pending": in the background, in dependency order.
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_dep_doc>(()).await.unwrap();
+    let res = t.app().run_action("_system/migrations:run", json!({}), &admin()).await.unwrap();
+    let started: Vec<&str> = res["started"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(started[..4], ["0001_task_priority", "dep/z_first", "dep/a_second", "dep/m_third"]);
+    let mut waited = 0;
+    while summary(t.app(), "slow").await.state != MigrationState::Done {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += 1;
+        assert!(waited < 1000, "the background run didn't finish");
+    }
+    assert_eq!(t.query::<dep_trails>(()).await.unwrap(), vec![vec!["z_first", "a_second", "m_third"]]);
+
+    // A dependency running elsewhere blocks "run all" at its dependent (a `blocked` report, then it stops).
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_dep_doc>(()).await.unwrap();
+    let r = t.app().run_migration::<dep_z>(RunOptions { max_batches: Some(0), ..Default::default() }).await.unwrap();
+    assert_eq!(r.outcome, RunOutcome::Stopped);
+    let reports = t.app().run_pending_migrations(RunOptions::default()).await.unwrap();
+    let outcomes: Vec<(&str, RunOutcome)> = reports.iter().map(|r| (r.name.as_str(), r.outcome)).collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("0001_task_priority", RunOutcome::Completed),
+            ("dep/z_first", RunOutcome::AlreadyRunning),
+            ("dep/a_second", RunOutcome::Blocked)
+        ]
+    );
+    assert!(reports[2].error.as_deref().unwrap().contains("`dep/z_first` (running)"), "{:?}", reports[2].error);
 }

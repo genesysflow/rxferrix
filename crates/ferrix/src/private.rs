@@ -64,6 +64,8 @@ pub struct MigrationDef {
     pub table: &'static str,
     /// Documents per batch (one transaction each).
     pub batch_size: usize,
+    /// `#[migration(after = ["0001_x", ...])]`: the names of the migrations that must be done before this one runs.
+    pub after: &'static [&'static str],
     pub handler: MigrationHandler,
 }
 
@@ -83,6 +85,7 @@ impl std::fmt::Debug for MigrationDef {
             .field("name", &self.name())
             .field("table", &self.table)
             .field("batch_size", &self.batch_size)
+            .field("after", &self.after)
             .finish()
     }
 }

@@ -174,6 +174,7 @@ pub enum TokenizerKind {
     Unicode61,
     Porter,
     Trigram,
+    Snowball,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +194,9 @@ impl Tokenizer {
     pub const fn trigram() -> Self {
         Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true }
     }
+    pub const fn snowball(language: &'static str) -> Self {
+        Tokenizer { kind: TokenizerKind::Snowball, language: Some(language), remove_diacritics: true }
+    }
     pub const fn keep_diacritics(self) -> Self {
         Tokenizer { remove_diacritics: false, ..self }
     }
@@ -205,6 +209,18 @@ pub struct VectorIndexDef {
     pub dimensions: usize,
     pub filter_fields: Vec<&'static str>,
     pub kind: VectorIndexKind,
+    pub hnsw: HnswParams,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HnswParams {
+    pub m: usize,
+    pub ef_construction: usize,
+    pub ef_search: usize,
+}
+
+impl HnswParams {
+    pub const DEFAULT: HnswParams = HnswParams { m: 16, ef_construction: 128, ef_search: 128 };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -485,6 +501,7 @@ pub mod __private {
         pub name: Option<&'static str>,
         pub table: &'static str,
         pub batch_size: usize,
+        pub after: &'static [&'static str],
         pub handler: MigrationHandler,
     }
     impl MigrationDef {

@@ -29,6 +29,7 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
     name: ::core::option::Option::None,
     table: <Todo as ::ferrix::Table>::NAME,
     batch_size: 100usize,
+    after: &[],
     handler: {
         fn __ferrix_migrate<'a>(
             __ferrix_ctx: &'a ::ferrix::MutationCtx,

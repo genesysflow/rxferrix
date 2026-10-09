@@ -540,7 +540,7 @@ async fn slow_consumer_is_coalesced_and_does_not_stall_others() {
 /// A query that takes long to run holds up neither the next generation nor the connections that don't watch it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_query_does_not_hold_up_others() {
-    const SLOW_MS: u32 = 1500;
+    const SLOW_MS: u32 = 2500;
     let t = TestApp::new().await.unwrap();
     let app = t.app().clone();
     let mut slow = Client::new(&app).await;

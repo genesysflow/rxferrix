@@ -1,5 +1,5 @@
 //! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]
-//! [--storage LOCATION] [--max-upload-size SIZE]`,
+//! [--storage LOCATION] [--max-upload-size SIZE] [--storage-private]`,
 //! `ferrix functions`, `ferrix codegen [--out DIR]`, `ferrix admin create|reset-password <email>` and
 //! `ferrix migrate [--name NAME] [--dry-run] [--restart]` / `ferrix migrate status` (`crate::migrations`).
 
@@ -150,6 +150,10 @@ struct ServeArgs {
     /// Largest accepted upload, e.g. `100MB` (default), `2GB`, `512KB`, or a number of bytes.
     #[arg(long, env = "FERRIX_MAX_UPLOAD_SIZE", value_name = "SIZE", value_parser = parse_size)]
     max_upload_size: Option<u64>,
+    /// Private file storage: plain /api/storage/<id> URLs are refused (403); files are served only through signed,
+    /// expiring URLs (ctx.storage.get_signed_url).
+    #[arg(long, env = "FERRIX_STORAGE_PRIVATE")]
+    storage_private: bool,
 }
 
 /// `"100MB"`, `"2GB"`, `"512KB"`, `"1.5MB"` (powers of 1024), or a bare number of bytes.
@@ -216,6 +220,19 @@ impl Ferrix {
     /// "0 0 3 * * *", ())`. See [`crate::scheduler::CronSpec::cron`].
     pub fn cron<F: SchedulableFunction>(mut self, name: impl Into<String>, expr: impl Into<String>, args: impl Into<F::Args>) -> Self {
         self.scheduler = self.scheduler.cron::<F>(name, expr, args);
+        self
+    }
+
+    /// [`Ferrix::cron`] evaluated in an IANA time zone, DST included: `.cron_tz::<report>("report", "0 0 9 * * *",
+    /// "Europe/Bucharest", ())`. See [`crate::scheduler::CronSpec::timezone`].
+    pub fn cron_tz<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        expr: impl Into<String>,
+        tz: impl Into<String>,
+        args: impl Into<F::Args>,
+    ) -> Self {
+        self.scheduler = self.scheduler.cron_tz::<F>(name, expr, tz, args);
         self
     }
 
@@ -426,13 +443,16 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     auth
 }
 
-/// The builder's storage config with `--storage` / `--max-upload-size` applied on top.
+/// The builder's storage config with `--storage` / `--max-upload-size` / `--storage-private` applied on top.
 fn storage_config(args: &ServeArgs, mut storage: StorageConfig) -> crate::Result<StorageConfig> {
     if let Some(location) = args.storage.as_deref().filter(|l| !l.trim().is_empty()) {
         storage.backend = StorageBackend::parse(location)?;
     }
     if let Some(max) = args.max_upload_size {
         storage.max_upload_size = max;
+    }
+    if args.storage_private {
+        storage.private = true;
     }
     Ok(storage)
 }
@@ -569,11 +589,12 @@ mod tests {
 
     #[test]
     fn storage_flags() {
-        let cli = parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB"]).unwrap();
+        let cli = parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB", "--storage-private"]).unwrap();
         let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
         let storage = storage_config(&args, StorageConfig::default()).unwrap();
         assert!(matches!(storage.backend, StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "some/prefix"));
         assert_eq!(storage.max_upload_size, 2 << 30);
+        assert!(storage.private);
         // Without flags the builder's config stands.
         let cli = parse(&[]).unwrap();
         let storage = storage_config(&cli.serve, StorageConfig::local("/srv/files").max_upload_size(5)).unwrap();

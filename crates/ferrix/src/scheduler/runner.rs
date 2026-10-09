@@ -28,6 +28,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+use super::cancellation::{self as cancel, ActionAborted, Registration};
 use super::cron::{self, ParsedCron};
 use super::store;
 use super::tables::{JobState, ScheduledJob};
@@ -64,9 +65,13 @@ pub struct SchedulerState {
 }
 
 impl SchedulerState {
-    /// Validates the declared crons (fails `App::open` on a bad expression or duplicate name).
-    pub(crate) fn new(options: &SchedulerOptions) -> crate::Result<SchedulerState> {
-        let crons = cron::parse_all(&options.crons)?;
+    /// Validates the declared crons (fails `App::open` on a bad expression or duplicate name) and adds ferrix's
+    /// system crons (`cron::system_crons`).
+    pub(crate) fn new(app_options: &crate::runtime::AppOptions) -> crate::Result<SchedulerState> {
+        let options = &app_options.scheduler;
+        let mut specs = options.crons.clone();
+        specs.extend(cron::system_crons(app_options));
+        let crons = cron::parse_all(&specs)?;
         let concurrency = options.concurrency.max(1);
         Ok(SchedulerState {
             options: options.clone(),
@@ -256,14 +261,18 @@ async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: OwnedSemaphorePermit
             ran
         }
         Some(FunctionKind::Action) => {
+            // Registered before the claim commits, so a cancel committed right after it finds the running job.
+            let registration = cancel::register(job.id, app.scheduler_state().options.cancel_grace);
             if !claim_action(app, job.id).await? {
                 return Ok(false);
             }
             let app = app.clone();
-            tokio::spawn(IN_JOB.scope((), async move {
-                run_action_job(&app, job).await;
+            let signal = registration.signal.clone();
+            tokio::spawn(IN_JOB.scope((), cancel::scope(signal, async move {
+                run_action_job(&app, job, &registration).await;
+                drop(registration);
                 drop(permit);
-            }));
+            })));
             Ok(true)
         }
         other => {
@@ -387,12 +396,33 @@ async fn claim_action(app: &App, id: Id<ScheduledJob>) -> crate::Result<bool> {
     .await
 }
 
-/// Run a claimed action and record its outcome (or schedule a retry).
-async fn run_action_job(app: &App, job: Doc<ScheduledJob>) {
+/// Run a claimed action and record its outcome (or schedule a retry). A job canceled while it ran keeps its
+/// `canceled` state; how the action ended is appended to its `error` (and a value it still returned is kept).
+async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Registration) {
+    let signal = &registration.signal;
+    if signal.is_canceled() {
+        // Canceled between the claim and the start: never started.
+        return;
+    }
     let run = app.call_action(&job.path, job.args.clone(), &Identity::anonymous(), true).await;
     let backoff_base = app.scheduler_state().options.retry_backoff;
+    let canceled = signal.is_canceled();
     let recorded = store::write(app, |db| async move {
         let Some(current) = db.get(job.id).await? else { return Ok(()) };
+        if current.state == JobState::Canceled && canceled {
+            let mut value = current.value;
+            let ending = match &run.result {
+                Err(e) if e.is::<ActionAborted>() => format!("aborted after the {:?} grace period", signal.grace()),
+                Err(e) => format!("it stopped with an error: {e:#}"),
+                Ok(result) => {
+                    value.result = Some(store::truncate(serde_json::to_string(result)?));
+                    "it returned before being aborted".to_string()
+                }
+            };
+            let error = value.error.take().unwrap_or_else(|| "Canceled".to_string());
+            value.error = Some(store::truncate(format!("{error}; {ending}")));
+            return db.replace(job.id, value).await;
+        }
         if current.state != JobState::InProgress {
             return Ok(());
         }

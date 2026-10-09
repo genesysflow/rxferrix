@@ -1,7 +1,8 @@
 //! File storage over real HTTP: the upload flow (hash, size, content type), single-use and expiring upload URLs,
-//! the size limit (413, streamed), serving (ETag/304, ranges, safe headers), transactional deletes, actions'
-//! `store`/`get`, reactivity of `get_url`, the dashboard's admin-only functions, the orphan sweep, rate limits, and
-//! an in-memory `object_store` backend under a prefix (the same code path as S3).
+//! the size limit (413, streamed), serving (ETag/304, ranges, multipart/byteranges over a raw socket, safe headers),
+//! signed URLs and private mode, thumbnails (cache, invalidation, decompression bombs), transactional deletes,
+//! actions' `store`/`get`, reactivity of `get_url`, the dashboard's admin-only functions, the orphan sweep (and its
+//! system cron), rate limits, and an in-memory `object_store` backend under a prefix (the same code path as S3).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -104,6 +105,21 @@ mod app {
     #[action]
     pub async fn action_upload_url(ctx: &ActionCtx) -> Result<String> {
         ctx.storage.generate_upload_url().await
+    }
+
+    #[query]
+    pub async fn signed_url_q(ctx: &QueryCtx, file: Id<StoredFile>, ttl_seconds: u32) -> Result<Option<String>> {
+        ctx.storage.get_signed_url(file, std::time::Duration::from_secs(ttl_seconds.into())).await
+    }
+
+    #[mutation]
+    pub async fn signed_url_m(ctx: &MutationCtx, file: Id<StoredFile>, ttl_seconds: u32) -> Result<Option<String>> {
+        ctx.storage.get_signed_url(file, std::time::Duration::from_secs(ttl_seconds.into())).await
+    }
+
+    #[action]
+    pub async fn signed_url_a(ctx: &ActionCtx, file: Id<StoredFile>, ttl_seconds: u32) -> Result<Option<String>> {
+        ctx.storage.get_signed_url(file, std::time::Duration::from_secs(ttl_seconds.into())).await
     }
 }
 
@@ -431,10 +447,10 @@ async fn serving_etags_ranges_and_safe_headers() {
     let res = s.get(id, &[("range", "bytes=20-")]).await;
     assert_eq!(res.status(), 416);
     assert_eq!(res.headers()["content-range"], "bytes */20");
-    // Multiple ranges aren't supported: the whole file.
+    // Multiple ranges: multipart/byteranges (more in `multiple_ranges_are_served_as_multipart_byteranges`).
     let res = s.get(id, &[("range", "bytes=0-1,4-5")]).await;
-    assert_eq!(res.status(), 200);
-    assert_eq!(res.bytes().await.unwrap().len(), 20);
+    assert_eq!(res.status(), 206);
+    assert!(res.headers()["content-type"].to_str().unwrap().starts_with("multipart/byteranges; boundary="));
     // If-Range with another ETag: the whole file; with ours: the range.
     let res = s.get(id, &[("range", "bytes=0-1"), ("if-range", "\"stale\"")]).await;
     assert_eq!(res.status(), 200);
@@ -730,4 +746,468 @@ async fn public_url_makes_absolute_urls() {
     assert!(url.starts_with("https://files.example.com/api/storage/upload?token="), "{url}");
     let id = t.action::<app::store_text>(("x".to_string(),)).await.unwrap();
     assert_eq!(t.query::<app::url_of>((id,)).await.unwrap(), Some(format!("https://files.example.com/api/storage/{id}")));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Signed URLs and private mode
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The `exp` of a signed URL.
+fn exp_of(url: &str) -> u64 {
+    let query = url.split_once('?').unwrap().1;
+    query.split('&').find_map(|kv| kv.strip_prefix("exp=")).unwrap().parse().unwrap()
+}
+
+fn now_s(t: &TestApp) -> u64 {
+    (t.app().db().clock().now_ms() / 1000.0) as u64
+}
+
+#[tokio::test]
+async fn signed_urls_expire_and_are_tamper_proof() {
+    let s = server().await;
+    let data = b"signed content".to_vec();
+    let id = s.upload(&data, "text/plain", None).await;
+
+    // From an action and a mutation: exactly `ttl` from now.
+    let url = s.abs(&s.t.action::<app::signed_url_a>((id, 60)).await.unwrap().unwrap());
+    assert!(url.contains(&format!("/api/storage/{id}?exp=")) && url.contains("&sig="), "{url}");
+    let exp = exp_of(&url);
+    assert!(exp.abs_diff(now_s(&s.t) + 60) <= 1, "{url}");
+    let res = s.get_url(&url, &[]).await;
+    assert_eq!(res.status(), 200);
+    let max_age: u64 = res.headers()["cache-control"].to_str().unwrap().split("max-age=").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+    assert!(max_age <= 60, "cached at most until it expires");
+    assert_eq!(res.bytes().await.unwrap().as_ref(), data.as_slice());
+    let from_mutation = s.t.mutation::<app::signed_url_m>((id, 120)).await.unwrap().unwrap();
+    assert!(exp_of(&from_mutation).abs_diff(now_s(&s.t) + 120) <= 1);
+
+    // Tampering with the expiry, the signature or the file fails.
+    let tampered_exp = url.replace(&format!("exp={exp}"), &format!("exp={}", exp + 1000));
+    let other = s.upload(b"other", "text/plain", None).await;
+    let other_file = url.replace(&id.to_string(), &other.to_string());
+    let no_sig = url.split("&sig=").next().unwrap().to_string();
+    let bad_sig = format!("{no_sig}&sig=AAAA");
+    for bad in [tampered_exp, other_file, no_sig, bad_sig] {
+        let res = s.get_url(&bad, &[]).await;
+        assert_eq!(res.status(), 403, "{bad}");
+        assert_eq!(code_of(&res.json().await.unwrap()), "invalid_signature");
+    }
+    // Variants of a signed URL work too (the signature covers the file and the expiry).
+    assert_eq!(s.get_url(&format!("{url}&download=1"), &[]).await.status(), 200);
+
+    // Once expired: 403 url_expired (the server's clock, here the test clock).
+    s.t.app().db().clock().advance(Duration::from_secs(61));
+    let res = s.get_url(&url, &[]).await;
+    assert_eq!(res.status(), 403);
+    assert_eq!(code_of(&res.json().await.unwrap()), "url_expired");
+    // Not in private mode: the plain URL still works.
+    assert_eq!(s.get(id, &[]).await.status(), 200);
+
+    // TTLs out of range, and missing files.
+    for ttl in [0, 8 * 24 * 3600] {
+        let err = s.t.action::<app::signed_url_a>((id, ttl)).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<UserError>().map(|e| e.code.as_str()), Some("invalid_ttl"), "{ttl}: {err}");
+    }
+    s.t.mutation::<app::delete_file>((other, false)).await.unwrap();
+    assert_eq!(s.t.action::<app::signed_url_a>((other, 60)).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn signed_urls_in_queries_are_stable_within_a_bucket() {
+    let s = server().await;
+    // Start one second into an hour window (windows are aligned to the epoch), so the test can't straddle two.
+    let into_window = now_s(&s.t) % 3600;
+    s.t.app().db().clock().advance(Duration::from_secs(3600 - into_window + 1));
+    let id = s.upload(b"q", "text/plain", None).await;
+    // Rounded up to a multiple of the TTL: valid for between ttl and 2·ttl, the same for every run in the window.
+    let first = s.t.query::<app::signed_url_q>((id, 3600)).await.unwrap().unwrap();
+    let exp = exp_of(&first);
+    assert_eq!(exp % 3600, 0);
+    let now = now_s(&s.t);
+    assert!(exp >= now + 3600 && exp < now + 7200 + 1, "{exp} vs {now}");
+    // A rerun at a later snapshot (after a write) in the same window: the same URL.
+    s.upload(b"another write", "text/plain", None).await;
+    assert_eq!(s.t.query::<app::signed_url_q>((id, 3600)).await.unwrap().unwrap(), first);
+    assert_eq!(s.get_url(&s.abs(&first), &[]).await.status(), 200);
+    // In the next window, a new one.
+    s.t.app().db().clock().advance(Duration::from_secs(3600));
+    s.upload(b"a write in the next window", "text/plain", None).await;
+    let next = s.t.query::<app::signed_url_q>((id, 3600)).await.unwrap().unwrap();
+    assert_eq!(exp_of(&next), exp + 3600);
+}
+
+#[tokio::test]
+async fn private_mode_serves_signed_urls_only() {
+    let s = server_with(StorageConfig::default().private(true)).await;
+    let png = png_bytes(64, 48, false);
+    let id = s.upload(&png, "image/png", Some("p.png")).await;
+
+    // The plain URL is refused, for existing and unknown ids alike (nothing to probe).
+    for url in [format!("{}/api/storage/{id}", s.base), format!("{}/api/storage/nonexistent", s.base)] {
+        let res = s.get_url(&url, &[]).await;
+        assert_eq!(res.status(), 403);
+        assert_eq!(code_of(&res.json().await.unwrap()), "signature_required");
+    }
+    // get_url fails loudly instead of returning a URL that doesn't work.
+    let err = s.t.query::<app::url_of>((id,)).await.unwrap_err();
+    assert_eq!(err.downcast_ref::<UserError>().map(|e| e.code.as_str()), Some("storage_private"));
+    // Signed URLs work, thumbnails included.
+    let url = s.abs(&s.t.query::<app::signed_url_q>((id, 600)).await.unwrap().unwrap());
+    let res = s.get_url(&url, &[]).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), png.as_slice());
+    let res = s.get_url(&format!("{url}&thumb=32x32"), &[]).await;
+    assert_eq!((res.status().as_u16(), res.headers()["content-type"].to_str().unwrap()), (200, "image/jpeg"));
+    let res = s.get_url(&format!("{}/api/storage/{id}?thumb=32x32", s.base), &[]).await;
+    assert_eq!(res.status(), 403);
+    // The dashboard's file list gets signed URLs (an hour, bucketed).
+    let app = s.t.app();
+    let admin = Identity::admin(app.auth().create_admin(app, "admin@example.com", "admin password".into()).await.unwrap(), None);
+    let page = ferrix::PaginationOpts::first(10);
+    let files = s.t.query_as::<ferrix::storage::files>(&admin, (page,)).await.unwrap();
+    let url = s.abs(&files.page[0].url);
+    assert!(url.contains("&sig="), "{url}");
+    assert_eq!(s.get_url(&url, &[]).await.status(), 200);
+    let res = s.get_url(&s.abs(&files.page[0].download_url), &[]).await;
+    assert_eq!(res.status(), 200);
+    assert!(res.headers()["content-disposition"].to_str().unwrap().starts_with("attachment;"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Thumbnails
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn encode(image: image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
+    let mut out = Vec::new();
+    image.write_to(&mut std::io::Cursor::new(&mut out), format).unwrap();
+    out
+}
+
+fn png_bytes(width: u32, height: u32, alpha: bool) -> Vec<u8> {
+    let image = if alpha {
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| image::Rgba([x as u8, y as u8, 7, 100])))
+    } else {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 7])))
+    };
+    encode(image, image::ImageFormat::Png)
+}
+
+fn dimensions(bytes: &[u8]) -> (u32, u32) {
+    let image = image::load_from_memory(bytes).unwrap();
+    (image.width(), image.height())
+}
+
+/// CRC-32 (IEEE), for patching PNG chunks.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// A decompression bomb: a tiny, valid-looking PNG whose header claims 50000×50000 pixels (2.5 GP, 7.5 GB as RGB).
+fn png_bomb() -> Vec<u8> {
+    let mut png = png_bytes(1, 1, false);
+    // Signature (8), then the IHDR chunk: length (4), "IHDR" (4), width (4), height (4), ... and its CRC.
+    assert_eq!(&png[12..16], b"IHDR");
+    png[16..20].copy_from_slice(&50_000u32.to_be_bytes());
+    png[20..24].copy_from_slice(&50_000u32.to_be_bytes());
+    let crc = crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&crc.to_be_bytes());
+    png
+}
+
+#[tokio::test]
+async fn thumbnails_are_generated_cached_and_invalidated() {
+    let s = server().await;
+    let photo = png_bytes(400, 300, false);
+    let id = s.upload(&photo, "image/png", Some("photo.png")).await;
+    let thumb = |q: &str| format!("{}/api/storage/{id}?{q}", s.base);
+
+    // contain (default): fits inside the box, aspect ratio kept; opaque → JPEG.
+    let res = s.get_url(&thumb("thumb=100x100"), &[]).await;
+    assert_eq!(res.status(), 200);
+    let etag = format!("\"{}.t1.100x100.contain\"", sha256_hex(&photo));
+    assert_eq!(res.headers()["etag"], etag.as_str());
+    assert_eq!(res.headers()["content-type"], "image/jpeg");
+    assert_eq!(res.headers()["content-disposition"], "inline");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+    let first = res.bytes().await.unwrap();
+    assert_eq!(dimensions(&first), (100, 75));
+    // Cached in the blob store, and served from there (byte for byte).
+    let storage = s.t.app().storage().clone();
+    let cached = storage.thumbnail_path(&id.to_string(), "100x100-contain");
+    assert!(storage.object_store().head(&cached).await.is_ok());
+    assert_eq!(s.get_url(&thumb("thumb=100x100"), &[]).await.bytes().await.unwrap(), first);
+    // ETag per variant; If-None-Match → 304.
+    assert_eq!(s.get_url(&thumb("thumb=100x100"), &[("if-none-match", &etag)]).await.status(), 304);
+    assert_eq!(s.get_url(&thumb("thumb=100x100&fit=cover"), &[("if-none-match", &etag)]).await.status(), 200);
+    // cover: exactly the box.
+    let res = s.get_url(&thumb("thumb=50x80&fit=cover"), &[]).await;
+    assert_eq!(res.headers()["etag"], format!("\"{}.t1.50x80.cover\"", sha256_hex(&photo)).as_str());
+    assert_eq!(dimensions(&res.bytes().await.unwrap()), (50, 80));
+    // Never scaled up with contain.
+    assert_eq!(dimensions(&s.get_url(&thumb("thumb=1000x1000"), &[]).await.bytes().await.unwrap()), (400, 300));
+    // A single number is a square box.
+    let res = s.get_url(&thumb("thumb=80"), &[]).await;
+    assert_eq!(res.headers()["etag"], format!("\"{}.t1.80x80.contain\"", sha256_hex(&photo)).as_str());
+    assert_eq!(dimensions(&res.bytes().await.unwrap()), (80, 60));
+    // HEAD: headers only.
+    let res = s.client.head(thumb("thumb=100x100")).send().await.unwrap();
+    assert_eq!((res.status().as_u16(), res.headers()["content-length"].to_str().unwrap()), (200, first.len().to_string().as_str()));
+
+    // Transparency → PNG; GIF (first frame) and WebP sources work too.
+    let transparent = s.upload(&png_bytes(80, 80, true), "image/png", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{transparent}?thumb=40x40", s.base), &[]).await;
+    assert_eq!(res.headers()["content-type"], "image/png");
+    assert_eq!(dimensions(&res.bytes().await.unwrap()), (40, 40));
+    let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(60, 30, |x, _| image::Rgb([x as u8 * 4, 0, 0])));
+    for (format, ct) in [(image::ImageFormat::Gif, "image/gif"), (image::ImageFormat::WebP, "image/webp"), (image::ImageFormat::Jpeg, "image/jpeg")] {
+        let file = s.upload(&encode(rgb.clone(), format), ct, None).await;
+        let res = s.get_url(&format!("{}/api/storage/{file}?thumb=30x30", s.base), &[]).await;
+        assert_eq!(res.status(), 200, "{ct}");
+        assert_eq!(dimensions(&res.bytes().await.unwrap()), (30, 15), "{ct}");
+    }
+
+    // Bad requests.
+    for (q, status, code) in [
+        ("thumb=0x10", 400, "invalid_thumbnail"),
+        ("thumb=2000x10", 400, "invalid_thumbnail"),
+        ("thumb=abc", 400, "invalid_thumbnail"),
+        ("thumb=10x10&fit=stretch", 400, "invalid_thumbnail"),
+    ] {
+        let res = s.get_url(&thumb(q), &[]).await;
+        assert_eq!(res.status(), status, "{q}");
+        assert_eq!(code_of(&res.json().await.unwrap()), code, "{q}");
+    }
+    let text = s.upload(b"not an image", "text/plain", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{text}?thumb=10x10", s.base), &[]).await;
+    assert_eq!((res.status().as_u16(), code_of(&res.json().await.unwrap())), (415, "unsupported_image"));
+    let liar = s.upload(b"\x89PNG\r\n\x1a\n but broken", "image/png", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{liar}?thumb=10x10", s.base), &[]).await;
+    assert_eq!((res.status().as_u16(), code_of(&res.json().await.unwrap())), (422, "invalid_image"));
+
+    // Deleting the file deletes its cached thumbnails; its thumbnail URLs are 404.
+    s.t.mutation::<app::delete_file>((id, false)).await.unwrap();
+    eventually(async || storage.object_store().head(&cached).await.is_err()).await;
+    assert_eq!(s.get_url(&thumb("thumb=100x100"), &[]).await.status(), 404);
+}
+
+#[tokio::test]
+async fn decompression_bombs_are_refused_before_decoding() {
+    let s = server().await;
+    let bomb = png_bomb();
+    assert!(bomb.len() < 100, "a tiny file");
+    let id = s.upload(&bomb, "image/png", None).await;
+    let started = std::time::Instant::now();
+    let res = s.get_url(&format!("{}/api/storage/{id}?thumb=64x64", s.base), &[]).await;
+    assert_eq!(res.status(), 422);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(code_of(&body), "image_too_large");
+    assert!(body["errorMessage"].as_str().unwrap().contains("50000x50000"), "{body}");
+    assert!(started.elapsed() < Duration::from_secs(2), "refused from the header, nothing decoded");
+    // Nothing was cached.
+    let storage = s.t.app().storage();
+    assert!(storage.object_store().head(&storage.thumbnail_path(&id.to_string(), "64x64-contain")).await.is_err());
+    // The original file itself is still served as is.
+    assert_eq!(s.get(id, &[]).await.bytes().await.unwrap().as_ref(), bomb.as_slice());
+
+    // The limits are configurable: source pixels, source bytes, and an allowlist of sizes.
+    let s = server_with(
+        StorageConfig::default().thumbnail_max_source_pixels(10_000).thumbnail_max_source_bytes(50_000).thumbnail_sizes(&[(64, 64)]),
+    )
+    .await;
+    let small = s.upload(&png_bytes(100, 100, false), "image/png", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{small}?thumb=64x64", s.base), &[]).await;
+    assert_eq!(res.status(), 200, "exactly at the pixel limit");
+    let big = s.upload(&png_bytes(101, 100, false), "image/png", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{big}?thumb=64x64", s.base), &[]).await;
+    assert_eq!((res.status().as_u16(), code_of(&res.json().await.unwrap())), (422, "image_too_large"));
+    let res = s.get_url(&format!("{}/api/storage/{small}?thumb=32x32", s.base), &[]).await;
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(code_of(&body), "invalid_thumbnail");
+    assert!(body["errorMessage"].as_str().unwrap().contains("allowed: 64x64"), "{body}");
+    let heavy = s.upload(&vec![0u8; 50_001], "image/png", None).await;
+    let res = s.get_url(&format!("{}/api/storage/{heavy}?thumb=64x64", s.base), &[]).await;
+    assert_eq!((res.status().as_u16(), code_of(&res.json().await.unwrap())), (422, "image_too_large"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Multiple ranges (raw HTTP)
+// ---------------------------------------------------------------------------------------------------------------------
+
+struct RawResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl RawResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
+
+/// One HTTP/1.1 request over a plain TCP socket, read until the server closes it.
+async fn raw_request(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)]) -> RawResponse {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("end of headers");
+    let head = String::from_utf8(raw[..split].to_vec()).unwrap();
+    let mut lines = head.split("\r\n");
+    let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+    let headers =
+        lines.map(|l| l.split_once(':').unwrap()).map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string())).collect();
+    RawResponse { status, headers, body: raw[split + 4..].to_vec() }
+}
+
+/// A part of a `multipart/byteranges` body: its headers (lowercase names) and data.
+type Part = (Vec<(String, String)>, Vec<u8>);
+
+/// The parts of a `multipart/byteranges` body.
+fn multipart_parts(body: &[u8], boundary: &str) -> Vec<Part> {
+    let delimiter = format!("--{boundary}");
+    let text = body;
+    let mut parts = Vec::new();
+    let mut at = 0;
+    let find = |from: usize, needle: &[u8]| text[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from);
+    assert!(text.starts_with(delimiter.as_bytes()), "the body starts with the first boundary");
+    loop {
+        at += delimiter.len();
+        if text[at..].starts_with(b"--\r\n") {
+            assert_eq!(at + 4, text.len(), "nothing after the closing boundary");
+            return parts;
+        }
+        assert!(text[at..].starts_with(b"\r\n"));
+        let head_end = find(at, b"\r\n\r\n").unwrap();
+        let headers = String::from_utf8(text[at + 2..head_end].to_vec())
+            .unwrap()
+            .split("\r\n")
+            .map(|l| l.split_once(':').unwrap())
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        let data_start = head_end + 4;
+        let next = find(data_start, format!("\r\n{delimiter}").as_bytes()).unwrap();
+        parts.push((headers, text[data_start..next].to_vec()));
+        at = next + 2;
+    }
+}
+
+#[tokio::test]
+async fn multiple_ranges_are_served_as_multipart_byteranges() {
+    let s = server().await;
+    let data: Vec<u8> = (0..1000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let id = s.upload(&data, "text/plain", None).await;
+    let path = format!("/api/storage/{id}");
+
+    // Three ranges (one a suffix), listed out of order: three parts, ascending.
+    let res = raw_request(s.addr, "GET", &path, &[("Range", "bytes=100-109, 0-9, -5")]).await;
+    assert_eq!(res.status, 206);
+    let content_type = res.header("content-type").unwrap();
+    let boundary = content_type.strip_prefix("multipart/byteranges; boundary=").expect(content_type).to_string();
+    assert_eq!(res.header("content-length").unwrap(), res.body.len().to_string(), "exact Content-Length");
+    assert!(res.header("content-range").is_none(), "Content-Range is per part");
+    assert!(res.header("transfer-encoding").is_none());
+    let parts = multipart_parts(&res.body, &boundary);
+    let expected = [(0usize, 10usize), (100, 110), (995, 1000)];
+    assert_eq!(parts.len(), 3);
+    for ((headers, body), (start, end)) in parts.iter().zip(expected) {
+        let get = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(get("content-type"), Some("text/plain"));
+        assert_eq!(get("content-range"), Some(format!("bytes {start}-{}/1000", end - 1).as_str()));
+        assert_eq!(body.as_slice(), &data[start..end]);
+    }
+
+    // Overlapping and adjacent ranges coalesce: a plain single-range 206.
+    let res = raw_request(s.addr, "GET", &path, &[("Range", "bytes=0-9,5-19,20-29")]).await;
+    assert_eq!(res.status, 206);
+    assert_eq!(res.header("content-range"), Some("bytes 0-29/1000"));
+    assert_eq!(res.header("content-type"), Some("text/plain"));
+    assert_eq!(res.body, &data[0..30]);
+    // Unsatisfiable ranges are dropped; when all are, 416.
+    let res = raw_request(s.addr, "GET", &path, &[("Range", "bytes=990-999,5000-6000")]).await;
+    assert_eq!((res.status, res.header("content-range")), (206, Some("bytes 990-999/1000")));
+    let res = raw_request(s.addr, "GET", &path, &[("Range", "bytes=5000-6000,7000-")]).await;
+    assert_eq!((res.status, res.header("content-range")), (416, Some("bytes */1000")));
+    // More than 16 ranges: ignored, the whole file.
+    let many: Vec<String> = (0..17).map(|i| format!("{}-{}", i * 10, i * 10 + 1)).collect();
+    let res = raw_request(s.addr, "GET", &path, &[("Range", &format!("bytes={}", many.join(",")))]).await;
+    assert_eq!((res.status, res.body.len()), (200, 1000));
+    // HEAD: the multipart headers, no body.
+    let res = raw_request(s.addr, "HEAD", &path, &[("Range", "bytes=0-0,2-2")]).await;
+    assert_eq!(res.status, 206);
+    assert!(res.header("content-type").unwrap().starts_with("multipart/byteranges; boundary="));
+    assert!(res.body.is_empty());
+    // If-Range with another ETag: the whole file.
+    let res = raw_request(s.addr, "GET", &path, &[("Range", "bytes=0-0,2-2"), ("If-Range", "\"stale\"")]).await;
+    assert_eq!((res.status, res.body.len()), (200, 1000));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The orphan sweep as a system cron
+// ---------------------------------------------------------------------------------------------------------------------
+
+mod sweep_q {
+    use ferrix::prelude::*;
+    use ferrix::scheduler::{Cron, ScheduledJob};
+
+    #[internal_query]
+    pub async fn cron_rows(ctx: &QueryCtx) -> Result<Vec<Doc<Cron>>> {
+        ctx.db.query::<Cron>().collect().await
+    }
+
+    #[internal_query]
+    pub async fn sweep_jobs(ctx: &QueryCtx) -> Result<Vec<Doc<ScheduledJob>>> {
+        Ok(ctx.db.query::<ScheduledJob>().collect().await?.into_iter().filter(|j| j.origin.as_deref() == Some("cron:_storage_sweep")).collect())
+    }
+}
+
+#[tokio::test]
+async fn the_orphan_sweep_runs_as_a_system_cron() {
+    let s = server().await;
+    let crons = s.t.query::<sweep_q::cron_rows>(()).await.unwrap();
+    let sweep = crons.iter().find(|c| c.name == ferrix::scheduler::SWEEP_CRON).expect("declared by ferrix");
+    assert_eq!((sweep.schedule.as_str(), sweep.path.as_str()), ("every 6h", "_system/storage:sweep_orphans"));
+
+    // An orphaned blob and an orphaned thumbnail (their file's document is gone).
+    let photo = s.upload(&png_bytes(20, 20, false), "image/png", None).await;
+    assert_eq!(s.get_url(&format!("{}/api/storage/{photo}?thumb=10x10", s.base), &[]).await.status(), 200);
+    let storage = s.t.app().storage().clone();
+    let thumb = storage.thumbnail_path(&photo.to_string(), "10x10-contain");
+    s.t.mutation::<app::delete_file>((photo, false)).await.unwrap();
+    eventually(async || !s.blob_exists(photo).await).await;
+    storage.object_store().put(&storage.blob_path(&photo.to_string()), b"orphan".to_vec().into()).await.unwrap();
+    storage.object_store().put(&thumb, b"orphan thumbnail".to_vec().into()).await.unwrap();
+    let kept = s.upload(b"kept", "text/plain", None).await;
+
+    // Five hours on: the sweep isn't due yet.
+    assert_eq!(s.t.advance_time(Duration::from_secs(5 * 3600)).await.unwrap(), 0);
+    assert!(s.blob_exists(photo).await);
+    // At six hours the cron's job runs the sweep; the blobs are older than the grace period (one hour) by then.
+    assert_eq!(s.t.advance_time(Duration::from_secs(3600)).await.unwrap(), 1);
+    assert!(!s.blob_exists(photo).await);
+    assert!(storage.object_store().head(&thumb).await.is_err());
+    assert!(s.blob_exists(kept).await);
+    let jobs = s.t.query::<sweep_q::sweep_jobs>(()).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    let stats: Value = serde_json::from_str(jobs[0].result.as_deref().unwrap()).unwrap();
+    assert_eq!((stats["deleted"].as_u64(), stats["thumbnails"].as_u64()), (Some(1), Some(1)), "{stats}");
+
+    // Without a sweep interval there is no system cron.
+    let t = TestApp::with_options(AppOptions { dev: true, storage: StorageConfig::default().sweep_interval(None), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(t.query::<sweep_q::cron_rows>(()).await.unwrap().is_empty());
 }

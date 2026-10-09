@@ -427,7 +427,10 @@ async fn model_based_reactivity() {
     let t = TestApp::new().await.unwrap();
     let app = t.app().clone();
     let dumps = Arc::new(Dumps::default());
-    dumps.record(0, json!([]));
+    // The app's tables are empty at every ts startup committed (e.g. the reconcile of ferrix's system crons).
+    for ts in 0..=app.db().write_log().latest() {
+        dumps.record(ts, json!([]));
+    }
 
     let (steps_tx, mut steps_rx) = mpsc::channel(CLIENTS);
     let (quiesce_tx, quiesce_rx) = watch::channel(false);

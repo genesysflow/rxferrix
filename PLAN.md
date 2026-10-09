@@ -417,9 +417,12 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - Actions can also call `ctx.storage.store(bytes)` and `ctx.storage.get(id) -> bytes`.
 - Later: image thumbnails (`?thumb=200x200`, via the `image` crate) and orphan cleanup through a built-in cron.
 - As built (docs/CONTRACT.md §1.6, docs/PROTOCOL.md "File storage"): `ctx.storage` exists in all three contexts
-  (queries: `get_url`, `get_metadata`); `_storage` also records the original file name, and its creation time is
-  `_creationTime`. URLs are stable capability URLs (`/api/storage/<id>`, the id carries 96 random bits), so
-  `get_url` stays deterministic in queries; signed or expiring URLs remain an option for private files.
+  (queries: `get_url`, `get_signed_url`, `get_metadata`); `_storage` also records the original file name, and its
+  creation time is `_creationTime`. URLs are stable capability URLs (`/api/storage/<id>`, the id carries 96 random
+  bits), so `get_url` stays deterministic in queries. Signed URLs (`?exp=&sig=`) expire; in queries their expiry is
+  rounded up to a multiple of the TTL so results are stable within a window. Private mode (`--storage-private`)
+  refuses unsigned reads. Thumbnails (`?thumb=WxH&fit=`) are cached in the blob store; the orphan sweep is the
+  system cron `_storage_sweep`.
 
 ### 7.3 Scheduler and cron
 - `ctx.scheduler.run_after::<fn_ref>(dur, args)` and `run_at::<fn_ref>(time, args)`. Called inside a mutation, the job row is inserted **in the same transaction**, so it is scheduled only if the mutation commits. Both return an `Id<_scheduled_jobs>`, which can be passed to `ctx.scheduler.cancel(id)`.
@@ -433,7 +436,9 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   failed | canceled`, the builder is `.cron::<f>(name, expr, args)` with 6-field UTC expressions plus
   `.interval::<f>(name, every, args)`, and the scheduler wakes on write-log commits to the jobs table instead of an
   explicit `Notify` from the writer. Mutation jobs run one at a time in the dispatcher, since they serialize on the
-  writer anyway.)
+  writer anyway. A running action can be canceled: cooperatively through `ctx.is_canceled()` / `ctx.canceled()`,
+  then aborted at its next await after a grace period. Crons can run in an IANA time zone (`cron_tz`), and ferrix
+  declares its own system crons, named `_…`.)
 
 ### 7.4 Text search (SQLite FTS5)
 - `#[search_index(name, search = field, filter = [f1, f2])]` creates an FTS5 table per search index, with filter fields stored as `UNINDEXED` columns.
@@ -584,9 +589,16 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Crons and intervals on the `Ferrix` builder, reconciled into `_crons`; missed runs run once; no pile-up.
 - [x] Retention of finished jobs (7 days), the admin-only `_system/scheduler:*` functions and the dashboard Scheduler
   page; `TestApp::run_due_jobs` / `advance_time` / `restart` with an advanceable clock.
-- [ ] Not yet: canceling a running action, per-cron timezones, a "run cron now" button.
+- [x] Canceling a running action: the job commits as `canceled` (reason recorded), the action is signaled after the
+  commit (`ActionCtx::is_canceled` / `canceled()`) and aborted at its next await after `cancel_grace` (5s);
+  committed nested mutations stay, an in-flight one rolls back; never retried. `ctx.scheduler.cancel` /
+  `cancel_with_reason` and the dashboard's `cancel_job` work for actions in progress.
+- [x] Per-cron time zones (`cron_tz` / `CronSpec::timezone`, `chrono-tz`): spring-forward gaps run later by the gap,
+  fall-back folds run a time of day once (every-hour expressions in both hours); `_crons.timezone`.
+- [x] "Run cron now": `_system/scheduler:run_cron_now { name, force? }` (admin; no pile-up unless forced). The
+  dashboard button itself is still to do (UI), as are showing `timezone` / `system` and canceling running jobs there.
 
-### Phase 7 — File storage (M) — mostly done
+### Phase 7 — File storage (M) — done
 - [x] The `_storage` system table (`StoredFile`: sha256, size, content type, `createdBy`, original file name) and the
   local (`<data dir>/storage/`) and S3-compatible backends via `object_store` (`--storage s3://bucket/prefix`,
   `AWS_*` env vars; any `object_store` through the builder). Blobs are named by their storage id and only become
@@ -602,8 +614,17 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] `uploadFile()` in `@ferrix/client` (XHR progress, `fetch` fallback), re-exported by React and Svelte.
 - [x] The dashboard Files page (live list, previews, download, delete, drag-and-drop upload; `_storage` ids in the data
   grid link to it) and image attachments in `examples/todo`.
-- [ ] Later: signed, expiring URLs for private files; image thumbnails; multiple-range responses; running the orphan
-  sweep as a built-in cron once the scheduler exists.
+- [x] Signed, expiring URLs (`ctx.storage.get_signed_url(id, ttl)`: HMAC with a key derived from the storage key;
+  exact expiry in mutations and actions, rounded up to a multiple of the TTL in queries so results stay
+  deterministic) and private mode (`StorageConfig::private`, `--storage-private`: unsigned reads get 403).
+- [x] Image thumbnails (`?thumb=WxH&fit=contain|cover`, JPEG/PNG/WebP/GIF via the `image` crate): header-checked
+  pixel limit before decoding (decompression bombs), decoder limits, size limits or an allowlist, cached under
+  `_thumbs/<id>/`, per-variant ETags, deleted with the file and swept as orphans.
+- [x] Multiple-range responses (`multipart/byteranges`, coalesced, at most 16 ranges).
+- [x] The orphan sweep runs as the system cron `_storage_sweep` (internal action `_system/storage:sweep_orphans`),
+  replacing the ad-hoc background task.
+- [ ] Not yet: dashboard UI for private mode (the Download link appends `?download=1`; `downloadUrl` is provided),
+  thumbnails as previews on the Files page.
 
 ### Phase 8 — Search (M) — done
 - [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`

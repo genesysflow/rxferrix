@@ -85,15 +85,17 @@ pub struct ScheduledJob {
     pub origin: Option<String>,
 }
 
-/// A cron declared with `Ferrix::cron` / `Ferrix::interval` (`_crons`), reconciled at startup: rows of crons that
-/// are no longer declared are deleted.
+/// A cron declared with `Ferrix::cron` / `Ferrix::cron_tz` / `Ferrix::interval` (`_crons`), reconciled at startup:
+/// rows of crons that are no longer declared are deleted. Names starting with `_` are ferrix's own system crons.
 #[table(name = "_crons")]
 #[index(by_name = [name])]
 #[index(by_next_run = [next_run])]
 pub struct Cron {
     pub name: String,
-    // The cron expression ("0 */5 * * * *", UTC), or "every <duration>" for intervals.
+    // The cron expression ("0 */5 * * * *"), or "every <duration>" for intervals.
     pub schedule: String,
+    // The IANA time zone the expression is evaluated in; null for UTC.
+    pub timezone: Option<String>,
     pub path: String,
     #[ts(type = "any")]
     pub args: Value,

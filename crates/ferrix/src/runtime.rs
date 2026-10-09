@@ -341,7 +341,7 @@ impl App {
         let dir = dir.as_ref().to_path_buf();
         let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
-        let scheduler = crate::scheduler::SchedulerState::new(&options.scheduler)?;
+        let scheduler = crate::scheduler::SchedulerState::new(&options)?;
         let open_options =
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
         let retention = options.log_retention.clone();
@@ -378,7 +378,6 @@ impl App {
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
-        crate::storage::service::spawn_sweeper(&app);
         crate::migrations::startup(&app).await?;
         crate::auth::start(&app).await?;
         Ok(app)
@@ -694,7 +693,9 @@ impl App {
             identity: identity.clone(),
         };
         let exec = Execution::start(path, FunctionKind::Action, identity, &args);
-        let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
+        // Inside a scheduled job that gets canceled, the handler is dropped after the grace period.
+        let run = crate::scheduler::cancellation::abortable(catch_panics(handler(ctx, args)));
+        let (result, log_lines) = crate::log::capture(run).await;
         exec.finish(self.logs(), &result, &log_lines);
         ActionRun { result, log_lines }
     }

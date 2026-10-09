@@ -141,11 +141,24 @@ const storageId = await uploadFile(url, file, { onProgress: ({ loaded, total }) 
 await client.mutation(api.files.set_avatar, { file: storageId });
 ```
 
-`GET /api/storage/<id>` serves files with ETags, range requests and headers that keep uploads from running script on
-your origin. Mutations can also `delete` files (transactionally) and read their metadata; actions can `store` and
-`get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability URLs:
-anyone with the URL can read the file. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6 and
-[docs/PROTOCOL.md](docs/PROTOCOL.md) ("File storage"). The todo example attaches images to todos.
+`GET /api/storage/<id>` serves files with ETags, range requests (several ranges as `multipart/byteranges`) and
+headers that keep uploads from running script on your origin. Add `?thumb=200x200` (and `&fit=cover`) to an image's
+URL for a thumbnail (JPEG, PNG, WebP, GIF; generated once and cached; oversized images are refused from their header,
+before decoding). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
+and `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability
+URLs: anyone with the URL can read the file. For private files, use expiring signed URLs and turn on private mode
+(`StorageConfig::private(true)` or `--storage-private`), which refuses unsigned URLs:
+
+```rust
+#[query]   // in a query the expiry is rounded up to a multiple of the TTL, so the result is stable for that long
+pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
+    ctx.storage.get_signed_url(file, Duration::from_secs(3600)).await   // ".../api/storage/<id>?exp=…&sig=…"
+}
+```
+
+Blobs left without a document (a crash mid-upload) and stale thumbnails are removed by the `_storage_sweep` system
+cron (every 6 hours). Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6 and [docs/PROTOCOL.md](docs/PROTOCOL.md)
+("File storage"). The todo example attaches images to todos.
 ## Scheduler and crons
 
 Mutations and actions can schedule other mutations and actions (internal ones too), and `main` can declare crons:
@@ -163,16 +176,21 @@ pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> R
 fn main() -> ferrix::Result<()> {
     ferrix::Ferrix::new()
         .cron::<purge_completed>("purge-completed", "0 0 * * * *", ())   // sec min hour day month weekday, UTC
+        .cron_tz::<daily_digest>("digest", "0 0 9 * * *", "Europe/Bucharest", ())   // 09:00 local, DST-aware
         .run()
 }
 ```
 
 Also `run_at::<f>(ms, args)`, `cancel(id)`, `with_retries(n)` (actions), and `.interval::<f>(name, Duration, args)`.
+Canceling works on running actions too: the action sees `ctx.is_canceled()` (or awaits `ctx.canceled()` in a
+`select!`) and should stop; after a 5 second grace period it is aborted at its next `.await`. Mutations it already
+ran stay committed. Admins can run a cron immediately with `_system/scheduler:run_cron_now`.
 Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see them live). Scheduled mutations run
 **exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
 interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
 them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
-finished jobs are deleted after 7 days. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
+finished jobs are deleted after 7 days. In a time zone, a run in the hour skipped by a spring-forward change runs an
+hour later, and a time of day in the repeated fall-back hour runs once. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
 deterministically. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.7.
 
 ## Search

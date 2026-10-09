@@ -352,7 +352,8 @@ async fn http_fallback_endpoints() {
     let (status, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "h" } }))).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], "success");
-    assert_eq!(body["ts"], 1);
+    // The commit ts (startup may already have committed, e.g. the reconcile of ferrix's system crons).
+    assert!(body["ts"].as_u64().is_some_and(|ts| ts >= 1), "{body}");
     assert_eq!(body["logLines"], json!([]));
 
     let (status, body) = http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await;

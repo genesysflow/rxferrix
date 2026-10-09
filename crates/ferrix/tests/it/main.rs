@@ -3,6 +3,7 @@
 mod common;
 
 mod auth;
+mod authkit;
 mod bench;
 mod catalog;
 mod codegen;
@@ -14,6 +15,7 @@ mod model;
 mod pagination;
 mod query_engine;
 mod readsets;
+mod revocation;
 mod storage;
 mod scheduler;
 mod search;

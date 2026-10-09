@@ -12,6 +12,7 @@ use super::email::{Email, LogMailer, Mailer, Purpose, SmtpMailer};
 use super::identity::Identity;
 use super::oauth::OAuthFlows;
 use super::rate_limit::{RateLimiter, Rule};
+use super::revocation::{Revocations, SessionWatch};
 use super::store::{self, ClientInfo, Principal, RefreshOutcome};
 use super::tables::{Admin, Session, User};
 use super::tokens::{AccessClaims, Keys, TokenError, ct_eq, random_token};
@@ -107,6 +108,7 @@ pub struct AuthService {
     limiter: RateLimiter,
     pub(crate) oauth: OAuthFlows,
     setup_token_hash: Mutex<Option<String>>,
+    revocations: Arc<Revocations>,
 }
 
 pub(crate) fn now_ms() -> f64 {
@@ -135,7 +137,7 @@ impl AuthService {
             );
         }
         let oauth = OAuthFlows::new(&config.oauth);
-        Ok(AuthService { config, keys, redirects, mailer, limiter: RateLimiter::default(), oauth, setup_token_hash: Mutex::new(None) })
+        Ok(AuthService { config, keys, redirects, mailer, limiter: RateLimiter::default(), oauth, setup_token_hash: Mutex::new(None), revocations: Arc::default() })
     }
 
     pub fn config(&self) -> &AuthConfig {
@@ -171,6 +173,31 @@ impl AuthService {
     /// Validate an access token: signature, expiry, and that its session is still active (so sign-out and
     /// revocation take effect for every new connection and request immediately).
     pub async fn authenticate(&self, app: &App, token: &str) -> Result<Authenticated, TokenError> {
+        self.authenticate_inner(app, token, false).await.map(|(a, _)| a)
+    }
+
+    /// [`AuthService::authenticate`] for long-lived connections: also returns a [`SessionWatch`] that fires as soon
+    /// as the token's session ends (sign-out, revocation, user deletion, ...; see [`super::revocation`]). The watch is
+    /// registered before the session check, so no revocation can slip in between.
+    pub async fn authenticate_watched(
+        &self,
+        app: &App,
+        token: &str,
+    ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
+        self.authenticate_inner(app, token, true).await
+    }
+
+    /// The registry of connections watching their sessions (live revocation).
+    pub fn revocations(&self) -> &Arc<Revocations> {
+        &self.revocations
+    }
+
+    async fn authenticate_inner(
+        &self,
+        app: &App,
+        token: &str,
+        watch: bool,
+    ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
         let claims = self.keys.verify(token, now_s())?;
         let session: Id<Session> = claims.sid.parse().map_err(|_| TokenError::Malformed)?;
         let (principal, identity) = if claims.adm {
@@ -180,8 +207,9 @@ impl AuthService {
             let user: Id<User> = claims.sub.parse().map_err(|_| TokenError::Malformed)?;
             (Principal::User(user), Identity::user(user, Some(session)))
         };
+        let watch = watch.then(|| self.revocations.watch(app, session.to_string()));
         match store::session_active(app, session, principal, now_ms()).await {
-            Ok(true) => Ok(Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }),
+            Ok(true) => Ok((Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }, watch)),
             Ok(false) => Err(TokenError::SessionEnded),
             Err(e) => {
                 tracing::error!("auth: session lookup failed: {e:#}");

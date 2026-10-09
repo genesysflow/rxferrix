@@ -216,6 +216,47 @@ pub mod hostile {
     }
 }
 
+/// `#[migration]` in its forms: untyped (`Value`) or typed documents; patch, `DocChange` or `()` results; a table
+/// by type or by name; default and explicit batch sizes and names.
+pub mod data {
+    use ferrix::prelude::*;
+    use ferrix_macros::migration;
+    use serde_json::{Value, json};
+
+    use super::todos::Todo;
+
+    /// Adds a default priority.
+    #[migration(table = Todo)]
+    pub async fn add_priority(_ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+        Ok(doc.get("prio").is_none().then(|| json!({ "prio": 0 })))
+    }
+
+    #[derive(ferrix::__private::serde::Deserialize)]
+    #[serde(crate = "ferrix::__private::serde")]
+    pub struct OldTodo {
+        pub title: String,
+    }
+
+    #[migration(table = "todos", batch = 500, name = "0002_rename-title")]
+    pub(crate) async fn rename_title(_ctx: &MutationCtx, doc: Doc<OldTodo>) -> anyhow::Result<DocChange> {
+        if doc.title.is_empty() {
+            return Ok(DocChange::Delete);
+        }
+        Ok(DocChange::Replace(json!({ "text": doc.title, "done": false, "createdBy": null, "prio": 0 })))
+    }
+
+    #[migration(table = super::todos::TodoItem, batch = 1)]
+    async fn noop(ctx: &MutationCtx, _: Value) -> ferrix::Result<()> {
+        let _ = ctx.now();
+        Ok(())
+    }
+
+    /// Private migration references are usable inside their module.
+    pub fn noop_name() -> String {
+        <noop as ferrix::migrations::MigrationRef>::name()
+    }
+}
+
 fn def(name: &str) -> &'static FunctionDef {
     let mut it = FUNCTIONS.iter().filter(|f| f.name == name);
     let d = it.next().unwrap_or_else(|| panic!("{name} not registered"));
@@ -509,6 +550,48 @@ fn args_structs_and_tuple_conversions() {
     assert_eq!(a.text, "hi");
     let _: <todos::count as FunctionRef>::Args = ().into();
     assert_eq!(todos::bump_path(), "todos:bump");
+}
+
+#[test]
+fn migrations_are_registered_and_run() {
+    use ferrix::__private::MIGRATIONS;
+    use ferrix::migrations::{DocChange, MigrationRef};
+
+    let find = |fn_name: &str| {
+        let mut it = MIGRATIONS.iter().filter(|m| m.fn_name == fn_name);
+        let d = it.next().unwrap_or_else(|| panic!("{fn_name} not registered"));
+        assert!(it.next().is_none());
+        d
+    };
+    let add = find("add_priority");
+    assert_eq!((add.name(), add.table, add.batch_size), ("data:add_priority".to_string(), "todos", 100));
+    let rename = find("rename_title");
+    assert_eq!((rename.name(), rename.table, rename.batch_size), ("0002_rename-title".to_string(), "todos", 500));
+    let noop = find("noop");
+    assert_eq!((noop.table, noop.batch_size), ("todo_item", 1));
+    assert_eq!(MIGRATIONS.len(), 3);
+
+    assert_eq!(<data::add_priority as MigrationRef>::name(), "data:add_priority");
+    assert_eq!(<data::rename_title as MigrationRef>::table(), "todos");
+    assert_eq!(data::noop_name(), "data:noop");
+
+    let ctx = ferrix::MutationCtx::mock();
+    let doc = json!({ "_id": "00".repeat(16), "_creationTime": 1.0, "title": "hi" });
+    assert_eq!(block_on((add.handler)(&ctx, doc.clone())).unwrap(), DocChange::Patch(json!({ "prio": 0 })));
+    assert_eq!(block_on((add.handler)(&ctx, json!({ "prio": 3 }))).unwrap(), DocChange::Keep);
+    assert_eq!(
+        block_on((rename.handler)(&ctx, doc.clone())).unwrap(),
+        DocChange::Replace(json!({ "text": "hi", "done": false, "createdBy": null, "prio": 0 }))
+    );
+    let empty = json!({ "_id": "00".repeat(16), "_creationTime": 1.0, "title": "" });
+    assert_eq!(block_on((rename.handler)(&ctx, empty)).unwrap(), DocChange::Delete);
+    // A document that doesn't deserialize as the typed parameter is an error (the runtime fails the migration).
+    let err = block_on((rename.handler)(&ctx, json!({ "text": "no title" }))).unwrap_err();
+    assert!(err.to_string().contains("does not deserialize"), "{err}");
+    assert_eq!(block_on((noop.handler)(&ctx, json!({}))).unwrap(), DocChange::Keep);
+    // The user's fn stays callable.
+    assert_eq!(block_on(data::add_priority(&ctx, json!({}))).unwrap(), Some(json!({ "prio": 0 })));
+    assert_send(&(add.handler)(&ctx, json!({})));
 }
 
 #[test]

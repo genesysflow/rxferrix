@@ -1,0 +1,41 @@
+error: #[migration] functions take `&MutationCtx` as their first parameter, found `&QueryCtx`
+ --> tests/ui/migration_signature.rs:7:25
+  |
+7 | async fn wrong_ctx(ctx: &QueryCtx, doc: Value) -> Result<()> { Ok(()) }
+  |                         ^^^^^^^^^
+
+error: #[migration] functions must be `async fn`
+  --> tests/ui/migration_signature.rs:10:1
+   |
+10 | fn not_async(ctx: &MutationCtx, doc: Value) -> Result<()> { Ok(()) }
+   | ^^
+
+error: #[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`
+  --> tests/ui/migration_signature.rs:13:16
+   |
+13 | async fn no_doc(ctx: &MutationCtx) -> Result<()> { Ok(()) }
+   |                ^^^^^^^^^^^^^^^^^^^
+
+error: #[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`
+  --> tests/ui/migration_signature.rs:16:47
+   |
+16 | async fn extra(ctx: &MutationCtx, doc: Value, more: u32) -> Result<()> { Ok(()) }
+   |                                               ^^^^^^^^^
+
+error: document types must be owned: references are not allowed (use e.g. `String` instead of `&str`)
+  --> tests/ui/migration_signature.rs:19:43
+   |
+19 | async fn borrowed(ctx: &MutationCtx, doc: &Value) -> Result<()> { Ok(()) }
+   |                                           ^^^^^^
+
+error: #[migration] functions return `Result<Option<serde_json::Value>>` (a patch or None), `Result<DocChange>` or `Result<()>`
+  --> tests/ui/migration_signature.rs:22:49
+   |
+22 | async fn no_return(ctx: &MutationCtx, doc: Value) {}
+   |                                                 ^
+
+error: #[migration] can only be used on an `async fn`
+  --> tests/ui/migration_signature.rs:25:1
+   |
+25 | struct NotAFunction;
+   | ^^^^^^

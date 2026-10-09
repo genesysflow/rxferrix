@@ -208,7 +208,7 @@ ferrix/
   `Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`. A missing field is ordered as `Undefined`, below `Null`.
 - **`Id<T>`**: 4-byte table number plus 14 random bytes, encoded as base32 text. The table can be decoded from the ID, so `ctx.db.get(id)` needs no table name and IDs can be validated as belonging to the right table. The string form appears in TS as `Id<"messages">` (a branded string).
 - **System fields**: every `Doc<T>` is `{ _id: Id<T>, _creation_time: f64 (ms), ...T }`. These use `#[serde(flatten)]`.
-- **Wire and storage encoding**: JSON. Int64 values outside the safe JS range and bytes use a small tagged form (`{"$int":"…"}`, `{"$bytes":"base64"}`). Types are always known from the schema, so this rarely shows up.
+- **Wire and storage encoding**: JSON. Int64 values outside the safe JS range and bytes use a small tagged form (`{"$int":"…"}`, `{"$bytes":"base64"}`). Types are always known from the schema, so this rarely shows up. (Built: `ferrix::Bytes` is `{"$bytes": "<base64>"}`, TS `{ $bytes: string }` with `bytesToJson` / `bytesFromJson` in `@ferrix/client`, and has its own key tag; `$int` is not built: integers are plain JSON numbers.)
 
 ### 4.2 Schema from Rust structs
 
@@ -222,8 +222,8 @@ ferrix/
 - New table: register it and assign a table number.
 - New index: backfill synchronously at startup (fine at this scale) and log progress.
 - Removed index: delete its entries.
-- Changed fields: validate every existing document against the new schema. If any fail, **refuse to start** and print the failing doc IDs and a hint. `ferrix serve --dev` offers to open them in the dashboard.
-- Migrations: `#[migration]` functions are mutations that run in batches over a table. Ferrix tracks which ones have run in `_migrations`. `ferrix migrate` runs pending ones. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
+- Changed fields: validate every existing document against the new schema. If any fail, **refuse to start** and print the failing doc IDs and a hint (including a migration snippet), unless migrations for the table are pending (below). `ferrix serve --dev` offers to open them in the dashboard (not built yet).
+- Migrations (built, docs/CONTRACT.md §1.9): `#[migration(table = T, batch = N)]` functions get each document as raw JSON (or a typed `Doc<Old>`) and return a patch, a `DocChange` or nothing. They run in batches, each one mutation transaction that also advances a cursor in `_migrations`, so a run processes each document exactly once and resumes after a crash or a failure. `ferrix migrate [--name] [--dry-run]`, `ferrix migrate status`, `serve --migrate` and the admin functions `_system/migrations:{list, status, run, cancel}` run and show them. A table whose documents fail the startup check still opens while it has pending migrations, as *migrating*: writes may leave a document invalid only if it already was, and the check runs again (recording the fingerprint) in the transaction where its last migration finishes; a table still invalid after its migrations refuses the next start. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
 
 ### 4.3 Storage layout in SQLite
 
@@ -500,10 +500,14 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - Design change found during the build: function references are type-namespace-only braced structs, called as `ctx.run_query::<list>(args)` (docs/CONTRACT.md §1).
 
 ### Phase 1 — Core engine (L) — mostly done
-- [x] Full value model in the key encoding, with proptests. (There is no `Bytes` type yet; values are plain JSON.)
+- [x] Full value model in the key encoding, with proptests, including `ferrix::Bytes` (`{"$bytes": "<base64>"}`, its
+  own tag between String and Array; the encoding is versioned in `_meta` and older databases get every index rebuilt).
 - [x] `#[table]` with typed field and index handles, catalog reconciliation, and index backfill.
 - [x] Validating existing documents against a changed schema at startup (only tables whose schema fingerprint changed; `--skip-schema-check` escape hatch).
-- [ ] `#[migration]`.
+- [x] `#[migration]`: batched, resumable, exactly once per run, dry runs, `_migrations`, `ferrix migrate`,
+  `serve --migrate`, admin system functions, and lenient startup for tables with pending migrations (CONTRACT §1.9).
+  Not yet: a dashboard Migrations page (the system functions exist), dependencies between migrations other than name
+  order.
 - [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
 - [x] Mutations: `insert`, `patch`, `replace`, `delete`. Every write is validated against the table type (`patch` checks the merged document; `insert`/`replace` check that the stored JSON round-trips).
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
@@ -623,8 +627,25 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Not yet: the dashboard UI for search, stemmers for languages other than English, vector search in queries
   (reactive), tunable HNSW parameters (`M`, `ef`) per index.
 
+### Phase 10 — DX fixes found by `examples/chat-react` (M)
+- [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
+  existing indexes on upgrade. Today they end in the random `_id`.
+- [ ] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
+  render cleanly.
+- [ ] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
+  don't depend on serde/ts-rs directly.
+- [ ] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
+  is composable with a custom `Mailer`.
+- [ ] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
+  (non-throwing).
+- [ ] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
+- [ ] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
+- [ ] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
+  scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
+
 ### Phase 9 — Operations polish (M)
-- [ ] Backup and restore, export and import, migrations CLI, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.
+- [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`).
+- [ ] Backup and restore, export and import, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.
 - [x] An interval-tree invalidation index (done in Phase 2).
 
 ---

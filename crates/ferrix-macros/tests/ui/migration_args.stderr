@@ -1,0 +1,37 @@
+error: #[migration] needs the table it migrates: `#[migration(table = TableType)]`
+ --> tests/ui/migration_args.rs:6:1
+  |
+6 | #[migration]
+  | ^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `migration` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `batch` must be between 1 and 10000
+ --> tests/ui/migration_args.rs:9:38
+  |
+9 | #[migration(table = "todos", batch = 0)]
+  |                                      ^
+
+error: `batch` must be between 1 and 10000
+  --> tests/ui/migration_args.rs:12:38
+   |
+12 | #[migration(table = "todos", batch = 20000, name = "not ok!")]
+   |                                      ^^^^^
+
+error: a migration name may only contain letters, digits and `_ - . : /`, not ` `
+  --> tests/ui/migration_args.rs:12:52
+   |
+12 | #[migration(table = "todos", batch = 20000, name = "not ok!")]
+   |                                                    ^^^^^^^^^
+
+error: unknown argument `every` (expected `table`, `batch` or `name`)
+  --> tests/ui/migration_args.rs:15:30
+   |
+15 | #[migration(table = "todos", every = 5)]
+   |                              ^^^^^
+
+error: `table` must be a table type (`table = Todo`) or a table name (`table = "todos"`)
+  --> tests/ui/migration_args.rs:18:21
+   |
+18 | #[migration(table = 5)]
+   |                     ^

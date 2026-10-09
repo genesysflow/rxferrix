@@ -135,6 +135,18 @@ pub fn table_documents(conn: &Connection, table_number: u32) -> anyhow::Result<V
     Ok(out)
 }
 
+/// The number of documents in a table (a range count over the `documents` primary key; see [`table_documents`]).
+pub fn count_documents(conn: &Connection, table_number: u32) -> anyhow::Result<u64> {
+    let start = table_number.to_be_bytes().to_vec();
+    let n: i64 = match crate::keys::prefix_successor(&start) {
+        Some(end) => conn
+            .prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1 AND id < ?2")?
+            .query_row(params![start, end], |r| r.get(0))?,
+        None => conn.prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1")?.query_row(params![start], |r| r.get(0))?,
+    };
+    Ok(n as u64)
+}
+
 /// One batch of an index scan: up to `limit` `(key, json)` rows of `range` in `order`, continuing strictly after
 /// (Asc) or before (Desc) `cursor` if given.
 pub fn scan_index_batch(

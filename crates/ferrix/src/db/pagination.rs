@@ -32,11 +32,11 @@ use data_encoding::BASE64URL_NOPAD;
 use serde::{Deserialize, Serialize};
 
 use crate::db::catalog::IndexId;
-use crate::db::query::{Query, SCAN_BATCH, parse_doc};
+use crate::db::query::{Decode, SCAN_BATCH, ScanPlan};
 use crate::db::readset::KeyRange;
 use crate::db::storage;
 use crate::keys;
-use crate::schema::{Doc, Order, Table};
+use crate::schema::Order;
 
 /// The most documents one page scans (matching the filter or not) when no `endCursor` is given. A page that hits it
 /// is returned early, possibly with fewer than `numItems` documents, and `isDone = false`.
@@ -228,13 +228,14 @@ fn span(range: &KeyRange, order: Order, start: Option<&Position>, end: Option<&P
 // paginate
 // ---------------------------------------------------------------------------------------------------------------------
 
-pub(super) async fn paginate<T: Table>(
-    q: Query<'_, T>,
+/// Read one page of `plan` (typed or untyped: `decode` turns a stored row into a `D`).
+pub(super) async fn paginate<D: Send>(
+    plan: ScanPlan<'_>,
     opts: PaginationOpts,
-) -> crate::Result<PaginationResult<Doc<T>>> {
-    let db = q.db;
-    let (index, range) = q.resolve()?;
-    let order = q.order;
+    decode: Decode<D>,
+    filter: Option<&(dyn Fn(&D) -> bool + Send + Sync + '_)>,
+) -> crate::Result<PaginationResult<D>> {
+    let ScanPlan { db, table, index, range, order } = plan;
     let fp = fingerprint(index.id, order, &range);
     let start = opts.cursor.as_deref().map(|c| decode_cursor(c, "cursor", &fp, &range)).transpose()?;
     let end = opts.end_cursor.as_deref().map(|c| decode_cursor(c, "endCursor", &fp, &range)).transpose()?;
@@ -262,17 +263,17 @@ pub(super) async fn paginate<T: Table>(
             let mut batch = SCAN_BATCH;
             if let Some(n) = limit {
                 batch = batch.min(MAX_PAGE_SCAN - scanned);
-                if q.filter.is_none() {
+                if filter.is_none() {
                     batch = batch.min(n - page.len());
                 }
             }
             let rows = db.with_conn(|c| storage::scan_index_batch(c, index.id, &scan, order, last.as_deref(), batch))?;
             let exhausted = rows.len() < batch;
             for (key, json) in rows {
-                let doc = parse_doc::<T>(&json)?;
+                let doc = decode(&table, &json)?;
                 last = Some(key);
                 scanned += 1;
-                if q.filter.as_ref().is_none_or(|f| f(&doc)) {
+                if filter.is_none_or(|f| f(&doc)) {
                     page.push(doc);
                 }
                 if let Some(n) = limit

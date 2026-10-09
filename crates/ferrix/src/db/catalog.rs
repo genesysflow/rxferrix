@@ -40,6 +40,9 @@ pub struct TableInfo {
     pub number: u32,
     /// All indexes, `by_id` included.
     pub indexes: Vec<IndexInfo>,
+    /// The table's definition in code (its TS type and validator). `None` for a table that exists in the database
+    /// but is no longer defined in code: its documents can still be read, but untyped writes are refused.
+    pub def: Option<TableDef>,
 }
 
 impl TableInfo {
@@ -76,14 +79,14 @@ impl Catalog {
         self.by_number.values()
     }
 
-    fn load(conn: &Connection) -> anyhow::Result<Catalog> {
+    fn load(conn: &Connection, defs: &[TableDef]) -> anyhow::Result<Catalog> {
         let mut tables: BTreeMap<u32, TableInfo> = BTreeMap::new();
         {
             let mut stmt = conn.prepare("SELECT table_number, name FROM _tables")?;
             let mut rows = stmt.query([])?;
             while let Some(r) = rows.next()? {
                 let number: u32 = r.get(0)?;
-                tables.insert(number, TableInfo { name: r.get(1)?, number, indexes: Vec::new() });
+                tables.insert(number, TableInfo { name: r.get(1)?, number, indexes: Vec::new(), def: None });
             }
         }
         let mut stmt = conn.prepare("SELECT index_id, table_number, name, fields FROM _indexes ORDER BY index_id")?;
@@ -97,7 +100,8 @@ impl Catalog {
             }
         }
         let mut catalog = Catalog::default();
-        for (number, t) in tables {
+        for (number, mut t) in tables {
+            t.def = defs.iter().find(|d| d.name == t.name).cloned();
             let t = Arc::new(t);
             catalog.by_name.insert(t.name.clone(), t.clone());
             catalog.by_number.insert(number, t);
@@ -140,7 +144,7 @@ fn validate_defs(defs: &[TableDef]) -> anyhow::Result<Vec<TableDef>> {
 pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Catalog> {
     let defs = validate_defs(defs)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let existing = Catalog::load(&tx)?;
+    let existing = Catalog::load(&tx, &defs)?;
     let mut next_table: u32 = tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
     let mut next_index: u32 = tx.query_row("SELECT COALESCE(MAX(index_id), 0) + 1 FROM _indexes", [], |r| r.get(0))?;
 
@@ -198,7 +202,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
         }
     }
     tx.commit()?;
-    Catalog::load(conn)
+    Catalog::load(conn, &defs)
 }
 
 fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, fields: &[String]) -> anyhow::Result<()> {

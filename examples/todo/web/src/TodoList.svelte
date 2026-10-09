@@ -5,9 +5,15 @@
   type Filter = "all" | "open" | "done";
   let filter = $state<Filter>("all");
   let text = $state("");
+  let search = $state("");
   let error = $state<string | null>(null);
 
-  const todos = useQuery(api.todos.list, () => (filter === "all" ? {} : { done: filter === "done" }));
+  const done = $derived(filter === "all" ? {} : { done: filter === "done" });
+  const searching = $derived(search.trim() !== "");
+  const listed = useQuery(api.todos.list, () => (searching ? "skip" : done));
+  // Full-text search (the todos table has a search index on `text`), live like any other query.
+  const found = useQuery(api.todos.search, () => (searching ? { text: search, ...done } : "skip"));
+  const todos = $derived(searching ? found : listed);
   const remaining = useQuery(api.todos.remaining);
   const connection = useConnectionState();
 
@@ -54,6 +60,7 @@
   {#each ["all", "open", "done"] as const as f (f)}
     <button class:active={filter === f} onclick={() => (filter = f)}>{f}</button>
   {/each}
+  <input class="search" type="search" bind:value={search} placeholder="Search…" aria-label="Search todos" />
   <span class="spacer"></span>
   <button onclick={() => run(addSamples({ count: 3 }))}>+3 samples</button>
   <button onclick={() => run(clearCompleted())}>Clear completed</button>

@@ -68,6 +68,17 @@ try {
   await timed("delete in A -> gone in B", () =>
     b.locator("li", { hasText: item }).waitFor({ state: "detached", timeout: 2000 }),
   );
+
+  // Full-text search in A (the last word is a prefix): a matching todo added in B appears in A's results live.
+  const word = `zebra${Date.now()}`;
+  await a.getByLabel("Search todos").fill(word.slice(0, -3));
+  await a.getByText("Nothing here.").waitFor({ timeout: 2000 });
+  await b.getByLabel("New todo").fill(`find the ${word}`);
+  await b.getByRole("button", { name: "Add" }).click();
+  await timed("add in B -> in A's search results", () => a.locator("li", { hasText: word }).waitFor({ timeout: 2000 }));
+  await a.getByLabel("Search todos").fill("");
+  await b.locator("li", { hasText: word }).getByRole("button", { name: "Delete" }).click();
+  await a.locator("li", { hasText: word }).waitFor({ state: "detached", timeout: 2000 });
 } catch (e) {
   failures.push(String(e));
 } finally {

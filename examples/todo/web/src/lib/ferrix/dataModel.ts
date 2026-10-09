@@ -7,11 +7,16 @@ export type DataModel = {
   "todos": { text: string, done: boolean, };
 };
 
+/** Built-in ferrix tables that app documents may reference, e.g. `Id<"_users">`. */
+export type SystemDataModel = {
+  "_users": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };
+};
+
 /** The name of a table. */
 export type TableNames = keyof DataModel;
 
-/** A document id of table `T`. At runtime a plain string. */
-export type Id<T extends TableNames> = GenericId<T>;
+/** A document id of table `T` (an app table, or a system table from `SystemDataModel`). At runtime a plain string. */
+export type Id<T extends TableNames | keyof SystemDataModel> = GenericId<T>;
 
 /** A stored document of table `T`, with its system fields. */
-export type Doc<T extends TableNames> = DataModel[T] & { _id: Id<T>; _creationTime: number };
+export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };

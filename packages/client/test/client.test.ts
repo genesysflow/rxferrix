@@ -707,6 +707,47 @@ describe("auth", () => {
     ]);
   });
 
+  it("works with an external provider's token getter (Clerk, Auth0, Supabase)", async () => {
+    // e.g. client.setAuth(({ forceRefresh }) => clerk.session.getToken({ skipCache: forceRefresh }))
+    const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const issued: string[] = [];
+    let signedIn = true;
+    const getToken = vi.fn(async ({ forceRefresh }: { forceRefresh: boolean }) => {
+      if (!signedIn) return null;
+      const exp = Math.floor(Date.now() / 1000) + 60; // short-lived, as Clerk's are
+      const token = `${b64({ alg: "RS256", kid: "k1" })}.${b64({ iss: "https://clerk.example.com", sub: "user_1", exp })}.sig${forceRefresh ? "!" : ""}`;
+      issued.push(token);
+      return token;
+    });
+    const onChange = vi.fn();
+    client.setAuth(getToken, onChange);
+    await flushMicrotasks();
+    const sent = await openAndDrain();
+    expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: issued[0] });
+    server.transition({ identity: 1, ts: 1 });
+    expect(onChange).toHaveBeenLastCalledWith(true);
+
+    // Refreshed 30s before `exp` with forceRefresh, and sent on the same socket (kept alive by the server's pings).
+    vi.advanceTimersByTime(15_000);
+    server.push({ type: "Ping" });
+    vi.advanceTimersByTime(15_000);
+    await flushMicrotasks();
+    expect(getToken).toHaveBeenLastCalledWith({ forceRefresh: true });
+    expect(server.drain().filter((m) => m.type !== "Pong")).toEqual([{ type: "Authenticate", baseVersion: 1, token: issued[1] }]);
+    server.transition({ identity: 2, ts: 1 });
+
+    // The user is deleted (or signs out at the provider): AuthError, the getter has nothing more, anonymous again.
+    signedIn = false;
+    server.push({ type: "AuthError", error: "session has ended" });
+    await flushMicrotasks();
+    expect(getToken).toHaveBeenLastCalledWith({ forceRefresh: true });
+    expect(onChange).toHaveBeenLastCalledWith(false);
+    expect(client.connectionState().isAuthenticated).toBe(false);
+    vi.advanceTimersByTime(20_000);
+    const after = await openAndDrain();
+    expect(after.map((m) => m.type)).toEqual(["Connect"]);
+  });
+
   it("refetches with forceRefresh after an AuthError", async () => {
     const tokens = ["bad", "good"];
     const fetchToken = vi.fn(async () => tokens.shift() ?? null);

@@ -86,9 +86,32 @@ await auth.handleRedirectCallback();              // on the page OAuth and email
 ```
 
 Access tokens are 15-minute HS256 JWTs signed with a key from `<data dir>/auth_secret.key`; refresh tokens rotate
-on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
-one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
-("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
+on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a rotated refresh token
+ends the sockets of that session **at once** (`AuthError`, then the client continues signed out), not when the access
+token expires. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
+one-time `/_/setup#token=…` link; `admin create <email>` works too.
+
+**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): ferrix verifies their JWTs
+against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
+subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in method:
+
+```rust
+.auth(AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())          // JWKS found by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com")))
+```
+
+```ts
+// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError.
+client.setAuth(({ forceRefresh }) => clerk.session!.getToken({ skipCache: forceRefresh }));
+```
+
+**Runtime settings.** Administrators can change OAuth providers, SMTP, the redirect allowlist, sign-ups, token
+lifetimes and CORS origins without a restart (`_system/settings:*`). Secrets are encrypted at rest with a key derived
+from `auth_secret.key` and never shown again. Whatever the code, the command line or the environment configures wins
+over these settings. Every administrator write is recorded in an audit log (`_audit_log`), and admins can act as a
+user through a short-lived, audited session. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md) ("Auth") and
+[docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5, §4.1.4, §4.1.5.
 
 ## File storage
 
@@ -254,8 +277,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   fields, a side panel with a JSON editor (insert, edit, delete; validated against the table's Rust type), and
   clickable ids that open the referenced document. Secrets (password and token hashes) are never shown, and system
   tables are read-only except the `name`, `image` and `emailVerified` of users.
-- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user*, showing the
-  result, log lines and duration.
+- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user* (through a
+  real, short-lived, audited session), showing the result, log lines and duration.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
 - **Users**: users, linked providers, sessions (revoke), delete.
 - **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
@@ -263,6 +286,10 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 - **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
   and retry.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
+
+Runtime settings, the audit log and "open the app as this user" already have their admin-only backend
+(`_system/settings:*`, `_system/audit:list`, `POST /api/admin/impersonate`; docs/CONTRACT.md §4.1.4, §4.1.5, §4.2);
+their pages are still to come.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every
 view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The built assets are committed, so

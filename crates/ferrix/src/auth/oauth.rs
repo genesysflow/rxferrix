@@ -13,7 +13,7 @@
 //! ID tokens are not used: the profile comes from the userinfo endpoint over TLS with the access token, which avoids
 //! JWKS handling while relying on the same trust (the provider's TLS endpoint).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -38,40 +38,24 @@ pub(crate) struct Pending {
     created: Instant,
 }
 
+/// Pending flows and the HTTP client. The providers themselves come from the configuration in effect
+/// (`AuthService::oauth_provider`), which administrators can change at runtime.
 pub(crate) struct OAuthFlows {
-    providers: BTreeMap<String, OAuthProvider>,
     pending: Mutex<HashMap<String, Pending>>,
+    /// Discovered endpoints by discovery URL.
     discovered: tokio::sync::Mutex<HashMap<String, OidcEndpoints>>,
     http: reqwest::Client,
 }
 
 impl OAuthFlows {
-    pub fn new(providers: &[OAuthProvider]) -> Self {
-        let mut map = BTreeMap::new();
-        for p in providers {
-            if !p.is_configured() {
-                tracing::warn!("auth: OAuth provider `{}` has no client id/secret configured; it is disabled", p.id);
-                continue;
-            }
-            if map.insert(p.id.clone(), p.clone()).is_some() {
-                tracing::warn!("auth: OAuth provider `{}` is configured twice; using the last one", p.id);
-            }
-        }
+    pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("ferrix/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("building the HTTP client");
-        OAuthFlows { providers: map, pending: Mutex::new(HashMap::new()), discovered: Default::default(), http }
-    }
-
-    pub fn provider_ids(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
-    }
-
-    pub fn provider(&self, id: &str) -> Option<&OAuthProvider> {
-        self.providers.get(id)
+        OAuthFlows { pending: Mutex::new(HashMap::new()), discovered: Default::default(), http }
     }
 
     async fn endpoints(&self, provider: &OAuthProvider) -> AuthResult<Option<OidcEndpoints>> {
@@ -80,7 +64,7 @@ impl OAuthFlows {
             ProviderKind::Oidc(e) => Ok(Some(e.clone())),
             ProviderKind::OidcDiscovery { discovery_url } => {
                 let mut cache = self.discovered.lock().await;
-                if let Some(e) = cache.get(&provider.id) {
+                if let Some(e) = cache.get(discovery_url) {
                     return Ok(Some(e.clone()));
                 }
                 let endpoints: OidcEndpoints = self
@@ -93,7 +77,7 @@ impl OAuthFlows {
                     .json()
                     .await
                     .map_err(|e| provider_error(&provider.id, "invalid discovery document", e))?;
-                cache.insert(provider.id.clone(), endpoints.clone());
+                cache.insert(discovery_url.clone(), endpoints.clone());
                 Ok(Some(endpoints))
             }
         }

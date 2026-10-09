@@ -175,7 +175,10 @@ impl Auth {
     pub fn is_admin(&self) -> bool;
     pub fn admin_id(&self) -> Option<Id<Admin>>;
     pub fn require_admin(&self) -> Result<Id<Admin>>;   // "unauthenticated" when anonymous, "forbidden" for users
-    pub fn session_id(&self) -> Option<Id<Session>>;
+    pub fn session_id(&self) -> Option<Id<Session>>;      // None for external JWTs (they have no session row). For an
+                                                        // admin acting as the user, an impersonation session whose
+                                                        // `Session::impersonated_by` is set (check it to refuse
+                                                        // sensitive operations).
     pub fn identity(&self) -> &Identity;
 }
 // What a query reads of `ctx.auth` decides who shares its subscription (docs/PROTOCOL.md "Shared subscriptions"):
@@ -483,19 +486,73 @@ fn main() -> ferrix::Result<()> {
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
 `session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
-`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`.
+`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+`jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
+`impersonation(bool)` (`POST /api/admin/impersonate`, default true).
 CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `FERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`FERRIX_SMTP_URL`, `FERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted).
 
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
-`sign_in_as(app, user)`, `create_admin`, `reset_admin_password`, `create_setup_token`, ...). `TestApp::with_auth(cfg)`
-and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+`authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
+`reset_admin_password`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`, `revocations()`, ...).
+`TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+
+**External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
+HTTP Bearer tokens, alongside ferrix's own:
+
+```rust
+use ferrix::auth::{AuthConfig, JwtProvider, JwtAlgorithm};
+AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())                // JWKS by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com"))
+    .jwt(JwtProvider::new("https://<ref>.supabase.co/auth/v1").audience("authenticated")
+        .jwks_url("https://<ref>.supabase.co/auth/v1/.well-known/jwks.json"))
+// JwtProvider: jwks_url(url), audience(aud) (repeatable), any_audience(), user_id_claim("sub"), leeway(60s),
+// algorithms([JwtAlgorithm::Rs256, Es256, EdDsa]), jwks_refetch_interval(30s), jwks_cache_ttl(1h).
+```
+
+- Routing: a header `alg` of `HS256` means a ferrix token; anything else is looked up by its `iss` (exact match). An
+  unknown issuer is refused without network traffic. HMAC and `none` are never accepted for external tokens, and the
+  `alg` must match the key's type and curve (and the JWK's own `alg`, if any).
+- Keys: the issuer's JWKS, cached for an hour; an unknown `kid` refetches it (key rotation), at most once per
+  `jwks_refetch_interval` per issuer; 5s timeouts, no redirects, 1 MiB cap; on fetch failure the cached keys stay.
+- Claims: `exp` required and `nbf` optional, both with the leeway; `aud` (string or array) must contain a configured
+  audience, unless `any_audience()` (startup fails if neither is set); the user id claim must be a non-empty string
+  (or number) of at most 255 characters. Rejections are `AuthError` / 401 `invalid_token` with the messages listed in
+  docs/PROTOCOL.md.
+- Users: the subject maps to an `_accounts` row `{ provider: <issuer>, providerAccountId: <subject> }` and its
+  `_users` row, both created on first sight, so `ctx.auth.user_id()` is an ordinary `Id<User>` for every sign-in
+  method. External subjects are never linked to an existing user by email (the issuer vouches for its subjects, not
+  for addresses another sign-in method may own); the new user copies `email` only if `email_verified` is true and no
+  user has it yet, plus `name` and an https `picture`. The profile isn't updated on later sign-ins. The identity has
+  no session id; the connection's identity ends at the token's `exp` (plus leeway), or as soon as the user is
+  deleted. Deleting a user doesn't block the subject: its next token provisions a new user (block it at the issuer).
+
+**Live revocation** (`ferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
+log stream) authenticate with `authenticate_watched`, which registers the token's session id (or, for external
+tokens, the user id) in the app's `Revocations` registry *before* checking that it exists, and returns a
+`SessionWatch` whose `ended()` future resolves when the document is deleted. One watcher task per app follows the
+write log; for commits that wrote a watched document's `by_id` key it checks the document in a fresh snapshot and
+fires the watches of deleted ones. So every way a session ends is covered (sign-out, refresh-token reuse,
+`revoke_session`, `delete_user`, password reset, ...) and refreshes (which rewrite the session) are not mistaken for
+deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
+guarantee 10).
+
+**Runtime settings and precedence** (`ferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
+the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
+encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
+wins, field by field: an explicit `signups(..)`, `access_token_ttl(..)` or `session_ttl(..)` call; a non-empty
+redirect list (`redirect_url`, `--auth-redirect-url`); any `smtp(..)` / `--smtp-url` or custom `mailer`; and, per
+provider id, an OAuth provider with credentials (settings may add providers with other ids). Everything else is taken
+from `_settings` when set there, else the defaults apply. CORS origins exist only as a setting (default: any origin).
 
 **System tables** (all defined with `#[table]` in `ferrix::auth::tables`): `_users` (`User`), `_credentials`
-(argon2id password hash per user), `_accounts` (provider + provider account id), `_sessions` (user or admin, keyed
-hash of the current refresh token, sliding `expires_at`, user agent, ip, `last_used_at`), `_used_refresh_tokens`
+(argon2id password hash per user), `_accounts` (provider + provider account id; for external JWTs the provider is
+the issuer URL), `_sessions` (user or admin, keyed hash of the current refresh token, sliding `expires_at`, user
+agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on impersonation sessions, whose expiry is
+fixed), `_used_refresh_tokens`
 (rotated refresh token hashes, for reuse detection; deleted with their session), `_verification_codes` (keyed hashes
 of a 6-digit code and a link token, purpose, expiry, attempts), `_admins` (email, argon2id hash). The auth code
 reads and writes them directly through `QueryDb` / `MutationDb` (not through registered functions), so hashes never
@@ -1291,10 +1348,10 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 | `replace_document` | mutation | `{ id, document }` → `null`. System fields are ignored (`_id`, if given, must match). |
 | `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
 | `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
-| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` (`Identity::user(id, None)`; the user must exist). A failing function is a result with `success: false`, not an error. |
+| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
 | `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
-| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired }]` (no token hashes). |
-| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens. |
+| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, impersonatedBy }]` (no token hashes; `impersonatedBy` is the admin id of an impersonation session, else null). |
+| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens; its sockets get `AuthError` at once (live revocation). |
 | `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
 | `me` | query | `{}` → `{ _id, email }` of the signed-in admin. |
 
@@ -1302,8 +1359,13 @@ Write errors (schema validation, unknown table, missing document) are user error
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
 written: …``).
 
-**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` (case-insensitive: `passwordHash`,
-`refreshTokenHash`, `tokenHash`, `codeHash`) is replaced by `"••••"` in everything the dashboard returns, and indexes
+**Audited.** `insert_document`, `patch_document`, `replace_document`, `delete_documents` (one entry per document),
+`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.5), so an entry exists
+exactly for the writes that committed.
+
+**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` or `encrypted` (case-insensitive:
+`passwordHash`, `refreshTokenHash`, `tokenHash`, `codeHash`, `_settings.encrypted`) is replaced by `"••••"` in
+everything the dashboard returns (audit log diffs included), and indexes
 over such a field are `usable: false` and refused by `documents` (a range filter on them would let an admin
 binary-search a hash).
 
@@ -1370,6 +1432,68 @@ Read-only through the dashboard's generic writes; codegen leaves it out.
 
 The admin functions start with `ctx.auth.require_admin()` like §4.1.
 
+### 4.1.4 Settings (`_settings`, `_system/settings:*`)
+
+Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
+need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`; there are
+no hand-written references in `@ferrix/dashboard` yet.
+
+**`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
+per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
+holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets as a JSON map by provider id, or the
+SMTP password), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
+from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
+key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
+A row that can't be decrypted (another `auth_secret.key`) is ignored with an error in the log: its providers are off
+until the secret is entered again.
+
+| Path `_system/settings:…` | Kind | Args → result |
+|---|---|---|
+| `get` | action | `{}` → `SettingsView` |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `oidc` (the latter needs an https `issuer`, http only for loopback or in `--dev`); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
+
+```ts
+type OAuthKind = "github" | "google" | "oidc";
+type SettingsView = {
+  oauth: { id: string; kind: OAuthKind; issuer: string | null; clientId: string; clientSecret: "••••" | null;
+           enabled: boolean; scopes: string[] | null; locked: boolean }[];    // locked: a provider with this id is configured in code
+  smtp: { url: string /* no password */; from: string; password: "••••" | null } | null;
+  redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
+  sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
+  locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
+  effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
+               oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */ };
+};
+type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
+                            clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
+                            enabled: boolean; scopes?: string[] | null };
+type SmtpInput = { url: string /* a password in the URL is moved out of it */; from: string;
+                   password?: string | null /* omitted, null or "••••": keep; "": none */ };
+```
+
+Precedence: §1.5 ("Runtime settings and precedence"); `locked` and `effective` show its result. Secrets are only ever
+accepted, never returned, and never logged: the execution log stores system functions' arguments with every
+`password` / `secret` / `token` field and every URL password replaced by `"••••"` (`settings::redact_args`).
+
+### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
+
+Defined in `crates/ferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
+action, targetTable, targetId, before, after, details, at }` with indexes `by_at = [at]`, `by_admin = [admin, at]`,
+`by_action = [action, at]`, `by_table = [targetTable, at]`, `by_target = [targetId, at]`. Actions: `insert`, `patch`,
+`replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
+for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
+`details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
+`open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1). Secrets are masked by the §4.1 rule.
+
+Each entry is written in the same transaction as the write it describes. The table is a system table, so the
+dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
+entries older than `AuthConfig::audit_retention` (90 days) are swept at startup and hourly (`ferrix::audit::sweep`).
+
+| Path | Kind | Args → result |
+|---|---|---|
+| `_system/audit:list` | query (admin) | `{ admin?, action?, table?, target?, since?, until?, paginationOpts }` → `PaginationResult<Doc<"_audit_log">>`, newest first, live. The most selective filter picks the index (`target` > `admin` > `action` > `table` > time); the others are applied while scanning; `since` / `until` bound `at` (ms, inclusive). |
+
 ### 4.2 Admin HTTP endpoints
 
 The execution log and server stats live outside the reactive database, so they are plain HTTP. Every endpoint
@@ -1380,13 +1504,23 @@ endpoints' shape; responses carry `Cache-Control: no-store`.
 | Endpoint | Response |
 |---|---|
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
-| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
+| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
+| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user, 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the
 short-lived access token travels only in the `Authorization` header. The stream ends when that token expires (at most
-15 minutes); revoking the session stops new streams, while one already open runs until then.
+15 minutes), and immediately (`event: revoked`) when its session ends.
+
+**Impersonation, security.** Impersonation lets an admin act with all of a user's rights, so: it is admin-only and
+can be disabled; every impersonation session is audited at creation (same transaction), carries
+`impersonatedBy` (apps can refuse sensitive operations such as changing credentials or payments when
+`ctx.db.get(ctx.auth.session_id()?)` has it set), shows in the user's session list, is revocable like any session
+(with live revocation), dies with `delete_user`, and has a hard expiry of at most an hour that refreshing can't
+extend. `run_function`'s sessions last 5 minutes and are deleted as soon as the run ends. The minted tokens are never
+logged; they travel only in the response body or a URL fragment (never sent to servers). Opening the app with them
+stores them in that browser's app storage, replacing whoever was signed in there: use a private window.
 
 ### 4.3 The embedded dashboard
 

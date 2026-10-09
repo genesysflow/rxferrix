@@ -398,6 +398,8 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   - Magic link and email OTP.
 - **Tokens**: a short-lived JWT access token (about 15 minutes, HS256 or EdDSA) plus a rotating refresh token. The client refreshes automatically and sends `Authenticate` on the WebSocket.
 - **In functions**: `ctx.auth.user_id() -> Option<Id<User>>`, `ctx.auth.require_user()`, `ctx.auth.identity()`.
+  (As built: `require_user()` is synchronous and returns `Id<User>`; `ctx.auth.user(&ctx.db)` loads the document.
+  The builder is `AuthConfig::password()` rather than `Auth::password()`, because `ferrix::Auth` is `ctx.auth`'s type.)
 - **Endpoints**: `/api/auth/{signup,signin,signout,refresh,verify,reset,oauth/:provider,oauth/:provider/callback}`.
 - **Hardening**: rate limits on auth endpoints (`tower` governor), a constant-time compare, and no account enumeration.
 - **Later**: accept external JWTs (Clerk, Auth0) through a JWKS URL.
@@ -512,12 +514,22 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - **Milestone reached: usable for a real (unauthenticated) app.**
 
 ### Phase 4 — Dashboard v1 (L)
-- [ ] Admin auth, the setup link, and `_system:*` functions.
+- [x] Admin auth (`_admins`, `admin create|reset-password`, `/api/auth/admin/signin`, `ctx.auth.require_admin()`) and
+  the setup link (`/_/setup#token=…`, a minimal page until the dashboard exists).
+- [ ] Admin-only `_system:*` functions for the dashboard (so far only `_system/auth:me` / `update_profile` exist).
 - [ ] Data browser (live grid, edit, follow IDs), schema view, function runner, logs tail.
 
-### Phase 5 — Auth (M)
-- [ ] Password, OAuth (Google, GitHub), magic link and OTP, sessions and refresh, SMTP.
-- [ ] Client integration (`setAuth`, `useFerrixAuth`, `signIn`/`signOut`) and the dashboard Auth page.
+### Phase 5 — Auth (M) — mostly done
+- [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
+  tokens and reuse detection, SMTP (`lettre`; printed to the log in `--dev`), rate limits, `ctx.auth` (docs/PROTOCOL.md
+  "Auth", docs/CONTRACT.md §1.2 and §1.5).
+- [x] OAuth with PKCE: GitHub and Google presets, generic OIDC via discovery (tested against a mock provider only;
+  Discord and Apple presets are still to do).
+- [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
+  React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
+- [ ] The dashboard Auth page (users, sessions, revoke, impersonate); provider config in `_settings`.
+- [ ] External JWTs via JWKS; live revocation of already-authenticated sockets on sign-out (today they keep their
+  identity until the access token expires).
 - **Milestone: usable for real apps with users.**
 
 ### Phase 6 — Scheduler and cron (M)

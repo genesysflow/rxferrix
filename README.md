@@ -4,8 +4,8 @@ A single-binary reactive backend in Rust, deployed as one file.
 You write typed `#[query]` / `#[mutation]` / `#[action]` functions in Rust. Clients subscribe with `useQuery` over a
 WebSocket and get updated results automatically whenever a write affects them.
 
-Status: Phases 0–3 are mostly done (see [PLAN.md](PLAN.md) §10). Auth, the dashboard, the scheduler, files and
-search are not built yet.
+Status: Phases 0–3 and auth (Phase 5) are mostly done (see [PLAN.md](PLAN.md) §10). The dashboard, the scheduler,
+files and search are not built yet.
 
 ## Layout
 
@@ -47,6 +47,45 @@ fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 
 Functions call each other through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`.
+
+## Auth
+
+Enable sign-in methods in `main`, then use `ctx.auth` in functions:
+
+```rust
+use ferrix::auth::{AuthConfig, GitHub, User};
+
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new()
+        .auth(AuthConfig::password().magic_link().oauth(GitHub::from_env()).redirect_url("http://localhost:5173"))
+        .run()
+}
+
+#[table(name = "notes")]
+#[index(by_owner = [owner])]
+pub struct Note { pub owner: Id<User>, pub text: String }
+
+#[mutation]
+pub async fn add_note(ctx: &MutationCtx, text: String) -> Result<Id<Note>> {
+    let owner = ctx.auth.require_user()?;          // UserError "unauthenticated" when signed out
+    ctx.db.insert(Note { owner, text }).await
+}
+```
+
+On the client, `getAuth(client)` signs in and keeps the socket authenticated (tokens in `localStorage`, refreshed
+automatically). React has `useFerrixAuth()`, `useAuthActions()` and `useCurrentUser()`; Svelte has `useAuth()`
+and `useCurrentUser()`:
+
+```ts
+const auth = getAuth(client);
+await auth.signIn({ email, password });           // or signUp, requestMagicLink + verifyCode, signInWithOAuth("github")
+await auth.handleRedirectCallback();              // on the page OAuth and email links return to
+```
+
+Access tokens are 15-minute HS256 JWTs signed with a key from `<data dir>/auth_secret.key`; refresh tokens rotate
+on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
+one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
+("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
 
 ## Running the example
 

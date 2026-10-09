@@ -74,14 +74,19 @@ pub enum TokenizerKind {
     Porter,
     /// Every 3-character sequence: matches substrings anywhere in a word ("ell" matches "hello").
     Trigram,
+    /// Words reduced to their stem by a Snowball stemmer for the index's `language` (one of
+    /// [`Tokenizer::SNOWBALL_LANGUAGES`]): "copiii" matches "copiilor" in Romanian, "chantait" matches "chanter" in
+    /// French. A custom FTS5 tokenizer (`db::search::stem`) wrapping `unicode61`.
+    Snowball,
 }
 
-/// A search index's tokenizer: its kind, the stemming language (`Porter` only) and whether diacritics are folded
-/// (`café` = `cafe`, the default) or kept.
+/// A search index's tokenizer: its kind, the stemming language (`Porter` and `Snowball`) and whether diacritics are
+/// folded (`café` = `cafe`, the default) or kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tokenizer {
     pub kind: TokenizerKind,
-    /// `Some("english")` for `Porter` (the only language FTS5's stemmer supports), `None` otherwise.
+    /// `Some("english")` for `Porter` (the only language FTS5's stemmer supports), one of
+    /// [`Tokenizer::SNOWBALL_LANGUAGES`] for `Snowball`, `None` otherwise.
     pub language: Option<&'static str>,
     pub remove_diacritics: bool,
 }
@@ -89,6 +94,28 @@ pub struct Tokenizer {
 impl Tokenizer {
     /// Languages accepted by [`Tokenizer::porter`].
     pub const LANGUAGES: &'static [&'static str] = &["english"];
+    /// Languages accepted by [`Tokenizer::snowball`] (the stemmers of the `rust-stemmers` crate). Keep in sync with
+    /// the list in `ferrix-macros`.
+    pub const SNOWBALL_LANGUAGES: &'static [&'static str] = &[
+        "arabic",
+        "danish",
+        "dutch",
+        "english",
+        "finnish",
+        "french",
+        "german",
+        "greek",
+        "hungarian",
+        "italian",
+        "norwegian",
+        "portuguese",
+        "romanian",
+        "russian",
+        "spanish",
+        "swedish",
+        "tamil",
+        "turkish",
+    ];
 
     /// `tokenizer = "unicode61"` (the default).
     pub const fn unicode61() -> Self {
@@ -103,6 +130,12 @@ impl Tokenizer {
     /// `tokenizer = "trigram"`.
     pub const fn trigram() -> Self {
         Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true }
+    }
+
+    /// `tokenizer = "snowball", language = "<language>"` (one of [`Tokenizer::SNOWBALL_LANGUAGES`], checked at
+    /// startup).
+    pub const fn snowball(language: &'static str) -> Self {
+        Tokenizer { kind: TokenizerKind::Snowball, language: Some(language), remove_diacritics: true }
     }
 
     /// `diacritics = "keep"`: `café` and `cafe` are different terms.
@@ -127,6 +160,55 @@ pub struct VectorIndexDef {
     pub filter_fields: Vec<&'static str>,
     /// Exact (sqlite-vec brute force, the default) or approximate (an HNSW graph on top of it).
     pub kind: VectorIndexKind,
+    /// The HNSW graph's parameters (`#[vector_index(.., kind = "hnsw", m = 16, ef_construction = 128, ef_search =
+    /// 128)]`). Must be [`HnswParams::DEFAULT`] for exact indexes. Changing `m` or `ef_construction` rebuilds the
+    /// graph (and its saved file); `ef_search` only changes how searches run.
+    pub hnsw: HnswParams,
+}
+
+/// The parameters of an HNSW vector index (docs/CONTRACT.md §1.8). Ranges are checked at startup (and by the macro).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct HnswParams {
+    /// Links per node on the upper layers (layer 0 allows `2 * m`). More links: better recall, more memory, slower
+    /// builds. [`HnswParams::M_RANGE`].
+    pub m: usize,
+    /// Width of the candidate list when inserting a node. Higher: a better graph, slower builds.
+    /// [`HnswParams::EF_CONSTRUCTION_RANGE`].
+    pub ef_construction: usize,
+    /// Default search width (at least the number of candidates a search asks for). Higher: better recall, slower
+    /// searches. Per search: `VectorSearchOpts::ef(n)`. [`HnswParams::EF_SEARCH_RANGE`].
+    pub ef_search: usize,
+}
+
+impl HnswParams {
+    /// `m = 16, ef_construction = 128, ef_search = 128`.
+    pub const DEFAULT: HnswParams = HnswParams { m: 16, ef_construction: 128, ef_search: 128 };
+    pub const M_RANGE: std::ops::RangeInclusive<usize> = 4..=64;
+    pub const EF_CONSTRUCTION_RANGE: std::ops::RangeInclusive<usize> = 16..=2048;
+    /// Also the range of `VectorSearchOpts::ef`.
+    pub const EF_SEARCH_RANGE: std::ops::RangeInclusive<usize> = 1..=4096;
+
+    /// An error message if a parameter is out of range.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, value, range) in [
+            ("m", self.m, Self::M_RANGE),
+            ("ef_construction", self.ef_construction, Self::EF_CONSTRUCTION_RANGE),
+            ("ef_search", self.ef_search, Self::EF_SEARCH_RANGE),
+        ] {
+            if !range.contains(&value) {
+                return Err(format!("`{name}` must be between {} and {}, got {value}", range.start(), range.end()));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for HnswParams {
+    fn default() -> Self {
+        HnswParams::DEFAULT
+    }
 }
 
 /// How a vector index answers nearest-neighbour searches (`#[vector_index(.., kind = "hnsw")]`).

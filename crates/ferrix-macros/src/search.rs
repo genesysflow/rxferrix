@@ -3,7 +3,9 @@
 //! ```ignore
 //! #[search_index(search_body, search = body, filter = [channel], tokenizer = "porter", language = "english",
 //!                diacritics = "keep")]
+//! #[search_index(search_ro, search = body, tokenizer = "snowball", language = "romanian")]
 //! #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
+//! #[vector_index(by_tuned, field = embedding, dims = 1536, kind = "hnsw", m = 32, ef_construction = 256, ef_search = 64)]
 //! ```
 
 use proc_macro2::{Span, TokenStream};
@@ -17,9 +19,35 @@ pub const MAX_FILTER_FIELDS: usize = 16;
 /// Largest `dims` accepted (sqlite-vec's limit for `float[N]` columns).
 pub const MAX_DIMENSIONS: usize = 8192;
 /// `tokenizer = ...` values.
-const TOKENIZERS: &[&str] = &["unicode61", "porter", "trigram"];
-/// `language = ...` values (FTS5's Porter stemmer is English only). Keep in sync with `ferrix::Tokenizer::LANGUAGES`.
-const LANGUAGES: &[&str] = &["english"];
+const TOKENIZERS: &[&str] = &["unicode61", "porter", "trigram", "snowball"];
+/// `language = ...` values of `tokenizer = "porter"` (FTS5's Porter stemmer is English only). Keep in sync with
+/// `ferrix::Tokenizer::LANGUAGES`.
+const PORTER_LANGUAGES: &[&str] = &["english"];
+/// `language = ...` values of `tokenizer = "snowball"`. Keep in sync with `ferrix::Tokenizer::SNOWBALL_LANGUAGES`.
+pub const SNOWBALL_LANGUAGES: &[&str] = &[
+    "arabic",
+    "danish",
+    "dutch",
+    "english",
+    "finnish",
+    "french",
+    "german",
+    "greek",
+    "hungarian",
+    "italian",
+    "norwegian",
+    "portuguese",
+    "romanian",
+    "russian",
+    "spanish",
+    "swedish",
+    "tamil",
+    "turkish",
+];
+/// Ranges of the HNSW parameters (`ferrix::HnswParams::{M, EF_CONSTRUCTION, EF_SEARCH}_RANGE`; keep in sync).
+pub const HNSW_M: (usize, usize) = (4, 64);
+pub const HNSW_EF_CONSTRUCTION: (usize, usize) = (16, 2048);
+pub const HNSW_EF_SEARCH: (usize, usize) = (1, 4096);
 
 /// A string argument and where it was written.
 pub type StrArg = Option<(String, Span)>;
@@ -57,6 +85,10 @@ pub struct SpecialIndexSpec {
     pub diacritics: StrArg,
     /// `kind = "exact" | "hnsw"` (vector indexes), validated.
     pub vector_kind: StrArg,
+    /// `m = N`, `ef_construction = N`, `ef_search = N` (HNSW vector indexes), validated.
+    pub m: Option<(usize, Span)>,
+    pub ef_construction: Option<(usize, Span)>,
+    pub ef_search: Option<(usize, Span)>,
     /// Problems found while parsing that don't prevent reading the rest (reported together with the others).
     pub errors: Vec<syn::Error>,
 }
@@ -68,7 +100,7 @@ impl SpecialIndexSpec {
                 "expected `#[search_index(name, search = field, filter = [field, ...], tokenizer = \"...\")]`"
             }
             Kind::Vector => {
-                "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...], kind = \"...\")]`"
+                "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...], kind = \"...\", m = N, ef_construction = N, ef_search = N)]`"
             }
         };
         let syn::Meta::List(list) = &attr.meta else {
@@ -98,6 +130,9 @@ impl SpecialIndexSpec {
             language: None,
             diacritics: None,
             vector_kind: None,
+            m: None,
+            ef_construction: None,
+            ef_search: None,
             errors: Vec::new(),
         };
         let mut seen_filter = false;
@@ -138,6 +173,23 @@ impl SpecialIndexSpec {
                         spec.dims = Some((1, lit.span()));
                     }
                 }
+            } else if let Some(((lo, hi), slot)) = match (kind, key_name.as_str()) {
+                (Kind::Vector, "m") => Some((HNSW_M, &mut spec.m)),
+                (Kind::Vector, "ef_construction") => Some((HNSW_EF_CONSTRUCTION, &mut spec.ef_construction)),
+                (Kind::Vector, "ef_search") => Some((HNSW_EF_SEARCH, &mut spec.ef_search)),
+                _ => None,
+            } {
+                let lit: syn::LitInt = input.parse()?;
+                if slot.is_some() {
+                    spec.errors.push(syn::Error::new(key.span(), format!("duplicate `{key_name}` argument")));
+                }
+                match lit.base10_parse::<usize>() {
+                    Ok(n) if (lo..=hi).contains(&n) => *slot = Some((n, key.span())),
+                    _ => spec.errors.push(syn::Error::new(
+                        lit.span(),
+                        format!("`{key_name}` must be an integer between {lo} and {hi}"),
+                    )),
+                }
             } else if key_name == "filter" {
                 let content;
                 let bracket = bracketed!(content in input);
@@ -151,7 +203,7 @@ impl SpecialIndexSpec {
                 spec.filter_span = Some(bracket.span.join());
             } else if let Some((allowed, slot)) = match (kind, key_name.as_str()) {
                 (Kind::Search, "tokenizer") => Some((TOKENIZERS, &mut spec.tokenizer)),
-                (Kind::Search, "language") => Some((LANGUAGES, &mut spec.language)),
+                (Kind::Search, "language") => Some((SNOWBALL_LANGUAGES, &mut spec.language)),
                 (Kind::Search, "diacritics") => Some((&["remove", "keep"][..], &mut spec.diacritics)),
                 (Kind::Vector, "kind") => Some((&["exact", "hnsw"][..], &mut spec.vector_kind)),
                 _ => None,
@@ -165,7 +217,7 @@ impl SpecialIndexSpec {
                 if !allowed.contains(&value.as_str()) {
                     let list = allowed.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ");
                     let what = if key_name == "language" {
-                        format!("unsupported language \"{value}\"; the porter stemmer supports {list}")
+                        format!("unsupported language \"{value}\"; the snowball stemmers support {list}")
                     } else {
                         format!("unknown {key_name} \"{value}\"; expected one of {list}")
                     };
@@ -175,7 +227,7 @@ impl SpecialIndexSpec {
             } else {
                 let expected = match kind {
                     Kind::Search => "`search`, `filter`, `tokenizer`, `language` or `diacritics`",
-                    Kind::Vector => "`field`, `dims`, `filter` or `kind`",
+                    Kind::Vector => "`field`, `dims`, `filter`, `kind`, `m`, `ef_construction` or `ef_search`",
                 };
                 return Err(syn::Error::new(
                     key.span(),
@@ -186,13 +238,42 @@ impl SpecialIndexSpec {
                 ));
             }
         }
-        if let Some((_, span)) = &spec.language
-            && spec.tokenizer.as_ref().is_none_or(|(t, _)| t != "porter")
-        {
-            spec.errors.push(syn::Error::new(
+        let tokenizer = spec.tokenizer.as_ref().map(|(t, _)| t.as_str());
+        match (&spec.language, tokenizer) {
+            (Some((l, span)), Some("porter")) if !PORTER_LANGUAGES.contains(&l.as_str()) => {
+                // Only report languages that exist at all (an unknown one was reported above).
+                if SNOWBALL_LANGUAGES.contains(&l.as_str()) {
+                    spec.errors.push(syn::Error::new(
+                        *span,
+                        format!(
+                            "unsupported language \"{l}\"; the porter stemmer supports \"english\" (use `tokenizer = \"snowball\"` for other languages)"
+                        ),
+                    ));
+                }
+            }
+            (Some(_), Some("porter" | "snowball")) => {}
+            (Some((_, span)), _) => spec.errors.push(syn::Error::new(
                 *span,
-                "`language` only applies to `tokenizer = \"porter\"` (stemming)",
-            ));
+                "`language` only applies to `tokenizer = \"porter\"` or `tokenizer = \"snowball\"` (stemming)",
+            )),
+            (None, Some("snowball")) => {
+                let (_, span) = spec.tokenizer.as_ref().expect("matched");
+                spec.errors.push(syn::Error::new(
+                    *span,
+                    "`tokenizer = \"snowball\"` needs a `language`, e.g. `language = \"french\"`",
+                ));
+            }
+            (None, _) => {}
+        }
+        if spec.vector_kind.as_ref().is_none_or(|(k, _)| k != "hnsw") {
+            for (name, arg) in [("m", spec.m), ("ef_construction", spec.ef_construction), ("ef_search", spec.ef_search)] {
+                if let Some((_, span)) = arg {
+                    spec.errors.push(syn::Error::new(
+                        span,
+                        format!("`{name}` only applies to `kind = \"hnsw\"` (approximate vector indexes)"),
+                    ));
+                }
+            }
         }
         Ok(spec)
     }
@@ -205,6 +286,10 @@ impl SpecialIndexSpec {
                 quote!(::ferrix::Tokenizer::porter(#language))
             }
             Some("trigram") => quote!(::ferrix::Tokenizer::trigram()),
+            Some("snowball") => {
+                let language = self.language.as_ref().map_or("english", |(l, _)| l.as_str());
+                quote!(::ferrix::Tokenizer::snowball(#language))
+            }
             _ => quote!(::ferrix::Tokenizer::unicode61()),
         };
         match self.diacritics.as_ref().map(|(d, _)| d.as_str()) {
@@ -218,6 +303,23 @@ impl SpecialIndexSpec {
         match self.vector_kind.as_ref().map(|(k, _)| k.as_str()) {
             Some("hnsw") => quote!(::ferrix::VectorIndexKind::Hnsw),
             _ => quote!(::ferrix::VectorIndexKind::Exact),
+        }
+    }
+
+    /// The `::ferrix::HnswParams` expression of a vector index: the defaults with the given parameters.
+    pub fn hnsw_params_expr(&self) -> TokenStream {
+        let fields: Vec<TokenStream> = [("m", self.m), ("ef_construction", self.ef_construction), ("ef_search", self.ef_search)]
+            .into_iter()
+            .filter_map(|(name, arg)| {
+                let (n, _) = arg?;
+                let ident = syn::Ident::new(name, Span::call_site());
+                Some(quote!(#ident: #n))
+            })
+            .collect();
+        match fields.len() {
+            0 => quote!(::ferrix::HnswParams::DEFAULT),
+            3 => quote!(::ferrix::HnswParams { #(#fields,)* }),
+            _ => quote!(::ferrix::HnswParams { #(#fields,)* ..::ferrix::HnswParams::DEFAULT }),
         }
     }
 }

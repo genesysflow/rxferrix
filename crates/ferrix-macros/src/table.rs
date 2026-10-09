@@ -485,6 +485,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             let field = &info.json_name;
             let dims = spec.dims.map(|(n, _)| n).unwrap_or(1);
             let kind = spec.vector_kind_expr();
+            let hnsw = spec.hnsw_params_expr();
             quote! {
                 ::ferrix::VectorIndexDef {
                     name: #name,
@@ -492,6 +493,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     dimensions: #dims,
                     filter_fields: ::std::vec![#(#filter),*],
                     kind: #kind,
+                    hnsw: #hnsw,
                 }
             }
         });

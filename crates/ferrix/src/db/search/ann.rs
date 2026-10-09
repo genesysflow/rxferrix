@@ -36,7 +36,8 @@
 //! after the initial build, after rebuilds, and after every `max(1000, live / 10)` changes (written to a temporary
 //! file, then renamed). The file holds the graph, the vectors and each node's document id, filter values and a hash of
 //! its vector, followed by a blake3 checksum of the rest. At startup it is loaded if its checksum, format and index
-//! definition match, then **validated against the table**: the whole `vec0` table is scanned (at one snapshot) and
+//! definition match (dimensions, filter fields, and the graph's `m` and `ef_construction`: a file built with other
+//! parameters is discarded, so changing them rebuilds the graph), then **validated against the table**: the whole `vec0` table is scanned (at one snapshot) and
 //! every document whose vector hash or filter values differ from its node, that has no node, or whose node has no
 //! document, is applied like a catch-up. A missing, stale or corrupt file only costs a rebuild. Smaller indexes are
 //! rebuilt at every startup.
@@ -45,7 +46,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
@@ -55,15 +56,17 @@ use crate::db::catalog::{Catalog, IndexId};
 use crate::db::search::hnsw::{Graph, Params, dot, normalized};
 use crate::db::search::vector::from_blob;
 use crate::db::search::{SearchIndexInfo, SpecialIndexKind};
+use crate::schema::HnswParams;
 use crate::db::storage;
 use crate::id::DocId;
 use crate::writelog::WriteLog;
 
 /// Filtered searches whose matching documents number at most this many are computed exactly.
 pub const BRUTE_FORCE_MAX: usize = 4096;
-/// Search width on layer 0 (at least the number of candidates asked for). At 200k × 384 with a low intrinsic
+/// Default search width on layer 0 (at least the number of candidates asked for; per index:
+/// `#[vector_index(.., ef_search = N)]`, per search: `VectorSearchOpts::ef`). At 200k × 384 with a low intrinsic
 /// dimension, 128 gives recall@10 ≈ 0.95 in about 0.5 ms (see `search::perf_hnsw`).
-pub const EF_SEARCH: usize = 128;
+pub const EF_SEARCH: usize = crate::schema::HnswParams::DEFAULT.ef_search;
 /// Rebuild once tombstones exceed this fraction of the nodes...
 const REBUILD_RATIO: f64 = 0.25;
 /// ...and this many.
@@ -86,8 +89,27 @@ pub fn set_persist_threshold(n: usize) {
 }
 
 /// The HNSW indexes of one database.
+///
+/// Dropping it (with the `Database`) stops the background thread and waits for it, so its reader connection is
+/// closed before the drop returns: a later open of the same database in this process never races with it (the last
+/// connection to close checkpoints the WAL under an exclusive lock).
 pub struct AnnIndexes {
     inner: Arc<Inner>,
+    /// Dropped to stop the background thread (it waits on the receiving end between polls).
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for AnnIndexes {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take()
+            && thread.thread().id() != std::thread::current().id()
+            && thread.join().is_err()
+        {
+            tracing::error!("the vector index thread panicked");
+        }
+    }
 }
 
 struct Inner {
@@ -107,17 +129,20 @@ impl AnnIndexes {
         }
         remove_stale_files(dir, &indexes);
         let inner = Arc::new(Inner { indexes, log });
+        let (mut stop, mut thread) = (None, None);
         if !inner.indexes.is_empty() {
             let weak = Arc::downgrade(&inner);
             let db_path = dir.join("data.db");
+            let (tx, rx) = mpsc::channel();
             let spawned = std::thread::Builder::new()
                 .name("ferrix-ann".into())
-                .spawn(move || background(weak, db_path));
-            if let Err(e) = spawned {
-                tracing::error!("could not start the vector index thread ({e}); vector searches will be exact");
+                .spawn(move || background(weak, db_path, rx));
+            match spawned {
+                Ok(handle) => (stop, thread) = (Some(tx), Some(handle)),
+                Err(e) => tracing::error!("could not start the vector index thread ({e}); vector searches will be exact"),
             }
         }
-        AnnIndexes { inner }
+        AnnIndexes { inner, stop, thread }
     }
 
     /// The HNSW index with this id, if it is one.
@@ -201,6 +226,8 @@ pub struct AnnIndex {
     name: String,
     dims: usize,
     filter_count: usize,
+    /// `m` and `ef_construction` build the graph; `ef_search` is the default search width.
+    params: HnswParams,
     /// The vec0 table.
     storage: String,
     file: PathBuf,
@@ -260,7 +287,7 @@ fn threads() -> usize {
 
 impl AnnIndex {
     fn new(dir: &Path, table: &str, info: &SearchIndexInfo) -> AnnIndex {
-        let SpecialIndexKind::Vector { dimensions, filter_fields, .. } = &info.kind else {
+        let SpecialIndexKind::Vector { dimensions, filter_fields, hnsw, .. } = &info.kind else {
             unreachable!("only vector indexes are HNSW indexes")
         };
         AnnIndex {
@@ -269,6 +296,7 @@ impl AnnIndex {
             name: info.name.clone(),
             dims: *dimensions,
             filter_count: filter_fields.len(),
+            params: *hnsw,
             storage: info.storage_table(),
             file: dir.join(format!("vector_index_{}.hnsw", info.id)),
             state: RwLock::new(None),
@@ -281,6 +309,22 @@ impl AnnIndex {
 
     pub fn is_ready(&self) -> bool {
         self.state.read().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// The index's parameters (from its definition).
+    pub fn params(&self) -> HnswParams {
+        self.params
+    }
+
+    /// The `(m, ef_construction)` the current graph was built with (`None` while it isn't ready).
+    pub fn graph_params(&self) -> Option<(usize, usize)> {
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
+        state.as_ref().map(|s| (s.graph.params().m, s.graph.params().ef_construction))
+    }
+
+    /// The graph parameters of this index.
+    fn build_params(&self) -> Params {
+        Params { m: self.params.m, ef_construction: self.params.ef_construction }
     }
 
     pub fn status(&self) -> AnnStatus {
@@ -423,12 +467,18 @@ impl AnnIndex {
     // ----------------------------------------------------------------------------------------------- search
 
     /// The `limit` live documents nearest to `vector` among those matching `branches` (an OR of ANDs of `(filter
-    /// column, hex value)`; `[[]]` matches everything), best first, as `(doc id, cosine similarity)`. `None` if
-    /// the graph is not ready.
-    pub(crate) fn search(&self, vector: &[f32], limit: usize, branches: &[Vec<(usize, String)>]) -> Option<Vec<(DocId, f32)>> {
+    /// column, hex value)`; `[[]]` matches everything), best first, as `(doc id, cosine similarity)`, searching
+    /// with width `ef` (default: the index's `ef_search`). `None` if the graph is not ready.
+    pub(crate) fn search(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        branches: &[Vec<(usize, String)>],
+        ef: Option<usize>,
+    ) -> Option<Vec<(DocId, f32)>> {
         let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         let state = state.as_ref()?;
-        Some(state.search(vector, limit, branches))
+        Some(state.search(vector, limit, branches, ef.unwrap_or(self.params.ef_search)))
     }
 
     // ----------------------------------------------------------------------------------------------- rebuild
@@ -571,6 +621,7 @@ impl AnnIndex {
             nodes.push(NodeMeta { doc: DocId(doc), filters, hash, live: live[0] == 1 });
         }
         let graph = Graph::read_from(&mut r)?;
+        ensure!(graph.params() == self.build_params(), "saved with other HNSW parameters (m, ef_construction)");
         let digest = r.hasher.finalize();
         let mut stored = [0u8; 32];
         r.inner.read_exact(&mut stored).context("missing checksum")?;
@@ -604,7 +655,7 @@ impl State {
     /// A fresh graph over `rows` (built on all cores).
     fn build(index: &AnnIndex, rows: Vec<Row>) -> State {
         let mut state = State {
-            graph: Graph::new(index.dims, Params::default(), u64::from(index.id) ^ 0x5eed),
+            graph: Graph::new(index.dims, index.build_params(), u64::from(index.id) ^ 0x5eed),
             nodes: Vec::new(),
             by_doc: HashMap::new(),
             postings: vec![HashMap::new(); index.filter_count],
@@ -715,7 +766,7 @@ impl State {
         n.min(live)
     }
 
-    fn search(&self, vector: &[f32], limit: usize, branches: &[Vec<(usize, String)>]) -> Vec<(DocId, f32)> {
+    fn search(&self, vector: &[f32], limit: usize, branches: &[Vec<(usize, String)>], ef: usize) -> Vec<(DocId, f32)> {
         let live = self.by_doc.len();
         let matching = self.estimate(branches);
         if matching == 0 || limit == 0 {
@@ -727,7 +778,7 @@ impl State {
             let mut k = ((limit as f64) * (live as f64 / matching as f64) * 1.25).ceil() as usize;
             k = k.clamp(limit, live.max(limit));
             for _ in 0..3 {
-                let found = self.graph.search(vector, k, EF_SEARCH.max(k), accept);
+                let found = self.graph.search(vector, k, ef.max(k), accept);
                 if found.len() >= limit || k >= self.graph.len() {
                     hits = Some(found);
                     break;
@@ -793,9 +844,10 @@ fn row_of(r: &rusqlite::Row<'_>, index: &AnnIndex, doc: Option<DocId>) -> anyhow
     Ok(Row { doc, hash: vector_hash(&blob), vector: from_blob(&blob), filters })
 }
 
-/// The background thread: load or build every graph, then follow commits, rebuild and save as needed. Exits when the
-/// database is dropped.
-fn background(weak: Weak<Inner>, db_path: PathBuf) {
+/// The background thread: load or build every graph, then follow commits, rebuild and save as needed. Exits (closing
+/// its connection) as soon as `stop` disconnects, i.e. when the `AnnIndexes` is dropped, which waits for it.
+fn background(weak: Weak<Inner>, db_path: PathBuf, stop: mpsc::Receiver<()>) {
+    let stopped = || matches!(stop.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     let conn = match storage::open_reader(&db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -813,6 +865,9 @@ fn background(weak: Weak<Inner>, db_path: PathBuf) {
     let mut retry_at: HashMap<IndexId, Instant> = HashMap::new();
     let mut seen = 0u64;
     loop {
+        if stopped() {
+            return;
+        }
         let Some(inner) = weak.upgrade() else { return };
         let latest = inner.log.latest();
         let mut indexes: Vec<&Arc<AnnIndex>> = inner.indexes.values().collect();
@@ -837,6 +892,9 @@ fn background(weak: Weak<Inner>, db_path: PathBuf) {
             tracing::warn!("vector index thread: {e:#}");
         }
         for index in &indexes {
+            if stopped() {
+                return;
+            }
             if index.needs_rebuild() {
                 index.rebuild();
             }
@@ -848,10 +906,12 @@ fn background(weak: Weak<Inner>, db_path: PathBuf) {
         }
         drop(indexes);
         drop(inner);
-        // Wait for the next commit (or a few polls, to notice the database going away).
+        // Wait for the next commit (or a few polls), returning as soon as the database goes away.
         let start = Instant::now();
         loop {
-            std::thread::sleep(POLL);
+            if !matches!(stop.recv_timeout(POLL), Err(mpsc::RecvTimeoutError::Timeout)) {
+                return;
+            }
             let Some(inner) = weak.upgrade() else { return };
             if inner.log.latest() > latest.max(seen) || start.elapsed() > Duration::from_secs(1) {
                 break;

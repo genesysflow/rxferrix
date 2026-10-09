@@ -40,7 +40,8 @@ impl ::ferrix::Table for Message {
             vector_indexes: ::std::vec![
                 ::ferrix::VectorIndexDef { name : "by_embedding", vector_field :
                 "embedding", dimensions : 1536usize, filter_fields :
-                ::std::vec!["channel"], kind : ::ferrix::VectorIndexKind::Exact, }
+                ::std::vec!["channel"], kind : ::ferrix::VectorIndexKind::Exact, hnsw :
+                ::ferrix::HnswParams::DEFAULT, }
             ],
             ts: || ::ferrix::__private::ts_inline::<Message>(),
             validate: ::ferrix::__private::validate_doc::<Message>,

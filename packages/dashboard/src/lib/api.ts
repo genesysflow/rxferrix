@@ -16,6 +16,14 @@ export interface IndexSummary {
   usable: boolean;
 }
 
+export interface SearchIndexSummary {
+  name: string;
+  kind: "search" | "vector";
+  field: string;
+  filterFields: string[];
+  dimensions: number | null;
+}
+
 export interface TableSummary {
   name: string;
   number: number;
@@ -23,6 +31,7 @@ export interface TableSummary {
   defined: boolean;
   documents: number;
   indexes: IndexSummary[];
+  searchIndexes: SearchIndexSummary[];
   ts: string | null;
   secretFields: string[];
   access: TableAccess;

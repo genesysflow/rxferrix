@@ -60,6 +60,7 @@ describe("JsonValue", () => {
     defined: true,
     documents: 1,
     indexes: [],
+    searchIndexes: [],
     ts: null,
     secretFields: [],
     access: "readWrite",

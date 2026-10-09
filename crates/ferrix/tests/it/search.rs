@@ -574,6 +574,24 @@ async fn subscriptions_follow_search_results() {
     assert_eq!(texts(&ws.next_value().await), vec!["hello world"]);
 }
 
+#[tokio::test]
+async fn dashboard_lists_search_and_vector_indexes() {
+    let t = TestApp::new().await.unwrap();
+    let admin = t.app().auth().create_admin(t.app(), "admin@example.com", "admin password".into()).await.unwrap();
+    let run = t.app().run_query("_system/dashboard:tables", json!({}), &Identity::admin(admin, None)).await;
+    let tables = run.result.unwrap();
+    let find = |name: &str| tables.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["searchIndexes"].clone();
+    assert_eq!(
+        find("search_messages"),
+        json!([{ "name": "search_body", "kind": "search", "field": "body", "filterFields": ["channel", "pinned"], "dimensions": null }])
+    );
+    assert_eq!(
+        find("search_vectors"),
+        json!([{ "name": "by_embedding", "kind": "vector", "field": "embedding", "filterFields": ["category", "rank"], "dimensions": 8 }])
+    );
+    assert_eq!(find("todos"), json!([]));
+}
+
 // ------------------------------------------------------------------------------------------------ catalog
 
 fn messages_def(search_indexes: Vec<SearchIndexDef>) -> TableDef {

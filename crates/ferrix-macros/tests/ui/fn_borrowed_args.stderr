@@ -1,0 +1,17 @@
+error: argument types must be owned: references are not allowed (use e.g. `String` instead of `&str`)
+ --> tests/ui/fn_borrowed_args.rs:6:41
+  |
+6 | pub async fn list(ctx: &QueryCtx, name: &str) -> Result<u32> { Ok(1) }
+  |                                         ^^^^
+
+error: return types must be owned: references are not allowed (use e.g. `String` instead of `&str`)
+ --> tests/ui/fn_borrowed_args.rs:9:79
+  |
+9 | pub async fn list2(ctx: &QueryCtx, name: std::borrow::Cow<'_, str>) -> Result<&'static str> { Ok("") }
+  |                                                                               ^^^^^^^^^^^^
+
+error: argument types must be owned and `'static`: lifetimes are not allowed
+ --> tests/ui/fn_borrowed_args.rs:9:59
+  |
+9 | pub async fn list2(ctx: &QueryCtx, name: std::borrow::Cow<'_, str>) -> Result<&'static str> { Ok("") }
+  |                                                           ^^

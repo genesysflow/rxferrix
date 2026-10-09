@@ -1,0 +1,63 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func(FnKind::Action, true, quote!\n{\n    #[cfg(feature = \"x\")] pub async fn ia(ctx: &ActionCtx) ->\n    std::result::Result<String, MyError> { todo!() }\n})"
+---
+#[cfg(feature = "x")]
+pub async fn ia(ctx: &ActionCtx) -> std::result::Result<String, MyError> {
+    todo!()
+}
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_ia {}
+#[cfg(feature = "x")]
+impl ::core::convert::From<()> for __ferrix_args_ia {
+    fn from(_: ()) -> Self {
+        Self {}
+    }
+}
+/// Function reference for [`ia`](fn@ia).
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types, dead_code)]
+pub struct ia {}
+#[cfg(feature = "x")]
+impl ::ferrix::FunctionRef for ia {
+    type Args = __ferrix_args_ia;
+    type Output = String;
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "ia")
+    }
+}
+#[cfg(feature = "x")]
+impl ::ferrix::ActionFunction for ia {}
+#[cfg(feature = "x")]
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_ia: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "ia",
+    visibility: ::ferrix::__private::Visibility::Internal,
+    handler: ::ferrix::__private::Handler::Action(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_ia = ::ferrix::__private::decode_args(
+            "ia",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = ia(&__ferrix_ctx).await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    })),
+    ts: || (
+        ::ferrix::__private::ts_inline::<__ferrix_args_ia>(),
+        ::ferrix::__private::ts_inline::<String>(),
+    ),
+};

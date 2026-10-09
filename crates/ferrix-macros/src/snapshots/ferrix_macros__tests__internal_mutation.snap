@@ -1,0 +1,58 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func(FnKind::Mutation, true, quote!\n{ async fn im(ctx: &MutationCtx, x: i32) -> Result<i32> { Ok(x) } })"
+---
+async fn im(ctx: &MutationCtx, x: i32) -> Result<i32> {
+    Ok(x)
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_im {
+    pub x: i32,
+}
+impl ::core::convert::From<(i32,)> for __ferrix_args_im {
+    fn from(__ferrix_tuple: (i32,)) -> Self {
+        Self { x: __ferrix_tuple.0 }
+    }
+}
+/// Function reference for [`im`](fn@im).
+#[allow(non_camel_case_types, dead_code)]
+struct im {}
+impl ::ferrix::FunctionRef for im {
+    type Args = __ferrix_args_im;
+    type Output = i32;
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "im")
+    }
+}
+impl ::ferrix::MutationFunction for im {}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_im: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "im",
+    visibility: ::ferrix::__private::Visibility::Internal,
+    handler: ::ferrix::__private::Handler::Mutation(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_im = ::ferrix::__private::decode_args(
+            "im",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = im(&__ferrix_ctx, __ferrix_decoded.x).await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    })),
+    ts: || (
+        ::ferrix::__private::ts_inline::<__ferrix_args_im>(),
+        ::ferrix::__private::ts_inline::<i32>(),
+    ),
+};

@@ -1,0 +1,5 @@
+error: unknown field `created_byy` in index `by_done`; struct `Todo` has no such field
+ --> tests/ui/table_unknown_index_field.rs:6:26
+  |
+6 | #[index(by_done = [done, created_byy])]
+  |                          ^^^^^^^^^^^

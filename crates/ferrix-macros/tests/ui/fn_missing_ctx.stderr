@@ -1,0 +1,11 @@
+error: #[query] functions take the context as their first parameter: `ctx: &QueryCtx`
+ --> tests/ui/fn_missing_ctx.rs:6:18
+  |
+6 | pub async fn list() -> Result<u32> { Ok(1) }
+  |                  ^^
+
+error: #[mutation] functions take the context as their first parameter: `ctx: &MutationCtx`
+ --> tests/ui/fn_missing_ctx.rs:9:24
+  |
+9 | pub async fn add(text: String) -> Result<u32> { Ok(1) }
+  |                        ^^^^^^

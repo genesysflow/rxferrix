@@ -1,0 +1,5 @@
+error: #[table] requires a struct with named fields, not a tuple struct
+ --> tests/ui/table_tuple.rs:6:16
+  |
+6 | pub struct Todo(String, bool);
+  |                ^^^^^^^^^^^^^^

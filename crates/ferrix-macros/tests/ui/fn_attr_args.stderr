@@ -1,0 +1,5 @@
+error: #[query] does not take arguments
+ --> tests/ui/fn_attr_args.rs:5:9
+  |
+5 | #[query(public)]
+  |         ^^^^^^

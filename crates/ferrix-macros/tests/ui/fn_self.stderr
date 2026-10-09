@@ -1,0 +1,5 @@
+error: #[query] functions cannot take `self`
+ --> tests/ui/fn_self.rs:9:23
+  |
+9 |     pub async fn list(&self, ctx: &QueryCtx) -> Result<u32> { Ok(1) }
+  |                       ^^^^^

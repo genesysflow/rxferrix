@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(), quote!(struct S;))"
+---
+#[query] can only be used on an `async fn`

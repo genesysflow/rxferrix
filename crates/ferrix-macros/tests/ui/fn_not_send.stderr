@@ -1,0 +1,16 @@
+error: future cannot be sent between threads safely
+  --> tests/ui/fn_not_send.rs:8:14
+   |
+ 8 | pub async fn list(ctx: &QueryCtx) -> Result<u32> {
+   |              ^^^^ future created by async block is not `Send`
+   |
+   = help: within `{async block@$DIR/tests/ui/fn_not_send.rs:8:14: 8:18}`, the trait `Send` is not implemented for `Rc<u32>`
+note: future is not `Send` as this value is used across an await
+  --> tests/ui/fn_not_send.rs:11:14
+   |
+ 9 |     let rc = Rc::new(1);
+   |         -- has type `Rc<u32>` which is not `Send`
+10 |     let _ = ctx.now();
+11 |     async {}.await;
+   |              ^^^^^ await occurs here, with `rc` maybe used later
+   = note: required for the cast from `Pin<Box<{async block@$DIR/tests/ui/fn_not_send.rs:8:14: 8:18}>>` to `Pin<Box<dyn Future<Output = std::result::Result<ferrix_mock::__private::serde_json::Value, anyhow::Error>> + Send>>`

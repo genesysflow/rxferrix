@@ -1,0 +1,5 @@
+error: #[table] can only be used on a struct with named fields, not an enum
+ --> tests/ui/table_enum.rs:6:5
+  |
+6 | pub enum Todo { A, B }
+  |     ^^^^

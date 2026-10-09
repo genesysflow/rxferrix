@@ -1,0 +1,5 @@
+error: #[table] requires a struct with named fields, not a unit struct
+ --> tests/ui/table_unit.rs:6:12
+  |
+6 | pub struct Todo;
+  |            ^^^^

@@ -1,0 +1,11 @@
+error: #[table] already derives `Serialize`; remove it from this #[derive]
+ --> tests/ui/table_double_derive.rs:6:10
+  |
+6 | #[derive(serde::Serialize, Clone, PartialEq)]
+  |          ^^^^^^^^^^^^^^^^
+
+error: #[table] already derives `Clone`; remove it from this #[derive]
+ --> tests/ui/table_double_derive.rs:6:28
+  |
+6 | #[derive(serde::Serialize, Clone, PartialEq)]
+  |                            ^^^^^

@@ -1,0 +1,43 @@
+{
+  "name": "@ferrix/svelte",
+  "version": "0.1.0",
+  "description": "Svelte 5 (runes) bindings for Ferrix",
+  "type": "module",
+  "sideEffects": false,
+  "svelte": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src/lib"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && svelte-package -i src/lib -o dist",
+    "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.json --threshold error",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ferrix/client": "workspace:*"
+  },
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/package": "^3.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@testing-library/svelte": "^5.4.2",
+    "jsdom": "^30.1.2",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}

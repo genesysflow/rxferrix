@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!(struct T;))"
+---
+#[table] requires a struct with named fields, not a unit struct

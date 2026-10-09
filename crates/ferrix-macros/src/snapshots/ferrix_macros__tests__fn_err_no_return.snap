@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(), quote!(async fn f(ctx: &QueryCtx) {}))"
+---
+#[query] functions must declare a return type `Result<T>`; use `Result<()>` for no value

@@ -1,0 +1,5 @@
+error: duplicate index name `by_done`
+ --> tests/ui/table_duplicate_index.rs:7:9
+  |
+7 | #[index(by_done = [created_by])]
+  |         ^^^^^^^

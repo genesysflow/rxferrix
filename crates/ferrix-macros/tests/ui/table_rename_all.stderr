@@ -1,0 +1,5 @@
+error: #[table] sets `#[serde(rename_all = "camelCase")]`; other `rename_all` rules are not supported (use per-field `#[serde(rename = "...")]`)
+ --> tests/ui/table_rename_all.rs:6:9
+  |
+6 | #[serde(rename_all = "snake_case")]
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^

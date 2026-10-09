@@ -1,0 +1,5 @@
+error: #[query] functions must be `async fn`
+ --> tests/ui/fn_not_async.rs:6:5
+  |
+6 | pub fn list(ctx: &QueryCtx) -> Result<u32> { Ok(1) }
+  |     ^^

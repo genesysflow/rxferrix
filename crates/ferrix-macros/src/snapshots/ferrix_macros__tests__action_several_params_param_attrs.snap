@@ -1,0 +1,81 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func(FnKind::Action, false, quote!\n{\n    pub async fn\n    add_many(ctx: &ActionCtx, n: u32, prefix_text: Option<String>,\n    #[serde(default)] dry_run: bool, r#type: String,) -> Result<()> { Ok(()) }\n})"
+---
+pub async fn add_many(
+    ctx: &ActionCtx,
+    n: u32,
+    prefix_text: Option<String>,
+    dry_run: bool,
+    r#type: String,
+) -> Result<()> {
+    Ok(())
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_add_many {
+    pub n: u32,
+    pub prefix_text: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    pub r#type: String,
+}
+impl ::core::convert::From<(u32, Option<String>, bool, String)>
+for __ferrix_args_add_many {
+    fn from(__ferrix_tuple: (u32, Option<String>, bool, String)) -> Self {
+        Self {
+            n: __ferrix_tuple.0,
+            prefix_text: __ferrix_tuple.1,
+            dry_run: __ferrix_tuple.2,
+            r#type: __ferrix_tuple.3,
+        }
+    }
+}
+/// Function reference for [`add_many`](fn@add_many).
+#[allow(non_camel_case_types, dead_code)]
+pub struct add_many {}
+impl ::ferrix::FunctionRef for add_many {
+    type Args = __ferrix_args_add_many;
+    type Output = ();
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "add_many")
+    }
+}
+impl ::ferrix::ActionFunction for add_many {}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_add_many: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "add_many",
+    visibility: ::ferrix::__private::Visibility::Public,
+    handler: ::ferrix::__private::Handler::Action(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_add_many = ::ferrix::__private::decode_args(
+            "add_many",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = add_many(
+                &__ferrix_ctx,
+                __ferrix_decoded.n,
+                __ferrix_decoded.prefix_text,
+                __ferrix_decoded.dry_run,
+                __ferrix_decoded.r#type,
+            )
+            .await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    })),
+    ts: || (
+        ::ferrix::__private::ts_inline::<__ferrix_args_add_many>(),
+        ::ferrix::__private::ts_inline::<()>(),
+    ),
+};

@@ -1,0 +1,5 @@
+error: #[table] structs cannot be generic
+ --> tests/ui/table_generic.rs:6:16
+  |
+6 | pub struct Todo<T> { pub value: T }
+  |                ^^^

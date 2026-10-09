@@ -1,0 +1,56 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func(FnKind::Query, true, quote!\n{ async fn iq(ctx: &QueryCtx) -> Result<()> { Ok(()) } })"
+---
+async fn iq(ctx: &QueryCtx) -> Result<()> {
+    Ok(())
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_iq {}
+impl ::core::convert::From<()> for __ferrix_args_iq {
+    fn from(_: ()) -> Self {
+        Self {}
+    }
+}
+/// Function reference for [`iq`](fn@iq).
+#[allow(non_camel_case_types, dead_code)]
+struct iq {}
+impl ::ferrix::FunctionRef for iq {
+    type Args = __ferrix_args_iq;
+    type Output = ();
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "iq")
+    }
+}
+impl ::ferrix::QueryFunction for iq {}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_iq: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "iq",
+    visibility: ::ferrix::__private::Visibility::Internal,
+    handler: ::ferrix::__private::Handler::Query(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_iq = ::ferrix::__private::decode_args(
+            "iq",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = iq(&__ferrix_ctx).await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    })),
+    ts: || (
+        ::ferrix::__private::ts_inline::<__ferrix_args_iq>(),
+        ::ferrix::__private::ts_inline::<()>(),
+    ),
+};

@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table_err(quote!(nme = \"x\"), quote!(struct T { x: u32, }))"
+---
+unknown #[table] argument; expected `name = "..."`

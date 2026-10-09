@@ -1,0 +1,11 @@
+error: index name `by_id` is reserved for a built-in index
+ --> tests/ui/table_reserved_index.rs:6:9
+  |
+6 | #[index(by_id = [done], by_creation_time = [done])]
+  |         ^^^^^
+
+error: index name `by_creation_time` is reserved for a built-in index
+ --> tests/ui/table_reserved_index.rs:6:25
+  |
+6 | #[index(by_id = [done], by_creation_time = [done])]
+  |                         ^^^^^^^^^^^^^^^^

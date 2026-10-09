@@ -1,0 +1,9 @@
+[package]
+name = "todo-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ferrix = { path = "../../../crates/ferrix" }

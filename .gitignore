@@ -1,0 +1,6 @@
+target/
+node_modules/
+fx_data/
+dist/
+.svelte-kit/
+*.tsbuildinfo

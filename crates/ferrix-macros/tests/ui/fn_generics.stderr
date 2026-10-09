@@ -1,0 +1,11 @@
+error: #[query] functions cannot be generic (no type, const or lifetime parameters)
+ --> tests/ui/fn_generics.rs:6:18
+  |
+6 | pub async fn list<T: Default>(ctx: &QueryCtx) -> Result<u32> { Ok(1) }
+  |                  ^^^^^^^^^^^^
+
+error: #[query] functions cannot be generic (no type, const or lifetime parameters)
+ --> tests/ui/fn_generics.rs:9:19
+  |
+9 | pub async fn list2<'a>(ctx: &'a QueryCtx) -> Result<u32> { Ok(1) }
+  |                   ^^^^

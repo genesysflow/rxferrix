@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(),\nquote!(async fn f<T: Clone>(ctx: &QueryCtx, x: T) -> Result<()> where T: Copy,\n{}))"
+---
+#[query] functions cannot be generic (no type, const or lifetime parameters)

@@ -1,0 +1,53 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table(quote!(name = \"todos\"), quote!\n{\n    #[index(by_done = [done, created_by])] pub struct Todo\n    { pub text: String, pub done: bool, pub created_by: Option<String> }\n})"
+---
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct Todo {
+    pub text: String,
+    pub done: bool,
+    pub created_by: Option<String>,
+}
+impl ::ferrix::Table for Todo {
+    const NAME: &'static str = "todos";
+    fn table_def() -> ::ferrix::TableDef {
+        ::ferrix::TableDef {
+            name: "todos",
+            indexes: ::std::vec![
+                ::ferrix::IndexDef { name : "by_done", fields : ::std::vec!["done",
+                "createdBy"] }
+            ],
+            ts: || ::ferrix::__private::ts_inline::<Todo>(),
+        }
+    }
+}
+#[allow(non_upper_case_globals)]
+impl Todo {
+    pub const text: ::ferrix::Field<Todo, String> = ::ferrix::Field::new("text");
+    pub const done: ::ferrix::Field<Todo, bool> = ::ferrix::Field::new("done");
+    pub const created_by: ::ferrix::Field<Todo, Option<String>> = ::ferrix::Field::new(
+        "createdBy",
+    );
+    pub const _id: ::ferrix::Field<Todo, ::ferrix::Id<Todo>> = ::ferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::ferrix::Field<Todo, ::core::primitive::f64> = ::ferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_done: ::ferrix::Index<Todo> = ::ferrix::Index::new("by_done");
+    pub const by_creation_time: ::ferrix::Index<Todo> = ::ferrix::Index::new(
+        "by_creation_time",
+    );
+}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_TABLE_Todo: fn() -> ::ferrix::TableDef = <Todo as ::ferrix::Table>::table_def;

@@ -1,0 +1,17 @@
+error: unknown #[table] argument; expected `name = "..."`
+ --> tests/ui/table_bad_args.rs:5:9
+  |
+5 | #[table(nmae = "todos")]
+  |         ^^^^
+
+error: table name cannot be empty
+ --> tests/ui/table_bad_args.rs:8:16
+  |
+8 | #[table(name = "")]
+  |                ^^
+
+error: expected string literal
+  --> tests/ui/table_bad_args.rs:11:16
+   |
+11 | #[table(name = todos)]
+   |                ^^^^^

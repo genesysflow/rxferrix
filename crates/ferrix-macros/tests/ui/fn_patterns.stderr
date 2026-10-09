@@ -1,0 +1,17 @@
+error: parameter patterns must be plain identifiers (they become the argument names)
+ --> tests/ui/fn_patterns.rs:6:35
+  |
+6 | pub async fn list(ctx: &QueryCtx, (a, b): (u32, u32), _: u32, ref c: u32) -> Result<u32> { Ok(a + b + *c) }
+  |                                   ^^^^^^
+
+error: parameter patterns must be plain identifiers (they become the argument names)
+ --> tests/ui/fn_patterns.rs:6:55
+  |
+6 | pub async fn list(ctx: &QueryCtx, (a, b): (u32, u32), _: u32, ref c: u32) -> Result<u32> { Ok(a + b + *c) }
+  |                                                       ^
+
+error: parameter patterns must be plain identifiers (they become the argument names)
+ --> tests/ui/fn_patterns.rs:6:63
+  |
+6 | pub async fn list(ctx: &QueryCtx, (a, b): (u32, u32), _: u32, ref c: u32) -> Result<u32> { Ok(a + b + *c) }
+  |                                                               ^^^^^

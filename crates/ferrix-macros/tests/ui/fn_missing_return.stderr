@@ -1,0 +1,5 @@
+error: #[query] functions must declare a return type `Result<T>`; use `Result<()>` for no value
+ --> tests/ui/fn_missing_return.rs:6:33
+  |
+6 | pub async fn list(ctx: &QueryCtx) {}
+  |                                 ^

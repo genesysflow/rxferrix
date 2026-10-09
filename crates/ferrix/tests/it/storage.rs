@@ -952,6 +952,10 @@ async fn thumbnails_are_generated_cached_and_invalidated() {
     assert_eq!(dimensions(&res.bytes().await.unwrap()), (50, 80));
     // Never scaled up with contain.
     assert_eq!(dimensions(&s.get_url(&thumb("thumb=1000x1000"), &[]).await.bytes().await.unwrap()), (400, 300));
+    // A single number is a square box.
+    let res = s.get_url(&thumb("thumb=80"), &[]).await;
+    assert_eq!(res.headers()["etag"], format!("\"{}.t1.80x80.contain\"", sha256_hex(&photo)).as_str());
+    assert_eq!(dimensions(&res.bytes().await.unwrap()), (80, 60));
     // HEAD: headers only.
     let res = s.client.head(thumb("thumb=100x100")).send().await.unwrap();
     assert_eq!((res.status().as_u16(), res.headers()["content-length"].to_str().unwrap()), (200, first.len().to_string().as_str()));

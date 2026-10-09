@@ -296,6 +296,7 @@ async fn startup_refuses_documents_that_no_longer_match() {
     }
     assert!(!err.contains(&bad_ids[20]), "at most 20 per table");
     assert!(err.contains("--skip-schema-check") && err.contains("Option<T>"), "{err}");
+    assert!(err.contains("#[migration(table = \"items\")]"), "a migration is suggested: {err}");
 
     // The escape hatch opens anyway but records nothing: the next normal start checks again.
     open(strict_items(|| "{ changed: true }".into()), true).unwrap();

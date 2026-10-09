@@ -289,7 +289,7 @@ signature is refused, so signed URLs are the only way to read files.
 - **416** when no range is satisfiable, with `Content-Range: bytes */size`.
 - **404** `not_found` for unknown or deleted files and ids of other tables.
 
-**Thumbnails** (`thumb=WxH`, `fit=contain` (default) or `cover`): for files whose type is `image/jpeg`, `image/png`,
+**Thumbnails** (`thumb=WxH`, or `thumb=N` for an `N×N` box; `fit=contain` (default) or `cover`): for files whose type is `image/jpeg`, `image/png`,
 `image/webp` or `image/gif` (the first frame). `contain` fits the image inside `W×H` keeping its aspect ratio and never
 scales up; `cover` fills exactly `W×H` (scaled, center cropped). `W` and `H` go from 1 to 1024 unless the server
 allows only a list of sizes (`StorageConfig::thumbnail_sizes`). The response is a PNG when the image has

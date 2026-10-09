@@ -1,0 +1,59 @@
+error[E0277]: a #[migration] must return `Result<Option<serde_json::Value>>` (a patch or None), `Result<DocChange>` or `Result<()>`, not `Result<u32>`
+ --> tests/ui/migration_types.rs:7:1
+  |
+7 | #[migration(table = "todos")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not a migration result
+8 | async fn bad_output(ctx: &MutationCtx, doc: Value) -> Result<u32> { Ok(1) }
+  |                                                              --- required by a bound introduced by this call
+  |
+  = help: the trait `MigrationOutput` is not implemented for `u32`
+help: the following other types implement trait `MigrationOutput`
+ --> tests/mock/src/lib.rs
+  |
+  |     impl MigrationOutput for DocChange {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `DocChange`
+...
+  |     impl MigrationOutput for Option<serde_json::Value> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Option<Value>`
+...
+  |     impl MigrationOutput for () {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()`
+note: required by a bound in `ferrix_mock::__private::migration_output`
+ --> tests/mock/src/lib.rs
+  |
+  |     pub fn migration_output<O: crate::migrations::MigrationOutput>(
+  |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `migration_output`
+
+error[E0277]: the trait bound `NotDeserialize: serde::de::DeserializeOwned` is not satisfied
+  --> tests/ui/migration_types.rs:14:42
+   |
+14 | async fn bad_doc(ctx: &MutationCtx, doc: NotDeserialize) -> Result<()> { Ok(()) }
+   |                                          ^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `for<'de> ferrix_mock::__private::serde::Deserialize<'de>` is not implemented for `NotDeserialize`
+  --> tests/ui/migration_types.rs:11:1
+   |
+11 | pub struct NotDeserialize;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `ferrix_mock::__private::serde::Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `NotDeserialize` to implement `ferrix_mock::__private::serde::de::DeserializeOwned`
+note: required by a bound in `ferrix_mock::__private::decode_migration_doc`
+  --> tests/mock/src/lib.rs
+   |
+   |     pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> Result<T> {
+   |                                    ^^^^^^^^^^^^^^^^ required by this bound in `decode_migration_doc`
+
+error[E0277]: the trait bound `std::string::String: Table` is not satisfied
+  --> tests/ui/migration_types.rs:17:21
+   |
+17 | #[migration(table = String)]
+   |                     ^^^^^^ the trait `Table` is not implemented for `std::string::String`

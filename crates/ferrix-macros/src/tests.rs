@@ -475,3 +475,92 @@ fn function_errors() {
         )
     );
 }
+
+// ----------------------------------------------------------------------------------------------- #[migration]
+
+fn migration(attr: TokenStream, item: TokenStream) -> String {
+    pretty(crate::migration::expand_migration(attr, item).expect("expansion succeeds"))
+}
+
+fn migration_err(attr: TokenStream, item: TokenStream) -> String {
+    let err = crate::migration::expand_migration(attr, item).expect_err("expansion fails");
+    err.into_iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn migration_contract_example() {
+    insta::assert_snapshot!(migration(
+        quote!(table = Todo, batch = 100),
+        quote! {
+            /// Adds a default priority.
+            pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> {
+                Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))
+            }
+        }
+    ));
+}
+
+#[test]
+fn migration_typed_named_table_by_name() {
+    insta::assert_snapshot!(migration(
+        quote!(table = "todos", name = "0002_split-name", batch = 7),
+        quote! {
+            #[cfg(feature = "x")]
+            async fn split(_ctx: &ferrix::MutationCtx, doc: Doc<OldTodo>) -> anyhow::Result<DocChange> {
+                Ok(DocChange::Keep)
+            }
+        }
+    ));
+}
+
+#[test]
+fn migration_errors() {
+    insta::assert_snapshot!(
+        "migration_err_args",
+        migration_err(
+            quote!(batch = 0, name = "has space", tables = X, name = "x"),
+            quote!(
+                async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}
+            )
+        )
+    );
+    insta::assert_snapshot!(
+        "migration_err_syntax",
+        migration_err(
+            quote!(table),
+            quote!(
+                async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}
+            )
+        )
+    );
+    insta::assert_snapshot!(
+        "migration_err_signature",
+        migration_err(
+            quote!(table = Todo),
+            quote!(
+                fn m<T>(ctx: &QueryCtx, doc: &Value, extra: u32) {}
+            )
+        )
+    );
+    insta::assert_snapshot!(
+        "migration_err_params",
+        migration_err(
+            quote!(table = Todo),
+            quote!(
+                async fn m(ctx: MutationCtx) -> Result<()> {}
+            )
+        )
+    );
+    insta::assert_snapshot!(
+        "migration_err_values",
+        migration_err(
+            quote!(table = 5, batch = "big", name = x),
+            quote!(
+                async fn m(ctx: &MutationCtx, (a, b): (u32, u32)) -> Option<()> {}
+            )
+        )
+    );
+}

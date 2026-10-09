@@ -6,7 +6,7 @@
 //!   `thumbnail_max_source_pixels` (40 MP) is refused before anything is decoded; the decoder then runs with
 //!   matching `image::Limits` (dimensions and allocation), so a header that lies can't make it allocate more.
 //! - **Sizes**: `W` and `H` between 1 and `thumbnail_max_dimension` (1024), or only the pairs in
-//!   `thumbnail_sizes` when that allowlist is set. `fit=contain` (default) scales the image down to fit inside
+//!   `thumbnail_sizes` when that allowlist is set; `thumb=N` means `N×N`. `fit=contain` (default) scales the image down to fit inside
 //!   `W×H` keeping its aspect ratio (never up); `fit=cover` fills exactly `W×H`, scaling and cropping the center.
 //!   JPEG EXIF orientation is applied.
 //! - **Output**: PNG when the image has an alpha channel, JPEG (quality 85) otherwise.
@@ -57,10 +57,12 @@ pub(crate) struct ThumbSpec {
 }
 
 impl ThumbSpec {
-    /// Parse `thumb=WxH` and `fit=…` against the configured limits. The error is safe to show to clients.
+    /// Parse `thumb=WxH` (or `thumb=N`, an `N×N` box) and `fit=…` against the configured limits. The error is safe
+    /// to show to clients.
     pub(crate) fn parse(thumb: &str, fit: Option<&str>, config: &StorageConfig) -> Result<ThumbSpec, String> {
-        let bad = || format!("`thumb` must be WIDTHxHEIGHT, e.g. 200x200 (got `{thumb}`)");
-        let (w, h) = thumb.trim().split_once(['x', 'X']).ok_or_else(bad)?;
+        let bad = || format!("`thumb` must be WIDTHxHEIGHT or SIZE, e.g. 200x200 or 480 (got `{thumb}`)");
+        let thumb = thumb.trim();
+        let (w, h) = thumb.split_once(['x', 'X']).unwrap_or((thumb, thumb));
         let num = |s: &str| if !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit()) { s.parse::<u32>().ok() } else { None };
         let (width, height) = (num(w).ok_or_else(bad)?, num(h).ok_or_else(bad)?);
         let fit = match fit.map(str::trim) {
@@ -207,7 +209,9 @@ mod tests {
         assert_eq!(spec.variant(), "200x100-cover");
         assert_eq!(spec.etag("abc"), "\"abc.t1.200x100.cover\"");
         assert_eq!(ThumbSpec::parse("64X64", None, &config).unwrap().fit, Fit::Contain);
-        for bad in ["200", "0x10", "1025x10", "x10", "10x", "-1x5", "10x10x10", "99999999x1"] {
+        let square = ThumbSpec::parse("480", None, &config).unwrap();
+        assert_eq!((square.width, square.height), (480, 480), "a single number is a square box");
+        for bad in ["", "0", "2000", "0x10", "1025x10", "x10", "10x", "-1x5", "10x10x10", "99999999x1"] {
             assert!(ThumbSpec::parse(bad, None, &config).is_err(), "{bad}");
         }
         assert!(ThumbSpec::parse("10x10", Some("stretch"), &config).is_err());

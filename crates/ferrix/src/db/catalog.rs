@@ -5,7 +5,9 @@
 //! - every table has the built-in `by_id` (no `index_entries` rows; it still has an id so that read sets and write
 //!   logs can name it) and `by_creation_time` (`["_creationTime"]`) indexes;
 //! - new indexes, and indexes whose fields changed, are rebuilt by a synchronous backfill;
-//! - indexes removed from code lose their entries.
+//! - indexes removed from code lose their entries;
+//! - a database written with an older key encoding (`keys::KEY_ENCODING_VERSION`, in `_meta`) has every index
+//!   rebuilt first.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -67,9 +69,34 @@ impl TableInfo {
 pub struct Catalog {
     by_name: HashMap<String, Arc<TableInfo>>,
     by_number: HashMap<u32, Arc<TableInfo>>,
+    /// Tables opened despite documents that don't match their type, because migrations for them are pending. Writes
+    /// to them are validated leniently (see [`Catalog::is_migrating`]) until their last migration has run and the
+    /// table passed the schema check again.
+    migrating: std::sync::RwLock<std::collections::BTreeSet<String>>,
 }
 
 impl Catalog {
+    /// True while `table` is *migrating*: a patch or replace may then leave a document that doesn't match the
+    /// table's type, but only if it didn't match before the write either (a document the migrations haven't
+    /// rewritten yet). Inserts, and writes to documents that match, are always validated strictly.
+    pub fn is_migrating(&self, table: &str) -> bool {
+        self.migrating.read().unwrap_or_else(|e| e.into_inner()).contains(table)
+    }
+
+    /// The migrating tables, by name.
+    pub fn migrating_tables(&self) -> Vec<String> {
+        self.migrating.read().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+    }
+
+    pub(crate) fn set_migrating(&self, table: &str, migrating: bool) {
+        let mut set = self.migrating.write().unwrap_or_else(|e| e.into_inner());
+        if migrating {
+            set.insert(table.to_string());
+        } else {
+            set.remove(table);
+        }
+    }
+
     pub fn table(&self, name: &str) -> anyhow::Result<&Arc<TableInfo>> {
         self.by_name.get(name).with_context(|| format!("table `{name}` is not registered"))
     }
@@ -154,6 +181,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
     let defs = validate_defs(defs)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     search::ensure_schema(&tx)?;
+    upgrade_key_encoding(&tx)?;
     let existing = Catalog::load(&tx, &defs)?;
     let mut next_table: u32 = tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
     let mut next_index: u32 = tx.query_row("SELECT COALESCE(MAX(index_id), 0) + 1 FROM _indexes", [], |r| r.get(0))?;
@@ -214,6 +242,53 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
     }
     tx.commit()?;
     Catalog::load(conn, &defs)
+}
+
+/// `_meta` key holding the key encoding version the index entries were written with (absent = 1).
+pub const META_KEY_ENCODING: &str = "key_encoding";
+
+/// Rebuild every index (ordinary, search and vector, also of tables no longer defined in code) if the database was
+/// written with an older key encoding, then record the current version.
+fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
+    let stored = match storage::read_meta_u64(conn, META_KEY_ENCODING)? {
+        0 => 1,
+        v => v,
+    };
+    if stored == keys::KEY_ENCODING_VERSION {
+        return Ok(());
+    }
+    if stored > keys::KEY_ENCODING_VERSION {
+        bail!(
+            "this database was written with index key encoding v{stored}, newer than this binary's v{}; \
+             use a newer ferrix",
+            keys::KEY_ENCODING_VERSION
+        );
+    }
+    let has_documents: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM documents)", [], |r| r.get(0))?;
+    if has_documents {
+        tracing::info!(from = stored, to = keys::KEY_ENCODING_VERSION, "index key encoding changed; rebuilding every index");
+        conn.execute("DELETE FROM index_entries", [])?;
+        let indexes: Vec<(IndexId, u32, String, String)> = conn
+            .prepare("SELECT index_id, table_number, name, fields FROM _indexes ORDER BY index_id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        for (id, table_number, name, fields) in indexes {
+            if name != BY_ID {
+                backfill(conn, table_number, id, &serde_json::from_str::<Vec<String>>(&fields)?)?;
+            }
+        }
+        let names: HashMap<u32, String> = conn
+            .prepare("SELECT table_number, name FROM _tables")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (table_number, infos) in search::load(conn)? {
+            let name = names.get(&table_number).map(String::as_str).unwrap_or("?");
+            for info in infos {
+                search::rebuild(conn, name, table_number, &info)?;
+            }
+        }
+    }
+    storage::write_meta(conn, META_KEY_ENCODING, (keys::KEY_ENCODING_VERSION as i64).into())
 }
 
 fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, fields: &[String]) -> anyhow::Result<()> {

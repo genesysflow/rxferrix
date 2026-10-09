@@ -4,29 +4,21 @@ use std::collections::HashSet;
 
 use ferrix::auth::User;
 use ferrix::prelude::*;
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::model::{Channel, Member, Message, get_channel, membership, require_member, require_readable, user_error};
 use crate::profiles::Names;
 
-/// A channel as the sidebar shows it.
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+/// A channel as the sidebar shows it: the channel document, and whether the caller joined it.
+#[object]
+#[derive(Clone, Debug)]
 pub struct ChannelSummary {
-    #[serde(rename = "_id")]
-    #[ts(rename = "_id")]
-    pub id: Id<Channel>,
-    pub name: String,
-    pub topic: String,
-    pub private: bool,
+    #[serde(flatten)]
+    pub channel: Doc<Channel>,
     pub is_member: bool,
 }
 
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug)]
 pub struct MemberInfo {
     pub user: Id<User>,
     pub name: String,
@@ -34,23 +26,17 @@ pub struct MemberInfo {
 }
 
 /// The channel header: the channel, whether the caller joined it, and who did.
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug)]
 pub struct ChannelInfo {
-    #[serde(rename = "_id")]
-    #[ts(rename = "_id")]
-    pub id: Id<Channel>,
-    pub name: String,
-    pub topic: String,
-    pub private: bool,
+    #[serde(flatten)]
+    pub channel: Doc<Channel>,
     pub is_member: bool,
     pub members: Vec<MemberInfo>,
 }
 
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug)]
 pub struct UnreadCount {
     pub channel: Id<Channel>,
     pub count: u32,
@@ -76,13 +62,7 @@ pub async fn list(ctx: &QueryCtx) -> Result<Vec<ChannelSummary>> {
     Ok(channels
         .into_iter()
         .filter(|c| !c.private || mine.contains(&c.id))
-        .map(|c| ChannelSummary {
-            id: c.id,
-            is_member: mine.contains(&c.id),
-            name: c.value.name,
-            topic: c.value.topic,
-            private: c.value.private,
-        })
+        .map(|channel| ChannelSummary { is_member: mine.contains(&channel.id), channel })
         .collect())
 }
 
@@ -97,21 +77,14 @@ pub async fn get(ctx: &QueryCtx, channel: Id<Channel>) -> Result<ChannelInfo> {
         .with_index(Member::by_channel_user, |q| q.eq(Member::channel, channel))
         .take(1000)
         .await?;
-    let mut names = Names::default();
+    let names = Names::default();
     let mut members = Vec::with_capacity(rows.len());
     for row in &rows {
         let (name, color) = names.get(&ctx.db, row.user).await?;
         members.push(MemberInfo { user: row.user, name, color });
     }
     members.sort_by_key(|m| m.name.to_lowercase());
-    Ok(ChannelInfo {
-        id: doc.id,
-        is_member: rows.iter().any(|m| m.user == user),
-        name: doc.value.name,
-        topic: doc.value.topic,
-        private: doc.value.private,
-        members,
-    })
+    Ok(ChannelInfo { channel: doc, is_member: rows.iter().any(|m| m.user == user), members })
 }
 
 /// Creates a channel (the caller joins it). Names are lowercase letters, digits and dashes, and unique.
@@ -181,7 +154,9 @@ pub async fn mark_read(ctx: &MutationCtx, channel: Id<Channel>) -> Result<()> {
     let newer = ctx
         .db
         .query::<Message>()
-        .with_index(Message::by_channel_sent, |q| q.eq(Message::channel, channel).gt(Message::sent_at, member.last_read_at))
+        .with_index(Message::by_channel, |q| {
+            q.eq(Message::channel, channel).gt(Message::_creation_time, member.last_read_at)
+        })
         .first()
         .await?;
     if newer.is_some() {
@@ -197,10 +172,17 @@ pub async fn unread(ctx: &QueryCtx) -> Result<Vec<UnreadCount>> {
     let memberships = ctx.db.query::<Member>().with_index(Member::by_user, |q| q.eq(Member::user, user)).collect().await?;
     let mut out = Vec::new();
     for m in memberships {
+        let since_read = |q: ferrix::IndexRange<Message>| {
+            q.eq(Message::channel, m.channel).gt(Message::_creation_time, m.last_read_at)
+        };
+        // Most channels have nothing new: an index count (no documents read) settles those.
+        if ctx.db.query::<Message>().with_index(Message::by_channel, since_read).count().await? == 0 {
+            continue;
+        }
         let unread = ctx
             .db
             .query::<Message>()
-            .with_index(Message::by_channel_sent, |q| q.eq(Message::channel, m.channel).gt(Message::sent_at, m.last_read_at))
+            .with_index(Message::by_channel, since_read)
             .filter(move |msg| msg.author != user)
             .take(MAX_UNREAD)
             .await?;

@@ -6,7 +6,7 @@ import type { Id as GenericId } from "@ferrix/client";
 export type DataModel = {
   "channels": { name: string, topic: string, private: boolean, createdBy: Id<"_users">, };
   "members": { channel: Id<"channels">, user: Id<"_users">, lastReadAt: number, };
-  "messages": { channel: Id<"channels">, author: Id<"_users">, body: string, attachment: Id<"_storage"> | null, edited: boolean, kind: string, sentAt: number, };
+  "messages": { channel: Id<"channels">, author: Id<"_users">, body: string, attachment: Id<"_storage"> | null, edited: boolean, kind: string, };
   "profiles": { user: Id<"_users">, name: string, color: string, };
   "reactions": { message: Id<"messages">, user: Id<"_users">, emoji: string, };
   "typing": { channel: Id<"channels">, user: Id<"_users">, expiresAt: number, };
@@ -28,54 +28,61 @@ export type Id<T extends TableNames | keyof SystemDataModel> = GenericId<T>;
 /** A stored document of table `T`, with its system fields. */
 export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };
 
+/** An attached file, as the app shows it. */
 export type Attachment = { url: string, contentType: string | null, filename: string | null, size: number, };
+
+/** The channel header: the channel, whether the caller joined it, and who did. */
+export type ChannelInfo = { isMember: boolean, members: Array<MemberInfo>, } & Doc<"channels">;
+
+/** A channel as the sidebar shows it: the channel document, and whether the caller joined it. */
+export type ChannelSummary = { isMember: boolean, } & Doc<"channels">;
 
 export type MemberInfo = { user: Id<"_users">, name: string, color: string, };
 
 /**
- * A message as the app shows it: the author's name and color, the attachment's URL, grouped reactions.
+ * A message as the app shows it: the message document (`_id`, `_creationTime`, `body`, ...) plus the author's
+ * name and color, the attached file's URL, and the reactions grouped by emoji.
  */
-export type MessageView = { _id: Id<"messages">, channel: Id<"channels">, author: Id<"_users">, authorName: string, authorColor: string, body: string, kind: string, edited: boolean, sentAt: number, attachment: Attachment | null, reactions: Array<ReactionGroup>, };
+export type MessageView = {
+  authorName: string,
+  authorColor: string,
+  /** The attachment's URL and metadata (`attachment` is its storage id). */
+  file: Attachment | null,
+  reactions: Array<ReactionGroup>,
+} & Doc<"messages">;
 
-/**
- * Which page to read. Usually received from the client as a query argument named `paginationOpts`.
- */
-export type PaginationOpts = { 
-/**
- * How many documents to return (ignored when `endCursor` is set). Must be at least 1.
- */
-numItems: number, 
-/**
- * Where the page starts: `null` for the start of the range, otherwise a previous page's `continueCursor`.
- */
-cursor: string | null, 
-/**
- * Where the page ends. When set, the page holds every matching document between `cursor` and `endCursor`.
- */
-endCursor?: string | null, };
+/** Which page to read. Usually received from the client as a query argument named `paginationOpts`. */
+export type PaginationOpts = {
+  /** How many documents to return (ignored when `endCursor` is set). Must be at least 1. */
+  numItems: number,
+  /** Where the page starts: `null` for the start of the range, otherwise a previous page's `continueCursor`. */
+  cursor: string | null,
+  /** Where the page ends. When set, the page holds every matching document between `cursor` and `endCursor`. */
+  endCursor?: string | null,
+};
 
-/**
- * One page of results.
- */
-export type PaginationResult<T> = { 
-/**
- * The documents of this page, in query order.
- */
-page: Array<T>, 
-/**
- * True when there is nothing after this page (`continueCursor` is then the end of the range).
- */
-isDone: boolean, 
-/**
- * Where the next page starts: just past the last scanned document (or `endCursor`, when given).
- */
-continueCursor: string, };
+/** One page of results. */
+export type PaginationResult<T> = {
+  /** The documents of this page, in query order. */
+  page: Array<T>,
+  /** True when there is nothing after this page (`continueCursor` is then the end of the range). */
+  isDone: boolean,
+  /** Where the next page starts: just past the last scanned document (or `endCursor`, when given). */
+  continueCursor: string,
+};
 
-/**
- * One emoji's reactions on a message.
- */
-export type ReactionGroup = { emoji: string, count: number, 
-/**
- * Whether the caller is among them.
- */
-mine: boolean, names: Array<string>, };
+/** One emoji's reactions on a message. */
+export type ReactionGroup = {
+  emoji: string,
+  count: number,
+  /** Whether the caller is among them. */
+  mine: boolean,
+  names: Array<string>,
+};
+
+/** What `send` did: posted a message, or ran a slash command (then `notice` says what happened). */
+export type SendResult = { message: Id<"messages"> | null, notice: string | null, };
+
+export type TypingUser = { user: Id<"_users">, name: string, };
+
+export type UnreadCount = { channel: Id<"channels">, count: number, };

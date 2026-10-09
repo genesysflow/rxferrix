@@ -100,6 +100,35 @@ impl TestApp {
         self.app.typed_action::<F>(args.into(), identity).await
     }
 
+    /// Create a user in `_users` (email verified), with a password credential when `password` is given (so the
+    /// user can also sign in with it), without going through sign-up: no auth method needs to be configured and no
+    /// email is sent. Errors if the email is taken. Call functions as the user with [`TestApp::as_user`].
+    pub async fn create_user(&self, email: &str, password: Option<&str>) -> crate::Result<crate::Id<crate::auth::User>> {
+        use crate::auth::store;
+        let email = store::normalize_email(email)?;
+        let user = match password {
+            Some(password) => {
+                let hash = crate::auth::password::hash(password.to_string()).await?;
+                let user = store::create_password_user(&self.app, email, hash, None).await??;
+                store::mark_email_verified(&self.app, user).await?;
+                user
+            }
+            None => {
+                let lookup = email.clone();
+                if store::read(&self.app, |db| async move { store::user_by_email(&db, &lookup).await }).await?.is_some() {
+                    return Err(crate::UserError::new("email_in_use", "An account with this email already exists").into());
+                }
+                store::passwordless_user(&self.app, email, true).await??
+            }
+        };
+        Ok(user)
+    }
+
+    /// Typed calls as `user` (`Identity::user(user, None)`): `t.as_user(ann).mutation::<send>((..)).await`.
+    pub fn as_user(&self, user: crate::Id<crate::auth::User>) -> TestUser<'_> {
+        TestUser { app: self, identity: Identity::user(user, None) }
+    }
+
     pub fn app(&self) -> &App {
         &self.app
     }
@@ -136,5 +165,30 @@ impl TestApp {
             }
         });
         Ok(addr)
+    }
+}
+
+/// Typed calls as one user; see [`TestApp::as_user`].
+pub struct TestUser<'a> {
+    app: &'a TestApp,
+    identity: Identity,
+}
+
+impl TestUser<'_> {
+    /// The identity the calls run as.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    pub async fn query<F: QueryFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+        self.app.query_as::<F>(&self.identity, args).await
+    }
+
+    pub async fn mutation<F: MutationFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+        self.app.mutation_as::<F>(&self.identity, args).await
+    }
+
+    pub async fn action<F: ActionFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+        self.app.action_as::<F>(&self.identity, args).await
     }
 }

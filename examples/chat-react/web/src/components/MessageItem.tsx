@@ -57,7 +57,7 @@ export const MessageItem = memo(function MessageItem({ message: m, grouped, mine
     >
       <div className="gutter">
         {grouped ? (
-          <time className="hover-time">{formatTime(m.sentAt).split(", ").pop()}</time>
+          <time className="hover-time">{formatTime(m._creationTime).split(", ").pop()}</time>
         ) : (
           <span className="avatar" style={{ background: m.authorColor }}>
             {reminder ? "⏰" : initials(m.authorName)}
@@ -68,7 +68,7 @@ export const MessageItem = memo(function MessageItem({ message: m, grouped, mine
         {!grouped && (
           <div className="meta">
             <span className="author">{reminder ? `Reminder for ${m.authorName}` : m.authorName}</span>
-            <time dateTime={new Date(m.sentAt).toISOString()}>{formatTime(m.sentAt)}</time>
+            <time dateTime={new Date(m._creationTime).toISOString()}>{formatTime(m._creationTime)}</time>
             {pending && <span className="sending">sending…</span>}
           </div>
         )}
@@ -93,7 +93,7 @@ export const MessageItem = memo(function MessageItem({ message: m, grouped, mine
             </p>
           )
         )}
-        {m.attachment && <AttachmentImage attachment={m.attachment} />}
+        {m.file && <AttachmentImage attachment={m.file} />}
         {m.reactions.length > 0 && (
           <div className="reactions">
             {m.reactions.map((g) => (
@@ -179,7 +179,7 @@ export const MessageItem = memo(function MessageItem({ message: m, grouped, mine
 });
 
 /** An image attachment: asks for a thumbnail (`?thumb=`) and falls back to the original if that fails. */
-function AttachmentImage({ attachment }: { attachment: NonNullable<MessageView["attachment"]> }) {
+function AttachmentImage({ attachment }: { attachment: NonNullable<MessageView["file"]> }) {
   const [fallback, setFallback] = useState(false);
   const isImage = attachment.contentType?.startsWith("image/") ?? false;
   if (!isImage) {

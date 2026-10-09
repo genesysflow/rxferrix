@@ -5,6 +5,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::function::{FnKind, expand_function};
+use crate::object::expand_object;
 use crate::table::expand_table;
 
 fn pretty(tokens: TokenStream) -> String {
@@ -329,6 +330,101 @@ fn action_several_params_param_attrs() {
             ) -> Result<()> { Ok(()) }
         }
     ));
+}
+
+#[test]
+fn dev_only_action() {
+    insta::assert_snapshot!(pretty(
+        expand_function(
+            FnKind::Action,
+            false,
+            quote!(dev_only),
+            quote! {
+                /// The newest code emailed to `email` (dev only).
+                pub async fn last_code(ctx: &ActionCtx, email: String) -> Result<Option<String>> { todo!() }
+            }
+        )
+        .expect("expansion succeeds")
+    ));
+}
+
+#[test]
+fn dev_only_errors() {
+    insta::assert_snapshot!(
+        "fn_err_dev_only",
+        [quote!(dev_only, dev_only), quote!(dev_only = true), quote!(internal)]
+            .into_iter()
+            .map(|attr| func_err(FnKind::Mutation, attr, quote!(async fn f(ctx: &MutationCtx) -> Result<()> {})))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+fn object(attr: TokenStream, item: TokenStream) -> String {
+    pretty(expand_object(attr, item).expect("expansion succeeds"))
+}
+
+fn object_err(attr: TokenStream, item: TokenStream) -> String {
+    let err = expand_object(attr, item).expect_err("expansion fails");
+    err.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn object_struct_with_flattened_doc() {
+    insta::assert_snapshot!(object(
+        quote!(),
+        quote! {
+            /// A message as the app shows it.
+            #[derive(Clone, Debug)]
+            pub struct MessageView {
+                #[serde(flatten)]
+                pub message: Doc<Message>,
+                /// The author's display name.
+                pub author_name: String,
+                pub reactions: Vec<ReactionGroup>,
+            }
+        }
+    ));
+}
+
+#[test]
+fn object_enum_and_own_rename_all() {
+    insta::assert_snapshot!(
+        "object_enum",
+        object(quote!(), quote! { pub enum Status { Open, InProgress, Done { at: f64 } } })
+    );
+    // The type's own rename_all wins; nothing else is added.
+    insta::assert_snapshot!(
+        "object_own_rename_all",
+        object(
+            quote!(),
+            quote! {
+                #[serde(rename_all = "snake_case", deny_unknown_fields)]
+                pub struct Raw<T> { pub some_field: T }
+            }
+        )
+    );
+}
+
+#[test]
+fn object_errors() {
+    insta::assert_snapshot!(
+        "object_err",
+        [
+            object_err(quote!(x), quote!(pub struct A {})),
+            object_err(quote!(), quote!(pub fn f() {})),
+            object_err(
+                quote!(),
+                quote! {
+                    #[derive(Debug, serde::Serialize, TS)]
+                    #[serde(crate = "serde")]
+                    #[ts(crate = "ts_rs", export)]
+                    pub struct A { pub a: u32 }
+                }
+            ),
+        ]
+        .join("\n")
+    );
 }
 
 #[test]

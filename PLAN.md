@@ -238,7 +238,7 @@ CREATE TABLE documents (
 );
 CREATE TABLE index_entries (
   index_id   INTEGER NOT NULL,
-  key        BLOB NOT NULL,         -- memcomparable(index field values ++ doc id)
+  key        BLOB NOT NULL,         -- memcomparable(index field values ++ _creationTime) ++ doc id
   doc_id     BLOB NOT NULL,
   PRIMARY KEY (index_id, key)
 ) WITHOUT ROWID;
@@ -252,7 +252,7 @@ Why use generic tables instead of one SQLite table per user table:
 - Adding or removing an index needs no DDL, only a backfill.
 - There is one code path for every table, system tables included.
 
-**Memcomparable key encoding.** For each value, write a type-tag byte, then an order-preserving payload: sign-flipped big-endian for ints, IEEE-754 bit tricks for floats, and escaped, terminated bytes for strings, bytes, and arrays. Byte order then matches `Value` order exactly. The trailing doc ID makes keys unique. Every index implicitly ends in `_creation_time, _id`. Built-in indexes are `by_id` and `by_creation_time`.
+**Memcomparable key encoding.** For each value, write a type-tag byte, then an order-preserving payload: sign-flipped big-endian for ints, IEEE-754 bit tricks for floats, and escaped, terminated bytes for strings, bytes, and arrays. Byte order then matches `Value` order exactly. The trailing doc ID makes keys unique. Every index implicitly ends in `_creation_time, _id` (built in Phase 10, key encoding v3; `by_creation_time` is just `_creationTime, _id`), so equal declared fields are in creation order and `_creationTime` can be bounded after them. Built-in indexes are `by_id` and `by_creation_time`. The encoding version lives in `_meta.key_encoding`; opening an older database rebuilds the indexes whose layout changed.
 
 ### 4.4 Transactions and commit timestamps
 
@@ -679,20 +679,27 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   parameters (`M`, `ef`) per index.
 
 ### Phase 10 — DX fixes found by `examples/chat-react` (M)
-- [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
-  existing indexes on upgrade. Today they end in the random `_id`.
-- [ ] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
-  render cleanly.
-- [ ] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
-  don't depend on serde/ts-rs directly.
-- [ ] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
-  is composable with a custom `Mailer`.
-- [ ] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
-  (non-throwing).
-- [ ] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
-- [ ] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
-- [ ] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
+- [x] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
+  existing indexes on upgrade. Key encoding v3: a v2 database rebuilds its ordinary indexes on open (search and
+  vector indexes keep their layout); cursors hash the version, so old ones are rejected. `_creationTime` can be
+  bounded after an eq on every declared field; listing a system field in `#[index]` stays a compile error.
+- [x] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
+  render cleanly (JSDoc on their own lines, one field per line). Only table types and args structs are inlined.
+- [x] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
+  don't depend on serde/ts-rs directly: `#[ferrix::object]`; `#[serde(flatten)] doc: Doc<T>` embeds a document
+  (TS `{ … } & Doc<"t">`).
+- [x] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
+  is composable with a custom `Mailer`. (`#[query(dev_only)]` etc., refused outside `--dev`, generated into
+  `devApi`; `DevLogMailer` and `AuthConfig::dev_mailer`.)
+- [x] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
+  (non-throwing). Svelte: `useAuth().providers` (its paginated query already returned `error`).
+- [x] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
+- [x] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
+  (Also `try_map_concurrent` and `TestApp::as_user`. The async maps take closures returning futures rather than
+  `AsyncFnMut`: the futures of borrowing async closures aren't provably `Send` yet.)
+- [x] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
+  (README "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
 
 ### Phase 9 — Operations polish (M)
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and

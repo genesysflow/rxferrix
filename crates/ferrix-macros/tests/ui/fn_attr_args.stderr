@@ -1,4 +1,4 @@
-error: #[query] does not take arguments
+error: unknown #[query] argument; the only one is `dev_only` (refused unless the server runs with --dev)
  --> tests/ui/fn_attr_args.rs:5:9
   |
 5 | #[query(public)]

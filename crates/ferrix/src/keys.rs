@@ -12,7 +12,10 @@
 //! 2. All keys whose first fields equal `v1..vk` form one contiguous byte range: the keys that start with the prefix
 //!    `enc(v1) ++ … ++ enc(vk)`. That range ends at [`prefix_successor`] of the prefix.
 //!
-//! An index key is `enc(field_1) ++ … ++ enc(field_n) ++ id_bytes(16)`; the trailing id makes keys unique.
+//! An index key is `enc(field_1) ++ … ++ enc(field_n) ++ enc(_creationTime) ++ id_bytes(16)` (see
+//! [`index_key_fields`]): every index ends in the creation time and then the id, so the documents that
+//! share the declared fields' values are in creation order (`eq(channel)` + `Order::Desc` is newest first), and the
+//! trailing id makes keys unique.
 
 use serde_json::{Map, Number, Value};
 
@@ -27,8 +30,19 @@ pub const TAG_ARRAY: u8 = 0x08;
 pub const TAG_OBJECT: u8 = 0x09;
 
 /// Version of this encoding, stored in `_meta` (`key_encoding`). Version 1 had no Bytes tag (arrays were 0x07,
-/// objects 0x08); opening a database written with an older version rebuilds every index (`db::catalog`).
-pub const KEY_ENCODING_VERSION: u64 = 2;
+/// objects 0x08); version 2 ended user index keys in the id alone (no `_creationTime`). Opening a database written
+/// with an older version rebuilds its indexes (`db::catalog`).
+pub const KEY_ENCODING_VERSION: u64 = 3;
+
+/// The fields an index key is made of, before the id: the declared fields, then `_creationTime` (unless the index
+/// already ends with it, as the built-in `by_creation_time` does).
+pub fn index_key_fields(declared: &[String]) -> Vec<String> {
+    let mut out = declared.to_vec();
+    if out.last().is_none_or(|f| f != crate::schema::CREATION_TIME_FIELD) {
+        out.push(crate::schema::CREATION_TIME_FIELD.to_string());
+    }
+    out
+}
 
 const SIGN: u64 = 1 << 63;
 
@@ -141,8 +155,8 @@ pub fn encode(v: &Value) -> Vec<u8> {
     out
 }
 
-/// The index key of a document: its indexed field values (looked up by JSON name, missing = Undefined) followed by
-/// the 16 id bytes.
+/// The index key of a document: the values of `fields` (looked up by JSON name, missing = Undefined; pass an index's
+/// key fields, [`index_key_fields`]) followed by the 16 id bytes.
 pub fn index_key(doc: &Map<String, Value>, fields: &[String], id: &[u8; 16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     for f in fields {
@@ -548,6 +562,16 @@ mod tests {
         let mut next = encode(&json!("x\u{0}"));
         next.extend_from_slice(&[0u8; 16]);
         assert!(next >= end);
+    }
+
+    #[test]
+    fn key_fields_end_in_creation_time() {
+        let f = |v: &[&str]| index_key_fields(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(f(&["channel"]), ["channel", "_creationTime"]);
+        assert_eq!(f(&["a", "b"]), ["a", "b", "_creationTime"]);
+        // `by_creation_time` already ends with it.
+        assert_eq!(f(&["_creationTime"]), ["_creationTime"]);
+        assert_eq!(f(&[]), ["_creationTime"]);
     }
 
     #[test]

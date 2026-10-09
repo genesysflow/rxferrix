@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FerrixClient, MemoryAuthStorage, getAuth } from "@ferrix/client";
 import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { useAuth, type AuthProviders } from "../src/lib/index.js";
 import AuthView from "./AuthView.svelte";
 import Root from "./Root.svelte";
 
@@ -64,5 +65,22 @@ describe("useAuth / useCurrentUser", () => {
     target.querySelectorAll("button")[1]!.click();
     await settle();
     expect(text()).toBe("out / none");
+  });
+
+  it("lists the server's sign-in methods", async () => {
+    const providers: AuthProviders = { password: true, magicLink: false, signups: true, oauth: ["github"] };
+    const other = new FerrixClient("http://localhost:3211", {
+      webSocketConstructor: server.WebSocket,
+      unsavedChangesWarning: false,
+    });
+    const fetch = vi.fn(async (url: string) =>
+      url.endsWith("/api/auth/providers")
+        ? new Response(JSON.stringify(providers), { status: 200 })
+        : new Response("not found", { status: 404 }),
+    );
+    getAuth(other, { storage: new MemoryAuthStorage(), fetch: fetch as unknown as typeof globalThis.fetch, syncTabs: false });
+    expect(await useAuth({ client: other }).providers()).toEqual(providers);
+    expect(fetch.mock.calls.map((c) => String(c[0]))).toContain("http://localhost:3211/api/auth/providers");
+    other.close();
   });
 });

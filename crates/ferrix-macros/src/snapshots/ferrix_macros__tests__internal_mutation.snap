@@ -44,6 +44,7 @@ static __FERRIX_FN_im: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     module_path: ::core::module_path!(),
     name: "im",
     visibility: ::ferrix::__private::Visibility::Internal,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Mutation(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_im = ::ferrix::__private::decode_args(
             "im",
@@ -54,6 +55,6 @@ static __FERRIX_FN_im: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_im>(),
-        ::ferrix::__private::ts_inline::<i32>(),
+        ::ferrix::__private::ts_output::<i32>(),
     ),
 };

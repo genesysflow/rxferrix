@@ -37,12 +37,22 @@ pub struct QueryCtx {
     /// File storage: `get_url`, `get_metadata` (`crate::storage`).
     pub storage: crate::storage::QueryStorage,
     now: f64,
+    dev: bool,
 }
 
 impl QueryCtx {
     /// The commit time (ms since the epoch) of the snapshot the query runs at. Deterministic per ts.
+    ///
+    /// It is not a reactive clock: a subscribed query reruns when what it read changes, not when time passes, so a
+    /// result computed from `now()` (e.g. "expired") goes stale. Store the state instead and change it with a
+    /// scheduled mutation (`ctx.scheduler.run_at`).
     pub fn now(&self) -> f64 {
         self.now
+    }
+
+    /// True when the app runs in dev mode (`ferrix serve --dev`, and `TestApp`).
+    pub fn is_dev(&self) -> bool {
+        self.dev
     }
 }
 
@@ -55,12 +65,18 @@ pub struct MutationCtx {
     /// Schedule functions to run later; jobs are written in this mutation's transaction (`crate::scheduler`).
     pub scheduler: crate::scheduler::Scheduler,
     now: f64,
+    dev: bool,
 }
 
 impl MutationCtx {
     /// The time (ms since the epoch) this mutation commits at.
     pub fn now(&self) -> f64 {
         self.now
+    }
+
+    /// True when the app runs in dev mode (`ferrix serve --dev`, and `TestApp`).
+    pub fn is_dev(&self) -> bool {
+        self.dev
     }
 }
 
@@ -76,6 +92,11 @@ pub struct ActionCtx {
 }
 
 impl ActionCtx {
+    /// True when the app runs in dev mode (`ferrix serve --dev`, and `TestApp`).
+    pub fn is_dev(&self) -> bool {
+        self.app.options().dev
+    }
+
     /// Run a query (public or internal) in its own snapshot: `ctx.run_query::<list>((x,))`.
     pub async fn run_query<F: QueryFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
         self.app.typed_query::<F>(args.into(), &self.identity).await
@@ -102,6 +123,8 @@ pub struct FunctionInfo {
     pub path: String,
     pub kind: FunctionKind,
     pub visibility: Visibility,
+    /// Refused unless the app runs in dev mode; generated into `devApi` rather than `api`.
+    pub dev_only: bool,
     /// TS type of the args object.
     pub args_ts: String,
     /// TS type of the return value.
@@ -140,7 +163,14 @@ impl Registry {
             .iter()
             .map(|(path, def)| {
                 let (args_ts, output_ts) = (def.ts)();
-                FunctionInfo { path: path.clone(), kind: def.handler.kind(), visibility: def.visibility, args_ts, output_ts }
+                FunctionInfo {
+                    path: path.clone(),
+                    kind: def.handler.kind(),
+                    visibility: def.visibility,
+                    dev_only: def.dev_only,
+                    args_ts,
+                    output_ts,
+                }
             })
             .collect()
     }
@@ -449,7 +479,8 @@ impl App {
         &self.inner.auth
     }
 
-    /// Look up a function of `kind`. Internal functions are only found when `allow_internal`.
+    /// Look up a function of `kind`. Internal functions are only found when `allow_internal`; dev-only functions
+    /// are refused (whoever calls) unless the app runs in dev mode.
     fn lookup(&self, path: &str, kind: FunctionKind, allow_internal: bool) -> crate::Result<&'static FunctionDef> {
         let def = self
             .inner
@@ -457,6 +488,12 @@ impl App {
             .get(path)
             .filter(|d| allow_internal || d.visibility == Visibility::Public)
             .ok_or_else(|| FunctionNotFound(format!("Could not find public function for '{path}'")))?;
+        if def.dev_only && !self.options().dev {
+            return Err(FunctionNotFound(format!(
+                "'{path}' is a dev-only function: it only runs when the server is started with --dev"
+            ))
+            .into());
+        }
         if def.handler.kind() != kind {
             return Err(FunctionNotFound(format!(
                 "Trying to execute '{path}' as a {}, but it is defined as a {}",
@@ -561,7 +598,7 @@ impl App {
         let read_set = db.read_set_handle();
         let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
         let (auth, auth_access) = Auth::tracked(identity.clone());
-        let ctx = QueryCtx { db, auth, storage, now: snapshot.time };
+        let ctx = QueryCtx { db, auth, storage, now: snapshot.time, dev: self.options().dev };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self, &result, &log_lines);
@@ -631,6 +668,7 @@ impl App {
             storage,
             scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path),
             now: txn.now(),
+            dev: self.options().dev,
         };
         let timeout = self.options().mutation_timeout;
         let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);

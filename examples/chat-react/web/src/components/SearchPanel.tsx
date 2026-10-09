@@ -40,7 +40,7 @@ export function SearchPanel({ channel, onClose }: { channel: ChannelInfo; onClos
                 {initials(m.authorName)}
               </span>
               <span className="author">{m.authorName}</span>
-              <time>{formatTime(m.sentAt)}</time>
+              <time>{formatTime(m._creationTime)}</time>
             </div>
             <p>{highlight(m.body, query)}</p>
           </li>

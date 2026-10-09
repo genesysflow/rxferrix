@@ -106,6 +106,42 @@ pub mod todos {
     }
 }
 
+/// `#[object]` types as outputs, and a dev-only function.
+pub mod views {
+    use ferrix::prelude::*;
+    use ferrix_macros::{action, object};
+
+    use super::todos::Todo;
+
+    /// A todo as a list shows it.
+    #[object]
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct TodoView {
+        pub id: Id<Todo>,
+        /// The text.
+        pub display_text: String,
+        pub status: Status,
+    }
+
+    #[object]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum Status {
+        Open,
+        InProgress,
+    }
+
+    #[object]
+    #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+    pub struct Shouty {
+        pub some_field: u8,
+    }
+
+    #[action(dev_only)]
+    pub async fn views(_ctx: &ActionCtx, status: Status) -> Result<Vec<TodoView>> {
+        Ok(vec![TodoView { id: Id::from_raw([0; 16]), display_text: "t".into(), status }])
+    }
+}
+
 /// Function paths from nested modules, and macros invoked through re-exported paths.
 pub mod nested {
     pub mod deeper {
@@ -433,8 +469,11 @@ fn functions_are_registered() {
             ("expand::todos", "get_doc"),
             ("expand::todos", "list"),
             ("expand::todos", "secret"),
+            ("expand::views", "views"),
         ]
     );
+    assert!(def("views").dev_only);
+    assert!(FUNCTIONS.iter().filter(|f| f.name != "views").all(|f| !f.dev_only));
     use ferrix::__private::FunctionKind::*;
     for (name, kind, vis) in [
         ("list", Query, Visibility::Public),
@@ -490,6 +529,27 @@ fn ts_signatures() {
             "Doc<\"todos\"> | null".to_owned()
         )
     );
+}
+
+#[test]
+fn objects_serialize_camel_case_and_are_named_in_ts() {
+    use ferrix::__private::ts_rs::TS;
+    use views::{Shouty, Status, TodoView};
+    let cfg = ferrix::__private::ts_rs::Config::default();
+    // The output is referred to by name, also inside a Vec.
+    assert_eq!((def("views").ts)().1, "Array<TodoView>");
+    assert_eq!(
+        TodoView::decl(&cfg),
+        "type TodoView = { id: Id<\"todos\">, \n/**\n * The text.\n */\ndisplayText: string, status: Status, };"
+    );
+    assert_eq!(Status::decl(&cfg), "type Status = \"open\" | \"inProgress\";");
+    assert_eq!(Shouty::inline(&cfg), "{ SOME_FIELD: number, }");
+    let out = run("views", json!({"status": "inProgress"})).unwrap();
+    assert_eq!(out[0]["displayText"], "t");
+    assert_eq!(out[0]["status"], "inProgress");
+    let back: Vec<TodoView> = serde_json::from_value(out).unwrap();
+    assert_eq!(back[0].status, Status::InProgress);
+    assert_eq!(serde_json::to_value(Shouty { some_field: 1 }).unwrap(), json!({"SOME_FIELD": 1}));
 }
 
 #[test]

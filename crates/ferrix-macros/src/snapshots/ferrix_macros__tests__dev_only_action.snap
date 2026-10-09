@@ -1,0 +1,61 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "pretty(expand_function(FnKind::Action, false, quote!(dev_only), quote!\n{\n    #[doc = r\" The newest code emailed to `email` (dev only).\"] pub async fn\n    last_code(ctx: &ActionCtx, email: String) -> Result<Option<String>>\n    { todo!() }\n}).expect(\"expansion succeeds\"))"
+---
+/// The newest code emailed to `email` (dev only).
+pub async fn last_code(ctx: &ActionCtx, email: String) -> Result<Option<String>> {
+    todo!()
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_last_code {
+    pub email: String,
+}
+impl ::core::convert::From<(String,)> for __ferrix_args_last_code {
+    fn from(__ferrix_tuple: (String,)) -> Self {
+        Self { email: __ferrix_tuple.0 }
+    }
+}
+/// Function reference for [`last_code`](fn@last_code).
+#[allow(non_camel_case_types, dead_code)]
+pub struct last_code {}
+impl ::ferrix::FunctionRef for last_code {
+    type Args = __ferrix_args_last_code;
+    type Output = Option<String>;
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "last_code")
+    }
+}
+impl ::ferrix::ActionFunction for last_code {}
+impl ::ferrix::SchedulableFunction for last_code {}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_last_code: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "last_code",
+    visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: true,
+    handler: ::ferrix::__private::Handler::Action(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_last_code = ::ferrix::__private::decode_args(
+            "last_code",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = last_code(&__ferrix_ctx, __ferrix_decoded.email).await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    })),
+    ts: || (
+        ::ferrix::__private::ts_inline::<__ferrix_args_last_code>(),
+        ::ferrix::__private::ts_output::<Option<String>>(),
+    ),
+};

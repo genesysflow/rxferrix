@@ -49,6 +49,7 @@ static __FERRIX_FN_add: ::ferrix::__private::FunctionDef = ::ferrix::__private::
     module_path: ::core::module_path!(),
     name: "add",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Mutation(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_add = ::ferrix::__private::decode_args(
             "add",
@@ -59,6 +60,6 @@ static __FERRIX_FN_add: ::ferrix::__private::FunctionDef = ::ferrix::__private::
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_add>(),
-        ::ferrix::__private::ts_inline::<Id<Todo>>(),
+        ::ferrix::__private::ts_output::<Id<Todo>>(),
     ),
 };

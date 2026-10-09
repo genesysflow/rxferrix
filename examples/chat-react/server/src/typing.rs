@@ -6,8 +6,6 @@ use std::time::Duration;
 use ferrix::auth::User;
 use ferrix::log;
 use ferrix::prelude::*;
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::messages::clear_typing;
 use crate::model::{Channel, Typing, require_member, require_readable};
@@ -16,9 +14,8 @@ use crate::profiles::Names;
 /// How long "typing…" lasts after the last keystroke the app reported (it reports at most every 2 seconds).
 pub const TYPING_TTL: Duration = Duration::from_secs(4);
 
-#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TypingUser {
     pub user: Id<User>,
     pub name: String,
@@ -35,7 +32,7 @@ pub async fn list(ctx: &QueryCtx, channel: Id<Channel>) -> Result<Vec<TypingUser
         .with_index(Typing::by_channel_user, |q| q.eq(Typing::channel, channel))
         .take(50)
         .await?;
-    let mut names = Names::default();
+    let names = Names::default();
     let mut out = Vec::new();
     for row in rows.into_iter().filter(|r| r.user != user) {
         let (name, _) = names.get(&ctx.db, row.user).await?;

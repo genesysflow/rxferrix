@@ -328,13 +328,13 @@ impl RangeOps {
 
     /// Turn the constraints into a byte range over the index keys.
     fn to_key_range(&self, table: &str, index: &IndexInfo) -> anyhow::Result<KeyRange> {
-        let ctx = || format!("invalid range for index `{}` of table `{table}` (fields {:?})", index.name, index.fields);
+        let ctx = || format!("invalid range for index `{}` of table `{table}` (fields {:?})", index.name, index.key_fields);
         let mut prefix = Vec::new();
         let mut pos = 0;
         let mut ops = self.0.iter().peekable();
         // Equality prefix.
         while let Some(op) = ops.next_if(|op| op.kind == OpKind::Eq) {
-            let Some(expected) = index.fields.get(pos) else {
+            let Some(expected) = index.key_fields.get(pos) else {
                 bail!("{}: too many fields; `eq({})` has no index field left", ctx(), op.field);
             };
             if op.field != expected.as_str() {
@@ -348,7 +348,7 @@ impl RangeOps {
         let mut lower: Option<(OpKind, Vec<u8>)> = None;
         let mut upper: Option<(OpKind, Vec<u8>)> = None;
         for op in ops {
-            let Some(expected) = index.fields.get(pos) else {
+            let Some(expected) = index.key_fields.get(pos) else {
                 bail!("{}: `{}({})` has no index field left", ctx(), op.kind.name(), op.field);
             };
             if op.kind == OpKind::Eq {
@@ -382,8 +382,12 @@ impl RangeOps {
     }
 }
 
-/// Constraints on an index: equality on a prefix of its fields, then at most one lower and one upper bound on the
-/// next field. Checked when the query runs.
+/// Constraints on an index: equality on a prefix of its key fields, then at most one lower and one upper bound on
+/// the next one. Checked when the query runs.
+///
+/// The key fields are the declared fields followed by `_creationTime` (every index ends in `_creationTime, _id`), so
+/// after an equality on every declared field the creation time can be bounded too:
+/// `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
 pub struct IndexRange<T> {
     ops: RangeOps,
     _p: PhantomData<fn() -> T>,
@@ -529,6 +533,14 @@ async fn scan<D: Send>(
     result.map(|()| out)
 }
 
+/// Count the index entries of `plan`'s range, recording the whole range as read.
+async fn count_range(plan: ScanPlan<'_>) -> crate::Result<u64> {
+    let ScanPlan { db, index, range, .. } = plan;
+    let result = db.with_conn(|c| storage::count_index_range(c, index.id, &range));
+    db.record(index.id, range);
+    result
+}
+
 /// A query's document predicate (`D` = `Doc<T>` or JSON).
 type Filter<'a, D> = Box<dyn Fn(&D) -> bool + Send + Sync + 'a>;
 
@@ -581,6 +593,25 @@ impl<'a, T: Table> Query<'a, T> {
 
     pub async fn first(self) -> crate::Result<Option<Doc<T>>> {
         Ok(self.run(Some(1)).await?.into_iter().next())
+    }
+
+    /// The number of matching documents. Without a `filter`, it counts index entries in the range (documents are
+    /// not read, so it stays cheap on large ranges); with one, it scans and counts the matches. Either way the
+    /// whole range is recorded in the read set: any insert, delete or change of an indexed value inside it reruns
+    /// the query.
+    ///
+    /// ```ignore
+    /// let unread = ctx.db.query::<Message>()
+    ///     .with_index(Message::by_channel, |q| q.eq(Message::channel, c).gt(Message::_creation_time, last_read))
+    ///     .count()
+    ///     .await?;
+    /// ```
+    pub async fn count(self) -> crate::Result<u64> {
+        let plan = self.plan()?;
+        match self.filter {
+            Some(filter) => Ok(scan(plan, None, |_, json| parse_doc::<T>(json), Some(&*filter)).await?.len() as u64),
+            None => count_range(plan).await,
+        }
     }
 
     /// The only matching document, if any. Errors if more than one matches.
@@ -660,6 +691,15 @@ impl<'a> RawQuery<'a> {
 
     pub async fn first(self) -> crate::Result<Option<Value>> {
         Ok(self.run(Some(1)).await?.into_iter().next())
+    }
+
+    /// The number of matching documents; see [`Query::count`].
+    pub async fn count(self) -> crate::Result<u64> {
+        let plan = ScanPlan::new(self.db, &self.table, &self.index, &self.range, self.order)?;
+        match self.filter {
+            Some(filter) => Ok(scan(plan, None, parse_value, Some(&*filter)).await?.len() as u64),
+            None => count_range(plan).await,
+        }
     }
 
     /// One page of results; see [`Query::paginate`].

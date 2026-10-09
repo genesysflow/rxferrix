@@ -7,9 +7,6 @@ publish = false
 
 [dependencies]
 ferrix = { path = "../../../crates/ferrix" }
-# Function outputs that aren't tables (view structs) need these derives directly.
-serde = { workspace = true }
-ts-rs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

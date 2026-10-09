@@ -42,7 +42,7 @@ pub mod tasks {
         pub color: Color,
     }
 
-    /// Only used as the `stats` output, which is inlined.
+    /// Only used as the `stats` output: declared, and referred to by name.
     #[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -50,6 +50,19 @@ pub mod tasks {
         pub by_priority: HashMap<String, Priority>,
         pub total: u64,
         pub top_label: Option<Label>,
+    }
+
+    /// A task as a list shows it (an `#[ferrix::object]`, returned in a `Vec`).
+    #[ferrix::object]
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct TaskSummary {
+        /// The task's title.
+        pub title: String,
+        /// How many labels it has.
+        ///
+        /// Zero when unlabeled.
+        pub label_count: u32,
+        pub priority: Priority,
     }
 
     /// Only used by an internal function: must not be emitted.
@@ -128,6 +141,31 @@ pub mod tasks {
     pub async fn ping(_ctx: &ActionCtx) -> Result<String> {
         Ok("pong".into())
     }
+
+    #[query]
+    pub async fn summaries(ctx: &QueryCtx) -> Result<Vec<TaskSummary>> {
+        let all = ctx.db.query::<Task>().collect().await?;
+        Ok(all
+            .into_iter()
+            .map(|t| TaskSummary { label_count: t.labels.len() as u32, priority: t.priority, title: t.value.title })
+            .collect())
+    }
+
+    /// The first summary, if any.
+    #[query]
+    pub async fn first_summary(ctx: &QueryCtx) -> Result<Option<TaskSummary>> {
+        Ok(summaries(ctx).await?.into_iter().next())
+    }
+
+    /// Dev-only: generated into `devApi`, refused unless the app runs in dev mode.
+    #[mutation(dev_only)]
+    pub async fn wipe(ctx: &MutationCtx) -> Result<u32> {
+        let all = ctx.db.query::<Task>().collect().await?;
+        for t in &all {
+            ctx.db.delete(t.id).await?;
+        }
+        Ok(all.len() as u32)
+    }
 }
 
 fn generated() -> GeneratedFiles {
@@ -165,7 +203,7 @@ fn generates_from_the_real_registry() {
         assert!(!dm.contains(internal), "{internal} must not be emitted");
     }
     assert!(!api.contains("_system"), "system functions are not emitted");
-    assert!(dm.contains("/**\n * How urgent a task is.\n */\nexport type Priority = \"low\" | \"high\";\n"), "{dm}");
+    assert!(dm.contains("/** How urgent a task is. */\nexport type Priority = \"low\" | \"high\";\n"), "{dm}");
     assert!(dm.contains("export type Color = \"Red\" | \"Green\" | { \"Custom\": { hex: string, } };\n"), "{dm}");
     assert!(dm.contains("export type Label = { name: string, color: Color, };\n"), "{dm}");
     // Pagination types: declared once, `PaginationResult` generically (it is referred to by name, see below).
@@ -182,13 +220,24 @@ fn generates_from_the_real_registry() {
     for t in ["PaginationOpts", "PaginationResult"] {
         assert_eq!(dm.matches(&format!("export type {t}")).count(), 1, "{t} declared once");
     }
-    // A top-level output type is inlined (like every arg/output type), so `Stats` itself needs no declaration, but
-    // the named types inside it do.
-    assert!(!dm.contains("type Stats"), "{dm}");
+    // A named output type is referred to by name and declared, also inside a `Vec` or an `Option`.
+    assert!(
+        dm.contains("export type Stats = { byPriority: { [key in string]: Priority }, total: number, topLabel: Label | null, };\n"),
+        "{dm}"
+    );
+    // Field docs: JSDoc on their own lines, one field per line.
+    assert!(
+        dm.contains(
+            "/** A task as a list shows it (an `#[ferrix::object]`, returned in a `Vec`). */\nexport type TaskSummary = {\n  \
+             /** The task's title. */\n  title: string,\n  /**\n   * How many labels it has.\n   *\n   * Zero when unlabeled.\n   \
+             */\n  labelCount: number,\n  priority: Priority,\n};\n"
+        ),
+        "{dm}"
+    );
     let order: Vec<usize> =
-        ["type Color", "type Label", "type Priority"].iter().map(|t| dm.find(t).unwrap()).collect();
+        ["type Color", "type Label", "type Priority", "type Stats", "type TaskSummary"].iter().map(|t| dm.find(t).unwrap()).collect();
     assert!(order.is_sorted(), "types are sorted by name");
-    for t in ["Color", "Label", "Priority"] {
+    for t in ["Color", "Label", "Priority", "Stats", "TaskSummary"] {
         assert_eq!(dm.matches(&format!("export type {t} ")).count(), 1, "{t} declared once");
     }
     assert!(!dm.contains("PurgeSecret") && !api.contains("PurgeSecret"), "internal-only types are not emitted");
@@ -198,18 +247,20 @@ fn generates_from_the_real_registry() {
     assert!(api.contains("import { makeFunctionReference } from \"@ferrix/client\";\n"));
     assert!(
         api.contains(
-            "import type { Color, Doc, Id, Label, PaginationOpts, PaginationResult, Priority, ScanSpec } from \"./dataModel\";\n"
+            "import type { AttachmentView, DevFlags, Doc, Hit, Id, Label, Mode, NoteView, PageHit, PaginationOpts, PaginationResult, Priority, ScanSpec, Stats, TaskSummary } from \"./dataModel\";\n"
         ),
         "{api}"
     );
     let expect = [
         "  codegen: {\n    tasks: {\n",
         "      add: makeFunctionReference<\"mutation\", { title: string, priority: Priority, labels: Array<Label>, parent?: Id<\"tasks\"> | null, }, Id<\"tasks\">>(\"mutation\", \"codegen/tasks:add\"),\n",
-        "      labels: makeFunctionReference<\"query\", Record<string, never>, { [key in string]: Array<{ name: string, color: Color, }> }>(\"query\", \"codegen/tasks:labels\"),\n",
+        "      first_summary: makeFunctionReference<\"query\", Record<string, never>, TaskSummary | null>(\"query\", \"codegen/tasks:first_summary\"),\n",
+        "      labels: makeFunctionReference<\"query\", Record<string, never>, { [key in string]: Array<Label> }>(\"query\", \"codegen/tasks:labels\"),\n",
         "      list: makeFunctionReference<\"query\", { priority?: Priority | null, }, Array<Doc<\"tasks\">>>(\"query\", \"codegen/tasks:list\"),\n",
         "      page: makeFunctionReference<\"query\", { priority?: Priority | null, paginationOpts: PaginationOpts, }, PaginationResult<Doc<\"tasks\">>>(\"query\", \"codegen/tasks:page\"),\n",
         "      ping: makeFunctionReference<\"action\", Record<string, never>, string>(\"action\", \"codegen/tasks:ping\"),\n",
-        "      stats: makeFunctionReference<\"query\", Record<string, never>, { byPriority: { [key in string]: Priority }, total: number, topLabel: Label | null, }>(\"query\", \"codegen/tasks:stats\"),\n",
+        "      stats: makeFunctionReference<\"query\", Record<string, never>, Stats>(\"query\", \"codegen/tasks:stats\"),\n",
+        "      summaries: makeFunctionReference<\"query\", Record<string, never>, Array<TaskSummary>>(\"query\", \"codegen/tasks:summaries\"),\n",
         "  common: {\n",
         "    todos: {\n      add: makeFunctionReference<\"mutation\", { text: string, }, Id<\"todos\">>(\"mutation\", \"common/todos:add\"),\n",
         "  macros: {\n    notes: {\n",
@@ -224,6 +275,13 @@ fn generates_from_the_real_registry() {
     }
     assert!(!api.contains("symbol"), "zero-arg functions use Record<string, never>");
     assert!(api.ends_with("} as const;\n"));
+    // Dev-only functions: in `devApi`, not in `api`.
+    let (public, dev) = api.split_once("export const devApi = {\n").expect("devApi");
+    assert!(!public.contains("codegen/tasks:wipe"), "{api}");
+    assert!(
+        dev.contains("      wipe: makeFunctionReference<\"mutation\", Record<string, never>, number>(\"mutation\", \"codegen/tasks:wipe\"),\n"),
+        "{api}"
+    );
 
     assert_eq!(files.index_ts, "/* eslint-disable */\n// Generated by `ferrix codegen`. Do not edit.\nexport * from \"./api\";\nexport * from \"./dataModel\";\n");
 

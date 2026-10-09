@@ -12,6 +12,7 @@ import {
 } from "@ferrix/client";
 import {
   api,
+  devApi,
   type DataModel,
   type Doc,
   type Id,
@@ -19,7 +20,9 @@ import {
   type PaginationOpts,
   type PaginationResult,
   type Priority,
+  type Stats,
   type TableNames,
+  type TaskSummary,
 } from "./generated";
 
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -37,6 +40,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "audited_items"
       | "blobs"
       | "dash_items"
+      | "dx_notes"
       | "items"
       | "lossy"
       | "mig_counted"
@@ -49,6 +53,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "ops_docs"
       | "ops_pairs"
       | "page_messages"
+      | "posts"
       | "private_notes"
       | "revocation_notes"
       | "sched_notes"
@@ -119,7 +124,19 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   client.watchQuery(api.codegen.tasks.stats, { x: 1 });
 
   const labels = await client.query(api.codegen.tasks.labels);
-  assertType<Equals<(typeof labels)[string], Array<{ name: string; color: Label["color"] }>>>();
+  assertType<Equals<(typeof labels)[string], Array<Label>>>();
+
+  // Named output types are referred to by name (declared in dataModel.ts), also inside Array / null.
+  assertType<Equals<OutputOf<typeof api.codegen.tasks.stats>, Stats>>();
+  assertType<Equals<OutputOf<typeof api.codegen.tasks.summaries>, Array<TaskSummary>>>();
+  assertType<Equals<OutputOf<typeof api.codegen.tasks.first_summary>, TaskSummary | null>>();
+  assertType<Equals<TaskSummary, { title: string; labelCount: number; priority: Priority }>>();
+
+  // Dev-only functions are in `devApi`, not in `api`.
+  const wiped: number = await client.mutation(devApi.codegen.tasks.wipe);
+  void wiped;
+  // @ts-expect-error dev-only
+  void api.codegen.tasks.wipe;
 
   // Mutations.
   const id = await client.mutation(api.codegen.tasks.add, {

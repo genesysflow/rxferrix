@@ -158,6 +158,9 @@ pub struct FunctionDef {
     /// The Rust fn name.
     pub name: &'static str,
     pub visibility: Visibility,
+    /// `#[query(dev_only)]` (etc.): refused unless the app runs in dev mode (`--dev`), and generated into `devApi`
+    /// instead of `api`.
+    pub dev_only: bool,
     pub handler: Handler,
     /// TS signature for codegen: (args TS type, output TS type).
     pub ts: fn() -> (String, String),
@@ -175,6 +178,7 @@ impl std::fmt::Debug for FunctionDef {
             .field("path", &self.path())
             .field("kind", &self.handler.kind())
             .field("visibility", &self.visibility)
+            .field("dev_only", &self.dev_only)
             .finish()
     }
 }
@@ -219,7 +223,8 @@ pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> Result<(), Stri
     <crate::Doc<T> as serde::Deserialize>::deserialize(doc).map(drop).map_err(|e| e.to_string())
 }
 
-/// The inline TS type of `T`, rendered with [`ts_config`].
+/// The inline TS type of `T`, rendered with [`ts_config`]: the body of a table struct (`DataModel`) or of a
+/// function's generated args struct.
 ///
 /// While a codegen session is active on this thread (see [`crate::codegen`]), the named types `T` refers to are
 /// also recorded, recursively, so that codegen can declare them.
@@ -235,6 +240,14 @@ pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String {
     }
     crate::codegen::collect_dependencies::<T>();
     T::inline(cfg)
+}
+
+/// The TS type of a function's output, rendered with [`ts_config`]: named types by name, also inside wrappers
+/// (`Array<MessageView>`, `ChannelSummary | null`, `PaginationResult<MessageView>`), and declared in `dataModel.ts`
+/// while a codegen session is active. Types without a name (`string`, tuples, maps) are written out.
+pub fn ts_output<T: ts_rs::TS + ?Sized + 'static>() -> String {
+    crate::codegen::collect_named::<T>();
+    T::name(ts_config())
 }
 
 /// The one ts-rs configuration used for every generated TS type. Large integers (`u64`, `i64`, ...) are `number`,

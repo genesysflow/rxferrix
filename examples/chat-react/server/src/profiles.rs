@@ -1,6 +1,7 @@
 //! Profiles: display names and avatar colors, linked to `_users`.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use ferrix::QueryDb;
 use ferrix::auth::User;
@@ -68,20 +69,21 @@ pub async fn profile_of(db: &QueryDb, user: Id<User>) -> Result<Option<Doc<Profi
     db.query::<Profile>().with_index(Profile::by_user, |q| q.eq(Profile::user, user)).first().await
 }
 
-/// Looks up (and caches) display names and colors while building a list.
+/// Looks up (and caches) display names and colors while building a list. Shared by reference (the lock is never
+/// held across an await), so it can be used from `PaginationResult::try_map`.
 #[derive(Default)]
-pub struct Names(HashMap<Id<User>, (String, String)>);
+pub struct Names(Mutex<HashMap<Id<User>, (String, String)>>);
 
 impl Names {
-    pub async fn get(&mut self, db: &QueryDb, user: Id<User>) -> Result<(String, String)> {
-        if let Some(found) = self.0.get(&user) {
+    pub async fn get(&self, db: &QueryDb, user: Id<User>) -> Result<(String, String)> {
+        if let Some(found) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&user) {
             return Ok(found.clone());
         }
         let found = match profile_of(db, user).await? {
             Some(p) => (p.value.name, p.value.color),
             None => ("someone".to_string(), "#64748b".to_string()),
         };
-        self.0.insert(user, found.clone());
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(user, found.clone());
         Ok(found)
     }
 }

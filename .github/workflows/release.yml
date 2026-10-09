@@ -1,0 +1,227 @@
+# Gates, the static musl release binary and the Docker image.
+#
+#   gates   every check of README "Tests": Rust tests and clippy (no warnings), the macro tests, the TS type check of
+#           generated code, the TS packages, the committed dashboard build, and the end-to-end tests (dashboard,
+#           todo example, chat example) in Chromium.
+#   release scripts/release.sh: x86_64-unknown-linux-musl todo-server with the web app embedded (uploaded as an
+#           artifact; attached to the GitHub release for v* tags).
+#   docker  the Dockerfile (FROM scratch), smoke-tested; pushed to ghcr.io for v* tags.
+#
+# SQLite build flags: `.cargo/config.toml` sets LIBSQLITE3_FLAGS for every cargo build in the repository (the release
+# script and the Docker build included). Nothing here may set LIBSQLITE3_FLAGS: an environment variable would replace
+# them (the "sqlite flags" step checks).
+name: release
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (mise.toml)
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Chromium for the end-to-end tests
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: sqlite flags
+        run: |
+          test -z "${LIBSQLITE3_FLAGS:-}" || { echo "LIBSQLITE3_FLAGS must come from .cargo/config.toml"; exit 1; }
+          grep -q 'LIBSQLITE3_FLAGS' .cargo/config.toml
+
+      - name: JS packages
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: macro tests
+        run: CARGO_TARGET_DIR=target/macros cargo test -p ferrix-macros
+
+      - name: generated TS type-checks
+        run: cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored
+
+      - name: TS type check and tests
+        run: bun run typecheck && bun run test
+
+      - name: dashboard build is current
+        run: bun run build:dashboard && bun run check:dashboard && git diff --exit-code -- crates/ferrix/dashboard-dist
+
+      - name: build the example servers
+        run: cargo build -p todo-server -p chat-server
+
+      - name: dashboard e2e
+        env:
+          CHROMIUM: ${{ steps.chrome.outputs.chrome-path }}
+        working-directory: packages/dashboard
+        run: bun e2e/dashboard.ts ../../target/debug/todo-server
+
+      - name: todo e2e (two tabs, reconnect)
+        env:
+          CHROMIUM: ${{ steps.chrome.outputs.chrome-path }}
+          FERRIX_URL: http://127.0.0.1:8092
+          VITE_PORT: "5175"
+        working-directory: examples/todo/web
+        run: |
+          data="$(mktemp -d)"
+          ../../../target/debug/todo-server serve --dev --dir "$data/a" --http 127.0.0.1:8092 > "$data/server.log" 2>&1 &
+          server=$!
+          bunx vite --strictPort > "$data/vite.log" 2>&1 &
+          vite=$!
+          for _ in $(seq 1 100); do
+            curl -fsS http://127.0.0.1:8092/api/health > /dev/null && curl -fsS http://localhost:5175/ > /dev/null && break
+            sleep 0.3
+          done
+          bun e2e/two-tabs.ts http://localhost:5175
+          kill "$server"; wait "$server" || true
+          APP_URL=http://localhost:5175 bun e2e/reconnect.ts ../../../target/debug/todo-server "$data/b"
+          kill "$vite" || true
+
+      - name: chat e2e
+        env:
+          CHROMIUM: ${{ steps.chrome.outputs.chrome-path }}
+          BACKEND_PORT: "8099"
+          VITE_PORT: "5182"
+        working-directory: examples/chat-react/web
+        run: bun e2e/chat.ts
+
+  release:
+    needs: gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (mise.toml), and mise for zig and cargo-zigbuild
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      - name: scripts/release.sh
+        run: scripts/release.sh
+
+      - name: check the binary
+        run: |
+          file dist/todo-server | tee /dev/stderr | grep -q 'statically linked'
+          dist/todo-server --help > /dev/null
+          ls -l dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: todo-server-x86_64-linux-musl
+          path: dist/todo-server
+          if-no-files-found: error
+
+      - name: attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/todo-server --clobber
+
+  docker:
+    needs: gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/todo-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: todo-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test
+        run: |
+          docker image inspect todo-server:ci --format '{{.Config.User}} {{.Config.Entrypoint}}'
+          docker run --rm todo-server:ci functions | grep -q 'todos:'
+          docker volume create ferrix-ci
+          docker run -d --name ferrix-ci -p 18090:8090 -v ferrix-ci:/data todo-server:ci
+          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:18090/api/health && break; sleep 0.3; done
+          curl -fsS http://127.0.0.1:18090/api/health | grep -q ok
+          docker logs ferrix-ci 2>&1 | head -5
+          docker rm -f ferrix-ci
+
+      - name: log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: push
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

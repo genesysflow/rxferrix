@@ -18,6 +18,7 @@ mod jwt;
 mod macros;
 mod migrations;
 mod model;
+mod oauth_presets;
 mod ops;
 mod pagination;
 mod query_engine;

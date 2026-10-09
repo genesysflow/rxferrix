@@ -71,6 +71,11 @@ impl Effective {
             let mut provider = match p.kind {
                 OAuthKind::Github => super::GitHub::new(p.client_id.clone(), secret),
                 OAuthKind::Google => super::Google::new(p.client_id.clone(), secret),
+                OAuthKind::Discord => super::Discord::new(p.client_id.clone(), secret),
+                OAuthKind::Apple => {
+                    let (Some(team), Some(key)) = (p.team_id.clone(), p.key_id.clone()) else { continue };
+                    super::Apple::new(p.client_id.clone(), team, key, secret)
+                }
                 OAuthKind::Oidc => {
                     let Some(issuer) = p.issuer.clone() else { continue };
                     super::Oidc::new(p.id.clone(), issuer, p.client_id.clone(), secret)

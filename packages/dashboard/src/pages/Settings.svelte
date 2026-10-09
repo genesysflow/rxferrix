@@ -130,7 +130,7 @@
   </p>
 {/snippet}
 
-{#snippet secretInput(s: SecretField, label: string, id: string, allowNone: boolean, onchange: (s: SecretField) => void, disabled: boolean)}
+{#snippet secretInput(s: SecretField, label: string, id: string, allowNone: boolean, onchange: (s: SecretField) => void, disabled: boolean, multiline = false)}
   <div class="secret">
     {#if s.mode === "keep" && s.stored}
       <input {id} class="mono" value="••••" readonly aria-label={`${label} (stored, hidden)`} disabled />
@@ -145,6 +145,21 @@
     {:else if s.mode === "keep"}
       <span class="faint small">Not set</span>
       {#if !disabled}<button class="small" type="button" onclick={() => onchange({ ...s, mode: "replace", value: "" })}>Set {label.toLowerCase()}</button>{/if}
+    {:else if multiline}
+      <!-- A PEM file keeps its line breaks; the text is masked with CSS where supported. -->
+      <textarea
+        {id}
+        class="mono pem"
+        rows="5"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label={label}
+        placeholder="-----BEGIN PRIVATE KEY-----"
+        value={s.value}
+        oninput={(e) => onchange({ ...s, value: e.currentTarget.value })}
+        {disabled}
+      ></textarea>
+      {#if s.stored}<button class="small ghost" type="button" onclick={() => onchange({ ...s, mode: "keep", value: "" })}>Keep current</button>{/if}
     {:else}
       <input
         {id}
@@ -334,8 +349,22 @@
               <select id={`p${p.key}-kind`} bind:value={p.kind}>
                 <option value="github">GitHub</option>
                 <option value="google">Google</option>
+                <option value="discord">Discord</option>
+                <option value="apple">Sign in with Apple</option>
                 <option value="oidc">OpenID Connect</option>
               </select>
+              {#if p.kind === "apple"}
+                <label for={`p${p.key}-team`}>Team id</label>
+                <div>
+                  <input id={`p${p.key}-team`} class="mono" placeholder="ABCDE12345" bind:value={p.teamId} />
+                  {@render fieldError(err(`oauth.${i}.teamId`))}
+                </div>
+                <label for={`p${p.key}-keyid`}>Key id</label>
+                <div>
+                  <input id={`p${p.key}-keyid`} class="mono" placeholder="the Sign in with Apple key's id" bind:value={p.keyId} />
+                  {@render fieldError(err(`oauth.${i}.keyId`))}
+                </div>
+              {/if}
               {#if p.kind === "oidc"}
                 <label for={`p${p.key}-issuer`}>Issuer</label>
                 <div>
@@ -343,14 +372,19 @@
                   {@render fieldError(err(`oauth.${i}.issuer`))}
                 </div>
               {/if}
-              <label for={`p${p.key}-client`}>Client id</label>
+              <label for={`p${p.key}-client`}>{p.kind === "apple" ? "Services ID" : "Client id"}</label>
               <div>
-                <input id={`p${p.key}-client`} class="mono wide" bind:value={p.clientId} />
+                <input id={`p${p.key}-client`} class="mono wide" placeholder={p.kind === "apple" ? "com.example.web" : ""} bind:value={p.clientId} />
                 {@render fieldError(err(`oauth.${i}.clientId`))}
               </div>
-              <label for={`p${p.key}-secret`}>Client secret</label>
+              <label for={`p${p.key}-secret`}>{p.kind === "apple" ? "Private key (.p8)" : "Client secret"}</label>
               <div>
-                {@render secretInput(p.secret, "Client secret", `p${p.key}-secret`, false, (s) => (p.secret = s), false)}
+                {#if p.kind === "apple"}
+                  {@render secretInput(p.secret, "Private key", `p${p.key}-secret`, false, (s) => (p.secret = s), false, true)}
+                  <div class="faint small">It signs a short-lived client secret; stored encrypted, never shown again.</div>
+                {:else}
+                  {@render secretInput(p.secret, "Client secret", `p${p.key}-secret`, false, (s) => (p.secret = s), false)}
+                {/if}
                 {@render fieldError(err(`oauth.${i}.secret`))}
               </div>
               <label for={`p${p.key}-scopes`}>Scopes</label>
@@ -369,6 +403,8 @@
           <select aria-label="New provider kind" bind:value={newKind}>
             <option value="github">GitHub</option>
             <option value="google">Google</option>
+            <option value="discord">Discord</option>
+            <option value="apple">Sign in with Apple</option>
             <option value="oidc">OpenID Connect</option>
           </select>
           <button onclick={addProvider}>+ Add provider</button>
@@ -379,6 +415,11 @@
 </div>
 
 <style>
+  textarea.pem {
+    width: min(100%, 520px);
+    font-size: 12px;
+    -webkit-text-security: disc;
+  }
   .small {
     font-size: 12.5px;
   }

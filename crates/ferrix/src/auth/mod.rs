@@ -4,7 +4,8 @@
 //!   `_verification_codes`, `_admins`).
 //! - [`identity`]: [`Identity`] (who is calling) and [`Auth`] (`ctx.auth` in functions).
 //! - [`tokens`]: the server secret, HS256 access tokens, opaque tokens and keyed hashes.
-//! - [`config`]: [`AuthConfig`] and the OAuth presets [`GitHub`], [`Google`], [`Oidc`].
+//! - [`config`]: [`AuthConfig`] and the OAuth presets [`GitHub`], [`Google`], [`Discord`], [`Apple`], [`Oidc`]
+//!   (`apple`: the client secret JWT and ID token checks of Sign in with Apple).
 //! - [`service`]: [`AuthService`], the auth state of an `App` (`app.auth()`), and the operations behind the
 //!   endpoints. [`http`]: the `/api/auth/*` routes. [`oauth`]: the authorization code flow with PKCE.
 //! - [`email`]: [`Mailer`] (SMTP, dev log, [`MemoryMailer`] for tests).
@@ -12,6 +13,7 @@
 //! The functions in this module are the client-facing system functions `_system/auth:me` and
 //! `_system/auth:update_profile` (hand-written references in `@ferrix/client`, since codegen skips system functions).
 
+pub(crate) mod apple;
 pub mod config;
 pub(crate) mod effective;
 pub mod email;
@@ -29,7 +31,7 @@ pub mod tables;
 pub mod tokens;
 
 
-pub use config::{AuthConfig, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
+pub use config::{Apple, AuthConfig, Discord, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
 pub use identity::{Auth, FORBIDDEN, Identity, UNAUTHENTICATED};
 pub use jwt::{JwtAlgorithm, JwtProvider};

@@ -304,7 +304,7 @@ export const migrations = {
 // ---------------------------------------------------------------------------------------------------------------------
 // Settings (`_system/settings:*`, actions: crates/ferrix/src/settings)
 
-export type OAuthKind = "github" | "google" | "oidc";
+export type OAuthKind = "github" | "google" | "discord" | "apple" | "oidc";
 /** What the server shows in place of a stored secret (and accepts back as "keep it"). */
 export const MASK = "••••";
 
@@ -317,6 +317,9 @@ export interface OAuthProviderView {
   clientSecret: string | null;
   enabled: boolean;
   scopes: string[] | null;
+  /** Apple: the developer team id and the key id (the secret is then the private key). */
+  teamId: string | null;
+  keyId: string | null;
   /** A provider with this id is configured in code: it wins and this entry is ignored. */
   locked: boolean;
 }
@@ -360,6 +363,9 @@ export interface OAuthProviderInput {
   clientSecret?: string | null;
   enabled: boolean;
   scopes?: string[] | null;
+  /** Apple only (required there). */
+  teamId?: string | null;
+  keyId?: string | null;
 }
 
 export interface SmtpInput {

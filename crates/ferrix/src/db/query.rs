@@ -51,6 +51,12 @@ impl QueryDb {
         QueryDb { source, catalog, read_set: Arc::new(Mutex::new(ReadSet::new())) }
     }
 
+    /// Another handle on the same source that records into the same read set (e.g. for `ctx.storage`, whose reads
+    /// must invalidate the query like `ctx.db`'s).
+    pub(crate) fn share(&self) -> QueryDb {
+        QueryDb { source: self.source.clone(), catalog: self.catalog.clone(), read_set: self.read_set.clone() }
+    }
+
     /// A handle to this context's read set. The runtime keeps one so it can still read it after the handler (which
     /// owns the context) has finished, including when the handler failed.
     pub(crate) fn read_set_handle(&self) -> Arc<Mutex<ReadSet>> {
@@ -182,6 +188,11 @@ fn to_fields<T: Table>(value: &T) -> anyhow::Result<Map<String, Value>> {
 impl MutationDb {
     pub(crate) fn new(txn: Arc<WriteTxn>) -> Self {
         MutationDb { reads: QueryDb::new(Source::Write(txn.clone()), txn.catalog.clone()), txn }
+    }
+
+    /// The write transaction this context writes into.
+    pub(crate) fn txn(&self) -> &Arc<WriteTxn> {
+        &self.txn
     }
 
     /// Insert a document. The stored JSON must round-trip: it is checked to deserialize back as `Doc<T>` (a

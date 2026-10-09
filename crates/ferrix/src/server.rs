@@ -4,6 +4,7 @@
 //! - `POST /api/query | /api/mutation | /api/action`: the HTTP fallback, `{ "path", "args" }`.
 //! - `GET  /api/health`.
 //! - `/api/auth/*`: authentication (`crate::auth::http`).
+//! - `POST /api/storage/upload`, `GET /api/storage/{id}`: file storage (`crate::storage::http`).
 //! - `/api/admin/*`: admin-only logs and stats (`crate::dashboard::http`).
 //! - `/_/`: the dashboard SPA (`crate::dashboard::assets`, feature `dashboard`; without it, a minimal `/_/setup`).
 
@@ -36,6 +37,7 @@ pub fn router(app: App) -> Router {
         .route("/api/action", post(http_action))
         .route("/api/health", get(|| async { axum::Json(json!({ "status": "ok" })) }))
         .merge(crate::auth::http::routes())
+        .merge(crate::storage::http::routes())
         .merge(crate::dashboard::http::routes())
         .merge(dashboard_ui())
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides

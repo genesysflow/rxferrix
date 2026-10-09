@@ -32,6 +32,8 @@ pub use crate::auth::{Auth, Identity};
 pub struct QueryCtx {
     pub db: QueryDb,
     pub auth: Auth,
+    /// File storage: `get_url`, `get_metadata` (`crate::storage`).
+    pub storage: crate::storage::QueryStorage,
     now: f64,
 }
 
@@ -46,6 +48,8 @@ impl QueryCtx {
 pub struct MutationCtx {
     pub db: MutationDb,
     pub auth: Auth,
+    /// File storage: `generate_upload_url`, `get_url`, `get_metadata`, transactional `delete` (`crate::storage`).
+    pub storage: crate::storage::MutationStorage,
     now: f64,
 }
 
@@ -59,6 +63,8 @@ impl MutationCtx {
 /// Context of an action: no transaction; can call queries, mutations and other actions (including internal ones).
 pub struct ActionCtx {
     pub auth: Auth,
+    /// File storage: everything `MutationCtx::storage` has, plus `store` and `get` (`crate::storage`).
+    pub storage: crate::storage::ActionStorage,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -164,6 +170,8 @@ pub struct AppOptions {
     pub skip_schema_check: bool,
     /// Retention of the execution log in `aux.db`. Default: 7 days or 200k rows.
     pub log_retention: LogRetention,
+    /// File storage backend and limits (`crate::storage`). Default: `<dir>/storage`, 100 MiB uploads.
+    pub storage: crate::storage::StorageConfig,
 }
 
 /// Default [`AppOptions::mutation_timeout`].
@@ -178,6 +186,7 @@ impl Default for AppOptions {
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             skip_schema_check: false,
             log_retention: LogRetention::default(),
+            storage: Default::default(),
         }
     }
 }
@@ -217,6 +226,17 @@ struct AppInner {
     dir: PathBuf,
     metrics: Metrics,
     started_at: f64,
+    storage: Arc<crate::storage::StorageService>,
+}
+
+/// A weak handle on an [`App`], for background tasks that must not keep it alive.
+#[derive(Clone)]
+pub(crate) struct WeakApp(std::sync::Weak<AppInner>);
+
+impl WeakApp {
+    pub(crate) fn upgrade(&self) -> Option<App> {
+        self.0.upgrade().map(|inner| App { inner })
+    }
 }
 
 /// Live counters for the dashboard's overview (`App::metrics`). Updated by the WebSocket server and sync workers.
@@ -276,7 +296,28 @@ impl App {
         .await??;
         let started_at = crate::db::wall_clock_ms();
         let metrics = Metrics::default();
-        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at }) })
+        let public_url = options.auth.public_url.clone();
+        let storage = crate::storage::StorageService::new(
+            &data_dir,
+            options.storage.clone(),
+            public_url.as_deref(),
+            *auth.keys.storage_key(),
+        )?;
+        let storage = Arc::new(storage);
+        let app =
+            App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at, storage }) };
+        crate::storage::service::ensure_schema(&app).await?;
+        crate::storage::service::spawn_sweeper(&app);
+        Ok(app)
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakApp {
+        WeakApp(Arc::downgrade(&self.inner))
+    }
+
+    /// File storage (blob store, upload URLs, sweep).
+    pub fn storage(&self) -> &Arc<crate::storage::StorageService> {
+        &self.inner.storage
     }
 
     /// The data directory (`data.db`, `aux.db`, `auth_secret.key`).
@@ -426,7 +467,8 @@ impl App {
         let Handler::Query(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
         let read_set = db.read_set_handle();
-        let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), now: snapshot.time };
+        let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
+        let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), storage, now: snapshot.time };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self.logs(), &result, &log_lines);
@@ -468,7 +510,10 @@ impl App {
                 Err(e) => return not_run(e),
             }
         }
-        let ctx = MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), now: txn.now() };
+        let storage =
+            crate::storage::MutationStorage::new(MutationDb::new(txn.clone()), self.storage().clone(), identity.clone());
+        let ctx =
+            MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), storage, now: txn.now() };
         let timeout = self.options().mutation_timeout;
         let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
         let run = async {
@@ -516,7 +561,8 @@ impl App {
             Err(e) => return ActionRun { result: Err(e), log_lines: Vec::new() },
         };
         let Handler::Action(handler) = def.handler else { unreachable!("kind checked by lookup") };
-        let ctx = ActionCtx { auth: Auth::new(identity.clone()), app: self.clone(), identity: identity.clone() };
+        let storage = crate::storage::ActionStorage::new(self.clone(), identity.clone());
+        let ctx = ActionCtx { auth: Auth::new(identity.clone()), storage, app: self.clone(), identity: identity.clone() };
         let exec = Execution::start(path, FunctionKind::Action, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self.logs(), &result, &log_lines);

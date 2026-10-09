@@ -1,4 +1,5 @@
-//! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]`,
+//! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]
+//! [--storage LOCATION] [--max-upload-size SIZE]`,
 //! `ferrix functions`, `ferrix codegen [--out DIR]` and `ferrix admin create|reset-password <email>`.
 
 use std::net::SocketAddr;
@@ -10,6 +11,7 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::auth::{AuthConfig, SmtpConfig};
 use crate::runtime::{App, AppOptions, registry};
+use crate::storage::{StorageBackend, StorageConfig};
 
 #[derive(Parser, Debug)]
 #[command(about = "A Ferrix backend", args_conflicts_with_subcommands = true)]
@@ -103,6 +105,29 @@ struct ServeArgs {
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
+    /// Where uploaded files are stored: a directory (default: <dir>/storage), file:///dir, or s3://bucket/prefix
+    /// (S3, R2, MinIO; credentials, region and endpoint from the standard AWS_* environment variables).
+    #[arg(long, env = "FERRIX_STORAGE", value_name = "LOCATION")]
+    storage: Option<String>,
+    /// Largest accepted upload, e.g. `100MB` (default), `2GB`, `512KB`, or a number of bytes.
+    #[arg(long, env = "FERRIX_MAX_UPLOAD_SIZE", value_name = "SIZE", value_parser = parse_size)]
+    max_upload_size: Option<u64>,
+}
+
+/// `"100MB"`, `"2GB"`, `"512KB"`, `"1.5MB"` (powers of 1024), or a bare number of bytes.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let (num, unit) = (&s[..split], s[split..].trim());
+    let n: f64 = num.parse().map_err(|_| format!("invalid size `{s}` (examples: 100MB, 2GB, 512KB)"))?;
+    let factor: u64 = match unit.to_ascii_uppercase().as_str() {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1 << 10,
+        "M" | "MB" | "MIB" => 1 << 20,
+        "G" | "GB" | "GIB" => 1 << 30,
+        _ => return Err(format!("invalid size unit in `{s}` (use B, KB, MB or GB)")),
+    };
+    Ok((n * factor as f64) as u64)
 }
 
 /// `"500ms"`, `"5s"`, `"2m"`, or a bare number of seconds.
@@ -126,6 +151,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 #[derive(Debug, Default)]
 pub struct Ferrix {
     auth: AuthConfig,
+    storage: StorageConfig,
 }
 
 impl Ferrix {
@@ -140,6 +166,13 @@ impl Ferrix {
         self
     }
 
+    /// Configure file storage: `Ferrix::new().storage(StorageConfig::s3("bucket", "uploads").max_upload_size(..))`.
+    /// `--storage` and `--max-upload-size` override it.
+    pub fn storage(mut self, storage: StorageConfig) -> Self {
+        self.storage = storage;
+        self
+    }
+
     /// Parse the command line and run it. Builds its own tokio runtime.
     pub fn run(self) -> crate::Result<()> {
         let cli = Cli::parse();
@@ -147,8 +180,8 @@ impl Ferrix {
             Some(Command::Functions) => print_functions(),
             Some(Command::Codegen(args)) => codegen(&args.out),
             Some(Command::Admin(cmd)) => admin(cmd, self.auth),
-            Some(Command::Serve(args)) => serve(args, self.auth),
-            None => serve(cli.serve, self.auth),
+            Some(Command::Serve(args)) => serve(args, self.auth, self.storage),
+            None => serve(cli.serve, self.auth, self.storage),
         }
     }
 }
@@ -238,7 +271,18 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     auth
 }
 
-fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
+/// The builder's storage config with `--storage` / `--max-upload-size` applied on top.
+fn storage_config(args: &ServeArgs, mut storage: StorageConfig) -> crate::Result<StorageConfig> {
+    if let Some(location) = args.storage.as_deref().filter(|l| !l.trim().is_empty()) {
+        storage.backend = StorageBackend::parse(location)?;
+    }
+    if let Some(max) = args.max_upload_size {
+        storage.max_upload_size = max;
+    }
+    Ok(storage)
+}
+
+fn serve(args: ServeArgs, auth: AuthConfig, storage: StorageConfig) -> crate::Result<()> {
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
@@ -253,12 +297,14 @@ fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let auth = auth_config(&args, auth);
+        let storage = storage_config(&args, storage)?;
         let public_url = auth.public_url.clone().unwrap_or_default();
         let options = AppOptions {
             dev: args.dev,
             mutation_timeout: args.mutation_timeout,
             skip_schema_check: args.skip_schema_check,
             auth,
+            storage,
             ..Default::default()
         };
         let app = App::open(&args.dir, options).await?;
@@ -337,6 +383,26 @@ mod tests {
         assert_eq!(cli.serve.codegen_out.as_deref(), Some(Path::new("gen")));
         assert!(parse(&["serve", "--codegen-out", "gen"]).is_err());
         assert!(parse(&["--codegen-out", "gen"]).is_err());
+    }
+
+    #[test]
+    fn storage_flags() {
+        let cli = parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB"]).unwrap();
+        let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
+        let storage = storage_config(&args, StorageConfig::default()).unwrap();
+        assert!(matches!(storage.backend, StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "some/prefix"));
+        assert_eq!(storage.max_upload_size, 2 << 30);
+        // Without flags the builder's config stands.
+        let cli = parse(&[]).unwrap();
+        let storage = storage_config(&cli.serve, StorageConfig::local("/srv/files").max_upload_size(5)).unwrap();
+        assert!(matches!(storage.backend, StorageBackend::Local(Some(_))) && storage.max_upload_size == 5);
+        assert_eq!(parse_size("100MB").unwrap(), 100 << 20);
+        assert_eq!(parse_size("512kb").unwrap(), 512 << 10);
+        assert_eq!(parse_size("1.5M").unwrap(), 3 << 19);
+        assert_eq!(parse_size("1234").unwrap(), 1234);
+        assert!(parse_size("5TB").is_err() && parse_size("big").is_err());
+        let cli = parse(&["--storage", "gs://x"]).unwrap();
+        assert!(storage_config(&cli.serve, StorageConfig::default()).is_err());
     }
 
     #[test]

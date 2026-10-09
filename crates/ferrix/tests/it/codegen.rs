@@ -154,9 +154,9 @@ fn generates_from_the_real_registry() {
     assert!(dm.contains(
         "export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };"
     ));
-    // `_users` may be referenced by app tables; other system tables are left out entirely.
+    // `_storage` and `_users` may be referenced by app tables; other system tables are left out entirely.
     assert!(
-        dm.contains("export type SystemDataModel = {\n  \"_users\": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };\n};\n"),
+        dm.contains("export type SystemDataModel = {\n  \"_storage\": { sha256: string, size: number, contentType: string | null, createdBy: string | null, filename: string | null, };\n  \"_users\": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };\n};\n"),
         "{dm}"
     );
     for internal in ["_sessions", "_credentials", "_admins", "_accounts", "passwordHash", "refreshTokenHash"] {

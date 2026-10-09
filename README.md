@@ -19,6 +19,7 @@ Phase 9 (operations: backups, migrations, release builds) is next.
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
+| `examples/chat-react` | The flagship example: a Slack-lite in React (auth, pagination, uploads, search, scheduler). |
 | `docs/CONTRACT.md` | Rust API and the exact code each macro generates. |
 | `docs/PROTOCOL.md` | WebSocket and HTTP protocol. |
 
@@ -224,6 +225,9 @@ cd examples/todo/web && bun run dev                             # web app on :51
 
 Open http://localhost:5173 in two tabs. Other commands: `todo-server functions` lists the registered functions,
 and `todo-server codegen --out <dir>` writes the TS API once.
+
+For a bigger app, [examples/chat-react](examples/chat-react/README.md) is a Slack-lite in React (backend on :8097,
+app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun e2e/chat.ts`.
 
 ## Tests
 

@@ -176,6 +176,13 @@ impl Graph {
     }
 
     /// Link an allocated node into the graph. Safe to call for different nodes on several threads at once.
+    ///
+    /// The node's own link lists are written for every layer (top-down) *before* any neighbour links back to it, so
+    /// it only becomes reachable once it is fully linked. Adding the back-links layer by layer instead (as the paper's
+    /// sequential algorithm does) made concurrent inserts fragile: another insert could reach the node on an upper
+    /// layer while its lower-layer lists were still empty, descend into it, find nothing else, and link itself almost
+    /// only to it. Under CPU contention (a thread preempted in the middle of a link) that left a fraction of a percent
+    /// of the nodes practically unreachable, so even a search for a node's own vector missed it.
     pub fn link(&self, node: u32) {
         let level = self.levels[node as usize];
         let q = self.vector(node).to_vec();
@@ -195,12 +202,13 @@ impl Graph {
             cur = self.greedy(&q, cur, layer);
         }
         let mut eps = vec![cur];
+        let mut back_links: Vec<(usize, Vec<(f32, u32)>)> = Vec::new();
         for layer in (0..=(level.min(top) as usize)).rev() {
             let found = self.search_layer(&q, &eps, self.params.ef_construction, layer, &mut visited, Some(node));
             let chosen = self.select_with(&found, self.params.m, true);
             {
-                // Concurrent inserts may already have linked to this node (it is reachable from the layers above):
-                // keep their links, pruning if the list overflows.
+                // Keep links other inserts may already have added (none should: the node isn't reachable before
+                // its back-links below), pruning if the list overflows.
                 let mut links = self.links[node as usize].write().unwrap_or_else(|e| e.into_inner());
                 let mut list: Vec<u32> = chosen.iter().map(|&(_, n)| n).collect();
                 for n in std::mem::take(&mut links[layer]) {
@@ -215,10 +223,13 @@ impl Graph {
                 }
                 links[layer] = list;
             }
-            for &(d, n) in &chosen {
+            back_links.push((layer, chosen));
+            eps = found;
+        }
+        for (layer, chosen) in back_links {
+            for (d, n) in chosen {
                 self.add_link(n, node, d, layer);
             }
-            eps = found;
         }
         self.put_visited(visited);
         if level > top {
@@ -674,6 +685,19 @@ mod tests {
         assert_eq!(odd.len(), 10);
         assert!(odd.iter().all(|(_, n)| n % 2 == 1));
         assert!(odd.windows(2).all(|w| w[0].0 <= w[1].0));
+    }
+
+    /// Regression: oversubscribed parallel builds (many more threads than cores, so links are preempted midway) used
+    /// to leave nodes unreachable (about 0.2% of them here: a search for their own vector missed them). See `link`.
+    #[test]
+    fn oversubscribed_parallel_builds_reach_every_node() {
+        let vectors = random_vectors(4800, 24, 11);
+        let mut misses = 0;
+        for seed in 0..2 {
+            let g = Graph::build(24, Params::default(), seed, &vectors, 64);
+            misses += (0..vectors.len()).filter(|&i| g.search(&vectors[i], 1, 128, |_| true)[0].1 != i as u32).count();
+        }
+        assert!(misses <= 1, "{misses} of {} self-searches missed", 2 * vectors.len());
     }
 
     #[test]

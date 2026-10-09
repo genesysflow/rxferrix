@@ -40,14 +40,16 @@ use crate::writelog::{CommitEntry, WriteLog};
 /// Default number of reader connections.
 pub const DEFAULT_READERS: usize = 6;
 
+/// Fields drop in order: the HNSW thread is stopped (and its connection closed) first, the writer closes last, so
+/// the read-write connection is the last one and checkpoints the WAL when the database is dropped.
 pub struct Database {
-    writer: Arc<tokio::sync::Mutex<Connection>>,
+    /// HNSW vector indexes (in-memory graphs following the write log).
+    ann: search::ann::AnnIndexes,
     readers: Arc<ReaderPool>,
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
     clock: Clock,
-    /// HNSW vector indexes (in-memory graphs following the write log).
-    ann: search::ann::AnnIndexes,
+    writer: Arc<tokio::sync::Mutex<Connection>>,
 }
 
 /// Options for [`Database::open_with`].

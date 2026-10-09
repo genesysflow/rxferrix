@@ -7,16 +7,18 @@ WebSocket and get updated results automatically whenever a write affects them.
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
 Phase 9 (operations) is built: data migrations (`#[migration]`), backups, export and import, metrics, TLS, frontend
-serving and release builds (see [Deploying](#deploying)).
+serving and release builds (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
+example found (index order, codegen names, `#[object]`, dev mode, storage URLs in dev; see
+[Things to know](#things-to-know)).
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `crates/ferrix` | The runtime: SQLite storage, query engine, read sets, write log, sync worker, axum server, CLI, codegen, `TestApp`. |
-| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
+| `crates/ferrix-macros` | `#[table]`, `#[object]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
-| `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery`, `useMutation`, `useAction`. |
+| `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery(WithStatus)`, `usePaginatedQuery(WithStatus)`, `useMutation`, `useAction`, auth hooks. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
@@ -51,6 +53,40 @@ fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 
 Functions call each other through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`.
+
+**Indexes end in `_creationTime, _id`**: documents with equal indexed fields are in creation order, so
+`with_index(Message::by_channel, |q| q.eq(Message::channel, c)).order(Order::Desc)` is newest first, and the creation
+time can be bounded after the declared fields: `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
+`.count()` counts an index range without reading the documents.
+
+**Types that aren't tables** (a function's output "view" struct, an enum argument) use `#[object]`: it derives
+serde and ts-rs through ferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in
+`dataModel.ts` by name (`Array<MessageView>`), with field doc comments as JSDoc. A document can be embedded whole:
+
+```rust
+#[object]
+pub struct MessageView {
+    #[serde(flatten)]
+    pub message: Doc<Message>,       // _id, _creationTime and the message's fields, at the top level
+    pub author_name: String,         // TS: { authorName: string } & Doc<"messages">
+}
+
+#[query]
+pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: PaginationOpts)
+    -> Result<PaginationResult<MessageView>> {
+    let page = ctx.db.query::<Message>()
+        .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
+        .order(Order::Desc)
+        .paginate(pagination_opts)
+        .await?;
+    page.try_map(|message| view(ctx, message)).await      // also map_async, try_map_concurrent
+}
+```
+
+**Dev mode.** `ctx.is_dev()` tells whether the server runs with `--dev`. `#[action(dev_only)]` (also queries and
+mutations) marks a function for development (seeding, reading a dev inbox): the server refuses it outside `--dev`,
+and codegen puts it in `devApi` instead of `api`. In `--dev` without SMTP, auth emails are printed to the log by
+`DevLogMailer`; `AuthConfig::dev_mailer(m)` replaces it (and can forward to it).
 
 ## Auth
 
@@ -143,7 +179,9 @@ await client.mutation(api.files.set_avatar, { file: storageId });
 ```
 
 `GET /api/storage/<id>` serves files with ETags, range requests (several ranges as `multipart/byteranges`) and
-headers that keep uploads from running script on your origin. Add `?thumb=200x200` (and `&fit=cover`) to an image's
+headers that keep uploads from running script on your origin. In `--dev`, file and upload URLs are root-relative
+(`/api/storage/...`) unless a public URL is set explicitly (`--public-url`), so they go through a dev server's
+`/api` proxy (Vite) like every other request. Add `?thumb=200x200` (and `&fit=cover`) to an image's
 URL for a thumbnail (JPEG, PNG, WebP, GIF; generated once and cached; oversized images are refused from their header,
 before decoding). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
 and `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability
@@ -390,6 +428,27 @@ stream one table with `GET /api/admin/export/{table}?format=csv` and import into
 **Metrics.** `serve --metrics [--metrics-token T]` exposes Prometheus metrics at `/metrics`: requests by route and
 status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,
 scheduler queue depth and dropped log entries.
+
+## Things to know
+
+- **Optimistic updates are replayed** on top of every server change until the mutation's result arrives. Create ids
+  and timestamps outside the update closure (once per call), not inside it:
+  ```ts
+  const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();
+  send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: id, _creationTime: now, …args } }));
+  ```
+- **Scheduled functions (and crons) run without an identity**, whoever scheduled them: pass the user as an argument to
+  an internal function, e.g. `ctx.scheduler.run_after::<deliver_reminder>(delay, (channel, user, text))`.
+- **`ctx.now()` in a query is the snapshot's time, not a reactive clock.** A query reruns when its data changes, not
+  when time passes. For expiry, store the state and flip it with a scheduled mutation (`run_at`); format "5 minutes
+  ago" in the client.
+- **Invalidation is coarse**: any write to a document reruns the queries that read it, even when nothing changed.
+  Skip no-op writes, keep fast-changing fields (presence, typing, counters) in small tables of their own, read narrow
+  ranges (`eq` prefixes, `_creationTime` bounds, `take(n)`), and count with `.count()`.
+- **Tests** (`ferrix::testing::TestApp`, in dev mode): `t.create_user("ann@example.com", Some("password"))` makes a
+  user, `t.as_user(id).query::<list>(args)` calls as them, `t.advance_time(d)` runs due jobs.
+
+More in [docs/CONTRACT.md](docs/CONTRACT.md) §1.10.
 
 ## Running the example
 

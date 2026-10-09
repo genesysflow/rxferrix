@@ -16,7 +16,8 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 use ferrix::prelude::*;
 // prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
 //           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, DocChange,
-//           table, query, mutation, action, internal_query, internal_mutation, internal_action, migration, json!, Ferrix
+//           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
+//           json!, Ferrix
 use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
@@ -58,7 +59,13 @@ Rules:
   The remaining parameters become the args. Parameter patterns must be plain identifiers.
 - The return type must be `ferrix::Result<T>` (written `Result<T>` with the prelude), where
   `T: Serialize + DeserializeOwned + ts_rs::TS + Send + 'static`.
-- Every arg type must be `Serialize + DeserializeOwned + ts_rs::TS + Send + 'static`.
+- Every arg type must be `Serialize + DeserializeOwned + ts_rs::TS + Send + 'static`. For types that are not tables
+  (a function's output "view" struct, an enum argument), `#[ferrix::object]` derives all three with camelCase JSON
+  through ferrix's re-exports, so apps need no serde / ts-rs dependency (§3.4).
+- `#[query(dev_only)]` (also `mutation`, `action` and the `internal_*` variants): a function for development (seeding,
+  reading a dev inbox). It is refused unless the app runs in dev mode (`serve --dev`, `TestApp`), whoever calls it,
+  with the not-found error `'<path>' is a dev-only function: it only runs when the server is started with --dev`
+  (clients always see the message), and codegen puts it in a separate `devApi` export instead of `api`.
 - The annotated fn stays a normal, directly callable async fn (useful as a helper). The macro *also* emits a
   **function reference type** with the same name: a braced struct `pub struct list {}`. A braced struct lives only in
   the *type* namespace, so it never clashes with the fn or with local variables named `list`. Call other functions
@@ -162,7 +169,9 @@ pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryS
 pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, /* private */ }
 pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, /* private: runtime handle */ }
 // ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7.
-// All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit.
+// All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit
+// (in a query: the snapshot's commit time, NOT a reactive clock; see §1.10).
+// ctx.is_dev() -> bool on all three: the app runs in dev mode (`serve --dev`; `TestApp` too).
 
 // ctx.auth: the caller, from a validated access token (WS `Authenticate` or HTTP `Authorization: Bearer`).
 // Identity flows unchanged into every `ctx.run_*` call an action makes.
@@ -219,6 +228,9 @@ impl<'a, T: Table> Query<'a, T> {
     pub async fn take(self, n: usize) -> Result<Vec<Doc<T>>>;
     pub async fn first(self) -> Result<Option<Doc<T>>>;
     pub async fn unique(self) -> Result<Option<Doc<T>>>;                       // Err if > 1 match
+    pub async fn count(self) -> Result<u64>;   // without a filter: an index range count (SQL COUNT over index_entries,
+                                               // no documents read); with one: a scan counting matches. Read set: the
+                                               // whole range either way (also RawQuery::count)
     pub async fn paginate(self, opts: PaginationOpts) -> Result<PaginationResult<Doc<T>>>;   // see §1.2.1
     pub fn with_search_index(self, index: SearchIndex<T>, f: impl FnOnce(SearchFilter<T>) -> SearchFilter<T>)
         -> SearchQuery<'a, T>;                                                  // full-text search, see §1.8
@@ -285,7 +297,19 @@ impl PaginationOpts {
 }
 #[derive(Serialize, Deserialize, ts_rs::TS)]
 pub struct PaginationResult<T> { pub page: Vec<T>, pub is_done: bool, pub continue_cursor: String }
-impl<T> PaginationResult<T> { pub fn map<U>(self, f: impl FnMut(T) -> U) -> PaginationResult<U>; }
+impl<T> PaginationResult<T> {
+    pub fn map<U>(self, f: impl FnMut(T) -> U) -> PaginationResult<U>;
+    // Async variants keep the cursors too. They take closures returning futures (`|m| async move { .. }`, or a call
+    // of an async fn), not `AsyncFnMut`: the futures of async closures that borrow their captures are not provably
+    // Send today, and handlers must be. Share a cache behind a std Mutex (never held across an await).
+    pub async fn map_async<U, Fut: Future<Output = U>>(self, f: impl FnMut(T) -> Fut) -> PaginationResult<U>;  // in order
+    pub async fn try_map<U, E, Fut: Future<Output = Result<U, E>>>(self, f: impl FnMut(T) -> Fut)
+        -> Result<PaginationResult<U>, E>;                                          // in order; stops at the first error
+    pub async fn try_map_concurrent<U, E, Fut: Future<Output = Result<U, E>>>(self, concurrency: usize,
+        f: impl Fn(T) -> Fut) -> Result<PaginationResult<U>, E>;                     // up to `concurrency` at a time (>= 1),
+                                                                                 // results in page order
+}
+// e.g. `page.try_map(|m| view(ctx, &names, m)).await` turns a PaginationResult<Doc<Message>> into PaginationResult<MessageView>.
 pub const ferrix::db::pagination::MAX_PAGE_SCAN: usize = 10_000;
 
 #[query]
@@ -320,8 +344,14 @@ pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOp
   page never invalidates an earlier page.
 - **Codegen**: `PaginationOpts` and `PaginationResult<T>` are declared in `dataModel.ts`; the function above becomes
   `makeFunctionReference<"query", { channel: string, paginationOpts: PaginationOpts, }, PaginationResult<Doc<"messages">>>`.
-  In general, a top-level *generic* named output type is rendered by name (and declared) rather than inlined
-  (`__private::ts_inline`).
+  In general a function's output refers to named types by name, also inside wrappers (`Array<MessageView>`,
+  `ChannelInfo | null`, `PaginationResult<MessageView>`), and declares them in `dataModel.ts`
+  (`__private::ts_output`); only table types and the generated args structs are written out as object types
+  (`__private::ts_inline`). Field doc comments become JSDoc on their own lines: an object type with a documented field
+  is laid out one field per line, indented (`codegen::format_ts`); a one-line type doc becomes `/** … */`.
+- **Clients** also have `usePaginatedQueryWithStatus` (`@ferrix/react`): the same, but a failed page comes back as
+  `error` (with the pages that did load still in `results`) instead of being thrown. (`@ferrix/svelte`'s
+  `usePaginatedQuery` always returns `error`.)
 - **Clients** (`client.paginatedQuery`, `usePaginatedQuery` in `@ferrix/react` / `@ferrix/svelte`) subscribe to
   page 0 as `{ ...args, paginationOpts: { numItems, cursor: null } }`, each further page from the previous page's
   `continueCursor`, and re-subscribe a page with `endCursor` pinned to its `continueCursor` as soon as a next page
@@ -496,7 +526,10 @@ fn main() -> ferrix::Result<()> {
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
 `session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
-`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `dev_mailer(Arc<dyn Mailer>)` (replaces the built-in
+`DevLogMailer`, which prints every email to the log, in `--dev` when no mailer or SMTP is configured in code, on the
+command line or in `_settings`; never used outside `--dev`; it can forward to `DevLogMailer.send(email)` to keep the
+log lines), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
 `impersonation(bool)` (`POST /api/admin/impersonate`, default true).
 CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
@@ -507,7 +540,10 @@ CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-re
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
 `authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
 `reset_admin_password`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`, `revocations()`, ...).
-`TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+`TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests, as do
+`TestApp::create_user(email, password: Option<&str>) -> Result<Id<User>>` (a verified `_users` row, plus a password
+credential when given; no auth method needs to be enabled and no email is sent; `email_in_use` if taken) and
+`TestApp::as_user(id) -> TestUser` (`query` / `mutation` / `action` as `Identity::user(id, None)`, and `identity()`).
 
 **External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
 HTTP Bearer tokens, alongside ferrix's own:
@@ -636,7 +672,10 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact)
 ```
 - **URLs.** `get_url` returns `<public url>/api/storage/<id>`. The base is `StorageConfig::public_url`, else the auth
   public URL (`--public-url`, which `serve` defaults to `http://<--http address>`), else nothing (a root-relative
-  `/api/storage/<id>`, e.g. in `TestApp`). The id carries 96 random bits, so the URL is an **unguessable capability
+  `/api/storage/<id>`, e.g. in `TestApp`). **In `--dev`**, unless a public URL is set explicitly (`--public-url` /
+  `FERRIX_PUBLIC_URL`, `AuthConfig::public_url`, a TLS domain, or `StorageConfig::public_url`), file, signed and
+  upload URLs are root-relative, so an app served by a dev server that proxies `/api` (Vite) loads and uploads files
+  through it, same-origin. (`StorageConfig::public_url("")` asks for root-relative URLs explicitly.) The id carries 96 random bits, so the URL is an **unguessable capability
   URL**: whoever has it can read the file, nobody can enumerate files. It never changes, which keeps
   `get_url` deterministic inside queries. In private mode `get_url` fails with the user error `storage_private`.
   Upload URLs are `<base>/api/storage/upload?token=<token>`, token = `base64url(json {n: nonce, e: exp_s, b?:
@@ -991,8 +1030,8 @@ Errors: a query vector whose length isn't the index's `dims` (or containing NaN/
 filter on a field that isn't a filter field, more than 64 `or` branches. Writing a document whose vector field has the
 wrong length (or isn't an array of numbers) fails before anything is written, unless the write leaves that field
 unchanged (a vector made unindexable by a change of `dims` stays unindexed, and the document stays editable).
-Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs can't inline
-them for codegen): map results to a struct to return them.
+Documents whose vector field is missing or null are not indexed. Results are `(id, score)` tuples, which can be
+returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struct reads better in the client.
 - **`kind = "exact"`** (default): sqlite-vec's `vec0` brute-force scan; exact (checked against brute force). About
   18 ms per k=10 query at 50k × 384, 75–120 ms at 200k × 384.
 - **`kind = "hnsw"`** (`db::search::hnsw`, `db::search::ann`): an in-memory HNSW graph (M = 16, ef_construction =
@@ -1147,6 +1186,33 @@ pub struct MigrationReport {   // camelCase JSON
 
 ---
 
+### 1.10 Semantics to keep in mind
+
+- **Optimistic updates are replayed.** The client re-runs an optimistic update on top of every new server result until
+  its mutation's result has arrived. The update must be a pure function of the local store and the
+  args: create ids, timestamps and random values **outside** the closure (once per call), not inside it, or each
+  replay inserts a different item:
+  ```ts
+  const optimisticId = `optimistic:${crypto.randomUUID()}` as Id<"messages">;   // once
+  const now = Date.now();                                                      // once
+  send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: optimisticId, _creationTime: now, … } }));
+  ```
+- **Scheduled functions run without an identity.** A job from `ctx.scheduler.run_after/run_at` (and a cron) runs as
+  the anonymous identity (the execution log shows `scheduler`), whoever scheduled it: `ctx.auth.require_user()`
+  fails there. Pass the user (and whatever else the job needs) as arguments and use an internal function, so clients
+  can't call it with someone else's id: `ctx.scheduler.run_after::<deliver_reminder>(delay, (channel, user, text))`.
+- **`ctx.now()` in a query is the snapshot time, not a clock.** A subscribed query reruns when something it read
+  changes, never because time passes, so a result computed from `now()` ("expired", "5 minutes ago") goes stale.
+  Store the state and change it at the right time with a scheduled mutation (`run_at` an `expire` job, as the chat
+  example does for typing indicators), and format relative times in the client.
+- **Invalidation is by index range, so writes are coarse.** Any write to a document (even one that leaves it
+  unchanged) invalidates every query that read it through any index, and an insert invalidates every query whose
+  range covers its keys. Tips: skip no-op writes (check first; `mark_read` only patches when something is new, since
+  each membership write reruns the channel header for all its viewers); keep frequently changing fields (presence,
+  typing, counters, `lastSeen`) in their own small table rather than on a widely read document; read narrow ranges
+  (an `eq` prefix plus a `_creationTime` bound, `take(n)`: a limited scan records only what it scanned); prefer
+  `Query::count()` (no documents read) to collecting a range just to count it.
+
 ---
 
 ## 2. `::ferrix::__private` items (used ONLY by macro output)
@@ -1173,6 +1239,7 @@ pub struct FunctionDef {
     pub module_path: &'static str,   // module_path!() at the definition site
     pub name: &'static str,          // the Rust fn name
     pub visibility: Visibility,
+    pub dev_only: bool,              // #[query(dev_only)]: refused outside dev mode, generated into `devApi`
     pub handler: Handler,
     /// TS signature for codegen: (args TS type, output TS type), built with ts_rs.
     pub ts: fn() -> (String, String),
@@ -1185,7 +1252,10 @@ pub fn function_path(module_path: &str, name: &str) -> String;
 pub fn decode_args<A: DeserializeOwned>(name: &str, args: serde_json::Value) -> Result<A>;
 pub fn encode_output<O: Serialize>(out: O) -> Result<serde_json::Value>;
 pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::inline(cfg) with the runtime's one ts-rs config
-                                                                 // ('static: codegen also walks T's dependencies)
+                                                                 // ('static: codegen also walks T's dependencies);
+                                                                 // table types and generated args structs
+pub fn ts_output<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::name(cfg): a function's output, named types by
+                                                                 // name (codegen declares them and their dependencies)
 /// `TableDef::validate` of a table: Ok iff `doc` deserializes as `Doc<T>`; Err = the serde error message.
 pub fn validate_doc<T: Table>(doc: &serde_json::Value) -> Result<(), String>;
 #[linkme::distributed_slice] pub static MIGRATIONS: [MigrationDef];
@@ -1338,15 +1408,18 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
     module_path: module_path!(),
     name: "list",
     visibility: ::ferrix::__private::Visibility::Public,     // Internal for internal_*
+    dev_only: false,                                         // true for #[query(dev_only)]
     handler: ::ferrix::__private::Handler::Query(|ctx, args| ::std::boxed::Box::pin(async move {
         let a: __ferrix_args_list = ::ferrix::__private::decode_args("list", args)?;
         let out = list(&ctx, a.done, a.limit).await?;            // value namespace => the user's fn
         ::ferrix::__private::encode_output(out)
     })),
     ts: || (::ferrix::__private::ts_inline::<__ferrix_args_list>(),
-            ::ferrix::__private::ts_inline::<Vec<Doc<Todo>>>()),
+            ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
 };
 ```
+- The only attribute argument is `dev_only` (`#[query(dev_only)]`); anything else, a value (`dev_only = true`) or a
+  repeat is a compile error.
 - `Output` is the `T` in `Result<T>`. The macro must handle `Result<T>`, `ferrix::Result<T>` and
   `anyhow::Result<T>`: it takes the first generic argument of the last path segment named `Result`. Anything else is
   a compile error.
@@ -1411,6 +1484,43 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
   out of range, an invalid `name`, a non-async fn, `const`/`unsafe`/ABI/generics/variadics, a wrong context
   (`&QueryCtx`, by value, ...), a parameter count other than two, non-identifier patterns, parameter attributes, a
   borrowed document type, and a missing or non-`Result` return type.
+
+### 3.4 `#[object]`
+
+For types used in function signatures that are not tables: output "view" structs, enums, nested argument types.
+
+Input:
+```rust
+/// A message as the app shows it.
+#[object]
+#[derive(Clone, Debug)]
+pub struct MessageView {
+    #[serde(flatten)]
+    pub message: Doc<Message>,
+    pub author_name: String,
+}
+```
+Output:
+```rust
+#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
+#[serde(crate = "::ferrix::__private::serde")]
+#[ts(crate = "::ferrix::__private::ts_rs")]
+#[serde(rename_all = "camelCase")]          // these two only when the item has no `rename_all` of its own
+#[ts(rename_all = "camelCase")]
+/// A message as the app shows it.
+#[derive(Clone, Debug)]
+pub struct MessageView { #[serde(flatten)] pub message: Doc<Message>, pub author_name: String }
+```
+- Structs (named, tuple, unit) and enums, generic or not; for an enum, `rename_all` renames the variants
+  (`InProgress` → `"inProgress"`). A `#[serde(rename_all = "...")]` (or `#[ts(...)]`) on the item replaces the camelCase
+  default; other `#[serde]` / `#[ts]` attributes are kept (ts-rs follows serde's, e.g. `rename`, `skip`, `flatten`).
+- Compile errors: arguments (`#[object(x)]`), an item that is not a struct or enum, deriving `Serialize`,
+  `Deserialize` or `TS` again, and `crate = ...` in `#[serde]` / `#[ts]`.
+- **Embedding documents.** `Id<T>` fields work as is (TS `Id<"table">`). `#[serde(flatten)] doc: Doc<T>` puts the
+  document's fields (`_id`, `_creationTime` and the table's) at the top level of the object: `Doc<T>` implements
+  ts-rs' `inline_flattened`, so the TS type is `{ authorName: string, … } & Doc<"messages">`. Field names must not
+  clash with the table's (rename the view's field, e.g. `file` next to the document's `attachment`).
+- Codegen declares the type under its name in `dataModel.ts` (§1.2.1, "Codegen").
 
 ---
 

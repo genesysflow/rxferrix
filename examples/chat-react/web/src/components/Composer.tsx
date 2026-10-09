@@ -91,7 +91,7 @@ export function Composer({ channel, me }: { channel: ChannelInfo; me: Profile })
     const file = upload?.file;
     // Created once, outside the update: the update is replayed on every server change until the send completes.
     const optimisticId = `optimistic:${crypto.randomUUID()}` as Id<"messages">;
-    const sentAt = Date.now();
+    const creationTime = Date.now();
     const mutate = body.startsWith("/")
       ? send // slash commands post nothing (or post later)
       : send.withOptimisticUpdate((store, args) => {
@@ -108,8 +108,9 @@ export function Composer({ channel, me }: { channel: ChannelInfo; me: Profile })
               body: args.body.trim(),
               kind: "message",
               edited: false,
-              sentAt,
-              attachment:
+              _creationTime: creationTime,
+              attachment: args.attachment ?? null,
+              file:
                 preview && file
                   ? { url: preview, contentType: file.type, filename: file.name, size: file.size }
                   : null,

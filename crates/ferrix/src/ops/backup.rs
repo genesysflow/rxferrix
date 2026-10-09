@@ -13,7 +13,7 @@
 //! | `data.db` | always |
 //! | `aux.db` | `include_aux` (`--with-aux`) |
 //! | `storage/<storage id>` | `include_files` (`--with-files`) and local file storage: the blob of every `_storage` document in the snapshot |
-//! | `auth_secret.key` | only with `include_secret` (`--include-secret`): it signs sessions and upload URLs, so anyone holding the archive could forge them |
+//! | `auth_secret.key` | only with `include_secret` (`--include-secret`): it signs sessions and upload URLs, so anyone holding the archive could forge them (it also encrypts the secrets in `_settings`: keep a copy safe either way) |
 //! | `manifest.json` | always, last: format, version, creation time, the snapshot's commit ts, and the size and SHA-256 of every other entry |
 //!
 //! **Targets** ([`BackupTarget`]): a directory (default `<data dir>/backups`) or an S3-compatible bucket

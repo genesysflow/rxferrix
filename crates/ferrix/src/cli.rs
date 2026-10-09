@@ -1,6 +1,7 @@
 //! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]
 //! [--storage LOCATION] [--max-upload-size SIZE] [operations flags]`,
-//! `ferrix functions`, `ferrix codegen [--out DIR]`, `ferrix admin create|reset-password <email>`, and the
+//! `ferrix functions`, `ferrix codegen [--out DIR]`, `ferrix admin create|reset-password <email>`,
+//! `ferrix migrate [--name NAME] [--dry-run] [--restart]` / `ferrix migrate status` (`crate::migrations`), and the
 //! operations commands `backup`, `restore`, `export`, `import` (flags and commands in `crate::ops::cli`).
 
 use std::net::SocketAddr;
@@ -47,6 +48,38 @@ enum Command {
     Export(crate::ops::cli::ExportArgs),
     /// Import JSONL (an export directory or files) through the normal write path (offline).
     Import(crate::ops::cli::ImportArgs),
+    /// Run data migrations (`#[migration]`), or show their status with `migrate status`. Stop the server first, or
+    /// use `serve --migrate` / the dashboard to migrate a running server.
+    Migrate(MigrateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+#[command(args_conflicts_with_subcommands = true)]
+struct MigrateArgs {
+    #[command(subcommand)]
+    command: Option<MigrateCommand>,
+    /// Run only this migration (default: every migration that isn't done, in name order, stopping at a failure).
+    #[arg(long)]
+    name: Option<String>,
+    /// Run over every document and report what would change, without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Start the migration over from the first document, even if it is done.
+    #[arg(long, requires = "name")]
+    restart: bool,
+    /// Data directory.
+    #[arg(long, default_value = "fx_data")]
+    dir: PathBuf,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum MigrateCommand {
+    /// List the migrations with their state and progress.
+    Status {
+        /// Data directory.
+        #[arg(long, default_value = "fx_data")]
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,6 +151,9 @@ struct ServeArgs {
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
+    /// Run the migrations that aren't done (`#[migration]`, in name order) in the background after starting.
+    #[arg(long, env = "FERRIX_MIGRATE")]
+    migrate: bool,
     /// Where uploaded files are stored: a directory (default: <dir>/storage), file:///dir, or s3://bucket/prefix
     /// (S3, R2, MinIO; credentials, region and endpoint from the standard AWS_* environment variables).
     #[arg(long, env = "FERRIX_STORAGE", value_name = "LOCATION")]
@@ -252,6 +288,7 @@ impl Ferrix {
                 args,
                 AppOptions { auth: self.auth, storage: self.storage, scheduler: self.scheduler, ..Default::default() },
             ),
+            Some(Command::Migrate(args)) => migrate(args, self.auth, self.storage, self.scheduler),
             Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler, self.web),
             None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web),
         }
@@ -293,6 +330,104 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
         }
         Ok(())
     })
+}
+
+fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, scheduler: SchedulerOptions) -> crate::Result<()> {
+    let stdout_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,ferrix::migrations=info".into());
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
+    let dir = match &args.command {
+        Some(MigrateCommand::Status { dir }) => dir.clone(),
+        None => args.dir.clone(),
+    };
+    // Running migrations is offline: refuse while a server holds the data directory (`crate::ops::lock`).
+    let _lock = match &args.command {
+        Some(MigrateCommand::Status { .. }) => None,
+        None => Some(crate::ops::DirLock::acquire(&dir)?),
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let app = App::open(&dir, AppOptions { auth, storage, scheduler, ..Default::default() }).await?;
+        if matches!(args.command, Some(MigrateCommand::Status { .. })) {
+            print_migration_status(&app).await?;
+            return Ok(());
+        }
+        let options = crate::migrations::RunOptions { dry_run: args.dry_run, restart: args.restart, ..Default::default() };
+        let reports = match &args.name {
+            Some(name) => vec![app.run_migration_named(name, options).await?],
+            None => app.run_pending_migrations(options).await?,
+        };
+        if reports.is_empty() {
+            println!("ferrix migrate: nothing to do (no migration is pending)");
+        }
+        let mut failed = false;
+        for r in &reports {
+            println!("{}", describe_report(r));
+            failed |= r.outcome == crate::migrations::RunOutcome::Failed;
+        }
+        if failed {
+            anyhow::bail!("a migration failed; fix it and run `migrate` again to resume");
+        }
+        Ok(())
+    })
+}
+
+/// One report, as `ferrix migrate` prints it.
+fn describe_report(r: &crate::migrations::MigrationReport) -> String {
+    use crate::migrations::RunOutcome;
+    let mut s = format!("{} (table `{}`): ", r.name, r.table);
+    s.push_str(&match r.outcome {
+        RunOutcome::AlreadyDone => "already done".to_string(),
+        RunOutcome::AlreadyRunning => "already running elsewhere".to_string(),
+        RunOutcome::DryRun => format!("dry run: would change {} of {} document(s)", r.changed, r.processed),
+        outcome => format!(
+            "{}: {} batch(es), {} document(s) processed, {} changed",
+            serde_json::to_value(outcome).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+            r.batches,
+            r.processed,
+            r.changed
+        ),
+    });
+    if let Some(e) = &r.error {
+        match &r.failed_document {
+            Some(doc) => s.push_str(&format!("\n  failed on document {doc}: {e}")),
+            None => s.push_str(&format!("\n  error: {e}")),
+        }
+    }
+    if let Some(check) = &r.schema_check {
+        s.push_str(&format!("\n  schema check of `{}`: {check}", r.table));
+    }
+    for ex in &r.examples {
+        let after = ex.after.as_ref().map_or("(deleted)".to_string(), |v| v.to_string());
+        s.push_str(&format!("\n  {}:\n    before: {}\n    after:  {after}", ex.id, ex.before));
+    }
+    s
+}
+
+async fn print_migration_status(app: &App) -> crate::Result<()> {
+    let migrations = app.migration_summaries().await?;
+    if migrations.is_empty() {
+        println!("no migrations are declared");
+    }
+    for m in migrations {
+        let mut line =
+            format!("{:<10} {}  (table `{}`, {}/{} processed", m.state.as_str(), m.name, m.table, m.processed, m.documents);
+        if !m.declared {
+            line.push_str(", no longer declared");
+        }
+        line.push(')');
+        if let Some(e) = &m.error {
+            line.push_str(&format!("\n           error: {e}"));
+        }
+        if let Some(check) = &m.schema_check {
+            line.push_str(&format!("\n           schema check: {check}"));
+        }
+        println!("{line}");
+    }
+    for table in app.db().catalog().migrating_tables() {
+        println!("table `{table}` has documents that don't match its type until its migrations have run");
+    }
+    Ok(())
 }
 
 /// Read a password from stdin (one line). Prompts on stderr when stdin is a terminal (the input is echoed).
@@ -392,6 +527,26 @@ fn serve(
         let _lock = crate::ops::DirLock::acquire(&args.dir)?;
         let app = App::open(&args.dir, options).await?;
         app.start_scheduler().await?;
+        if args.migrate {
+            let app = app.clone();
+            tokio::spawn(async move {
+                match app.run_pending_migrations(Default::default()).await {
+                    Ok(reports) => reports.iter().for_each(|r| tracing::info!("migration {}", describe_report(r))),
+                    Err(e) => tracing::error!("running migrations failed: {e:#}"),
+                }
+            });
+        } else {
+            let pending: Vec<String> = app
+                .migration_summaries()
+                .await?
+                .into_iter()
+                .filter(|m| m.declared && m.state != crate::migrations::MigrationState::Done)
+                .map(|m| m.name)
+                .collect();
+            if !pending.is_empty() {
+                tracing::warn!(?pending, "migrations are waiting; run them with `serve --migrate`, `migrate` or the dashboard");
+            }
+        }
         let server = crate::ops::tls::start(crate::ops::web::router(app.clone(), &web), &listen).await?;
         let scheme = if server.https { "https" } else { "http" };
         tracing::info!(
@@ -492,6 +647,21 @@ mod tests {
         assert!(parse_size("5TB").is_err() && parse_size("big").is_err());
         let cli = parse(&["--storage", "gs://x"]).unwrap();
         assert!(storage_config(&cli.serve, StorageConfig::default()).is_err());
+    }
+
+    #[test]
+    fn migrate_args() {
+        let cli = parse(&["migrate"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Migrate(ref a)) if a.command.is_none() && a.name.is_none() && !a.dry_run));
+        let cli = parse(&["migrate", "--name", "todos:add", "--dry-run", "--dir", "d"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Migrate(ref a))
+            if a.name.as_deref() == Some("todos:add") && a.dry_run && a.dir == Path::new("d")));
+        let cli = parse(&["migrate", "status", "--dir", "d"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Migrate(MigrateArgs { command: Some(MigrateCommand::Status { ref dir }), .. }))
+            if dir == Path::new("d")));
+        assert!(parse(&["migrate", "--restart"]).is_err(), "--restart needs --name");
+        let cli = parse(&["serve", "--migrate"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Serve(ref a)) if a.migrate));
     }
 
     #[test]

@@ -6,20 +6,21 @@ WebSocket and get updated results automatically whenever a write affects them.
 
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
-Phase 9 (operations) is under way: backups, export and import, metrics, TLS, frontend serving and release builds are
-built (see [Deploying](#deploying)).
+Phase 9 (operations) is built: data migrations (`#[migration]`), backups, export and import, metrics, TLS, frontend
+serving and release builds (see [Deploying](#deploying)).
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `crates/ferrix` | The runtime: SQLite storage, query engine, read sets, write log, sync worker, axum server, CLI, codegen, `TestApp`. |
-| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`. |
+| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
 | `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery`, `useMutation`, `useAction`. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
+| `examples/chat-react` | The flagship example: a Slack-lite in React (auth, pagination, uploads, search, scheduler). |
 | `docs/CONTRACT.md` | Rust API and the exact code each macro generates. |
 | `docs/PROTOCOL.md` | WebSocket and HTTP protocol. |
 
@@ -86,9 +87,32 @@ await auth.handleRedirectCallback();              // on the page OAuth and email
 ```
 
 Access tokens are 15-minute HS256 JWTs signed with a key from `<data dir>/auth_secret.key`; refresh tokens rotate
-on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
-one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
-("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
+on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a rotated refresh token
+ends the sockets of that session **at once** (`AuthError`, then the client continues signed out), not when the access
+token expires. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
+one-time `/_/setup#token=…` link; `admin create <email>` works too.
+
+**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): ferrix verifies their JWTs
+against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
+subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in method:
+
+```rust
+.auth(AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())          // JWKS found by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com")))
+```
+
+```ts
+// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError.
+client.setAuth(({ forceRefresh }) => clerk.session!.getToken({ skipCache: forceRefresh }));
+```
+
+**Runtime settings.** Administrators can change OAuth providers, SMTP, the redirect allowlist, sign-ups, token
+lifetimes and CORS origins without a restart (`_system/settings:*`). Secrets are encrypted at rest with a key derived
+from `auth_secret.key` and never shown again. Whatever the code, the command line or the environment configures wins
+over these settings. Every administrator write is recorded in an audit log (`_audit_log`), and admins can act as a
+user through a short-lived, audited session. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md) ("Auth") and
+[docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5, §4.1.4, §4.1.5.
 
 ## File storage
 
@@ -185,6 +209,46 @@ a filter field of the table's documents. Rough numbers (release build, a laptop)
 one-word query takes 0.35 ms, a broad two-letter prefix matching every document 80 ms; 50k vectors of 384 dimensions:
 a k=10 query takes about 18 ms (7 ms with a filter keeping 1 in 10). The todo example has a search box.
 
+## Migrations
+
+At startup, a table whose Rust type changed has its documents validated; if some don't match, the server refuses to
+start, listing them. Make the change backward compatible (`Option<T>`, `#[serde(default)]`), or write a migration.
+Migrations get the stored JSON, so they work however far the type has moved on:
+
+```rust
+#[table(name = "todos")]
+pub struct Todo { pub text: String, pub done: bool, pub priority: i64 }   // `priority` is new
+
+#[migration(table = Todo, batch = 100)]             // optionally `name = "0002_priority"`: a stable id
+async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // a patch, or None to keep it
+}
+```
+
+Return `DocChange::{Keep, Patch, Replace, Delete}` for more, or take a typed `Doc<OldTodo>` when the old shape still
+deserializes. A migration runs in batches, each one transaction that also advances its cursor in the `_migrations`
+table, so every document is processed exactly once per run, a crash or a failure resumes where it stopped, and
+subscriptions update as documents change.
+
+```sh
+todo-server migrate --dry-run          # what would change (with examples); writes nothing
+todo-server migrate                    # run every migration that isn't done, in name order
+todo-server migrate status             # state and progress of each
+todo-server serve --migrate            # or: start, then run them in the background
+```
+
+While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
+table is *migrating*, writes may leave a document invalid only if it already was, and reads of not-yet-migrated
+documents fail. When its last migration finishes, the table is validated again in the same transaction; if anything
+is still invalid, the next start refuses. The dashboard backend has admin functions for it
+(`_system/migrations:{list, status, run, cancel}`). Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.9.
+
+## Binary data
+
+`ferrix::Bytes` holds binary values in documents, args and results. It travels and is stored as
+`{"$bytes": "<base64>"}` (TS: `{ $bytes: string }`), can be indexed (ordered byte-wise), and converts with
+`bytesToJson(uint8Array)` / `bytesFromJson(value)` from `@ferrix/client`. For files, use file storage instead.
+
 ## Dashboard
 
 Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an
@@ -195,8 +259,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   fields, a side panel with a JSON editor (insert, edit, delete; validated against the table's Rust type), and
   clickable ids that open the referenced document. Secrets (password and token hashes) are never shown, and system
   tables are read-only except the `name`, `image` and `emailVerified` of users.
-- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user*, showing the
-  result, log lines and duration.
+- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user* (through a
+  real, short-lived, audited session), showing the result, log lines and duration.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
 - **Users**: users, linked providers, sessions (revoke), delete.
 - **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
@@ -204,6 +268,10 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 - **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
   and retry.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
+
+Runtime settings, the audit log and "open the app as this user" already have their admin-only backend
+(`_system/settings:*`, `_system/audit:list`, `POST /api/admin/impersonate`; docs/CONTRACT.md §4.1.4, §4.1.5, §4.2);
+their pages are still to come.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every
 view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The built assets are committed, so
@@ -262,7 +330,8 @@ port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port
 **Backups.** `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
 snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus
 the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
-can forge sessions). `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
+can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
+in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
 schedule (the cron `ferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones; admins can list,
 create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md §4.2). `todo-server restore
 <archive|s3://…>` is offline: it refuses while a server holds the data directory, checks the archive (checksums,
@@ -298,6 +367,9 @@ cd examples/todo/web && bun run dev                             # web app on :51
 
 Open http://localhost:5173 in two tabs. Other commands: `todo-server functions` lists the registered functions,
 and `todo-server codegen --out <dir>` writes the TS API once.
+
+For a bigger app, [examples/chat-react](examples/chat-react/README.md) is a Slack-lite in React (backend on :8097,
+app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun e2e/chat.ts`.
 
 ## Tests
 

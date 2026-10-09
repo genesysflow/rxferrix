@@ -14,9 +14,9 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 
 ```rust
 use ferrix::prelude::*;
-// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError,
-//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts,
-//           table, query, mutation, action, internal_query, internal_mutation, internal_action, json!, Ferrix
+// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
+//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, DocChange,
+//           table, query, mutation, action, internal_query, internal_mutation, internal_action, migration, json!, Ferrix
 use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
@@ -130,7 +130,30 @@ pub struct SearchIndex<T> { /* … */ }
 pub struct VectorIndex<T> { /* … */ }
 
 pub enum Order { Asc, Desc }
+
+/// Binary data (`ferrix::Bytes`, in the prelude). JSON on the wire and in storage: `{"$bytes": "<base64>"}`
+/// (standard alphabet, padded; decoding is strict, so every value has exactly one form). TS: `{ $bytes: string }`;
+/// `@ferrix/client` exports `type Bytes`, `bytesToJson(Uint8Array | ArrayBuffer | ArrayBufferView)`,
+/// `bytesFromJson(b): Uint8Array` and `isBytes(v)`.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Bytes(pub Vec<u8>);   // Deref<Target = Vec<u8>>, AsRef<[u8]>, From<Vec<u8> | &[u8] | [u8; N]>, Into<Vec<u8>>,
+                                 // From/Into axum::body::Bytes (so `ctx.storage.store(bytes, ..)` takes it)
+impl Bytes {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self;
+    pub fn into_vec(self) -> Vec<u8>;
+    pub fn to_json(&self) -> serde_json::Value;               // {"$bytes": "..."}
+    pub fn from_json(v: &serde_json::Value) -> Option<Bytes>; // only an object whose single key is "$bytes"
+}
 ```
+**Bytes in indexes.** The key encoding (PLAN.md §4.3, `ferrix::keys`) recognizes the tagged form and gives it its own
+type tag between strings and arrays, `Undefined < Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`,
+with an order-preserving body (bytes compare byte-wise; a prefix sorts first), so `Bytes` fields work in `#[index]`,
+`with_index` ranges, search filter fields and the dashboard's index filters. Any other object, including one whose
+`$bytes` is not canonical base64, stays an Object. Adding the tag renumbered Array and Object, so the key encoding
+has a version in `_meta` (`key_encoding`, now 2; absent = 1): opening a database written with an older version
+rebuilds every index (ordinary, search and vector) before anything else. Pagination cursors from before such an
+upgrade may then fail with `paginate: cursor does not belong to this query` if their range bounds held arrays or
+objects.
 
 ### 1.2 Contexts and database API
 
@@ -152,7 +175,10 @@ impl Auth {
     pub fn is_admin(&self) -> bool;
     pub fn admin_id(&self) -> Option<Id<Admin>>;
     pub fn require_admin(&self) -> Result<Id<Admin>>;   // "unauthenticated" when anonymous, "forbidden" for users
-    pub fn session_id(&self) -> Option<Id<Session>>;
+    pub fn session_id(&self) -> Option<Id<Session>>;      // None for external JWTs (they have no session row). For an
+                                                        // admin acting as the user, an impersonation session whose
+                                                        // `Session::impersonated_by` is set (check it to refuse
+                                                        // sensitive operations).
     pub fn identity(&self) -> &Identity;
 }
 // What a query reads of `ctx.auth` decides who shares its subscription (docs/PROTOCOL.md "Shared subscriptions"):
@@ -362,7 +388,9 @@ impl Default for AppOptions { /* the defaults above, dev = false */ }
   fail and up to 20 ids with their serde errors, plus how to fix it. Fingerprints are then not updated, so the
   check runs again next time. With `skip_schema_check` nothing is validated or recorded. The check misses changes
   that don't show in the TS type (e.g. `u32` → `u8`, or `deny_unknown_fields`); reads of such documents still fail
-  with a clear error.
+  with a clear error. A table with failing documents **opens anyway while `#[migration]`s for it are pending** (not
+  `done` in `_migrations`): it is then *migrating*, with lenient writes, until its last migration has run (§1.9).
+  The error message suggests a migration (with a snippet) and names migrations of the table that are already done.
 
 **Running functions with their log lines** (what the WS worker and the HTTP API use):
 ```rust
@@ -459,19 +487,73 @@ fn main() -> ferrix::Result<()> {
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
 `session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
-`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`.
+`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+`jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
+`impersonation(bool)` (`POST /api/admin/impersonate`, default true).
 CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `FERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`FERRIX_SMTP_URL`, `FERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted).
 
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
-`sign_in_as(app, user)`, `create_admin`, `reset_admin_password`, `create_setup_token`, ...). `TestApp::with_auth(cfg)`
-and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+`authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
+`reset_admin_password`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`, `revocations()`, ...).
+`TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+
+**External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
+HTTP Bearer tokens, alongside ferrix's own:
+
+```rust
+use ferrix::auth::{AuthConfig, JwtProvider, JwtAlgorithm};
+AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())                // JWKS by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com"))
+    .jwt(JwtProvider::new("https://<ref>.supabase.co/auth/v1").audience("authenticated")
+        .jwks_url("https://<ref>.supabase.co/auth/v1/.well-known/jwks.json"))
+// JwtProvider: jwks_url(url), audience(aud) (repeatable), any_audience(), user_id_claim("sub"), leeway(60s),
+// algorithms([JwtAlgorithm::Rs256, Es256, EdDsa]), jwks_refetch_interval(30s), jwks_cache_ttl(1h).
+```
+
+- Routing: a header `alg` of `HS256` means a ferrix token; anything else is looked up by its `iss` (exact match). An
+  unknown issuer is refused without network traffic. HMAC and `none` are never accepted for external tokens, and the
+  `alg` must match the key's type and curve (and the JWK's own `alg`, if any).
+- Keys: the issuer's JWKS, cached for an hour; an unknown `kid` refetches it (key rotation), at most once per
+  `jwks_refetch_interval` per issuer; 5s timeouts, no redirects, 1 MiB cap; on fetch failure the cached keys stay.
+- Claims: `exp` required and `nbf` optional, both with the leeway; `aud` (string or array) must contain a configured
+  audience, unless `any_audience()` (startup fails if neither is set); the user id claim must be a non-empty string
+  (or number) of at most 255 characters. Rejections are `AuthError` / 401 `invalid_token` with the messages listed in
+  docs/PROTOCOL.md.
+- Users: the subject maps to an `_accounts` row `{ provider: <issuer>, providerAccountId: <subject> }` and its
+  `_users` row, both created on first sight, so `ctx.auth.user_id()` is an ordinary `Id<User>` for every sign-in
+  method. External subjects are never linked to an existing user by email (the issuer vouches for its subjects, not
+  for addresses another sign-in method may own); the new user copies `email` only if `email_verified` is true and no
+  user has it yet, plus `name` and an https `picture`. The profile isn't updated on later sign-ins. The identity has
+  no session id; the connection's identity ends at the token's `exp` (plus leeway), or as soon as the user is
+  deleted. Deleting a user doesn't block the subject: its next token provisions a new user (block it at the issuer).
+
+**Live revocation** (`ferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
+log stream) authenticate with `authenticate_watched`, which registers the token's session id (or, for external
+tokens, the user id) in the app's `Revocations` registry *before* checking that it exists, and returns a
+`SessionWatch` whose `ended()` future resolves when the document is deleted. One watcher task per app follows the
+write log; for commits that wrote a watched document's `by_id` key it checks the document in a fresh snapshot and
+fires the watches of deleted ones. So every way a session ends is covered (sign-out, refresh-token reuse,
+`revoke_session`, `delete_user`, password reset, ...) and refreshes (which rewrite the session) are not mistaken for
+deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
+guarantee 10).
+
+**Runtime settings and precedence** (`ferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
+the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
+encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
+wins, field by field: an explicit `signups(..)`, `access_token_ttl(..)` or `session_ttl(..)` call; a non-empty
+redirect list (`redirect_url`, `--auth-redirect-url`); any `smtp(..)` / `--smtp-url` or custom `mailer`; and, per
+provider id, an OAuth provider with credentials (settings may add providers with other ids). Everything else is taken
+from `_settings` when set there, else the defaults apply. CORS origins exist only as a setting (default: any origin).
 
 **System tables** (all defined with `#[table]` in `ferrix::auth::tables`): `_users` (`User`), `_credentials`
-(argon2id password hash per user), `_accounts` (provider + provider account id), `_sessions` (user or admin, keyed
-hash of the current refresh token, sliding `expires_at`, user agent, ip, `last_used_at`), `_used_refresh_tokens`
+(argon2id password hash per user), `_accounts` (provider + provider account id; for external JWTs the provider is
+the issuer URL), `_sessions` (user or admin, keyed hash of the current refresh token, sliding `expires_at`, user
+agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on impersonation sessions, whose expiry is
+fixed), `_used_refresh_tokens`
 (rotated refresh token hashes, for reuse detection; deleted with their session), `_verification_codes` (keyed hashes
 of a 6-digit code and a link token, purpose, expiry, attempts), `_admins` (email, argon2id hash). The auth code
 reads and writes them directly through `QueryDb` / `MutationDb` (not through registered functions), so hashes never
@@ -744,7 +826,7 @@ written, unless the write leaves that field unchanged (a vector made unindexable
 unindexed, and the document stays editable). Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
 can't inline them for codegen): map results to a struct to return them.
 
-**Storage and consistency.** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
+**Storage and consistency (search).** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
 `UNINDEXED` columns, each the hex of its memcomparable encoding, and `_search_<n>_docs` mapping FTS rowids to doc
 ids); each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filter fields as metadata columns). They
 are listed in `_search_indexes` and updated inside the mutation's write transaction by both the typed and untyped
@@ -759,6 +841,98 @@ index id plus a `by_id` point read for each document it examined; every write th
 search index (its text or a filter value; inserts and deletes of indexed documents) adds `(search index id, doc id)`
 to the commit entry. So a subscription is invalidated by any such write to the table (and by any change to a document
 it returned), never by unrelated tables. No change to `ReadSet`/`CommitEntry` was needed.
+
+### 1.9 Migrations
+
+```rust
+use ferrix::prelude::*;          // migration, DocChange
+use serde_json::Value;
+
+/// Old todos have no priority. Untyped: the document is the stored JSON (system fields included), so it works
+/// however far the Rust type has moved on.
+#[migration(table = Todo, batch = 100)]          // table = a #[table] type or "name"; batch 1..=10000 (default 100)
+async fn add_priority(ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // Some(patch) or None (keep)
+}
+
+/// Typed, when the old shape still deserializes; a stable name set explicitly.
+#[migration(table = "todos", name = "0002_split_owner")]
+async fn split_owner(ctx: &MutationCtx, doc: Doc<OldTodo>) -> Result<DocChange> {
+    if doc.owner.is_empty() { return Ok(DocChange::Delete); }
+    let user = ctx.db.query::<User>().first().await?;                   // ctx is a normal MutationCtx
+    Ok(DocChange::Patch(json!({ "ownerId": user.map(|u| u.id) })))
+}
+```
+
+```rust
+pub enum DocChange { Keep, Patch(Value) /* shallow merge */, Replace(Value) /* system fields optional, unchanged */, Delete }
+pub trait MigrationOutput { fn into_change(self) -> DocChange; }   // DocChange, Option<Value> (None = Keep), () (Keep)
+pub trait MigrationRef: 'static { fn name() -> String; fn table() -> &'static str; }   // emitted by the macro
+
+#[derive(Default)]
+pub struct RunOptions {
+    pub dry_run: bool,              // run over every document, report, write nothing (every batch rolled back)
+    pub restart: bool,              // start over from the first document, even if done
+    pub max_batches: Option<u64>,   // stop after n batches, still `running` (as if the process died); for tests
+}
+impl App {
+    pub async fn run_migration<M: MigrationRef>(&self, opts: RunOptions) -> Result<MigrationReport>;
+    pub async fn run_migration_named(&self, name: &str, opts: RunOptions) -> Result<MigrationReport>;
+    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // name order; stops at a failure
+    pub async fn migration_summaries(&self) -> Result<Vec<MigrationSummary>>;                    // what `list` returns
+}
+pub struct MigrationReport {   // camelCase JSON
+    pub name: String, pub table: String,
+    pub outcome: RunOutcome,   // completed | failed | canceled | alreadyDone | alreadyRunning | stopped | dryRun
+    pub batches: u64, pub processed: u64, pub changed: u64,   // this run only
+    pub error: Option<String>, pub failed_document: Option<String>,
+    pub schema_check: Option<String>,   // "passed" or "failed: <report>" when it ended the table's migrating state
+    pub examples: Vec<ChangeExample>,   // dry runs: up to 5 { id, before, after (null = deleted) }
+}
+// ferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
+// of `A-Za-z0-9_-.:/`, batch sizes); App::open also fails if a migration's table is not defined in code.
+```
+
+- **Names** are stable ids: `name = "..."` or, by default, the function path (`todos:add_priority`, like functions).
+  Moving or renaming the function changes a default name, which makes it a new migration: set `name` for
+  migrations that may move. Migrations run in **name order** (`ferrix migrate`, `serve --migrate`, `run` without a
+  name), stopping at the first that fails or is canceled.
+- **Batches.** A run first marks the migration `running` (creating its `_migrations` row). Each batch is one mutation
+  transaction, the internal system mutation `_system/migrations:run_batch` (so it gets the mutation timeout, panic
+  handling and an execution log entry): it reads the cursor from the row, pages through the table's
+  `by_creation_time` index (`query_table(..).paginate`, `batch` documents after the cursor), calls the migration on
+  each document, applies the change with `patch_raw` / `replace_raw` / `delete_raw` (the normal write path: indexes,
+  search, write log, so **subscriptions update**), and stores the new cursor and counts in the same transaction.
+  Each document is therefore processed **exactly once per run**, also across crashes and with concurrent runners.
+  Documents inserted during a run (by the app, or by the migration into its own table) come after the cursor and are
+  processed too, so a migration must leave documents already in the new shape alone (return `None`).
+- **Failure.** An error or panic from the migration, a rejected write (validation, a patch that isn't an object, a
+  replacement that changes `_id`), or the batch timing out rolls the whole batch back; then the row becomes
+  `failed` with `error` and `failedDocument` (when one document caused it). Running again resumes at the failed
+  batch. `cancel` stops a run after its current batch (`canceled`); running again resumes. A restart turns rows left
+  `running` into `pending` (cursor kept; `App::open` does this). `done` migrations don't run again unless
+  `restart`ed.
+- **Dry runs** go through every document from the start in batches that are rolled back (writes the migration makes
+  through `ctx.db` included) and never touch `_migrations`; they report counts and examples, or the first failure.
+- **Schema check interplay (lenient mode).** At startup a changed table whose documents don't match its type opens
+  only if it has pending migrations; it is then *migrating* (`Catalog::is_migrating`; `tableMigrating` in `list`),
+  and its fingerprint is not recorded. In a migrating table, a patch or replace may leave a document that doesn't
+  match the type **only if it didn't match before the write either** (so migrations can rewrite documents step by
+  step, and app writes to not-yet-migrated documents still work); inserts, and writes to documents that match, are
+  validated strictly. So the number of invalid documents can only go down. Typed reads of not-yet-migrated documents
+  still fail (`document does not match table`), so run the migrations promptly (`serve --migrate` runs them right
+  after startup) or keep the type backward compatible. In the transaction where the table's **last** pending
+  migration finishes, every document of the table is validated: if all match, the fingerprint is recorded and the
+  table leaves the migrating state (`schemaCheck: "passed"`); otherwise the report is stored in `schemaCheck` and
+  logged as an error, the table stays migrating until the process stops, and the next start refuses to open (unless
+  a new migration for the table is pending). Invalid documents never survive a restart unnoticed. With
+  `--skip-schema-check` nothing is migrating, and migration writes are validated strictly.
+- **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--dir DIR]` runs every migration
+  that isn't done (or one) and prints a report per migration (exit code 1 if one failed); `ferrix migrate status`
+  lists them with their state and progress. Run the CLI while the server is stopped (it is a separate process: a
+  running server would not see its writes in its subscriptions); for a running server use the dashboard functions
+  (§4.1.3) or start it with `serve --migrate` (`FERRIX_MIGRATE`), which runs pending migrations in the background
+  after startup. Without `--migrate`, `serve` logs a warning listing the migrations that aren't done.
 
 ---
 
@@ -803,6 +977,19 @@ pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::inline(cf
                                                                  // ('static: codegen also walks T's dependencies)
 /// `TableDef::validate` of a table: Ok iff `doc` deserializes as `Doc<T>`; Err = the serde error message.
 pub fn validate_doc<T: Table>(doc: &serde_json::Value) -> Result<(), String>;
+#[linkme::distributed_slice] pub static MIGRATIONS: [MigrationDef];
+pub type MigrationHandler = for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, Result<DocChange>>;
+pub struct MigrationDef {
+    pub module_path: &'static str, pub fn_name: &'static str,
+    pub name: Option<&'static str>,   // #[migration(name = "...")]
+    pub table: &'static str,          // <T as Table>::NAME or the string given
+    pub batch_size: usize,
+    pub handler: MigrationHandler,
+}
+impl MigrationDef { pub fn name(&self) -> String; }   // `name`, else function_path(module_path, fn_name)
+/// Deserialize the document for the migration's parameter type (identity for `Value`).
+pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> Result<T>;
+pub fn migration_output<O: MigrationOutput>(out: O) -> Result<DocChange>;
 /// Field type checks for #[search_index] / #[vector_index] (`#[diagnostic::on_unimplemented]` explains failures).
 pub trait SearchFieldType {}   // String, Option<String>
 pub trait VectorFieldType {}   // Vec<f32>, Option<Vec<f32>>
@@ -949,6 +1136,59 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
   Both also get `impl ::ferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
   don't.
 
+### 3.3 `#[migration]`
+
+Input:
+```rust
+/// Adds a default priority.
+#[migration(table = Todo, batch = 100)]
+pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> { BODY }
+```
+Output (the fn is emitted unchanged; `#[cfg]`s are copied to every generated item):
+```rust
+/// Adds a default priority.
+pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> { BODY }
+
+/// Migration reference for [`add_priority`](fn@add_priority).
+#[allow(non_camel_case_types, dead_code)]
+pub struct add_priority {}
+impl ::ferrix::migrations::MigrationRef for add_priority {
+    fn name() -> ::std::string::String { ::ferrix::__private::MigrationDef::name(&__FERRIX_MIGRATION_add_priority) }
+    fn table() -> &'static str { __FERRIX_MIGRATION_add_priority.table }
+}
+
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::ferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "add_priority",
+    name: ::core::option::Option::None,                      // Some("...") with `name = "..."`
+    table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
+    batch_size: 100usize,
+    handler: {
+        fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
+            -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
+            ::std::boxed::Box::pin(async move {
+                let __ferrix_doc: serde_json::Value = ::ferrix::__private::decode_migration_doc::<serde_json::Value>(__ferrix_doc)?;
+                let __ferrix_out: Option<serde_json::Value> = add_priority(__ferrix_ctx, __ferrix_doc).await?;
+                ::ferrix::__private::migration_output(__ferrix_out)
+            })
+        }
+        __ferrix_migrate
+    },
+};
+```
+- Arguments: `table` (required; a type path, checked to implement `Table`, or a string literal), `batch` (an integer
+  literal in `1..=10000`, default 100), `name` (a string literal of 1..=128 characters out of `A-Za-z0-9_-.:/`).
+- The fn takes exactly `(ctx: &MutationCtx, doc: T)` with `T: DeserializeOwned` (`serde_json::Value`, `Doc<Old>`,
+  ...) and returns `Result<O>` (any `...::Result`) with `O: MigrationOutput`; an unsupported `O` is reported by
+  `#[diagnostic::on_unimplemented]`.
+- Compile errors (with spans) for: a missing `table`, unknown or duplicate arguments, values of the wrong kind, `batch`
+  out of range, an invalid `name`, a non-async fn, `const`/`unsafe`/ABI/generics/variadics, a wrong context
+  (`&QueryCtx`, by value, ...), a parameter count other than two, non-identifier patterns, parameter attributes, a
+  borrowed document type, and a missing or non-`Result` return type.
+
 ---
 
 ## 4. Built-in (system) tables and functions
@@ -985,10 +1225,10 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 | `replace_document` | mutation | `{ id, document }` → `null`. System fields are ignored (`_id`, if given, must match). |
 | `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
 | `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
-| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` (`Identity::user(id, None)`; the user must exist). A failing function is a result with `success: false`, not an error. |
+| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
 | `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
-| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired }]` (no token hashes). |
-| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens. |
+| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, impersonatedBy }]` (no token hashes; `impersonatedBy` is the admin id of an impersonation session, else null). |
+| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens; its sockets get `AuthError` at once (live revocation). |
 | `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
 | `me` | query | `{}` → `{ _id, email }` of the signed-in admin. |
 
@@ -996,8 +1236,13 @@ Write errors (schema validation, unknown table, missing document) are user error
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
 written: …``).
 
-**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` (case-insensitive: `passwordHash`,
-`refreshTokenHash`, `tokenHash`, `codeHash`) is replaced by `"••••"` in everything the dashboard returns, and indexes
+**Audited.** `insert_document`, `patch_document`, `replace_document`, `delete_documents` (one entry per document),
+`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.5), so an entry exists
+exactly for the writes that committed.
+
+**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` or `encrypted` (case-insensitive:
+`passwordHash`, `refreshTokenHash`, `tokenHash`, `codeHash`, `_settings.encrypted`) is replaced by `"••••"` in
+everything the dashboard returns (audit log diffs included), and indexes
 over such a field are `usable: false` and refused by `documents` (a range filter on them would let an admin
 binary-search a hash).
 
@@ -1042,6 +1287,90 @@ indexes `by_name` and `by_next_run`.
 The admin functions start with `ctx.auth.require_admin()` like §4.1; `invalid_id` / `not_found` for bad ids. The
 dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`), its Scheduler page at `/_/scheduler`.
 
+### 4.1.3 Migration table and system functions
+
+Defined in `crates/ferrix/src/migrations` with the normal macros (§1.9).
+
+**`_migrations`** (`MigrationRecord`), one row per migration that has run at least once (a declared migration without
+a row is pending): `{ name, table, state: "pending" | "running" | "done" | "failed" | "canceled", cursor: string |
+null (a pagination cursor over the table's by_creation_time index), processed, changed, startedAt, finishedAt, error
+(cut to 4 KiB), failedDocument, schemaCheck: string | null ("passed" or "failed: <report>") }`, index `by_name`.
+Read-only through the dashboard's generic writes; codegen leaves it out.
+
+| Path `_system/migrations:…` | Kind | Args → result |
+|---|---|---|
+| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in name (= run) order, then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating }`. Live (reruns with each batch and each write to the migrated tables). |
+| `status` | query (admin) | `{ name }` → `MigrationSummary \| null`. |
+| `run` | action (admin) | `{ name?, dryRun?, restart? }` → `{ started: string[], reports: MigrationReport[] }`. Without `name`: every migration that isn't done, in name order. Real runs continue in the background (`started`; follow them with `list`); `reports` then holds the ones that didn't start (`alreadyDone`, `alreadyRunning`). Dry runs run to the end and return a report each (`outcome: "dryRun"` or `"failed"`, counts, up to 5 `examples` `{ id, before, after }`). `not_found` for an unknown name. |
+| `cancel` | mutation (admin) | `{ name }` → `"canceled"` (it stops after its current batch; the next run resumes) or `"notRunning"`. |
+| `start` | internal mutation | `{ name, restart }` → `"started" \| "alreadyRunning" \| "alreadyDone"`. |
+| `run_batch` | internal mutation | `{ name, dryRun, cursor? }` → `{ ran, state, processed, changed, done, cursor, schemaCheck, examples }`: one batch (§1.9). |
+| `fail` | internal mutation | `{ name, error, document? }` → `null`: marks the migration failed. |
+
+The admin functions start with `ctx.auth.require_admin()` like §4.1.
+
+### 4.1.4 Settings (`_settings`, `_system/settings:*`)
+
+Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
+need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`; there are
+no hand-written references in `@ferrix/dashboard` yet.
+
+**`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
+per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
+holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets as a JSON map by provider id, or the
+SMTP password), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
+from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
+key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
+A row that can't be decrypted (another `auth_secret.key`) is ignored with an error in the log: its providers are off
+until the secret is entered again.
+
+| Path `_system/settings:…` | Kind | Args → result |
+|---|---|---|
+| `get` | action | `{}` → `SettingsView` |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `oidc` (the latter needs an https `issuer`, http only for loopback or in `--dev`); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
+
+```ts
+type OAuthKind = "github" | "google" | "oidc";
+type SettingsView = {
+  oauth: { id: string; kind: OAuthKind; issuer: string | null; clientId: string; clientSecret: "••••" | null;
+           enabled: boolean; scopes: string[] | null; locked: boolean }[];    // locked: a provider with this id is configured in code
+  smtp: { url: string /* no password */; from: string; password: "••••" | null } | null;
+  redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
+  sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
+  locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
+  effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
+               oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */ };
+};
+type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
+                            clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
+                            enabled: boolean; scopes?: string[] | null };
+type SmtpInput = { url: string /* a password in the URL is moved out of it */; from: string;
+                   password?: string | null /* omitted, null or "••••": keep; "": none */ };
+```
+
+Precedence: §1.5 ("Runtime settings and precedence"); `locked` and `effective` show its result. Secrets are only ever
+accepted, never returned, and never logged: the execution log stores system functions' arguments with every
+`password` / `secret` / `token` field and every URL password replaced by `"••••"` (`settings::redact_args`).
+
+### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
+
+Defined in `crates/ferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
+action, targetTable, targetId, before, after, details, at }` with indexes `by_at = [at]`, `by_admin = [admin, at]`,
+`by_action = [action, at]`, `by_table = [targetTable, at]`, `by_target = [targetId, at]`. Actions: `insert`, `patch`,
+`replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
+for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
+`details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
+`open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1). Secrets are masked by the §4.1 rule.
+
+Each entry is written in the same transaction as the write it describes. The table is a system table, so the
+dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
+entries older than `AuthConfig::audit_retention` (90 days) are swept at startup and hourly (`ferrix::audit::sweep`).
+
+| Path | Kind | Args → result |
+|---|---|---|
+| `_system/audit:list` | query (admin) | `{ admin?, action?, table?, target?, since?, until?, paginationOpts }` → `PaginationResult<Doc<"_audit_log">>`, newest first, live. The most selective filter picks the index (`target` > `admin` > `action` > `table` > time); the others are applied while scanning; `since` / `until` bound `at` (ms, inclusive). |
+
 ### 4.2 Admin HTTP endpoints
 
 The execution log and server stats live outside the reactive database, so they are plain HTTP. Every endpoint
@@ -1060,13 +1389,23 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/import/{table}?mode=insert\|upsert\|replace` | Body: JSONL (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/ferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
-| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
+| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
+| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user, 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the
 short-lived access token travels only in the `Authorization` header. The stream ends when that token expires (at most
-15 minutes); revoking the session stops new streams, while one already open runs until then.
+15 minutes), and immediately (`event: revoked`) when its session ends.
+
+**Impersonation, security.** Impersonation lets an admin act with all of a user's rights, so: it is admin-only and
+can be disabled; every impersonation session is audited at creation (same transaction), carries
+`impersonatedBy` (apps can refuse sensitive operations such as changing credentials or payments when
+`ctx.db.get(ctx.auth.session_id()?)` has it set), shows in the user's session list, is revocable like any session
+(with live revocation), dies with `delete_user`, and has a hard expiry of at most an hour that refreshing can't
+extend. `run_function`'s sessions last 5 minutes and are deleted as soon as the run ends. The minted tokens are never
+logged; they travel only in the response body or a URL fragment (never sent to servers). Opening the app with them
+stores them in that browser's app storage, replacing whoever was signed in there: use a private window.
 
 ### 4.3 The embedded dashboard
 
@@ -1097,6 +1436,10 @@ scheduled ones beyond `keep`; manual archives are never rotated.
 binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
 `data.db`(`-wal`, `-shm`), `aux.db` and, if restored, `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the
 restored files put in place; blobs are added to the storage directory.
+
+A backup holds the whole database, system tables included (`_users`, `_settings`, `_audit_log`, ...); secrets in
+`_settings` are encrypted with a key derived from `auth_secret.key`, so they are readable after a restore only with
+the same key file.
 
 **Export directories** (`ferrix export`): `<table>.jsonl` or `<table>.csv` per table (all app tables by default;
 `--tables` may name system tables), `files/<storage id>` for exported `_storage` documents, and `manifest.json`:

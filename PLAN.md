@@ -208,7 +208,7 @@ ferrix/
   `Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`. A missing field is ordered as `Undefined`, below `Null`.
 - **`Id<T>`**: 4-byte table number plus 14 random bytes, encoded as base32 text. The table can be decoded from the ID, so `ctx.db.get(id)` needs no table name and IDs can be validated as belonging to the right table. The string form appears in TS as `Id<"messages">` (a branded string).
 - **System fields**: every `Doc<T>` is `{ _id: Id<T>, _creation_time: f64 (ms), ...T }`. These use `#[serde(flatten)]`.
-- **Wire and storage encoding**: JSON. Int64 values outside the safe JS range and bytes use a small tagged form (`{"$int":"…"}`, `{"$bytes":"base64"}`). Types are always known from the schema, so this rarely shows up.
+- **Wire and storage encoding**: JSON. Int64 values outside the safe JS range and bytes use a small tagged form (`{"$int":"…"}`, `{"$bytes":"base64"}`). Types are always known from the schema, so this rarely shows up. (Built: `ferrix::Bytes` is `{"$bytes": "<base64>"}`, TS `{ $bytes: string }` with `bytesToJson` / `bytesFromJson` in `@ferrix/client`, and has its own key tag; `$int` is not built: integers are plain JSON numbers.)
 
 ### 4.2 Schema from Rust structs
 
@@ -222,8 +222,8 @@ ferrix/
 - New table: register it and assign a table number.
 - New index: backfill synchronously at startup (fine at this scale) and log progress.
 - Removed index: delete its entries.
-- Changed fields: validate every existing document against the new schema. If any fail, **refuse to start** and print the failing doc IDs and a hint. `ferrix serve --dev` offers to open them in the dashboard.
-- Migrations: `#[migration]` functions are mutations that run in batches over a table. Ferrix tracks which ones have run in `_migrations`. `ferrix migrate` runs pending ones. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
+- Changed fields: validate every existing document against the new schema. If any fail, **refuse to start** and print the failing doc IDs and a hint (including a migration snippet), unless migrations for the table are pending (below). `ferrix serve --dev` offers to open them in the dashboard (not built yet).
+- Migrations (built, docs/CONTRACT.md §1.9): `#[migration(table = T, batch = N)]` functions get each document as raw JSON (or a typed `Doc<Old>`) and return a patch, a `DocChange` or nothing. They run in batches, each one mutation transaction that also advances a cursor in `_migrations`, so a run processes each document exactly once and resumes after a crash or a failure. `ferrix migrate [--name] [--dry-run]`, `ferrix migrate status`, `serve --migrate` and the admin functions `_system/migrations:{list, status, run, cancel}` run and show them. A table whose documents fail the startup check still opens while it has pending migrations, as *migrating*: writes may leave a document invalid only if it already was, and the check runs again (recording the fingerprint) in the transaction where its last migration finishes; a table still invalid after its migrations refuses the next start. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
 
 ### 4.3 Storage layout in SQLite
 
@@ -402,7 +402,8 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   The builder is `AuthConfig::password()` rather than `Auth::password()`, because `ferrix::Auth` is `ctx.auth`'s type.)
 - **Endpoints**: `/api/auth/{signup,signin,signout,refresh,verify,reset,oauth/:provider,oauth/:provider/callback}`.
 - **Hardening**: rate limits on auth endpoints (`tower` governor), a constant-time compare, and no account enumeration.
-- **Later**: accept external JWTs (Clerk, Auth0) through a JWKS URL.
+- **External JWTs** (Clerk, Auth0, Supabase, any OIDC issuer) verified through the issuer's JWKS and mapped to
+  provisioned `_users` (built in Phase 5).
 
 ### 7.2 File storage
 - Backend: `object_store`, either `LocalFileSystem` at `fx_data/storage/` or S3-compatible storage (R2, MinIO, AWS).
@@ -503,10 +504,14 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - Design change found during the build: function references are type-namespace-only braced structs, called as `ctx.run_query::<list>(args)` (docs/CONTRACT.md §1).
 
 ### Phase 1 — Core engine (L) — mostly done
-- [x] Full value model in the key encoding, with proptests. (There is no `Bytes` type yet; values are plain JSON.)
+- [x] Full value model in the key encoding, with proptests, including `ferrix::Bytes` (`{"$bytes": "<base64>"}`, its
+  own tag between String and Array; the encoding is versioned in `_meta` and older databases get every index rebuilt).
 - [x] `#[table]` with typed field and index handles, catalog reconciliation, and index backfill.
 - [x] Validating existing documents against a changed schema at startup (only tables whose schema fingerprint changed; `--skip-schema-check` escape hatch).
-- [ ] `#[migration]`.
+- [x] `#[migration]`: batched, resumable, exactly once per run, dry runs, `_migrations`, `ferrix migrate`,
+  `serve --migrate`, admin system functions, and lenient startup for tables with pending migrations (CONTRACT §1.9).
+  Not yet: a dashboard Migrations page (the system functions exist), dependencies between migrations other than name
+  order.
 - [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
 - [x] Mutations: `insert`, `patch`, `replace`, `delete`. Every write is validated against the table type (`patch` checks the merged document; `insert`/`replace` check that the stored JSON round-trips).
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
@@ -543,8 +548,13 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] The SPA (`packages/dashboard`, Svelte 5) embedded with `rust-embed` (feature `dashboard`) and served at `/_/`:
   sign-in and setup, data browser (live grid, index filters, JSON editor, follow IDs, schema view), function runner,
   live logs tail, users and sessions, overview. Built assets are committed; a test fails when they are stale.
-- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, audited dashboard writes, per-function
-  latency charts, impersonation via a real session.
+- [x] Audited dashboard writes: `_audit_log` written in each write's own transaction (generic writes,
+  `revoke_session`, `delete_user`, settings, impersonation, `run_function`), `_system/audit:list` (live, filterable),
+  90-day retention (docs/CONTRACT.md §4.1.5). The dashboard page for it is still to build.
+- [x] Impersonation via a real session: `run_function` "as user" runs through a short-lived, audited session marked
+  `impersonatedBy`; `POST /api/admin/impersonate` mints one to open the app as a user (§4.2). No UI button yet.
+- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, per-function latency charts, and the UI for
+  settings, the audit log and impersonation.
 
 ### Phase 5 — Auth (M) — mostly done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
@@ -555,9 +565,15 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
   React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
 - [x] The dashboard Users page (users, linked providers, sessions, revoke, delete; "act as user" in the runner).
-- [ ] Provider configuration in `_settings`, editable from the dashboard.
-- [ ] External JWTs via JWKS; live revocation of already-authenticated sockets on sign-out (today they keep their
-  identity until the access token expires).
+- [x] Provider configuration in `_settings` (OAuth providers, SMTP, redirect allowlist, sign-ups, token lifetimes,
+  CORS origins), secrets encrypted at rest (XChaCha20-Poly1305, key from `auth_secret.key`), applied without a
+  restart, config wins over settings; admin-only `_system/settings:get|update|send_test_email` (docs/CONTRACT.md
+  §4.1.4). The dashboard Settings page is still to build.
+- [x] External JWTs via JWKS (`AuthConfig::jwt(JwtProvider)`: RS256/ES256/EdDSA, cached JWKS with rate-limited
+  refetch on unknown `kid`, iss/aud/exp/nbf with leeway, subjects provisioned as `_users` + `_accounts`), on WS and
+  HTTP Bearer (§1.5).
+- [x] Live revocation: sockets and the admin log stream end with `AuthError` / `event: revoked` as soon as their
+  session (or, for external tokens, user) is deleted (docs/PROTOCOL.md guarantee 10).
 - **Milestone: usable for real apps with users.**
 
 ### Phase 6 — Scheduler and cron (M) — done
@@ -610,6 +626,22 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Not yet: search pagination, a dashboard search box, per-filter-value read sets (finer invalidation), an
   approximate (HNSW) index for millions of vectors, configurable tokenizers.
 
+### Phase 10 — DX fixes found by `examples/chat-react` (M)
+- [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
+  existing indexes on upgrade. Today they end in the random `_id`.
+- [ ] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
+  render cleanly.
+- [ ] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
+  don't depend on serde/ts-rs directly.
+- [ ] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
+  is composable with a custom `Mailer`.
+- [ ] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
+  (non-throwing).
+- [ ] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
+- [ ] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
+- [ ] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
+  scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
+
 ### Phase 9 — Operations polish (M)
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
   `auth_secret.key` only with `--include-secret`), `ferrix backup`, scheduled backups with rotation to a directory or
@@ -626,7 +658,9 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   caching, precompressed files. The todo example embeds its web app.
 - [x] Release builds: `scripts/release.sh` (static `x86_64-unknown-linux-musl` via cargo-zigbuild, ~18 MiB),
   `Dockerfile` (`FROM scratch`), `.dockerignore`, `deploy/ferrix.service`.
-- [ ] Migrations CLI; dashboard UI for backups, export/import and metrics (the endpoints exist); JSON logs.
+- [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`). Running them
+  (not `status`) takes the data directory lock like `import`.
+- [ ] Dashboard UI for backups, export/import and metrics (the endpoints exist); JSON logs.
 - [ ] Not yet: incremental/streaming backups (use Litestream), restoring from the dashboard, CSV import, hot reload of
   `--tls-cert` files, building the Docker image in CI (not built here: no Docker daemon was available).
 - [x] An interval-tree invalidation index (done in Phase 2).

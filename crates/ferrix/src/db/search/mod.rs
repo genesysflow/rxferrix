@@ -298,6 +298,14 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
     Ok(())
 }
 
+/// Drop, recreate and backfill one search or vector index (e.g. after a key encoding change, which changes the
+/// encoded filter columns).
+pub(crate) fn rebuild(conn: &Connection, table: &str, table_number: u32, info: &SearchIndexInfo) -> anyhow::Result<()> {
+    drop_storage(conn, info)?;
+    create_storage(conn, info)?;
+    backfill(conn, table, table_number, info)
+}
+
 fn create_storage(conn: &Connection, info: &SearchIndexInfo) -> anyhow::Result<()> {
     let filters: Vec<String> = (0..info.filter_fields().len()).map(|i| format!("f{i}")).collect();
     match &info.kind {

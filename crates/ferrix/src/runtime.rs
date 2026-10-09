@@ -342,6 +342,7 @@ impl App {
         crate::log::ensure_installed();
         let registry = registry()?;
         let tables = registered_tables();
+        let migrations = crate::migrations::declared(&tables)?;
         let dir = dir.as_ref().to_path_buf();
         let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
@@ -350,7 +351,7 @@ impl App {
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
         let retention = options.log_retention.clone();
         let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
-            let db = Database::open_with(&dir, &tables, &open_options)?;
+            let db = Database::open_with_migrations(&dir, &tables, &open_options, &migrations)?;
             let logs = Logs::open(&dir.join("aux.db"), retention)?;
             Ok((db, logs))
         })
@@ -383,6 +384,8 @@ impl App {
         };
         crate::storage::service::ensure_schema(&app).await?;
         crate::storage::service::spawn_sweeper(&app);
+        crate::migrations::startup(&app).await?;
+        crate::auth::start(&app).await?;
         Ok(app)
     }
 
@@ -643,6 +646,11 @@ impl App {
                 result = Err(e);
             }
             match result {
+                // A dry run (`crate::migrations`): the handler succeeded, but nothing is kept.
+                Ok(value) if hook.is_some_and(|h| !h.commit()) => {
+                    txn.rollback();
+                    Ok((value, self.db().write_log().latest()))
+                }
                 Ok(value) => {
                     let ts = txn
                         .commit_with(|conn, ts| match idempotency_key {
@@ -704,6 +712,10 @@ pub(crate) trait MutationHook: Send + Sync {
     fn before<'a>(&'a self, db: &'a MutationDb) -> futures::future::BoxFuture<'a, crate::Result<()>>;
     /// Runs after the handler succeeded, right before the commit. An error fails (and rolls back) the mutation.
     fn after<'a>(&'a self, db: &'a MutationDb, value: &'a Value) -> futures::future::BoxFuture<'a, crate::Result<()>>;
+    /// False: roll the transaction back even though the handler succeeded, and return its value (a dry run).
+    fn commit(&self) -> bool {
+        true
+    }
 }
 
 /// An execution being timed for the execution log.
@@ -724,7 +736,8 @@ impl Execution {
             path: path.to_string(),
             kind,
             identity: identity_summary(identity),
-            args: crate::exec_log::truncate_args(args),
+            // System functions' secret arguments (settings passwords, ...) are masked (`settings::redact_args`).
+            args: crate::exec_log::truncate_args(&crate::settings::redact_args(path, args)),
         }
     }
 

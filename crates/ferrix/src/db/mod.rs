@@ -72,13 +72,28 @@ impl Database {
     /// Like [`Database::open`]. Refuses to open if existing documents don't match changed table types, unless
     /// `options.skip_schema_check` (see [`schema_check`]).
     pub fn open_with(dir: &Path, tables: &[TableDef], options: &OpenOptions) -> anyhow::Result<Database> {
+        Self::open_with_migrations(dir, tables, options, &[])
+    }
+
+    /// Like [`Database::open_with`], with the declared migrations as `(name, table)` pairs: a table whose documents
+    /// don't match its type still opens while migrations for it are pending (not `done` in `_migrations`), as a
+    /// *migrating* table ([`Catalog::is_migrating`]).
+    pub fn open_with_migrations(
+        dir: &Path,
+        tables: &[TableDef],
+        options: &OpenOptions,
+        migrations: &[(String, String)],
+    ) -> anyhow::Result<Database> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
         search::vector::register_extension();
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
         dedup::ensure_schema(&writer)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
-        schema_check::run(&writer, &catalog, tables, options.skip_schema_check)?;
+        let coverage = crate::migrations::coverage(&writer, &catalog, migrations)?;
+        for table in schema_check::run(&writer, &catalog, tables, options.skip_schema_check, &coverage)? {
+            catalog.set_migrating(&table, true);
+        }
         let ts = storage::read_meta_u64(&writer, storage::META_TS)?;
         let readers = options.readers.max(1);
         Ok(Database {
@@ -218,7 +233,14 @@ impl Database {
             }
         };
         let now = self.clock.now_ms().max(last_time);
-        let state = WriteState { conn: guard, prev_ts, now, last_creation_time, writes: Vec::new() };
+        let state = WriteState {
+            conn: guard,
+            prev_ts,
+            now,
+            last_creation_time,
+            writes: Vec::new(),
+            catalog: self.catalog.clone(),
+        };
         Ok(Arc::new(WriteTxn {
             state: Mutex::new(Some(state)),
             catalog: self.catalog.clone(),
@@ -313,6 +335,8 @@ pub(crate) struct WriteState {
     now: f64,
     last_creation_time: f64,
     writes: Vec<(IndexId, Vec<u8>)>,
+    /// For [`Catalog::is_migrating`].
+    catalog: Arc<Catalog>,
 }
 
 impl Drop for WriteState {
@@ -497,7 +521,7 @@ impl WriteState {
         table: &TableInfo,
         id: DocId,
         mut fields: Map<String, Value>,
-        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+        validate: impl Fn(&Map<String, Value>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         reject_system_fields(&fields)?;
         let old = self.load(table, id)?;
@@ -506,7 +530,7 @@ impl WriteState {
                 fields.insert(sys.into(), v.clone());
             }
         }
-        validate(&fields)?;
+        self.validate_update(table, &old, &fields, validate)?;
         self.write(table, id, Some(&old), Some(&fields))
     }
 
@@ -516,14 +540,33 @@ impl WriteState {
         table: &TableInfo,
         id: DocId,
         patch: Map<String, Value>,
-        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+        validate: impl Fn(&Map<String, Value>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         reject_system_fields(&patch)?;
         let old = self.load(table, id)?;
         let mut new = old.clone();
         new.extend(patch);
-        validate(&new)?;
+        self.validate_update(table, &old, &new, validate)?;
         self.write(table, id, Some(&old), Some(&new))
+    }
+
+    /// Validate the new version of an existing document. In a migrating table ([`Catalog::is_migrating`]), a document
+    /// that didn't match the table's type before the write may still not match after it (the migrations will rewrite
+    /// it); a document that matched must still match.
+    fn validate_update(
+        &self,
+        table: &TableInfo,
+        old: &Map<String, Value>,
+        new: &Map<String, Value>,
+        validate: impl Fn(&Map<String, Value>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        match validate(new) {
+            Err(_) if self.catalog.is_migrating(&table.name) && validate(old).is_err() => {
+                tracing::debug!(table = %table.name, "lenient write to a document of a migrating table");
+                Ok(())
+            }
+            r => r,
+        }
     }
 
     pub(crate) fn delete(&mut self, table: &TableInfo, id: DocId) -> anyhow::Result<()> {

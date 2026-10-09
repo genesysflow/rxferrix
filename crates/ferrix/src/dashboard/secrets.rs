@@ -2,7 +2,8 @@
 //!
 //! **Masking.** The auth tables store password hashes (argon2id) and keyed hashes of refresh tokens, used refresh
 //! tokens, link tokens and numeric codes. The dashboard never returns them: in every `_`-prefixed table, a field whose
-//! name ends in `hash` (case-insensitive) is replaced by [`MASK`] in every document the dashboard returns. Indexes
+//! name ends in `hash` or `encrypted` (case-insensitive; the latter is `_settings`' sealed secrets) is replaced by
+//! [`MASK`] in every document the dashboard returns (and in `_audit_log` diffs). Indexes
 //! over such a field can't be used to browse a table either (a range filter on a hash index would let an admin
 //! binary-search the hash value), so they are reported as unusable and rejected by `documents`.
 //!
@@ -30,9 +31,11 @@ pub fn is_system_table(table: &str) -> bool {
     table.starts_with('_')
 }
 
-/// Is `field` of `table` a secret that the dashboard never returns?
+/// Is `field` of `table` a secret that the dashboard never returns? Hashes, and the sealed secrets of `_settings`
+/// (`encrypted`: ciphertext, but there is no reason to hand it out).
 pub fn is_secret_field(table: &str, field: &str) -> bool {
-    is_system_table(table) && field.to_ascii_lowercase().ends_with("hash")
+    let field = field.to_ascii_lowercase();
+    is_system_table(table) && (field.ends_with("hash") || field.ends_with("encrypted"))
 }
 
 /// The secret fields among the JSON field names of `table`'s indexes and of `doc`, for display.
@@ -145,6 +148,7 @@ mod tests {
             (VerificationCode::table_def(), vec!["codeHash", "tokenHash"]),
             (User::table_def(), vec![]),
             (Account::table_def(), vec![]),
+            (crate::settings::model::Setting::table_def(), vec!["encrypted"]),
         ];
         for (def, fields) in expect {
             let info = TableInfo {

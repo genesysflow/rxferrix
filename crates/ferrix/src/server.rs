@@ -46,9 +46,17 @@ pub fn router(app: App) -> Router {
         .merge(crate::ops::http::routes())
         .merge(dashboard_ui())
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
-        // on top-level navigations, which CORS doesn't govern).
-        .layer(CorsLayer::permissive())
+        // on top-level navigations, which CORS doesn't govern). Administrators can restrict origins at runtime.
+        .layer(cors(&app))
         .with_state(app)
+}
+
+/// Any origin, unless the `corsOrigins` setting lists the allowed ones (`crate::settings`).
+fn cors(app: &App) -> CorsLayer {
+    let app = app.clone();
+    CorsLayer::permissive().allow_origin(tower_http::cors::AllowOrigin::predicate(move |origin, _| {
+        origin.to_str().is_ok_and(|o| app.auth().cors_allows(o))
+    }))
 }
 
 #[cfg(feature = "dashboard")]

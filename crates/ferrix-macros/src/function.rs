@@ -66,7 +66,7 @@ struct Arg {
 }
 
 /// Returns the `T` of a `...::Result<T, ...>` return type.
-fn output_type(ty: &syn::Type) -> Option<&syn::Type> {
+pub(crate) fn output_type(ty: &syn::Type) -> Option<&syn::Type> {
     let syn::Type::Path(tp) = ty else { return None };
     if tp.qself.is_some() {
         return None;
@@ -103,7 +103,7 @@ fn is_moved_param_attr(a: &syn::Attribute) -> bool {
 }
 
 /// Checks that the first parameter's type is `&<Kind>Ctx` (matching on the last path segment).
-fn check_ctx_type(
+pub(crate) fn check_ctx_type(
     ty: &syn::Type,
     kind: FnKind,
     macro_name: &str,

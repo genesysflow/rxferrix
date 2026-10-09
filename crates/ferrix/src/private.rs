@@ -137,6 +137,11 @@ pub fn encode_output<O: Serialize>(out: O) -> crate::Result<serde_json::Value> {
     Ok(serde_json::to_value(out)?)
 }
 
+/// `TableDef::validate` for table `T`: the document must deserialize as `Doc<T>`.
+pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> Result<(), String> {
+    <crate::Doc<T> as serde::Deserialize>::deserialize(doc).map(drop).map_err(|e| e.to_string())
+}
+
 /// The inline TS type of `T`, rendered with [`ts_config`].
 ///
 /// While a codegen session is active on this thread (see [`crate::codegen`]), the named types `T` refers to are

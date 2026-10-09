@@ -101,6 +101,15 @@ impl Deref for MutationDb {
     }
 }
 
+/// The document about to be written must deserialize as `Doc<T>`.
+fn check_doc<T: Table>(doc: &Map<String, Value>, what: &str) -> anyhow::Result<()> {
+    use serde::Deserialize as _;
+    Doc::<T>::deserialize(doc).map(drop).with_context(|| {
+        let id = doc.get(crate::schema::ID_FIELD).and_then(Value::as_str).unwrap_or("?");
+        format!("{what} document {id} does not match table `{}`; nothing was written", T::NAME)
+    })
+}
+
 fn to_fields<T: Table>(value: &T) -> anyhow::Result<Map<String, Value>> {
     match serde_json::to_value(value)? {
         Value::Object(m) => Ok(m),
@@ -113,33 +122,31 @@ impl MutationDb {
         MutationDb { reads: QueryDb::new(Source::Write(txn.clone()), txn.catalog.clone()), txn }
     }
 
+    /// Insert a document. The stored JSON must round-trip: it is checked to deserialize back as `Doc<T>` (a
+    /// `Serialize` impl that doesn't match its `Deserialize`, e.g. `#[serde(skip_serializing)]` on a required
+    /// field, is rejected here rather than breaking every later read).
     pub async fn insert<T: Table>(&self, value: T) -> crate::Result<Id<T>> {
         let table = self.table::<T>()?.clone();
         let fields = to_fields(&value)?;
-        let id = self.txn.with_state(|s| s.insert(&table, fields))?;
+        let id = self.txn.with_state(|s| s.insert(&table, fields, |doc| check_doc::<T>(doc, "inserted")))?;
         Ok(Id::from_doc_id(id))
     }
 
+    /// Replace a document's user fields (system fields are kept). Round-trip checked like [`MutationDb::insert`].
     pub async fn replace<T: Table>(&self, id: Id<T>, value: T) -> crate::Result<()> {
         let table = self.table::<T>()?.clone();
         self.check_id(&table, id)?;
         let fields = to_fields(&value)?;
-        self.txn.with_state(|s| s.replace(&table, id.doc_id(), fields))
+        self.txn.with_state(|s| s.replace(&table, id.doc_id(), fields, |doc| check_doc::<T>(doc, "replaced")))
     }
 
-    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. The result
-    /// must still deserialize as `T`.
+    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. The merged
+    /// document must still deserialize as `Doc<T>`; otherwise the patch is rejected and nothing is written.
     pub async fn patch<T: Table>(&self, id: Id<T>, patch: Value) -> crate::Result<()> {
         let table = self.table::<T>()?.clone();
         self.check_id(&table, id)?;
         let Value::Object(patch) = patch else { bail!("patch must be a JSON object") };
-        self.txn.with_state(|s| {
-            s.patch(&table, id.doc_id(), patch, |merged| {
-                serde_json::from_value::<Doc<T>>(Value::Object(merged.clone()))
-                    .map(drop)
-                    .with_context(|| format!("patched document does not match table `{}`", T::NAME))
-            })
-        })
+        self.txn.with_state(|s| s.patch(&table, id.doc_id(), patch, |merged| check_doc::<T>(merged, "patched")))
     }
 
     pub async fn delete<T: Table>(&self, id: Id<T>) -> crate::Result<()> {

@@ -37,6 +37,7 @@ impl ::ferrix::Table for TodoItem {
                 fields : ::std::vec!["type"] }
             ],
             ts: || ::ferrix::__private::ts_inline::<TodoItem>(),
+            validate: ::ferrix::__private::validate_doc::<TodoItem>,
         }
     }
 }

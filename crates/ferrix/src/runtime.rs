@@ -5,15 +5,18 @@ use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Context;
 use futures::FutureExt;
 use serde_json::Value;
 
+use crate::db::dedup::{self, IdempotencyKey};
 use crate::db::query::{MutationDb, QueryDb, Source};
 use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
-use crate::error::FunctionNotFound;
+use crate::error::{FunctionNotFound, MutationTimeout};
+use crate::exec_log::{LogRetention, Logs};
 use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, TABLES, Visibility};
 use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 
@@ -85,7 +88,7 @@ impl ActionCtx {
         self.app.typed_query::<F>(args.into(), &self.identity).await
     }
 
-    /// Run a mutation (public or internal) in its own transaction.
+    /// Run a mutation (public or internal) in its own transaction. Its log lines also appear in this action's.
     pub async fn run_mutation<F: MutationFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
         Ok(self.app.typed_mutation::<F>(args.into(), &self.identity).await?.0)
     }
@@ -167,23 +170,52 @@ pub fn registered_tables() -> Vec<TableDef> {
 
 #[derive(Debug, Clone)]
 pub struct AppOptions {
-    /// Show real error messages to clients instead of "Server Error".
+    /// Show real error messages to clients instead of "Server Error", and send functions' log lines to clients.
     pub dev: bool,
     /// Number of read-only connections.
     pub readers: usize,
+    /// A mutation still running after this long is rolled back with a [`MutationTimeout`] error. Default: 5s. Only
+    /// checked at `.await` points: synchronous code is never preempted.
+    pub mutation_timeout: Duration,
+    /// Open even if existing documents may not match changed table types (see `db::schema_check`).
+    pub skip_schema_check: bool,
+    /// Retention of the execution log in `aux.db`. Default: 7 days or 200k rows.
+    pub log_retention: LogRetention,
 }
+
+/// Default [`AppOptions::mutation_timeout`].
+pub const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for AppOptions {
     fn default() -> Self {
-        AppOptions { dev: false, readers: crate::db::DEFAULT_READERS }
+        AppOptions {
+            dev: false,
+            readers: crate::db::DEFAULT_READERS,
+            mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
+            skip_schema_check: false,
+            log_retention: LogRetention::default(),
+        }
     }
 }
 
-/// The result of running a query: its value or error, what it read, and the ts it ran at.
+/// The result of running a query: its value or error, what it read, the ts it ran at, and its log lines.
 pub struct QueryRun {
     pub result: crate::Result<Value>,
     pub read_set: ReadSet,
     pub ts: u64,
+    pub log_lines: Vec<String>,
+}
+
+/// The result of running a mutation: `(value, commit ts)` or the error, and its log lines.
+pub struct MutationRun {
+    pub result: crate::Result<(Value, u64)>,
+    pub log_lines: Vec<String>,
+}
+
+/// The result of running an action, and its log lines (including those of the functions it called).
+pub struct ActionRun {
+    pub result: crate::Result<Value>,
+    pub log_lines: Vec<String>,
 }
 
 /// A running Ferrix application: database + function registry. Cheap to clone.
@@ -196,21 +228,37 @@ struct AppInner {
     db: Database,
     registry: &'static Registry,
     options: AppOptions,
+    logs: Logs,
 }
 
 impl App {
-    /// Open the database in `dir` and reconcile it with the tables linked into the binary.
+    /// Open the database in `dir` (`data.db`, plus `aux.db` for the execution log) and reconcile it with the tables
+    /// linked into the binary. Fails if existing documents don't match changed table types (see
+    /// [`AppOptions::skip_schema_check`]).
     pub async fn open(dir: impl AsRef<Path>, options: AppOptions) -> crate::Result<App> {
+        crate::log::ensure_installed();
         let registry = registry()?;
         let tables = registered_tables();
         let dir = dir.as_ref().to_path_buf();
-        let readers = options.readers;
-        let db = tokio::task::spawn_blocking(move || Database::open(&dir, &tables, readers)).await??;
-        Ok(App { inner: Arc::new(AppInner { db, registry, options }) })
+        let open_options =
+            crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
+        let retention = options.log_retention.clone();
+        let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
+            let db = Database::open_with(&dir, &tables, &open_options)?;
+            let logs = Logs::open(&dir.join("aux.db"), retention)?;
+            Ok((db, logs))
+        })
+        .await??;
+        Ok(App { inner: Arc::new(AppInner { db, registry, options, logs }) })
     }
 
     pub fn db(&self) -> &Database {
         &self.inner.db
+    }
+
+    /// The execution log (`aux.db`): query, live tail and per-function stats.
+    pub fn logs(&self) -> &Logs {
+        &self.inner.logs
     }
 
     pub fn options(&self) -> &AppOptions {
@@ -247,11 +295,28 @@ impl App {
 
     /// Run a public mutation; returns its result and commit ts.
     pub async fn run_mutation(&self, path: &str, args: Value, identity: &Identity) -> crate::Result<(Value, u64)> {
-        self.call_mutation(path, args, identity, false).await
+        self.call_mutation(path, args, identity, false, None).await.result
+    }
+
+    /// Run a public mutation, returning its log lines too. With an `idempotency_key`, a key seen in the last ~10
+    /// minutes returns the recorded response without running the mutation again (see `db::dedup`).
+    pub async fn execute_mutation(
+        &self,
+        path: &str,
+        args: Value,
+        identity: &Identity,
+        idempotency_key: Option<&IdempotencyKey>,
+    ) -> MutationRun {
+        self.call_mutation(path, args, identity, false, idempotency_key).await
     }
 
     /// Run a public action.
     pub async fn run_action(&self, path: &str, args: Value, identity: &Identity) -> crate::Result<Value> {
+        self.call_action(path, args, identity, false).await.result
+    }
+
+    /// Run a public action, returning its log lines too.
+    pub async fn execute_action(&self, path: &str, args: Value, identity: &Identity) -> ActionRun {
         self.call_action(path, args, identity, false).await
     }
 
@@ -280,23 +345,21 @@ impl App {
         args: F::Args,
         identity: &Identity,
     ) -> crate::Result<(F::Output, u64)> {
-        let (out, ts) = self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, true).await?;
+        let (out, ts) = self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, true, None).await.result?;
         Ok((serde_json::from_value(out)?, ts))
     }
 
     pub(crate) async fn typed_action<F: ActionFunction>(&self, args: F::Args, identity: &Identity) -> crate::Result<F::Output> {
-        let out = self.call_action(&F::path(), serde_json::to_value(args)?, identity, true).await?;
+        let out = self.call_action(&F::path(), serde_json::to_value(args)?, identity, true).await.result?;
         Ok(serde_json::from_value(out)?)
     }
 
     pub(crate) async fn call_query(&self, path: &str, args: Value, identity: &Identity, allow_internal: bool) -> QueryRun {
         let snapshot = match self.db().snapshot().await {
             Ok(s) => s,
-            Err(e) => return QueryRun { result: Err(e), read_set: ReadSet::new(), ts: 0 },
+            Err(e) => return QueryRun { result: Err(e), read_set: ReadSet::new(), ts: 0, log_lines: Vec::new() },
         };
-        let ts = snapshot.ts;
-        let (result, read_set) = self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await;
-        QueryRun { result, read_set, ts }
+        self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await
     }
 
     /// Run a query in an existing snapshot. Several of these may run concurrently on the same snapshot.
@@ -307,18 +370,21 @@ impl App {
         args: Value,
         identity: &Identity,
         allow_internal: bool,
-    ) -> (crate::Result<Value>, ReadSet) {
+    ) -> QueryRun {
+        let ts = snapshot.ts;
         let def = match self.lookup(path, FunctionKind::Query, allow_internal) {
             Ok(d) => d,
-            Err(e) => return (Err(e), ReadSet::new()),
+            Err(e) => return QueryRun { result: Err(e), read_set: ReadSet::new(), ts, log_lines: Vec::new() },
         };
         let Handler::Query(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
         let read_set = db.read_set_handle();
         let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), now: snapshot.time };
-        let result = catch_panics(handler(ctx, args)).await;
+        let exec = Execution::start(path, FunctionKind::Query, identity, &args);
+        let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
+        exec.finish(self.logs(), &result, &log_lines);
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
-        (result, read_set)
+        QueryRun { result, read_set, ts, log_lines }
     }
 
     pub(crate) async fn call_mutation(
@@ -327,21 +393,64 @@ impl App {
         args: Value,
         identity: &Identity,
         allow_internal: bool,
-    ) -> crate::Result<(Value, u64)> {
-        let def = self.lookup(path, FunctionKind::Mutation, allow_internal)?;
+        idempotency_key: Option<&IdempotencyKey>,
+    ) -> MutationRun {
+        let not_run = |e| MutationRun { result: Err(e), log_lines: Vec::new() };
+        let def = match self.lookup(path, FunctionKind::Mutation, allow_internal) {
+            Ok(d) => d,
+            Err(e) => return not_run(e),
+        };
         let Handler::Mutation(handler) = def.handler else { unreachable!("kind checked by lookup") };
-        let txn = self.db().begin_write().await?;
-        let ctx = MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), now: txn.now() };
-        match catch_panics(handler(ctx, args)).await {
-            Ok(value) => {
-                let ts = txn.commit().context("commit failed")?;
-                Ok((value, ts))
-            }
-            Err(e) => {
-                txn.rollback();
-                Err(e)
+        let txn = match self.db().begin_write().await {
+            Ok(t) => t,
+            Err(e) => return not_run(e),
+        };
+        // Checked under the writer lock, so a concurrent duplicate waits for the first and then finds its response.
+        if let Some(key) = idempotency_key {
+            match txn.with_state(|s| dedup::lookup(s.conn(), key)) {
+                Ok(None) => {}
+                Ok(Some(stored)) => {
+                    txn.rollback();
+                    tracing::debug!(path, session = %key.session_id, request_id = key.request_id, "duplicate mutation; replaying its response");
+                    return MutationRun { result: stored.into_result(), log_lines: Vec::new() };
+                }
+                Err(e) => return not_run(e),
             }
         }
+        let ctx = MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), now: txn.now() };
+        let timeout = self.options().mutation_timeout;
+        let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
+        let run = async {
+            let result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+                Ok(r) => r,
+                Err(_elapsed) => Err(MutationTimeout { path: path.to_string(), timeout }.into()),
+            };
+            match result {
+                Ok(value) => {
+                    let ts = txn
+                        .commit_with(|conn, ts| match idempotency_key {
+                            Some(key) => dedup::record_success(conn, key, &value, ts),
+                            None => Ok(()),
+                        })
+                        .context("commit failed")?;
+                    Ok((value, ts))
+                }
+                Err(e) => {
+                    match idempotency_key {
+                        Some(key) => {
+                            if let Err(record_err) = txn.rollback_then(|conn| dedup::record_error(conn, key, &e)) {
+                                tracing::warn!(path, "could not record a failed mutation for deduplication: {record_err:#}");
+                            }
+                        }
+                        None => txn.rollback(),
+                    }
+                    Err(e)
+                }
+            }
+        };
+        let (result, log_lines) = crate::log::capture(run).await;
+        exec.finish(self.logs(), &result, &log_lines);
+        MutationRun { result, log_lines }
     }
 
     pub(crate) async fn call_action(
@@ -350,12 +459,77 @@ impl App {
         args: Value,
         identity: &Identity,
         allow_internal: bool,
-    ) -> crate::Result<Value> {
-        let def = self.lookup(path, FunctionKind::Action, allow_internal)?;
+    ) -> ActionRun {
+        let def = match self.lookup(path, FunctionKind::Action, allow_internal) {
+            Ok(d) => d,
+            Err(e) => return ActionRun { result: Err(e), log_lines: Vec::new() },
+        };
         let Handler::Action(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let ctx = ActionCtx { auth: Auth::new(identity.clone()), app: self.clone(), identity: identity.clone() };
-        catch_panics(handler(ctx, args)).await
+        let exec = Execution::start(path, FunctionKind::Action, identity, &args);
+        let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
+        exec.finish(self.logs(), &result, &log_lines);
+        ActionRun { result, log_lines }
     }
+}
+
+/// An execution being timed for the execution log.
+struct Execution {
+    timestamp: i64,
+    started: std::time::Instant,
+    path: String,
+    kind: FunctionKind,
+    identity: Option<String>,
+    args: (String, bool),
+}
+
+impl Execution {
+    fn start(path: &str, kind: FunctionKind, identity: &Identity, args: &Value) -> Execution {
+        Execution {
+            timestamp: crate::db::wall_clock_ms() as i64,
+            started: std::time::Instant::now(),
+            path: path.to_string(),
+            kind,
+            identity: identity_summary(identity),
+            args: crate::exec_log::truncate_args(args),
+        }
+    }
+
+    fn finish<T>(self, logs: &Logs, result: &crate::Result<T>, log_lines: &[String]) {
+        let (args, args_truncated) = self.args;
+        logs.record(crate::exec_log::LogEntry {
+            id: 0,
+            timestamp: self.timestamp,
+            path: self.path,
+            kind: self.kind,
+            identity: self.identity,
+            duration_us: self.started.elapsed().as_micros() as u64,
+            outcome: crate::exec_log::LogOutcome::of(result),
+            error: result.as_ref().err().map(|e| format!("{e:#}")),
+            log_lines: log_lines.to_vec(),
+            args,
+            args_truncated,
+        });
+    }
+}
+
+/// The execution log's summary of who called. `Identity` is treated as opaque here (its Debug form), so changes
+/// to it don't ripple into the log; the anonymous identity logs as `None`.
+fn identity_summary(identity: &Identity) -> Option<String> {
+    const MAX: usize = 256;
+    if *identity == Identity::default() {
+        return None;
+    }
+    let mut s = format!("{identity:?}");
+    if s.len() > MAX {
+        let mut cut = MAX;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push('…');
+    }
+    Some(s)
 }
 
 /// Turn a panic inside user code into an error, so a buggy function can't take down a connection (and so that a

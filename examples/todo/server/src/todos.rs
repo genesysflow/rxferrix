@@ -1,3 +1,4 @@
+use ferrix::log;
 use ferrix::prelude::*;
 
 /// One item on the list.
@@ -31,6 +32,7 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     if text.is_empty() {
         return Err(UserError::new("empty_text", "A todo needs some text").into());
     }
+    log::info!(len = text.len(), "adding a todo");
     ctx.db.insert(Todo { text, done: false }).await
 }
 

@@ -24,6 +24,7 @@ impl ::ferrix::Table for User {
             name: "user",
             indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<User>(),
+            validate: ::ferrix::__private::validate_doc::<User>,
         }
     }
 }

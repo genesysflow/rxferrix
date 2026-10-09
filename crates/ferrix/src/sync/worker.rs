@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::db::dedup::IdempotencyKey;
 use crate::db::readset::ReadSet;
 use crate::error::ClientError;
 use crate::runtime::{App, Identity};
@@ -51,9 +52,14 @@ struct QueryState {
     force: bool,
 }
 
+/// A finished mutation or action. `log_lines` are already empty outside `--dev`.
 enum Completion {
-    Mutation { request_id: RequestId, result: Result<(Value, u64), ClientError> },
-    Action { request_id: RequestId, result: Result<Value, ClientError> },
+    Mutation { request_id: RequestId, result: Result<(Value, u64), ClientError>, log_lines: Vec<String> },
+    Action { request_id: RequestId, result: Result<Value, ClientError>, log_lines: Vec<String> },
+}
+
+fn client_log_lines(app: &App, lines: Vec<String>) -> Vec<String> {
+    crate::log::for_client(app.options().dev, lines)
 }
 
 /// A protocol violation that ends the connection with `FatalError`.
@@ -71,6 +77,8 @@ pub struct SyncWorker {
     /// The version the client has (the end version of the last Transition sent).
     sent: StateVersion,
     identity: Identity,
+    /// From `Connect`; with each mutation's requestId it makes the idempotency key.
+    session_id: Option<String>,
     queries: BTreeMap<QueryId, QueryState>,
     /// Highest commit ts of a successful mutation response not yet covered by a sent Transition.
     pending_mutation_ts: Option<u64>,
@@ -94,6 +102,7 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         out,
         sent: StateVersion::default(),
         identity: Identity::default(),
+        session_id: None,
         queries: BTreeMap::new(),
         pending_mutation_ts: None,
         completions_tx,
@@ -150,6 +159,7 @@ impl SyncWorker {
         match msg {
             ClientMessage::Connect { session_id, connection_count, .. } => {
                 tracing::debug!(%session_id, connection_count, "sync client connected");
+                self.session_id = Some(session_id);
             }
             ClientMessage::ModifyQuerySet { base_version, new_version, modifications } => {
                 if base_version != self.sent.query_set || new_version != base_version + 1 {
@@ -211,18 +221,23 @@ impl SyncWorker {
             ClientMessage::Mutation { request_id, udf_path, args } => {
                 // Run off the worker task so a slow mutation doesn't block query updates for this socket.
                 let (app, identity, tx) = (self.app.clone(), self.identity.clone(), self.completions_tx.clone());
+                // A client resending after a reconnect reuses (sessionId, requestId): the runtime then replays the
+                // recorded response instead of running the mutation twice.
+                let key = self.session_id.clone().map(|session_id| IdempotencyKey { session_id, request_id });
                 tokio::spawn(async move {
-                    let result = app.run_mutation(&udf_path, args, &identity).await;
-                    let result = result.map_err(|e| ClientError::from_anyhow(&e, app.options().dev));
-                    let _ = tx.send(Completion::Mutation { request_id, result });
+                    let run = app.execute_mutation(&udf_path, args, &identity, key.as_ref()).await;
+                    let result = run.result.map_err(|e| ClientError::from_anyhow(&e, app.options().dev));
+                    let log_lines = client_log_lines(&app, run.log_lines);
+                    let _ = tx.send(Completion::Mutation { request_id, result, log_lines });
                 });
             }
             ClientMessage::Action { request_id, udf_path, args } => {
                 let (app, identity, tx) = (self.app.clone(), self.identity.clone(), self.completions_tx.clone());
                 tokio::spawn(async move {
-                    let result = app.run_action(&udf_path, args, &identity).await;
-                    let result = result.map_err(|e| ClientError::from_anyhow(&e, app.options().dev));
-                    let _ = tx.send(Completion::Action { request_id, result });
+                    let run = app.execute_action(&udf_path, args, &identity).await;
+                    let result = run.result.map_err(|e| ClientError::from_anyhow(&e, app.options().dev));
+                    let log_lines = client_log_lines(&app, run.log_lines);
+                    let _ = tx.send(Completion::Action { request_id, result, log_lines });
                 });
             }
             ClientMessage::Pong => {}
@@ -232,9 +247,9 @@ impl SyncWorker {
 
     async fn handle_completion(&mut self, done: Completion) -> Result<(), Fatal> {
         match done {
-            Completion::Mutation { request_id, result } => {
+            Completion::Mutation { request_id, result, log_lines } => {
                 let committed_ts = result.as_ref().ok().map(|(_, ts)| *ts);
-                self.send(ServerMessage::MutationResponse { request_id, result }).await?;
+                self.send(ServerMessage::MutationResponse { request_id, result, log_lines }).await?;
                 // Read-your-writes: the client resolves the mutation only once it has a Transition at ts >= the
                 // commit ts, so make sure one follows promptly (even an empty one).
                 if let Some(ts) = committed_ts
@@ -244,8 +259,8 @@ impl SyncWorker {
                     self.refresh_and_send().await?;
                 }
             }
-            Completion::Action { request_id, result } => {
-                self.send(ServerMessage::ActionResponse { request_id, result }).await?;
+            Completion::Action { request_id, result, log_lines } => {
+                self.send(ServerMessage::ActionResponse { request_id, result, log_lines }).await?;
             }
         }
         Ok(())
@@ -307,20 +322,22 @@ impl SyncWorker {
         drop(snapshot);
 
         let mut mods = Vec::new();
-        for (id, (result, read_set)) in to_run.into_iter().zip(results) {
-            let (hash, modification) = match result {
+        for (id, run) in to_run.into_iter().zip(results) {
+            // Log lines don't count towards the hash: a rerun with the same result sends nothing.
+            let log_lines = client_log_lines(&self.app, run.log_lines);
+            let (hash, modification) = match run.result {
                 Ok(value) => {
                     let hash = hash_result(b"ok", &value);
-                    (hash, StateModification::QueryUpdated { query_id: id, value })
+                    (hash, StateModification::QueryUpdated { query_id: id, value, log_lines })
                 }
                 Err(e) => {
                     let error = self.client_error(&e);
                     let hash = hash_result(b"err", &serde_json::json!([error.message, error.data]));
-                    (hash, StateModification::QueryFailed { query_id: id, error })
+                    (hash, StateModification::QueryFailed { query_id: id, error, log_lines })
                 }
             };
             let q = self.queries.get_mut(&id).expect("query exists");
-            q.read_set = read_set;
+            q.read_set = run.read_set;
             q.force = false;
             if q.hash != Some(hash) {
                 q.hash = Some(hash);

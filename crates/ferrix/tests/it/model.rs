@@ -287,10 +287,10 @@ impl Client {
                 assert!(end_version.query_set >= start_version.query_set);
                 for m in modifications {
                     match m {
-                        StateModification::QueryUpdated { query_id, value } => {
+                        StateModification::QueryUpdated { query_id, value, .. } => {
                             self.results.insert(query_id, Ok(value));
                         }
-                        StateModification::QueryFailed { query_id, error } => {
+                        StateModification::QueryFailed { query_id, error, .. } => {
                             self.results.insert(query_id, Err(error.message));
                         }
                         StateModification::QueryRemoved { query_id } => {
@@ -305,7 +305,7 @@ impl Client {
                 self.log.states.push((end_version.ts, self.results.clone()));
                 self.uncovered.retain(|m| *m > end_version.ts);
             }
-            ServerMessage::MutationResponse { request_id, result } => {
+            ServerMessage::MutationResponse { request_id, result, .. } => {
                 assert!(self.outstanding_mutations.remove(&request_id));
                 let (dump, ts) = result.expect("test mutations succeed");
                 self.dumps.record(ts, dump);

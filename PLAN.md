@@ -351,20 +351,20 @@ The dev loop: `cargo watch -x 'run -- serve --dev'` rebuilds and restarts, codeg
   - An **optimistic update layer**: a stack of updates replayed over server state, each removed once its mutation's ts is observed.
   - **Auth**: `client.setAuth(fetchToken)`, which refreshes tokens before expiry and re-sends `Authenticate`.
 - API: `client.watchQuery(ref, args) → { onUpdate(cb), localQueryResult() }`, `client.mutation(ref, args, { optimisticUpdate })`, `client.action(ref, args)`, `client.query(ref, args)` (one-shot), and `client.connectionState()`.
-- Paginated queries: `client.paginatedQuery(ref, args, { initialNumItems })`. The server-side `.paginate(opts)` returns `{ page, isDone, continueCursor }`. Reactive pagination **pins each page's end cursor** after the first load so pages don't shift as items are inserted.
+- Paginated queries: `client.paginatedQuery(ref, args, { initialNumItems })` → `{ subscribe(cb), getCurrent() }` with `{ results, status, isLoading, error, loadMore(n) }`. The server-side `.paginate(opts)` returns `{ page, isDone, continueCursor }`. Once a page is followed by another, the client **re-subscribes it with `endCursor` pinned** to where the next page starts (keeping the old result until the pinned one arrives), so pages don't shift as items are inserted or deleted. Pinning happens on the client, so the protocol needs nothing special.
 
 ### 5.2 `@ferrix/react`
 - `<FerrixProvider client={…}>`
 - `useQuery(ref, args | "skip")` returns `T | undefined` and throws on error to an ErrorBoundary. `useQueryWithStatus` returns `{ data, error, isLoading }` for callers who prefer that shape. Both are built on `useSyncExternalStore`.
 - `useMutation(ref)` returns an async function with `.withOptimisticUpdate(fn)`.
 - `useAction(ref)`
-- `usePaginatedQuery(ref, args, { initialNumItems })` returns `{ results, status, loadMore(n) }`.
+- `usePaginatedQuery(ref, args | "skip", { initialNumItems })` returns `{ results, status, isLoading, loadMore(n) }` and throws a failed page's error to an ErrorBoundary.
 - `useFerrixAuth()` returns `{ isLoading, isAuthenticated, user }`; `useAuthActions()` returns `{ signIn, signOut }`.
 
 ### 5.3 `@ferrix/svelte` (Svelte 5 runes)
 - `setupFerrix(url)` puts the client in context.
 - `useQuery(ref, () => args | "skip")` returns a reactive object `{ data, error, isLoading }`. It is implemented with `createSubscriber` from `svelte/reactivity`, and the args thunk is tracked so the subscription switches when args change.
-- `useMutation(ref)` (with `.withOptimisticUpdate`), `useAction(ref)`, `usePaginatedQuery(...)`, `useAuth()`.
+- `useMutation(ref)` (with `.withOptimisticUpdate`), `useAction(ref)`, `usePaginatedQuery(ref, () => args | "skip", { initialNumItems })` (a reactive `{ results, status, isLoading, error, loadMore }`; changing args starts over), `useAuth()`.
 - The dashboard is written in Svelte, so these bindings get used for real from the first day.
 
 ---
@@ -487,7 +487,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Full value model in the key encoding, with proptests. (There is no `Bytes` type yet; values are plain JSON.)
 - [x] `#[table]` with typed field and index handles, catalog reconciliation, and index backfill.
 - [ ] Validating existing documents against a changed schema at startup; `#[migration]`.
-- [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`. **`paginate` is still to do.**
+- [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
 - [x] Mutations: `insert`, `patch`, `replace`, `delete`. (`patch` is not schema-validated yet.)
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
 - [x] `TestApp` harness.
@@ -504,7 +504,8 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 
 ### Phase 3 — Clients and codegen (L) — mostly done
 - [x] `ferrix codegen --out` producing `api.ts`, `dataModel.ts` and `index.ts`; auto codegen in `serve --dev --codegen-out` (or `FERRIX_CODEGEN_OUT`).
-- [x] `@ferrix/client` core with optimistic updates. **`paginatedQuery` / `usePaginatedQuery` are still to do.**
+- [x] `@ferrix/client` core with optimistic updates.
+- [x] Reactive pagination: `client.paginatedQuery` (pins each page's `endCursor` once a next page follows it), `usePaginatedQuery` for React and Svelte, and the `insertAtTop` optimistic helper.
 - [x] `@ferrix/react` and `@ferrix/svelte`.
 - [x] `examples/todo` (Svelte), with Playwright e2e scripts. `examples/chat-react` is still to do.
 - **Milestone reached: usable for a real (unauthenticated) app.**

@@ -36,6 +36,7 @@ pub mod __private {
 
 pub use cli::Ferrix;
 pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, mutation, query, table};
+pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb};
 pub use error::{Error, Result, UserError};
 pub use id::Id;
@@ -65,4 +66,5 @@ pub mod prelude {
         ActionCtx, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
         internal_action, internal_mutation, internal_query, json, mutation, query, table,
     };
+    pub use crate::{PaginationOpts, PaginationResult};
 }

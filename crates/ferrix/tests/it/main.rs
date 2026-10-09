@@ -7,6 +7,7 @@ mod codegen;
 mod contract;
 mod macros;
 mod model;
+mod pagination;
 mod query_engine;
 mod readsets;
 mod websocket;

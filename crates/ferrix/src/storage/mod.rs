@@ -27,6 +27,7 @@ pub mod config;
 pub mod ctx;
 pub mod http;
 pub mod service;
+pub mod thumbs;
 
 pub use axum::body::Bytes;
 pub use config::{StorageBackend, StorageConfig};

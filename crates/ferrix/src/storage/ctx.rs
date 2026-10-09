@@ -1,6 +1,7 @@
 //! `ctx.storage` in queries ([`QueryStorage`]), mutations ([`MutationStorage`]) and actions ([`ActionStorage`]).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 
@@ -16,6 +17,41 @@ fn not_found(id: Id<StoredFile>) -> crate::Error {
     UserError::new("not_found", format!("File {id} does not exist")).into()
 }
 
+/// How a signed URL's expiry is chosen.
+#[derive(Clone, Copy)]
+enum Expiry {
+    /// `now + ttl` (mutations and actions).
+    Exact,
+    /// `now + ttl` rounded up to a multiple of `ttl` (queries): the same URL for every rerun within one `ttl`
+    /// window, so query results stay deterministic and cacheable; valid for between `ttl` and `2·ttl`.
+    Bucketed,
+}
+
+/// The expiry (seconds since the epoch) of a URL signed at `now_ms` for `ttl`.
+fn expiry(service: &StorageService, now_ms: f64, ttl: Duration, mode: Expiry) -> Result<u64> {
+    let max = service.config.max_signed_url_ttl;
+    if ttl < Duration::from_secs(1) || ttl > max {
+        let message = format!("A signed URL's TTL must be between 1 second and {max:?} (got {ttl:?})");
+        return Err(UserError::new("invalid_ttl", message).into());
+    }
+    let now = (now_ms / 1000.0).floor() as u64;
+    let ttl = ttl.as_secs();
+    Ok(match mode {
+        Expiry::Exact => now + ttl,
+        Expiry::Bucketed => (now + ttl).div_ceil(ttl) * ttl,
+    })
+}
+
+/// `get_url` in private mode.
+fn private_storage() -> crate::Error {
+    UserError::new("storage_private", "File storage is private: use ctx.storage.get_signed_url(id, ttl)").into()
+}
+
+async fn signed_url(db: &QueryDb, service: &StorageService, id: Id<StoredFile>, ttl: Duration, mode: Expiry) -> Result<Option<String>> {
+    let expires = expiry(service, db.time(), ttl, mode)?;
+    Ok(db.get(id).await?.map(|_| service.signed_url(&id.as_str(), expires)))
+}
+
 /// `ctx.storage` in a query: deterministic reads only. Both reads are tracked like `ctx.db` reads, so a query using
 /// them reruns when the file is deleted.
 pub struct QueryStorage {
@@ -29,9 +65,23 @@ impl QueryStorage {
     }
 
     /// The URL serving the file (`<public url>/api/storage/<id>`), or `None` if it doesn't exist. Stable for a given
-    /// id: the id itself is the unguessable capability.
+    /// id: the id itself is the unguessable capability. In private mode (`StorageConfig::private`) this fails with
+    /// the user error `storage_private`: use [`QueryStorage::get_signed_url`].
     pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>> {
         get_url(&self.db, &self.service, id).await
+    }
+
+    /// A signed URL for the file that expires (`<url>?exp=<s>&sig=<hmac>`), or `None` if it doesn't exist; the only
+    /// kind of URL that works in private mode. `ttl` is at least 1 second and at most
+    /// `StorageConfig::max_signed_url_ttl` (7 days), else the user error `invalid_ttl`.
+    ///
+    /// **Determinism.** A query's result must not depend on when it runs, so here the expiry is the query's
+    /// snapshot time plus `ttl`, **rounded up to a multiple of `ttl`**: every rerun within one `ttl` window returns
+    /// the same URL (browsers cache it), and it stays valid for between `ttl` and `2·ttl`. A subscription is only
+    /// rerun when data it read changes, not when the URL expires, so choose a `ttl` longer than the page will show
+    /// the result, or get fresh URLs from a mutation or an action (exact expiry there).
+    pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        signed_url(&self.db, &self.service, id, ttl, Expiry::Bucketed).await
     }
 
     /// The file's `_storage` document (sha256, size, content type, ...), or `None`.
@@ -39,13 +89,24 @@ impl QueryStorage {
         self.db.get(id).await
     }
 
-    /// The serving URL of `id` without checking that the file exists.
+    /// The serving URL of `id` without checking that the file exists: plain, or in private mode signed for an hour
+    /// (bucketed, see [`QueryStorage::get_signed_url`]). For the dashboard's Files page.
     pub(crate) fn url_unchecked(&self, id: &str) -> String {
-        self.service.file_url(id)
+        if !self.service.config.private {
+            return self.service.file_url(id);
+        }
+        let ttl = Duration::from_secs(3600).min(self.service.config.max_signed_url_ttl).max(Duration::from_secs(1));
+        match expiry(&self.service, self.db.time(), ttl, Expiry::Bucketed) {
+            Ok(expires) => self.service.signed_url(id, expires),
+            Err(_) => self.service.file_url(id),
+        }
     }
 }
 
 async fn get_url(db: &QueryDb, service: &StorageService, id: Id<StoredFile>) -> Result<Option<String>> {
+    if service.config.private {
+        return Err(private_storage());
+    }
     Ok(db.get(id).await?.map(|_| service.file_url(&id.as_str())))
 }
 
@@ -71,6 +132,12 @@ impl MutationStorage {
     /// See [`QueryStorage::get_url`].
     pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>> {
         get_url(&self.db, &self.service, id).await
+    }
+
+    /// A signed URL valid for exactly `ttl` from this mutation's `now()`, or `None` if the file doesn't exist. See
+    /// [`QueryStorage::get_signed_url`].
+    pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        signed_url(&self.db, &self.service, id, ttl, Expiry::Exact).await
     }
 
     /// See [`QueryStorage::get_metadata`].
@@ -120,7 +187,17 @@ impl ActionStorage {
 
     /// See [`QueryStorage::get_url`] (read at the latest snapshot).
     pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>> {
+        if self.service().config.private {
+            return Err(private_storage());
+        }
         Ok(self.metadata(id).await?.map(|_| self.service().file_url(&id.as_str())))
+    }
+
+    /// A signed URL valid for exactly `ttl` from now, or `None` if the file doesn't exist. See
+    /// [`QueryStorage::get_signed_url`].
+    pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        let expires = expiry(self.service(), self.app.db().clock().now_ms(), ttl, Expiry::Exact)?;
+        Ok(self.metadata(id).await?.map(|_| self.service().signed_url(&id.as_str(), expires)))
     }
 
     /// See [`QueryStorage::get_metadata`] (read at the latest snapshot).

@@ -1,5 +1,6 @@
-//! [`StorageService`]: the blob store of an [`App`] (`app.storage()`), upload URL signing, streaming writes with
-//! hashing and a size limit, the `_storage` document writes, and the orphan sweep.
+//! [`StorageService`]: the blob store of an [`App`] (`app.storage()`), upload URL signing, signed file URLs,
+//! streaming writes with hashing and a size limit, the `_storage` document writes, the thumbnail cache, and the
+//! orphan sweep.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -97,6 +98,36 @@ pub(crate) enum WriteError {
     Store(anyhow::Error),
 }
 
+/// Why a signed file URL was refused. The messages are safe to show to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignatureProblem {
+    /// Private mode and no signature.
+    Required,
+    /// Malformed or wrongly signed.
+    Invalid,
+    Expired,
+}
+
+impl SignatureProblem {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            SignatureProblem::Required => "signature_required",
+            SignatureProblem::Invalid => "invalid_signature",
+            SignatureProblem::Expired => "url_expired",
+        }
+    }
+}
+
+impl fmt::Display for SignatureProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SignatureProblem::Required => "Files are private: use a signed URL",
+            SignatureProblem::Invalid => "The file URL's signature is invalid",
+            SignatureProblem::Expired => "The file URL has expired",
+        })
+    }
+}
+
 /// What [`StorageService::sweep`] did (also the result of the `_storage_sweep` system cron's jobs).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +139,9 @@ pub struct SweepStats {
     /// Blobs deleted because no `_storage` document refers to them.
     #[ts(type = "number")]
     pub deleted: u64,
+    /// Cached thumbnails deleted because their file is gone.
+    #[ts(type = "number")]
+    pub thumbnails: u64,
 }
 
 /// File storage of an [`App`]: get it with `app.storage()`.
@@ -116,12 +150,16 @@ pub struct StorageService {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     key: [u8; 32],
+    /// Signs file URLs (`get_signed_url`); derived from `key`.
+    file_url_key: [u8; 32],
     base_url: String,
     pub(crate) limiter: RateLimiter,
     /// Nonces of upload tokens whose upload is running (a second concurrent upload with one token is refused).
     tokens_in_flight: Mutex<HashSet<String>>,
     /// Blobs being written whose document doesn't exist yet (never swept).
     blobs_in_flight: Mutex<HashSet<DocId>>,
+    /// Thumbnails generated at the same time.
+    pub(crate) thumbnail_permits: tokio::sync::Semaphore,
 }
 
 impl fmt::Debug for StorageService {
@@ -160,15 +198,19 @@ impl StorageService {
         let (store, prefix) = config.build_store(data_dir)?;
         let base_url =
             config.public_url.as_deref().or(public_url).map(|u| u.trim_end_matches('/').to_string()).unwrap_or_default();
+        let file_url_key = blake3::derive_key("ferrix storage v1 signed file url HMAC key", &key);
+        let thumbnail_permits = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
         Ok(StorageService {
             config,
             store,
             prefix,
             key,
+            file_url_key,
             base_url,
             limiter: RateLimiter::default(),
             tokens_in_flight: Mutex::new(HashSet::new()),
             blobs_in_flight: Mutex::new(HashSet::new()),
+            thumbnail_permits: tokio::sync::Semaphore::new(thumbnail_permits),
         })
     }
 
@@ -188,9 +230,98 @@ impl StorageService {
     }
 
     /// The serving URL of a file: `<public url>/api/storage/<id>` (root-relative without a public URL). Stable: the
-    /// id is an unguessable capability, so the URL is the same in every query and needs no signature.
+    /// id is an unguessable capability, so the URL is the same in every query and needs no signature. (In private
+    /// mode it is refused; see [`StorageService::signed_url`].)
     pub fn file_url(&self, id: &str) -> String {
         format!("{}/api/storage/{id}", self.base_url)
+    }
+
+    /// A signed file URL valid until `expires` (seconds since the epoch):
+    /// `<public url>/api/storage/<id>?exp=<expires>&sig=<base64url HMAC-SHA256(id "\n" expires)>`, keyed by a key
+    /// derived from the storage key. Query parameters such as `thumb`, `fit` and `download` may be appended: the
+    /// signature covers the file and the expiry, not the variant.
+    pub fn signed_url(&self, id: &str, expires: u64) -> String {
+        format!("{}?exp={expires}&sig={}", self.file_url(id), self.file_signature(id, expires))
+    }
+
+    fn file_mac(&self, id: &str, expires: u64) -> Hmac<Sha256> {
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&self.file_url_key).expect("HMAC takes any key length");
+        mac.update(id.as_bytes());
+        mac.update(b"\n");
+        mac.update(expires.to_string().as_bytes());
+        mac
+    }
+
+    fn file_signature(&self, id: &str, expires: u64) -> String {
+        BASE64URL_NOPAD.encode(&self.file_mac(id, expires).finalize().into_bytes())
+    }
+
+    /// Check a request's `exp` / `sig` for file `id` at `now_s` (constant-time comparison). Without either, the
+    /// request is fine unless storage is private.
+    pub(crate) fn check_signature(
+        &self,
+        id: &str,
+        exp: Option<&str>,
+        sig: Option<&str>,
+        now_s: u64,
+    ) -> Result<Option<u64>, SignatureProblem> {
+        let (exp, sig) = match (exp, sig) {
+            (None, None) if self.config.private => return Err(SignatureProblem::Required),
+            (None, None) => return Ok(None),
+            (Some(exp), Some(sig)) => (exp, sig),
+            _ => return Err(SignatureProblem::Invalid),
+        };
+        let expires: u64 = exp.parse().map_err(|_| SignatureProblem::Invalid)?;
+        let sig = BASE64URL_NOPAD.decode(sig.as_bytes()).map_err(|_| SignatureProblem::Invalid)?;
+        self.file_mac(id, expires).verify_slice(&sig).map_err(|_| SignatureProblem::Invalid)?;
+        if expires <= now_s {
+            return Err(SignatureProblem::Expired);
+        }
+        Ok(Some(expires))
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // Thumbnails
+
+    /// The cache directory of a file's thumbnails: `<prefix>/_thumbs/<id>`.
+    fn thumbs_dir(&self, id: &str) -> ObjectPath {
+        let dir = format!("{}/{id}", super::thumbs::THUMBS_DIR);
+        if self.prefix.is_empty() { ObjectPath::from(dir) } else { ObjectPath::from(format!("{}/{dir}", self.prefix)) }
+    }
+
+    /// The cache key of one thumbnail variant (`200x200-cover`) of a file.
+    pub fn thumbnail_path(&self, id: &str, variant: &str) -> ObjectPath {
+        self.thumbs_dir(id).join(variant)
+    }
+
+    /// A cached thumbnail, if any.
+    pub(crate) async fn cached_thumbnail(&self, id: &str, variant: &str) -> crate::Result<Option<Bytes>> {
+        match self.store.get(&self.thumbnail_path(id, variant)).await {
+            Ok(result) => Ok(Some(result.bytes().await?)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(anyhow::Error::from(e).context(format!("reading a thumbnail of {id}"))),
+        }
+    }
+
+    /// Cache a generated thumbnail (a failure is only logged: it is generated again next time).
+    pub(crate) async fn cache_thumbnail(&self, id: &str, variant: &str, bytes: Bytes) {
+        if let Err(e) = self.store.put(&self.thumbnail_path(id, variant), PutPayload::from(bytes)).await {
+            tracing::warn!("storage: caching thumbnail {variant} of {id} failed: {e}");
+        }
+    }
+
+    /// Delete every cached thumbnail of a file.
+    async fn delete_thumbnails(&self, id: &str) -> crate::Result<()> {
+        let dir = self.thumbs_dir(id);
+        let mut listing = self.store.list(Some(&dir));
+        while let Some(meta) = listing.next().await {
+            let meta = meta.with_context(|| format!("listing the thumbnails of {id}"))?;
+            match self.store.delete(&meta.location).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e).with_context(|| format!("deleting a thumbnail of {id}")),
+            }
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -336,12 +467,13 @@ impl StorageService {
         self.store.get_opts(&self.blob_path(id), options).await
     }
 
-    /// Delete a blob (missing blobs are fine).
+    /// Delete a blob and its cached thumbnails (missing ones are fine).
     pub(crate) async fn delete_blob(&self, id: &str) -> crate::Result<()> {
         match self.store.delete(&self.blob_path(id)).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("deleting the blob of file {id}")),
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(e).with_context(|| format!("deleting the blob of file {id}")),
         }
+        self.delete_thumbnails(id).await
     }
 
     /// Delete a blob in the background (after the deleting transaction committed). A failure is logged; the sweep
@@ -437,8 +569,9 @@ impl StorageService {
     // Sweep
 
     /// Delete blobs that no `_storage` document refers to: left behind by a crash between an upload and its
-    /// document, or by a failed post-commit delete. Blobs younger than `config.orphan_grace`, blobs being uploaded
-    /// and keys that aren't storage ids are left alone.
+    /// document, or by a failed post-commit delete; and cached thumbnails (`_thumbs/<id>/…`) whose file is gone.
+    /// Blobs and thumbnails younger than `config.orphan_grace`, blobs being uploaded and keys that aren't storage ids
+    /// are left alone. Runs as the system cron `_storage_sweep`.
     pub async fn sweep(&self, app: &App) -> crate::Result<SweepStats> {
         let prefix = (!self.prefix.is_empty()).then(|| ObjectPath::from(self.prefix.as_str()));
         let table_number = app.db().catalog().table(StoredFile::NAME)?.number;
@@ -446,24 +579,34 @@ impl StorageService {
         let cutoff_ms = app.db().clock().now_ms() as i64 - self.config.orphan_grace.as_millis() as i64;
         let mut stats = SweepStats::default();
         let mut listing = self.store.list(prefix.as_ref());
-        let mut candidates: Vec<(DocId, ObjectPath)> = Vec::new();
+        // (file id, key, is a thumbnail)
+        let mut candidates: Vec<(DocId, ObjectPath, bool)> = Vec::new();
+        let thumbs_root = format!("{}/", super::thumbs::THUMBS_DIR);
         while let Some(meta) = listing.next().await {
             let meta = meta.context("listing stored blobs")?;
             stats.scanned += 1;
-            // Only direct children of the prefix named like a storage id.
-            let Some(name) = meta.location.filename() else { continue };
-            if meta.location != self.blob_path(name) {
-                continue;
-            }
+            // Direct children of the prefix named like a storage id, and `_thumbs/<storage id>/<variant>`.
+            let location = meta.location.as_ref();
+            let relative =
+                if self.prefix.is_empty() { Some(location) } else { location.strip_prefix(&format!("{}/", self.prefix)) };
+            let Some(relative) = relative else { continue };
+            let (name, thumbnail) = match relative.strip_prefix(&thumbs_root) {
+                Some(rest) => match rest.split_once('/') {
+                    Some((id, variant)) if !variant.contains('/') => (id, true),
+                    _ => continue,
+                },
+                None if !relative.contains('/') => (relative, false),
+                None => continue,
+            };
             let Ok(id) = DocId::decode(name) else { continue };
             if id.table_number() != table_number || meta.last_modified.timestamp_millis() > cutoff_ms {
                 continue;
             }
-            candidates.push((id, meta.location));
+            candidates.push((id, meta.location, thumbnail));
         }
         for chunk in candidates.chunks(500) {
             let snapshot = app.db().snapshot().await?;
-            let orphans: Vec<&(DocId, ObjectPath)> = snapshot.with_conn(|c| {
+            let orphans: Vec<&(DocId, ObjectPath, bool)> = snapshot.with_conn(|c| {
                 let mut out = Vec::new();
                 for entry in chunk {
                     if crate::db::storage::get_document(c, &entry.0.0)?.is_none() {
@@ -473,18 +616,24 @@ impl StorageService {
                 Ok(out)
             })?;
             drop(snapshot);
-            for (id, path) in orphans {
+            for (id, path, thumbnail) in orphans {
                 if self.blobs_in_flight.lock().unwrap_or_else(|e| e.into_inner()).contains(id) {
                     continue;
                 }
                 match self.store.delete(path).await {
+                    Ok(()) | Err(object_store::Error::NotFound { .. }) if *thumbnail => stats.thumbnails += 1,
                     Ok(()) | Err(object_store::Error::NotFound { .. }) => stats.deleted += 1,
                     Err(e) => tracing::warn!("storage sweep: deleting {path} failed: {e}"),
                 }
             }
         }
-        if stats.deleted > 0 {
-            tracing::info!("storage sweep: deleted {} orphaned blob(s) of {} scanned", stats.deleted, stats.scanned);
+        if stats.deleted > 0 || stats.thumbnails > 0 {
+            tracing::info!(
+                "storage sweep: deleted {} orphaned blob(s) and {} thumbnail(s) of {} scanned",
+                stats.deleted,
+                stats.thumbnails,
+                stats.scanned
+            );
         }
         Ok(stats)
     }

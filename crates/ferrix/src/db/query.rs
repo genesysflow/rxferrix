@@ -79,6 +79,15 @@ impl QueryDb {
         self.catalog.table(T::NAME)
     }
 
+    /// The time (ms since the epoch) this context reads at: the snapshot's commit time (queries), or the time the
+    /// write transaction commits at (mutations). Deterministic for a given ts.
+    pub(crate) fn time(&self) -> f64 {
+        match &self.source {
+            Source::Snapshot(s) => s.time,
+            Source::Write(t) => t.now(),
+        }
+    }
+
     /// The catalog (tables and indexes) this context reads.
     pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog

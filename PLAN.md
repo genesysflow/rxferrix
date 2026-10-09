@@ -602,6 +602,22 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Not yet: search pagination, a dashboard search box, per-filter-value read sets (finer invalidation), an
   approximate (HNSW) index for millions of vectors, configurable tokenizers.
 
+### Phase 10 — DX fixes found by `examples/chat-react` (M)
+- [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
+  existing indexes on upgrade. Today they end in the random `_id`.
+- [ ] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
+  render cleanly.
+- [ ] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
+  don't depend on serde/ts-rs directly.
+- [ ] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
+  is composable with a custom `Mailer`.
+- [ ] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
+  (non-throwing).
+- [ ] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
+- [ ] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
+- [ ] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
+  scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
+
 ### Phase 9 — Operations polish (M)
 - [ ] Backup and restore, export and import, migrations CLI, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.
 - [x] An interval-tree invalidation index (done in Phase 2).

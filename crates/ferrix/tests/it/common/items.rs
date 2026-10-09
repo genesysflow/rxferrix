@@ -17,7 +17,8 @@ impl ::ferrix::Table for Item {
         ::ferrix::TableDef { name: "items", indexes: vec![
             ::ferrix::IndexDef { name: "by_group_score", fields: vec!["group", "score"] },
             ::ferrix::IndexDef { name: "by_name", fields: vec!["name"] },
-        ], ts: || ::ferrix::__private::ts_inline::<Item>(),
+        ], search_indexes: vec![], vector_indexes: vec![],
+        ts: || ::ferrix::__private::ts_inline::<Item>(),
         validate: ::ferrix::__private::validate_doc::<Item> }
     }
 }

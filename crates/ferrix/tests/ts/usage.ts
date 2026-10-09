@@ -23,7 +23,17 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   assertType<
     Equals<
       TableNames,
-      "attachments" | "dash_items" | "items" | "lossy" | "notes" | "private_notes" | "sched_notes" | "tasks" | "todos"
+      | "attachments"
+      | "dash_items"
+      | "items"
+      | "lossy"
+      | "notes"
+      | "private_notes"
+      | "sched_notes"
+      | "search_messages"
+      | "search_vectors"
+      | "tasks"
+      | "todos"
     >
   >();
   // ... and the built-in `_storage` table (file storage).

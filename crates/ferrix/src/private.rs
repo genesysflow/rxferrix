@@ -14,6 +14,26 @@ use crate::error::InvalidArgs;
 use crate::runtime::{ActionCtx, MutationCtx, QueryCtx};
 use crate::schema::TableDef;
 
+/// Field types `#[search_index(search = f)]` accepts. `#[table]` emits `const _: () = assert_search_field::<Ty>();`.
+#[diagnostic::on_unimplemented(
+    message = "the search field of a #[search_index] must be a `String` or `Option<String>`, not `{Self}`",
+    label = "not a string field"
+)]
+pub trait SearchFieldType {}
+impl SearchFieldType for String {}
+impl SearchFieldType for Option<String> {}
+pub const fn assert_search_field<T: SearchFieldType + ?Sized>() {}
+
+/// Field types `#[vector_index(field = f)]` accepts. `#[table]` emits `const _: () = assert_vector_field::<Ty>();`.
+#[diagnostic::on_unimplemented(
+    message = "the field of a #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`, not `{Self}`",
+    label = "not a `Vec<f32>` field"
+)]
+pub trait VectorFieldType {}
+impl VectorFieldType for Vec<f32> {}
+impl VectorFieldType for Option<Vec<f32>> {}
+pub const fn assert_vector_field<T: VectorFieldType + ?Sized>() {}
+
 /// Every `#[table]` registers its `table_def` here.
 #[linkme::distributed_slice]
 pub static TABLES: [fn() -> TableDef];

@@ -165,6 +165,78 @@ fn table_errors() {
     );
 }
 
+#[test]
+fn table_search_and_vector_indexes() {
+    insta::assert_snapshot!(table(
+        quote!(name = "messages"),
+        quote! {
+            #[index(by_channel = [channel])]
+            #[search_index(search_body, search = body, filter = [channel, author_name])]
+            #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+            #[search_index(search_title, search = title)]
+            #[cfg(feature = "x")]
+            pub struct Message {
+                pub channel: String,
+                pub body: String,
+                pub title: Option<String>,
+                #[serde(rename = "author")]
+                pub author_name: Option<String>,
+                pub embedding: Option<Vec<f32>>,
+            }
+        }
+    ));
+}
+
+#[test]
+fn table_search_index_errors() {
+    insta::assert_snapshot!(
+        "table_err_search_indexes",
+        table_err(
+            quote!(),
+            quote! {
+                #[index(by_x = [x])]
+                #[search_index(by_x, search = text)]
+                #[search_index(text, search = text)]
+                #[search_index(by_id, search = text)]
+                #[search_index(s_missing, search = nope, filter = [x, x, gone, text, _id])]
+                #[search_index(s_no_field, filter = [x])]
+                #[search_index(s_wrong_type, search = x)]
+                #[search_index(s_dup)]
+                #[search_index(s_dup, search = text, search = text, filter = [x], filter = [x])]
+                #[vector_index(v_wrong_type, field = text, dims = 3)]
+                #[vector_index(v_f64, field = wide, dims = 3)]
+                #[vector_index(v_no_dims, field = emb)]
+                #[vector_index(v_zero, field = emb, dims = 0)]
+                #[vector_index(v_huge, field = emb, dims = 100000)]
+                #[vector_index(v_ok, field = emb, dims = 2, filter = [emb])]
+                struct T { x: u32, text: String, emb: Vec<f32>, wide: Vec<f64> }
+            }
+        )
+    );
+    insta::assert_snapshot!(
+        "table_err_search_index_syntax",
+        table_err(
+            quote!(),
+            quote! {
+                #[search_index(name = s, search = text)]
+                struct T { text: String }
+            }
+        )
+    );
+    insta::assert_snapshot!(
+        "table_err_search_index_unknown_arg",
+        table_err(
+            quote!(),
+            quote! {
+                #[search_index(s, search = text, dims = 3)]
+                #[vector_index(v, field = emb, dims = 3, search = text)]
+                #[search_index]
+                struct T { text: String, emb: Vec<f32> }
+            }
+        )
+    );
+}
+
 // ----------------------------------------------------------------------------------------------- functions
 
 #[test]

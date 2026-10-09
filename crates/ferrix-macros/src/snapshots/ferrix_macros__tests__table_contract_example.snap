@@ -25,6 +25,8 @@ impl ::ferrix::Table for Todo {
                 ::ferrix::IndexDef { name : "by_done", fields : ::std::vec!["done",
                 "createdBy"] }
             ],
+            search_indexes: ::std::vec![],
+            vector_indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<Todo>(),
             validate: ::ferrix::__private::validate_doc::<Todo>,
         }

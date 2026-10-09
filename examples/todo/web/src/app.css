@@ -6,6 +6,7 @@ button { padding: .4rem .8rem; cursor: pointer; }
 .toolbar { display: flex; gap: .4rem; margin: 1rem 0; align-items: center; }
 .toolbar .spacer { flex: 1; }
 .toolbar .active { font-weight: 700; text-decoration: underline; }
+.toolbar .search { width: 9rem; }
 ul { list-style: none; padding: 0; }
 li { display: flex; align-items: center; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid #8884; }
 li > label:first-child { flex: 1; }

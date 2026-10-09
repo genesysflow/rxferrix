@@ -108,6 +108,8 @@ pub mod lossy {
             ::ferrix::TableDef {
                 name: "lossy",
                 indexes: vec![],
+                search_indexes: vec![],
+                vector_indexes: vec![],
                 ts: || ::ferrix::__private::ts_inline::<Lossy>(),
                 validate: ::ferrix::__private::validate_doc::<Lossy>,
             }

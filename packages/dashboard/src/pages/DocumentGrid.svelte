@@ -128,6 +128,20 @@
             <li><code>{i.name}</code> <span class="muted">[{i.fields.join(", ")}]</span>{#if !i.usable}<span class="faint"> · not browsable</span>{/if}</li>
           {/each}
         </ul>
+        {#if table.searchIndexes.length > 0}
+          <h3>Search and vector indexes</h3>
+          <ul>
+            {#each table.searchIndexes as s (s.name)}
+              <li>
+                <code>{s.name}</code>
+                <span class="muted"
+                  >{s.kind === "vector" ? `vector ${s.field} (${s.dimensions} dims)` : `text ${s.field}`}{#if s.filterFields.length > 0}
+                    · filter [{s.filterFields.join(", ")}]{/if}</span
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if table.secretFields.length > 0}
           <p class="faint">Masked: {table.secretFields.join(", ")}</p>
         {/if}

@@ -183,8 +183,12 @@ pub mod hostile {
 
     #[table]
     #[index(by_a = [a])]
+    #[search_index(search_b, search = b, filter = [a])]
+    #[vector_index(by_v, field = v, dims = 2, filter = [a, b])]
     pub struct Shadowed {
         pub a: u32,
+        pub b: String,
+        pub v: Option<Vec<f32>>,
     }
 
     // Function references named like the expansion's locals.
@@ -236,7 +240,11 @@ fn tables_are_registered() {
     assert_eq!(
         summary,
         vec![
-            ("shadowed", vec![IndexDef { name: "by_a", fields: vec!["a"] }], "{ a: number, }".to_string()),
+            (
+                "shadowed",
+                vec![IndexDef { name: "by_a", fields: vec!["a"] }],
+                "{ a: number, b: string, v: Array<number> | null, }".to_string(),
+            ),
             ("todo_item", vec![], "{ type: string, }".to_string()),
             (
                 "todos",
@@ -272,6 +280,26 @@ fn table_validate_deserializes_a_doc() {
     let mut bad_prio = good.clone();
     bad_prio["prio"] = json!(300);
     assert!(validate(&bad_prio).is_err());
+}
+
+#[test]
+fn search_and_vector_indexes() {
+    use ferrix::{SearchIndexDef, VectorIndexDef};
+    use hostile::Shadowed;
+    let def = Shadowed::table_def();
+    assert_eq!(def.search_indexes, vec![SearchIndexDef { name: "search_b", search_field: "b", filter_fields: vec!["a"] }]);
+    assert_eq!(
+        def.vector_indexes,
+        vec![VectorIndexDef { name: "by_v", vector_field: "v", dimensions: 2, filter_fields: vec!["a", "b"] }]
+    );
+    let s: ferrix::SearchIndex<Shadowed> = Shadowed::search_b;
+    assert_eq!(s.name(), "search_b");
+    let v: ferrix::VectorIndex<Shadowed> = Shadowed::by_v;
+    assert_eq!(v.name(), "by_v");
+    // Equality covers the new fields.
+    assert_ne!(def, TableDef { search_indexes: vec![], ..def.clone() });
+    assert_ne!(def, TableDef { vector_indexes: vec![], ..def.clone() });
+    assert_eq!(todos::Todo::table_def().search_indexes, vec![]);
 }
 
 #[test]

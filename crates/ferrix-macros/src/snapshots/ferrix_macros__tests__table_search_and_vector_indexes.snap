@@ -1,0 +1,95 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table(quote!(name = \"messages\"), quote!\n{\n    #[index(by_channel = [channel])]\n    #[search_index(search_body, search = body, filter =\n    [channel, author_name])]\n    #[vector_index(by_embedding, field = embedding, dims = 1536, filter =\n    [channel])] #[search_index(search_title, search = title)]\n    #[cfg(feature = \"x\")] pub struct Message\n    {\n        pub channel: String, pub body: String, pub title: Option<String>,\n        #[serde(rename = \"author\")] pub author_name: Option<String>, pub\n        embedding: Option<Vec<f32>>,\n    }\n})"
+---
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+#[cfg(feature = "x")]
+pub struct Message {
+    pub channel: String,
+    pub body: String,
+    pub title: Option<String>,
+    #[serde(rename = "author")]
+    pub author_name: Option<String>,
+    pub embedding: Option<Vec<f32>>,
+}
+#[cfg(feature = "x")]
+impl ::ferrix::Table for Message {
+    const NAME: &'static str = "messages";
+    fn table_def() -> ::ferrix::TableDef {
+        ::ferrix::TableDef {
+            name: "messages",
+            indexes: ::std::vec![
+                ::ferrix::IndexDef { name : "by_channel", fields : ::std::vec!["channel"]
+                }
+            ],
+            search_indexes: ::std::vec![
+                ::ferrix::SearchIndexDef { name : "search_body", search_field : "body",
+                filter_fields : ::std::vec!["channel", "author"] },
+                ::ferrix::SearchIndexDef { name : "search_title", search_field : "title",
+                filter_fields : ::std::vec![] }
+            ],
+            vector_indexes: ::std::vec![
+                ::ferrix::VectorIndexDef { name : "by_embedding", vector_field :
+                "embedding", dimensions : 1536usize, filter_fields :
+                ::std::vec!["channel"], }
+            ],
+            ts: || ::ferrix::__private::ts_inline::<Message>(),
+            validate: ::ferrix::__private::validate_doc::<Message>,
+        }
+    }
+}
+#[cfg(feature = "x")]
+#[allow(non_upper_case_globals)]
+impl Message {
+    pub const channel: ::ferrix::Field<Message, String> = ::ferrix::Field::new(
+        "channel",
+    );
+    pub const body: ::ferrix::Field<Message, String> = ::ferrix::Field::new("body");
+    pub const title: ::ferrix::Field<Message, Option<String>> = ::ferrix::Field::new(
+        "title",
+    );
+    pub const author_name: ::ferrix::Field<Message, Option<String>> = ::ferrix::Field::new(
+        "author",
+    );
+    pub const embedding: ::ferrix::Field<Message, Option<Vec<f32>>> = ::ferrix::Field::new(
+        "embedding",
+    );
+    pub const _id: ::ferrix::Field<Message, ::ferrix::Id<Message>> = ::ferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::ferrix::Field<Message, ::core::primitive::f64> = ::ferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_channel: ::ferrix::Index<Message> = ::ferrix::Index::new("by_channel");
+    pub const by_creation_time: ::ferrix::Index<Message> = ::ferrix::Index::new(
+        "by_creation_time",
+    );
+    pub const search_body: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new(
+        "search_body",
+    );
+    pub const by_embedding: ::ferrix::VectorIndex<Message> = ::ferrix::VectorIndex::new(
+        "by_embedding",
+    );
+    pub const search_title: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new(
+        "search_title",
+    );
+}
+#[cfg(feature = "x")]
+const _: () = ::ferrix::__private::assert_search_field::<String>();
+#[cfg(feature = "x")]
+const _: () = ::ferrix::__private::assert_vector_field::<Option<Vec<f32>>>();
+#[cfg(feature = "x")]
+const _: () = ::ferrix::__private::assert_search_field::<Option<String>>();
+#[cfg(feature = "x")]
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_TABLE_Message: fn() -> ::ferrix::TableDef = <Message as ::ferrix::Table>::table_def;

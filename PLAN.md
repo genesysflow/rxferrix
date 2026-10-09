@@ -271,7 +271,7 @@ Why use generic tables instead of one SQLite table per user table:
   - **`take(n)` / `first()` narrow the recorded range** to the part actually scanned, from the start bound to the last key returned. "Latest 50 messages" is then not invalidated by inserts older than the 50th.
   - `.filter(...)` does **not** narrow the range. The whole scanned range was read, so the read set covers all of it.
 - `db.get(id)` records a point range on `by_id`.
-- A search query records a coarse `(table, search_index)` dependency: any write to that table that changes the search field or a filter field invalidates it.
+- A search query records a coarse `(table, search_index)` dependency: any write to that table that changes the search field or a filter field invalidates it. (Implemented as the full key range of a synthetic index id per search index, plus `by_id` points for the documents it examined; see docs/CONTRACT.md §1.8.)
 - `ctx.auth` access marks the query as identity-dependent.
 
 **Subscription manager** (a single task that owns all subscriptions):
@@ -583,8 +583,23 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Later: signed, expiring URLs for private files; image thumbnails; multiple-range responses; running the orphan
   sweep as a built-in cron once the scheduler exists.
 
-### Phase 8 — Search (M)
-- [ ] FTS5 search indexes, then `sqlite-vec` vector indexes.
+### Phase 8 — Search (M) — mostly done
+- [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`
+  with span-accurate errors, typed `SearchIndex<T>` / `VectorIndex<T>` handles, `TableDef::{search_indexes,
+  vector_indexes}` (docs/CONTRACT.md §1.8, §3.1).
+- [x] FTS5 search indexes: one FTS5 table per index (filter fields as `UNINDEXED` memcomparable-hex columns),
+  maintained in the write transaction by the typed and untyped write paths, reconciled and backfilled at startup,
+  checked by `verify_indexes`. `with_search_index(..).take(n)` ranks by bm25; user text becomes quoted terms (AND,
+  last one a prefix), so it can't inject FTS5 syntax; empty text matches nothing; 1024-result cap.
+- [x] Coarse reactivity: search indexes get ids in the upper half of the index id space; a search query reads that
+  id's full range plus `by_id` points of what it examined, and writes changing an entry write `(id, doc id)`. No read
+  set / write log type changes.
+- [x] `sqlite-vec` vector indexes (`vec0`, cosine, filter fields as metadata columns, statically linked and registered
+  with `sqlite3_auto_extension`); `ActionCtx::vector_search` (actions only), dimension-checked, OR/AND equality
+  filters, exact results (checked against brute force). ~18 ms per k=10 query over 50k × 384.
+- [x] Dashboard schema view lists search and vector indexes; the todo example has a live search box.
+- [ ] Not yet: search pagination, a dashboard search box, per-filter-value read sets (finer invalidation), an
+  approximate (HNSW) index for millions of vectors, configurable tokenizers.
 
 ### Phase 9 — Operations polish (M)
 - [ ] Backup and restore, export and import, migrations CLI, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.

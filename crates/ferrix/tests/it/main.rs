@@ -15,4 +15,5 @@ mod query_engine;
 mod readsets;
 mod storage;
 mod scheduler;
+mod search;
 mod websocket;

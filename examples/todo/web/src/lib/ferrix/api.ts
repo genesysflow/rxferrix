@@ -15,6 +15,7 @@ export const api = {
     list: makeFunctionReference<"query", { done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:list"),
     remaining: makeFunctionReference<"query", Record<string, never>, number>("query", "todos:remaining"),
     remove: makeFunctionReference<"mutation", { id: Id<"todos">, }, null>("mutation", "todos:remove"),
+    search: makeFunctionReference<"query", { text: string, done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:search"),
     set_done: makeFunctionReference<"mutation", { id: Id<"todos">, done: boolean, }, null>("mutation", "todos:set_done"),
     set_image: makeFunctionReference<"mutation", { id: Id<"todos">, image?: Id<"_storage"> | null, }, null>("mutation", "todos:set_image"),
   },

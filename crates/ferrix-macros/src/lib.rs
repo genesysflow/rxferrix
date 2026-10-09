@@ -13,6 +13,7 @@
 use proc_macro::TokenStream;
 
 mod function;
+mod search;
 mod table;
 mod util;
 
@@ -30,7 +31,9 @@ fn into_tokens(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 /// ```ignore
 /// #[table(name = "todos")]                   // optional; defaults to snake_case(struct name)
 /// #[index(by_done = [done, created_by])]
-/// pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<String> }
+/// #[search_index(search_text, search = text, filter = [done])]                  // full-text (FTS5)
+/// #[vector_index(by_embedding, field = embedding, dims = 384, filter = [done])]  // sqlite-vec
+/// pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<String>, pub embedding: Option<Vec<f32>> }
 /// ```
 #[proc_macro_attribute]
 pub fn table(attr: TokenStream, item: TokenStream) -> TokenStream {

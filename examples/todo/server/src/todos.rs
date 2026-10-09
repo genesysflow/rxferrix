@@ -8,6 +8,7 @@ use ferrix::scheduler::ScheduledJob;
 /// One item on the list, with an optional image (a stored file).
 #[table(name = "todos")]
 #[index(by_done = [done])]
+#[search_index(search_text, search = text, filter = [done])]
 pub struct Todo {
     pub text: String,
     pub done: bool,
@@ -25,6 +26,23 @@ pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Todo>>> 
         None => ctx.db.query::<Todo>(),
     };
     query.order(Order::Desc).take(500).await
+}
+
+/// Todos whose text contains every word of `text` (the last word as a prefix, for search-as-you-type), most
+/// relevant first. Pass `done` to search only open or only completed ones.
+#[query]
+pub async fn search(ctx: &QueryCtx, text: String, done: Option<bool>) -> Result<Vec<Doc<Todo>>> {
+    ctx.db
+        .query::<Todo>()
+        .with_search_index(Todo::search_text, |q| {
+            let q = q.search(Todo::text, text);
+            match done {
+                Some(done) => q.eq(Todo::done, done),
+                None => q,
+            }
+        })
+        .take(50)
+        .await
 }
 
 /// How many todos are still open.

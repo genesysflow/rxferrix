@@ -1,0 +1,23 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!\n{\n    #[index(by_x = [x])] #[search_index(by_x, search = text)]\n    #[search_index(text, search = text)] #[search_index(by_id, search = text)]\n    #[search_index(s_missing, search = nope, filter =\n    [x, x, gone, text, _id])] #[search_index(s_no_field, filter = [x])]\n    #[search_index(s_wrong_type, search = x)] #[search_index(s_dup)]\n    #[search_index(s_dup, search = text, search = text, filter = [x], filter =\n    [x])] #[vector_index(v_wrong_type, field = text, dims = 3)]\n    #[vector_index(v_f64, field = wide, dims = 3)]\n    #[vector_index(v_no_dims, field = emb)]\n    #[vector_index(v_zero, field = emb, dims = 0)]\n    #[vector_index(v_huge, field = emb, dims = 100000)]\n    #[vector_index(v_ok, field = emb, dims = 2, filter = [emb])] struct T\n    { x: u32, text: String, emb: Vec<f32>, wide: Vec<f64> }\n})"
+---
+duplicate `search` argument
+duplicate `filter` argument
+`dims` must be an integer between 1 and 8192
+`dims` must be an integer between 1 and 8192
+duplicate index name `by_x`
+index name `text` conflicts with the field handle `T::text`
+index name `by_id` is reserved for a built-in index or system field
+unknown search field `nope` in #[search_index] `s_missing`; struct `T` has no such field
+field `x` appears twice in the filter fields of `s_missing`
+unknown filter field `gone` in #[search_index] `s_missing`; struct `T` has no such field
+system field `_id` cannot be used in #[search_index]
+#[search_index] `s_no_field` needs `search = <field>`
+the search field of #[search_index] must be a `String` or `Option<String>`; `x` is not
+#[search_index] `s_dup` needs `search = <field>`
+duplicate index name `s_dup`
+the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `text` is not
+the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `wide` is not
+#[vector_index] `v_no_dims` needs `dims = <number of dimensions>`
+`emb` is the vector field of `v_ok`; it cannot also be a filter field

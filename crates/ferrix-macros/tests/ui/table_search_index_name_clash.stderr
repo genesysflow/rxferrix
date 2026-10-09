@@ -1,0 +1,17 @@
+error: duplicate index name `by_channel`
+ --> tests/ui/table_search_index_name_clash.rs:7:16
+  |
+7 | #[search_index(by_channel, search = body)]
+  |                ^^^^^^^^^^
+
+error: index name `body` conflicts with the field handle `Message::body`
+ --> tests/ui/table_search_index_name_clash.rs:8:16
+  |
+8 | #[vector_index(body, field = embedding, dims = 3)]
+  |                ^^^^
+
+error: index name `by_creation_time` is reserved for a built-in index or system field
+ --> tests/ui/table_search_index_name_clash.rs:9:16
+  |
+9 | #[vector_index(by_creation_time, field = embedding, dims = 3)]
+  |                ^^^^^^^^^^^^^^^^

@@ -11,6 +11,7 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Token, bracketed};
 
+use crate::search::{Kind, MAX_FILTER_FIELDS, SpecialIndexSpec, TypeShape, type_shape};
 use crate::util::{Errors, attr_items, camel_case, is_cfg, rebuild_attr};
 
 /// Derives `#[table]` adds itself; users must not derive them again.
@@ -155,11 +156,27 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     // --- struct-level attributes: consume #[index], check derives / serde / ts, keep the rest.
     let mut kept_attrs = Vec::new();
     let mut index_specs = Vec::new();
+    let mut special_specs: Vec<SpecialIndexSpec> = Vec::new();
     for attr in std::mem::take(&mut strukt.attrs) {
         let path = attr.path();
         if path.is_ident("index") {
             match attr.parse_args::<IndexAttr>() {
                 Ok(IndexAttr(specs)) => index_specs.extend(specs),
+                Err(e) => errors.push(e),
+            }
+        } else if path.is_ident("search_index") || path.is_ident("vector_index") {
+            let kind = if path.is_ident("search_index") {
+                Kind::Search
+            } else {
+                Kind::Vector
+            };
+            match SpecialIndexSpec::parse(kind, &attr) {
+                Ok(mut spec) => {
+                    for e in spec.errors.drain(..) {
+                        errors.push(e);
+                    }
+                    special_specs.push(spec);
+                }
                 Err(e) => errors.push(e),
             }
         } else if path.is_ident("table") {
@@ -310,6 +327,116 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         index_defs.push((spec, name, json_fields));
     }
 
+    // --- search and vector indexes: one namespace with the indexes above (they all become associated consts).
+    let mut special_defs = Vec::new();
+    for spec in &special_specs {
+        let attr = spec.kind.attr();
+        let name = spec.name.unraw().to_string();
+        if RESERVED_INDEXES.contains(&name.as_str()) || RESERVED_ITEMS.contains(&name.as_str()) {
+            errors.error(
+                &spec.name,
+                format_args!(
+                    "index name `{name}` is reserved for a built-in index or system field"
+                ),
+            );
+        } else if !seen_index.insert(name.clone()) {
+            errors.error(&spec.name, format_args!("duplicate index name `{name}`"));
+        } else if field_by_name.contains_key(&name) {
+            errors.error(
+                &spec.name,
+                format_args!(
+                    "index name `{name}` conflicts with the field handle `{}::{name}`",
+                    strukt.ident
+                ),
+            );
+        }
+        let lookup = |field: &syn::Ident, errors: &mut Errors, role: &str| -> Option<&FieldInfo> {
+            let fname = field.unraw().to_string();
+            match field_by_name.get(&fname) {
+                Some(info) => Some(*info),
+                None if fname == "_id" || fname == "_creation_time" => {
+                    errors.error(
+                        field,
+                        format_args!("system field `{fname}` cannot be used in #[{attr}]"),
+                    );
+                    None
+                }
+                None => {
+                    errors.error(field, format_args!("unknown {role} `{fname}` in #[{attr}] `{name}`; struct `{}` has no such field", strukt.ident));
+                    None
+                }
+            }
+        };
+        let (field_key, role) = match spec.kind {
+            Kind::Search => ("search", "search field"),
+            Kind::Vector => ("field", "vector field"),
+        };
+        let main = match &spec.field {
+            Some(f) => lookup(f, &mut errors, role),
+            None => {
+                errors.error_at(
+                    spec.name.span(),
+                    format_args!("#[{attr}] `{name}` needs `{field_key} = <field>`"),
+                );
+                None
+            }
+        };
+        if let (Some(info), Some(f)) = (main, &spec.field) {
+            match (spec.kind, type_shape(info.ty)) {
+                (Kind::Search, TypeShape::F32Vec | TypeShape::Other) => errors.error(
+                    f,
+                    format_args!("the search field of #[search_index] must be a `String` or `Option<String>`; `{}` is not", f.unraw()),
+                ),
+                (Kind::Vector, TypeShape::Text | TypeShape::Other) => errors.error(
+                    f,
+                    format_args!("the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `{}` is not", f.unraw()),
+                ),
+                _ => {}
+            }
+        }
+        if spec.kind == Kind::Vector && spec.dims.is_none() {
+            errors.error_at(
+                spec.name.span(),
+                format_args!("#[vector_index] `{name}` needs `dims = <number of dimensions>`"),
+            );
+        }
+        if spec.filter.len() > MAX_FILTER_FIELDS
+            && let Some(span) = spec.filter_span
+        {
+            errors.error_at(
+                span,
+                format_args!("at most {MAX_FILTER_FIELDS} filter fields are supported"),
+            );
+        }
+        let mut filter_json = Vec::new();
+        let mut seen_filter = HashSet::new();
+        for f in &spec.filter {
+            let fname = f.unraw().to_string();
+            if !seen_filter.insert(fname.clone()) {
+                errors.error(
+                    f,
+                    format_args!("field `{fname}` appears twice in the filter fields of `{name}`"),
+                );
+                continue;
+            }
+            if spec.field.as_ref().is_some_and(|m| m.unraw() == fname) {
+                errors.error(
+                    f,
+                    format_args!(
+                        "`{fname}` is the {role} of `{name}`; it cannot also be a filter field"
+                    ),
+                );
+                continue;
+            }
+            if let Some(info) = lookup(f, &mut errors, "filter field") {
+                filter_json.push(info.json_name.clone());
+            }
+        }
+        if let Some(info) = main {
+            special_defs.push((spec, name, info, filter_json));
+        }
+    }
+
     errors.finish()?;
 
     // --- output
@@ -339,6 +466,49 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             pub const #iident: ::ferrix::Index<#ident> = ::ferrix::Index::new(#name);
         }
     });
+    let search_def_exprs = special_defs.iter().filter(|(s, ..)| s.kind == Kind::Search).map(|(_, name, info, filter)| {
+        let field = &info.json_name;
+        quote! {
+            ::ferrix::SearchIndexDef { name: #name, search_field: #field, filter_fields: ::std::vec![#(#filter),*] }
+        }
+    });
+    let vector_def_exprs = special_defs
+        .iter()
+        .filter(|(s, ..)| s.kind == Kind::Vector)
+        .map(|(spec, name, info, filter)| {
+            let field = &info.json_name;
+            let dims = spec.dims.map(|(n, _)| n).unwrap_or(1);
+            quote! {
+                ::ferrix::VectorIndexDef {
+                    name: #name,
+                    vector_field: #field,
+                    dimensions: #dims,
+                    filter_fields: ::std::vec![#(#filter),*],
+                }
+            }
+        });
+    let special_consts = special_defs.iter().map(|(spec, name, ..)| {
+        let iident = &spec.name;
+        let handle = match spec.kind {
+            Kind::Search => quote!(::ferrix::SearchIndex),
+            Kind::Vector => quote!(::ferrix::VectorIndex),
+        };
+        quote_spanned! {iident.span()=>
+            pub const #iident: #handle<#ident> = #handle::new(#name);
+        }
+    });
+    // Type checks the macro can't do syntactically (aliases etc.): a trait bound on the field type, reported at it.
+    let special_checks = special_defs.iter().map(|(spec, _, info, _)| {
+        let ty = info.ty;
+        let check = match spec.kind {
+            Kind::Search => quote!(assert_search_field),
+            Kind::Vector => quote!(assert_vector_field),
+        };
+        quote_spanned! {ty.span()=>
+            #(#cfgs)*
+            const _: () = ::ferrix::__private::#check::<#ty>();
+        }
+    });
     let static_ident = format_ident!("__FERRIX_TABLE_{}", ident);
 
     Ok(quote! {
@@ -360,6 +530,8 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 ::ferrix::TableDef {
                     name: #table_name,
                     indexes: ::std::vec![#(#index_def_exprs),*],
+                    search_indexes: ::std::vec![#(#search_def_exprs),*],
+                    vector_indexes: ::std::vec![#(#vector_def_exprs),*],
                     ts: || ::ferrix::__private::ts_inline::<#ident>(),
                     validate: ::ferrix::__private::validate_doc::<#ident>,
                 }
@@ -374,7 +546,10 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             pub const _creation_time: ::ferrix::Field<#ident, ::core::primitive::f64> = ::ferrix::Field::new("_creationTime");
             #(#index_consts)*
             pub const by_creation_time: ::ferrix::Index<#ident> = ::ferrix::Index::new("by_creation_time");
+            #(#special_consts)*
         }
+
+        #(#special_checks)*
 
         #(#cfgs)*
         #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]

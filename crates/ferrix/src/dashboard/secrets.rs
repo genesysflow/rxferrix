@@ -147,7 +147,13 @@ mod tests {
             (Account::table_def(), vec![]),
         ];
         for (def, fields) in expect {
-            let info = TableInfo { name: def.name.to_string(), number: 1, indexes: Vec::new(), def: Some(def.clone()) };
+            let info = TableInfo {
+                name: def.name.to_string(),
+                number: 1,
+                indexes: Vec::new(),
+                def: Some(def.clone()),
+                search_indexes: Vec::new(),
+            };
             assert_eq!(secret_fields(&info), fields, "{}", def.name);
         }
     }

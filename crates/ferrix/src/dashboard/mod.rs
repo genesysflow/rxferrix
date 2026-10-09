@@ -108,6 +108,8 @@ pub struct TableSummary {
     pub defined: bool,
     pub documents: u64,
     pub indexes: Vec<IndexSummary>,
+    /// Full-text search and vector indexes.
+    pub search_indexes: Vec<crate::db::search::SearchIndexSummary>,
     /// The TS type of the table's documents (user fields), when defined in code.
     pub ts: Option<String>,
     /// Fields whose values are masked.
@@ -150,6 +152,7 @@ pub async fn tables(ctx: &QueryCtx) -> Result<Vec<TableSummary>> {
             defined: t.def.is_some(),
             documents,
             indexes,
+            search_indexes: crate::db::search::summaries(&t),
             ts: t.def.as_ref().map(|d| (d.ts)()),
             secret_fields: secrets::secret_fields(&t),
             access: access(&t),

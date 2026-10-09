@@ -150,6 +150,39 @@ them as `scheduler`. Missed cron runs run once at startup, a cron whose previous
 finished jobs are deleted after 7 days. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
 deterministically. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.7.
 
+## Search
+
+Full-text search uses SQLite FTS5 and vector search uses sqlite-vec, both compiled into the binary. The indexes are
+updated in the mutation's transaction, so search results always agree with document reads, and search queries are
+reactive like any other query (docs/CONTRACT.md §1.8).
+
+```rust
+#[table(name = "messages")]
+#[search_index(search_body, search = body, filter = [channel])]
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
+
+#[query]   // most relevant first; the last word is a prefix ("hello wor" matches "hello world")
+pub async fn search(ctx: &QueryCtx, channel: String, text: String) -> Result<Vec<Doc<Message>>> {
+    ctx.db.query::<Message>()
+        .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
+        .take(20)
+        .await
+}
+
+#[action]  // vector search is for actions only; returns (id, cosine similarity) pairs
+pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>) -> Result<Vec<Id<Message>>> {
+    let hits = ctx.vector_search(Message::by_embedding, &embedding, VectorSearchOpts::new(10)).await?;
+    Ok(hits.into_iter().map(|(id, _score)| id).collect())
+}
+```
+
+User text is split into words that are always matched literally (never parsed as FTS5 syntax); empty text matches
+nothing; a query returns at most 1024 documents. A search subscription reruns after any write that changes the text or
+a filter field of the table's documents. Rough numbers (release build, a laptop): 50k documents of 12 words: a
+one-word query takes 0.35 ms, a broad two-letter prefix matching every document 80 ms; 50k vectors of 384 dimensions:
+a k=10 query takes about 18 ms (7 ms with a filter keeping 1 in 10). The todo example has a search box.
+
 ## Dashboard
 
 Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an

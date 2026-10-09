@@ -40,7 +40,6 @@ use tracing::subscriber::Interest;
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, Filter, SubscriberExt as _};
-use tracing_subscriber::util::SubscriberInitExt as _;
 
 pub use tracing::{debug, error, info, trace, warn};
 
@@ -151,10 +150,17 @@ where
 
 /// Install a global subscriber containing only the capture layer, unless a global subscriber is already set.
 /// Called when an [`App`](crate::App) opens, so capture works in tests and embedders that set up no tracing at all.
+///
+/// Not `tracing::dispatcher::has_been_set()`: that also turns true once any *scoped* dispatcher has existed (e.g.
+/// `tracing::subscriber::with_default`, even after it ended), which would leave capture silently uninstalled.
+/// Setting the global default fails exactly when a global subscriber is already set, which is the right test.
 pub(crate) fn ensure_installed() {
-    if !tracing::dispatcher::has_been_set() && tracing_subscriber::registry().with(layer()).try_init().is_ok() {
-        tracing::debug!("ferrix: installed the function log capture layer as the global subscriber");
-    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer())).is_ok() {
+            tracing::debug!("ferrix: installed the function log capture layer as the global subscriber");
+        }
+    });
 }
 
 struct CaptureFilter;

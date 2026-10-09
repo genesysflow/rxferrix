@@ -46,7 +46,7 @@ enum Command {
     Restore(crate::ops::cli::RestoreArgs),
     /// Export tables as JSONL or CSV; works while the server runs.
     Export(crate::ops::cli::ExportArgs),
-    /// Import JSONL (an export directory or files) through the normal write path (offline).
+    /// Import JSONL or CSV (an export directory or files) through the normal write path (offline).
     Import(crate::ops::cli::ImportArgs),
     /// Run data migrations (`#[migration]`), or show their status with `migrate status`. Stop the server first, or
     /// use `serve --migrate` / the dashboard to migrate a running server.

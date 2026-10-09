@@ -3,7 +3,8 @@
 //!
 //! - [`backup`]: consistent online snapshots (`VACUUM INTO`) packed as `.tar.zst` archives, backup targets (a
 //!   directory or an S3-compatible bucket), scheduled backups with rotation, and the offline `restore`.
-//! - [`export`]: JSONL and CSV export of tables, and JSONL import through the normal write path.
+//! - [`export`]: JSONL and CSV export of tables, and JSONL and CSV import through the normal write path ([`csv`]:
+//!   reading CSV with the table's types).
 //! - [`metrics`]: counters and the Prometheus text format of `GET /metrics`.
 //! - [`http`]: the admin endpoints (`/api/admin/backups*`, `/api/admin/export/{table}`, `/api/admin/import/{table}`)
 //!   and `/metrics`.
@@ -15,6 +16,7 @@
 
 pub mod backup;
 pub mod cli;
+pub mod csv;
 pub mod export;
 pub mod http;
 pub mod lock;

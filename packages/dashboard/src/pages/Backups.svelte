@@ -3,13 +3,13 @@
   import { useMutation, useQuery } from "@ferrix/svelte";
   import { onMount } from "svelte";
   import { scheduler, type BackupInfo, type ExportFormat, type ImportMode, type ImportReport } from "../lib/api.js";
-  import { createBackup, deleteBackup, downloadBackup, exportTable, importTable, listBackups, saveBlob } from "../lib/admin.js";
+  import { createBackup, deleteBackup, downloadBackup, exportTable, importFormatOf, importTable, listBackups, saveBlob } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatRelative, formatTime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
 
-  /** Backups (`/api/admin/backups*`), per-table export and JSONL import (`/api/admin/export|import/{table}`). */
+  /** Backups (`/api/admin/backups*`), per-table export and JSONL/CSV import (`/api/admin/export|import/{table}`). */
   const ctx = dashboardContext();
   const crons = useQuery(scheduler.crons, () => ({}));
   const runCronNow = useMutation(scheduler.runCronNow);
@@ -130,6 +130,7 @@
   let importName = $state("");
   let importMode = $state<ImportMode>("insert");
   let importFile = $state<File | null>(null);
+  let importFormat = $state<ExportFormat>("jsonl");
   let importing = $state(false);
   let importResult = $state<{ ok: true; report: ImportReport } | { ok: false; error: string } | null>(null);
   $effect(() => {
@@ -143,7 +144,7 @@
     importing = true;
     importResult = null;
     try {
-      const report = await importTable(ctx.auth, importName, importMode, importFile);
+      const report = await importTable(ctx.auth, importName, importMode, importFile, importFormat);
       importResult = { ok: true, report };
       ctx.toast(`Imported into ${importName}`);
     } catch (e) {
@@ -248,8 +249,9 @@
       <section class="card section" aria-labelledby="i-head">
         <h2 id="i-head">Import into a table</h2>
         <p class="muted small">
-          JSONL, one document per line (as exported). Every line is validated against the table before anything is
-          written; ids and creation times are kept.
+          JSONL (one document per line) or CSV with a header row, as exported; CSV cells are typed with the table's
+          fields. Every document is validated against the table before anything is written; ids and creation times
+          are kept.
         </p>
         <div class="form">
           <label for="import-table">Table</label>
@@ -269,9 +271,17 @@
           <input
             id="import-file"
             type="file"
-            accept=".jsonl,.ndjson,application/x-ndjson,application/json,text/plain"
-            onchange={(e) => (importFile = e.currentTarget.files?.[0] ?? null)}
+            accept=".jsonl,.ndjson,.csv,application/x-ndjson,application/json,text/csv,text/plain"
+            onchange={(e) => {
+              importFile = e.currentTarget.files?.[0] ?? null;
+              if (importFile) importFormat = importFormatOf(importFile.name);
+            }}
           />
+          <label for="import-format">Format</label>
+          <select id="import-format" bind:value={importFormat}>
+            <option value="jsonl">JSONL</option>
+            <option value="csv">CSV</option>
+          </select>
         </div>
         <div class="row">
           <button class="primary" onclick={runImport} disabled={importing || !importFile || !importName}>

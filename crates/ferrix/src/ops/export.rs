@@ -12,7 +12,9 @@
 //!
 //! By default every app table is exported (not the `_`-prefixed system tables, which `--tables` can name).
 //!
-//! **Import** ([`import_path`], `ferrix import`, `POST /api/admin/import/{table}`) reads JSONL only. Documents go
+//! **Import** ([`import_path`], `ferrix import`, `POST /api/admin/import/{table}`) reads JSONL, or CSV as exported
+//! (`--format csv`, `format=csv`, a `.csv` file or a CSV export; cells are typed with the table's shape, see
+//! `super::csv`). Documents go
 //! through the normal write path in batches of [`ImportOptions::batch_size`] per transaction, so they are validated
 //! against the table's Rust type, every index and search index is maintained, and subscriptions see each batch
 //! commit. Ids and creation times are kept (a line without `_id` gets a new one). Before writing anything, every line
@@ -395,11 +397,14 @@ pub struct ImportOptions {
     pub batch_size: usize,
     /// Allow importing into `_`-prefixed system tables (the CLI does; the admin endpoint doesn't).
     pub allow_system_tables: bool,
+    /// The format of the files; `None`: from each file's extension (`.csv` is CSV, anything else JSONL), or from
+    /// an export's manifest.
+    pub format: Option<ExportFormat>,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        ImportOptions { mode: ImportMode::Insert, batch_size: DEFAULT_BATCH_SIZE, allow_system_tables: false }
+        ImportOptions { mode: ImportMode::Insert, batch_size: DEFAULT_BATCH_SIZE, allow_system_tables: false, format: None }
     }
 }
 
@@ -498,8 +503,8 @@ struct ImportDoc {
     creation_time: Option<f64>,
 }
 
-fn parse_line(line: &str, table: &TableInfo, remap: &IdRemap) -> crate::Result<ImportDoc> {
-    let mut value: Value = serde_json::from_str(line).context("invalid JSON")?;
+fn parse_line(value: crate::Result<Value>, table: &TableInfo, remap: &IdRemap) -> crate::Result<ImportDoc> {
+    let mut value = value?;
     let source_id = value.get(ID_FIELD).and_then(Value::as_str).map(str::to_string);
     remap.value(&mut value);
     let Value::Object(mut fields) = value else { bail!("a document must be a JSON object") };
@@ -527,14 +532,37 @@ fn parse_line(line: &str, table: &TableInfo, remap: &IdRemap) -> crate::Result<I
     Ok(ImportDoc { source_id, id, fields, creation_time })
 }
 
-/// Read the lines of a JSONL file: `(line number, text)`, skipping blank lines.
-fn lines(path: &Path) -> crate::Result<impl Iterator<Item = crate::Result<(usize, String)>>> {
+/// One record of an import file: its line number and the document (or why that record can't be read). The outer
+/// error is for failures reading the file itself.
+type Record = crate::Result<(usize, crate::Result<Value>)>;
+
+/// The documents of an import file: JSONL (one per line, blank lines skipped) or CSV with a header
+/// (`super::csv`; cells are typed with the table's shape).
+fn records(path: &Path, format: ExportFormat, table: &TableInfo) -> crate::Result<Box<dyn Iterator<Item = Record> + Send>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    Ok(std::io::BufReader::new(file).lines().enumerate().filter_map(|(i, l)| match l {
-        Ok(l) if l.trim().is_empty() => None,
-        Ok(l) => Some(Ok((i + 1, l))),
-        Err(e) => Some(Err(e.into())),
-    }))
+    let reader = std::io::BufReader::new(file);
+    Ok(match format {
+        ExportFormat::Jsonl => Box::new(reader.lines().enumerate().filter_map(|(i, l)| match l {
+            Ok(l) if l.trim().is_empty() => None,
+            Ok(l) => Some(Ok((i + 1, serde_json::from_str(&l).context("invalid JSON")))),
+            Err(e) => Some(Err(e.into())),
+        })),
+        ExportFormat::Csv => {
+            let ts = table.def.as_ref().map(|d| (d.ts)());
+            let validate = table.def.as_ref().map(|d| d.validate);
+            let mut docs = super::csv::CsvDocs::new(reader, ts, validate, table.number)
+                .with_context(|| format!("reading {}", path.display()))?;
+            Box::new(std::iter::from_fn(move || docs.next_document().transpose()))
+        }
+    })
+}
+
+/// The format of an import file: the one asked for, else from its extension (`.csv`, otherwise JSONL).
+pub fn file_format(path: &Path, asked: Option<ExportFormat>) -> ExportFormat {
+    asked.unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("csv") => ExportFormat::Csv,
+        _ => ExportFormat::Jsonl,
+    })
 }
 
 /// The table to import into, checked.
@@ -550,7 +578,14 @@ fn import_table(app: &App, name: &str, options: &ImportOptions) -> crate::Result
 }
 
 /// Validate every line of `file` for `table` without writing (pass 1). Returns the ids and the count.
-async fn check_file(app: &App, table: &Arc<TableInfo>, file: &Path, remap: &IdRemap, mode: ImportMode) -> crate::Result<u64> {
+async fn check_file(
+    app: &App,
+    table: &Arc<TableInfo>,
+    file: &Path,
+    format: ExportFormat,
+    remap: &IdRemap,
+    mode: ImportMode,
+) -> crate::Result<u64> {
     let validate = table.def.as_ref().expect("checked by import_table").validate;
     let (t, path, rm) = (table.clone(), file.to_path_buf(), remap.clone());
     let (count, ids) = tokio::task::spawn_blocking(move || -> crate::Result<(u64, Vec<DocId>)> {
@@ -558,10 +593,10 @@ async fn check_file(app: &App, table: &Arc<TableInfo>, file: &Path, remap: &IdRe
         let mut ids = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut count = 0;
-        for line in lines(&path)? {
-            let (n, line) = line?;
+        for record in records(&path, format, &t)? {
+            let (n, value) = record?;
             count += 1;
-            let result = parse_line(&line, &t, &rm).and_then(|doc| {
+            let result = parse_line(value, &t, &rm).and_then(|doc| {
                 if !seen.insert(doc.id) {
                     bail!("duplicate `_id` {}", doc.id);
                 }
@@ -638,7 +673,8 @@ async fn delete_all(app: &App, table: &Arc<TableInfo>, batch_size: usize) -> cra
     }
 }
 
-/// Import one JSONL file into `table`. `files` is the directory of blobs (an export's `files/`), for `_storage`.
+/// Import one JSONL or CSV file (the format: [`ImportOptions::format`], else from the extension) into `table`.
+/// `files` is the directory of blobs (an export's `files/`), for `_storage`.
 pub async fn import_file(
     app: &App,
     table: &str,
@@ -650,7 +686,8 @@ pub async fn import_file(
 ) -> crate::Result<TableImport> {
     let table = import_table(app, table, options)?;
     let batch_size = options.batch_size.max(1);
-    check_file(app, &table, file, remap, options.mode).await?;
+    let format = file_format(file, options.format);
+    check_file(app, &table, file, format, remap, options.mode).await?;
     let mut result = TableImport { table: table.name.clone(), ..Default::default() };
     if options.mode == ImportMode::Replace {
         result.deleted = delete_all(app, &table, batch_size).await?;
@@ -660,13 +697,13 @@ pub async fn import_file(
     let validate = table.def.as_ref().expect("checked by import_table").validate;
     let overwrite = options.mode != ImportMode::Insert;
     let mut pending: Vec<ImportDoc> = Vec::with_capacity(batch_size);
-    let mut lines = lines(file)?.peekable();
+    let mut records = records(file, format, &table)?;
     loop {
         pending.clear();
         while pending.len() < batch_size {
-            let Some(line) = lines.next() else { break };
-            let (_, line) = line?;
-            pending.push(parse_line(&line, &table, remap)?);
+            let Some(record) = records.next() else { break };
+            let (_, value) = record?;
+            pending.push(parse_line(value, &table, remap)?);
         }
         if pending.is_empty() {
             break;
@@ -715,6 +752,7 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
     let mut jobs: Vec<(String, PathBuf)> = Vec::new();
     let mut remap = IdRemap::default();
     let mut files = None;
+    let mut format = options.format;
     if path.is_dir() {
         let manifest_path = path.join("manifest.json");
         if manifest_path.exists() {
@@ -722,9 +760,10 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
             if manifest.format != EXPORT_FORMAT {
                 bail!("{} is not a ferrix export manifest", manifest_path.display());
             }
-            if manifest.document_format != ExportFormat::Jsonl {
-                bail!("only JSONL exports can be imported (this one is {:?})", manifest.document_format);
+            if options.format.is_some_and(|f| f != manifest.document_format) {
+                bail!("{} is a {:?} export", path.display(), manifest.document_format);
             }
+            format = Some(manifest.document_format);
             remap = IdRemap::new(&manifest.catalog, app.db().catalog());
             for t in &manifest.tables {
                 if table.is_none_or(|only| only == t.name) {
@@ -733,12 +772,20 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
             }
             files = Some(path.join("files"));
         } else {
+            // `<table>.jsonl` and `<table>.csv` files (only those of `--format` when given).
+            let wanted = |ext: &str| match options.format {
+                Some(f) => ext == f.extension(),
+                None => ext == "jsonl" || ext == "csv",
+            };
             for entry in std::fs::read_dir(path)? {
                 let p = entry?.path();
-                if p.extension().is_some_and(|e| e == "jsonl")
+                if p.extension().and_then(|e| e.to_str()).is_some_and(wanted)
                     && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
                     && table.is_none_or(|only| only == stem)
                 {
+                    if jobs.iter().any(|(name, _)| name == stem) {
+                        bail!("{} has both {stem}.jsonl and {stem}.csv; pick one with --format", path.display());
+                    }
                     jobs.push((stem.to_string(), p.clone()));
                 }
             }
@@ -757,8 +804,9 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
     // Stored files first, so documents referencing them never point at a file that doesn't exist yet.
     jobs.sort_by_key(|(name, _)| name != crate::storage::StoredFile::NAME);
     report.remapped_ids = !remap.is_empty();
+    let options = ImportOptions { format, ..options.clone() };
     for (name, file) in jobs {
-        let done = import_file(app, &name, &file, files.as_deref(), &remap, options, &mut report)
+        let done = import_file(app, &name, &file, files.as_deref(), &remap, &options, &mut report)
             .await
             .with_context(|| format!("importing `{name}` from {}", file.display()))?;
         report.tables.push(done);

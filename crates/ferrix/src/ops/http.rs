@@ -8,8 +8,8 @@
 //! - `DELETE /api/admin/backups/{name}` → `{ deleted: true }`, or 404 `not_found`.
 //! - `GET /api/admin/export/{table}?format=jsonl|csv` → the table, streamed from one consistent snapshot (secrets of
 //!   system tables masked as in the dashboard).
-//! - `POST /api/admin/import/{table}?mode=insert|upsert|replace` with a JSONL body (at most 256 MiB) →
-//!   `ImportReport`. App tables only.
+//! - `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv` with a JSONL or CSV body (at most
+//!   256 MiB) → `ImportReport`. App tables only.
 //! - `GET /metrics` → Prometheus text (404 unless enabled; bearer token if configured). See [`super::metrics`].
 
 use std::io::Write;
@@ -252,6 +252,7 @@ async fn export_table(
 #[serde(default)]
 struct ImportQuery {
     mode: Option<ImportMode>,
+    format: Option<ExportFormat>,
 }
 
 async fn import_table(
@@ -263,7 +264,8 @@ async fn import_table(
 ) -> Response {
     admin!(app, headers);
     let Ok(Query(q)) = q else {
-        return AuthFailure::new(400, "invalid_request", "mode must be insert, upsert or replace").into_response();
+        return AuthFailure::new(400, "invalid_request", "mode must be insert, upsert or replace; format jsonl or csv")
+            .into_response();
     };
     if table.starts_with('_') {
         return AuthFailure::new(400, "read_only_table", format!("`{table}` is a system table; it can't be imported"))
@@ -291,7 +293,8 @@ async fn import_table(
     }
     try_or!(tokio::io::AsyncWriteExt::flush(&mut file).await);
     drop(file);
-    let options = ImportOptions { mode: q.mode.unwrap_or_default(), ..Default::default() };
+    let format = q.format.unwrap_or_default();
+    let options = ImportOptions { mode: q.mode.unwrap_or_default(), format: Some(format), ..Default::default() };
     let mut report = export::ImportReport::default();
     let result =
         export::import_file(&app, &table, spool.path(), None, &export::IdRemap::default(), &options, &mut report).await;

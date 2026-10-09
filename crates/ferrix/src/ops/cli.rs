@@ -310,19 +310,24 @@ pub fn run_export(args: ExportArgs, storage: StorageConfig) -> crate::Result<()>
     })
 }
 
-/// `import`: load JSONL through the normal write path (offline: the server must not be running).
+/// `import`: load JSONL or CSV through the normal write path (offline: the server must not be running).
 #[derive(Args, Debug, Clone)]
 pub struct ImportArgs {
-    /// An export directory, a directory of <table>.jsonl files, or one .jsonl file.
+    /// An export directory, a directory of <table>.jsonl / <table>.csv files, or one .jsonl or .csv file.
     pub path: PathBuf,
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     pub dir: PathBuf,
     #[arg(long, value_enum, default_value = "insert")]
     pub mode: ImportMode,
-    /// With a single file: the table (default: the file name without .jsonl). With a directory: only this table.
+    /// With a single file: the table (default: the file name without its extension). With a directory: only this
+    /// table.
     #[arg(long)]
     pub table: Option<String>,
+    /// jsonl or csv (as `export --format csv` writes it: a header, values typed with the table's shape). Default:
+    /// from the file extension (.csv is CSV), or the export's manifest.
+    #[arg(long, value_enum)]
+    pub format: Option<ExportFormat>,
     /// Documents per transaction.
     #[arg(long, default_value_t = export::DEFAULT_BATCH_SIZE)]
     pub batch_size: usize,
@@ -338,7 +343,8 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
     )?;
     runtime()?.block_on(async {
         let app = App::open(&args.dir, options).await?;
-        let import = ImportOptions { mode: args.mode, batch_size: args.batch_size, allow_system_tables: true };
+        let import =
+            ImportOptions { mode: args.mode, batch_size: args.batch_size, allow_system_tables: true, format: args.format };
         let report = export::import_path(&app, &args.path, args.table.as_deref(), &import).await?;
         for t in &report.tables {
             println!(

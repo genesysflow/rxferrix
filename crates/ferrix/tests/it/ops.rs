@@ -79,6 +79,46 @@ pub mod app {
         ctx.db.query::<OpsDoc>().with_index(OpsDoc::by_rank, |q| q.eq(OpsDoc::rank, rank)).collect().await
     }
 
+    #[object]
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Mood {
+        Happy,
+        Sad,
+    }
+
+    #[object]
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Meta {
+        pub score: f64,
+        pub label: Option<String>,
+    }
+
+    /// Every kind of value a CSV cell has to carry back (`csv_import_round_trips_mixed_types`).
+    #[table(name = "ops_mixed")]
+    pub struct Mixed {
+        pub name: String,
+        pub count: i64,
+        pub ratio: f64,
+        pub flag: bool,
+        pub note: Option<String>,
+        pub maybe: Option<bool>,
+        pub tags: Vec<String>,
+        pub meta: Meta,
+        pub mood: Mood,
+        pub data: Bytes,
+        pub owner: Option<Id<OpsDoc>>,
+    }
+
+    #[mutation]
+    pub async fn add_mixed(ctx: &MutationCtx, doc: Mixed) -> Result<Id<Mixed>> {
+        ctx.db.insert(doc).await
+    }
+
+    #[query]
+    pub async fn mixed(ctx: &QueryCtx) -> Result<Vec<Doc<Mixed>>> {
+        ctx.db.query::<Mixed>().collect().await
+    }
+
     #[action]
     pub async fn store_text(ctx: &ActionCtx, text: String) -> Result<Id<StoredFile>> {
         ctx.storage.store(text.into_bytes(), Some("text/plain")).await
@@ -315,7 +355,7 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     // Same table numbers: identical documents (ids and creation times included).
     let b = TestApp::new().await.unwrap();
     let ts = b.app().db().write_log().latest();
-    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 2, allow_system_tables: true };
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 2, allow_system_tables: true, format: None };
     let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
     assert!(!report.remapped_ids && report.files == 1);
     assert_eq!(report.tables.iter().map(|t| (t.table.as_str(), t.documents)).collect::<Vec<_>>(), [("_storage", 1), ("ops_docs", 5)]);
@@ -407,6 +447,79 @@ async fn csv_export_escapes_fields() {
     // A newline inside a field stays inside its quotes.
     assert!(csv.contains("\"child number 0\nsecond line\""), "{csv}");
     assert_eq!(csv.matches("\r\n").count(), 6);
+}
+
+fn mixed_doc(name: &str, count: i64, note: Option<&str>, owner: Option<ferrix::Id<OpsDoc>>) -> Mixed {
+    Mixed {
+        name: name.into(),
+        count,
+        ratio: count as f64 / 3.0,
+        flag: count % 2 == 0,
+        note: note.map(str::to_string),
+        maybe: (count % 3 != 0).then_some(count % 3 == 1),
+        tags: vec![name.into(), "a,b".into(), "say \"hi\"".into()],
+        meta: Meta { score: -0.1 * count as f64, label: (count > 1).then(|| format!("label {count}")) },
+        mood: if count % 2 == 0 { Mood::Happy } else { Mood::Sad },
+        data: ferrix::Bytes::new(vec![0, count as u8, 255]),
+        owner,
+    }
+}
+
+#[tokio::test]
+async fn csv_import_round_trips_mixed_types() {
+    let a = TestApp::new().await.unwrap();
+    let owner = a.mutation::<add_doc>(("owner".to_string(), 1, None, None)).await.unwrap();
+    // Strings that look like other types (only the table's shape tells them apart), quoting, line breaks, numbers
+    // that need every digit, and nested values.
+    let names = ["42", "true", "null", "", " padded ", "a,b\nc \"quoted\"", "{\"x\":1}", "[1]", "plain", "1e400"];
+    for (i, name) in names.iter().enumerate() {
+        let note = match i % 3 {
+            0 => None,
+            1 => Some("12"),
+            _ => Some("false"),
+        };
+        a.mutation::<add_mixed>((mixed_doc(name, i as i64 - 3, note, (i % 2 == 0).then_some(owner)),)).await.unwrap();
+    }
+    let original = a.query::<mixed>(()).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let options = ExportOptions { tables: Some(vec!["ops_mixed".into()]), format: ExportFormat::Csv, include_files: false };
+    let manifest = export::export_to_dir(a.dir(), None, out.path(), &options).await.unwrap();
+    assert_eq!(manifest.tables[0].documents, names.len() as u64);
+
+    // Into a fresh database: the export directory (CSV manifest), then a single .csv file with replace.
+    let b = TestApp::new().await.unwrap();
+    let import = ImportOptions { batch_size: 3, ..Default::default() };
+    let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
+    assert_eq!(report.tables[0].documents, names.len() as u64);
+    let as_json = |docs: &[ferrix::Doc<Mixed>]| docs.iter().map(|d| serde_json::to_value(d).unwrap()).collect::<Vec<_>>();
+    assert_eq!(as_json(&b.query::<mixed>(()).await.unwrap()), as_json(&original), "ids, creation times and values");
+    let replace = ImportOptions { mode: ImportMode::Replace, ..import.clone() };
+    let report = export::import_path(b.app(), &out.path().join("ops_mixed.csv"), None, &replace).await.unwrap();
+    assert_eq!((report.tables[0].deleted, report.tables[0].documents), (names.len() as u64, names.len() as u64));
+    assert_eq!(as_json(&b.query::<mixed>(()).await.unwrap()), as_json(&original));
+    verify(b.app()).await;
+
+    // Hand-written CSV: no `_id` / `_creationTime` columns (new ids), columns in any order, LF line ends.
+    let file = out.path().join("hand.csv");
+    std::fs::write(
+        &file,
+        "flag,name,count,ratio,note,maybe,tags,meta,mood,data,owner\n\
+         false,007,7,0.5,,,[],\"{\"\"score\"\":1,\"\"label\"\":null}\",sad,\"{\"\"$bytes\"\":\"\"AQI=\"\"}\",\n",
+    )
+    .unwrap();
+    let csv_insert = ImportOptions { format: Some(ExportFormat::Csv), ..Default::default() };
+    export::import_path(b.app(), &file, Some("ops_mixed"), &csv_insert).await.unwrap();
+    let added = b.query::<mixed>(()).await.unwrap().into_iter().find(|d| d.name == "007").unwrap();
+    assert_eq!((added.count, added.note.clone(), added.maybe, added.data.0.clone()), (7, None, None, vec![1, 2]));
+
+    // Bad cells are reported with their line, and nothing is written.
+    let ts = b.app().db().write_log().latest();
+    std::fs::write(&file, "name,count,ratio,flag,note,maybe,tags,meta,mood,data,owner\nx,many,1,true,,,[],{},happy,{},\nshort,1\n")
+        .unwrap();
+    let err = format!("{:#}", export::import_path(b.app(), &file, Some("ops_mixed"), &csv_insert).await.unwrap_err());
+    assert!(err.contains("hand.csv:2") && err.contains("does not match table `ops_mixed`"), "{err}");
+    assert!(err.contains("hand.csv:3") && err.contains("but the header has 11 column(s)"), "{err}");
+    assert_eq!(b.app().db().write_log().latest(), ts);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -830,6 +943,16 @@ async fn ops_admin_backup_export_and_import_flows() {
     let r = a.req(Method::POST, "/api/admin/import/_users", Some(&a.admin)).body("{}\n").send().await.unwrap();
     assert_eq!(r.status(), 400);
     let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=bogus", Some(&a.admin)).body(new_doc).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    // CSV: the exported CSV goes back in (upsert keeps the ids); CSV sent as JSONL is refused.
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert&format=csv", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let report: Value = r.json().await.unwrap();
+    assert_eq!((report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(a.t.query::<docs>(()).await.unwrap().iter().find(|d| d.rank == 3).unwrap().title, "exported, \"quoted\"");
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?format=xml", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
     assert_eq!(r.status(), 400);
     verify(a.t.app()).await;
 }

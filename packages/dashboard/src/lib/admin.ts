@@ -162,19 +162,25 @@ export function exportTable(auth: FerrixAuth, table: string, format: ExportForma
   return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}`, `${table}.${format}`);
 }
 
-/** `POST /api/admin/import/{table}?mode=…` with a JSONL body. */
+/** `POST /api/admin/import/{table}?mode=…&format=…` with a JSONL or CSV body (CSV as exported, with a header). */
 export async function importTable(
   auth: FerrixAuth,
   table: string,
   mode: ImportMode,
   body: Blob | string,
+  format: ExportFormat = "jsonl",
 ): Promise<ImportReport> {
-  const res = await adminFetch(auth, `/api/admin/import/${encodeURIComponent(table)}?mode=${mode}`, {
+  const res = await adminFetch(auth, `/api/admin/import/${encodeURIComponent(table)}?mode=${mode}&format=${format}`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-ndjson" },
+    headers: { "Content-Type": format === "csv" ? "text/csv" : "application/x-ndjson" },
     body,
   });
   return (await res.json()) as ImportReport;
+}
+
+/** The import format a file name suggests: `.csv` is CSV, anything else JSONL. */
+export function importFormatOf(name: string): ExportFormat {
+  return /\.csv$/i.test(name) ? "csv" : "jsonl";
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

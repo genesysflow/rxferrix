@@ -6,6 +6,7 @@ import {
   fetchTimeseries,
   filenameFromDisposition,
   impersonate,
+  importFormatOf,
   importTable,
   saveBlob,
 } from "../src/lib/admin.js";
@@ -102,9 +103,20 @@ describe("other admin endpoints", () => {
     const fetch = mockFetch(new Response(JSON.stringify(report)));
     expect(await importTable(fakeAuth(), "todos", "upsert", "{}\n{}\n")).toEqual(report);
     const [url, init] = fetch.mock.calls[0]!;
-    expect(url).toBe("/api/admin/import/todos?mode=upsert");
+    expect(url).toBe("/api/admin/import/todos?mode=upsert&format=jsonl");
     expect(init?.method).toBe("POST");
     expect(header(init, "content-type")).toBe("application/x-ndjson");
+  });
+
+  it("imports CSV with the format, inferred from the file name", async () => {
+    const report = { tables: [], files: 0, missingFiles: 0, remappedIds: false };
+    const fetch = mockFetch(new Response(JSON.stringify(report)));
+    await importTable(fakeAuth(), "todos", "insert", "_id,text\r\n", importFormatOf("todos.CSV"));
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe("/api/admin/import/todos?mode=insert&format=csv");
+    expect(header(init, "content-type")).toBe("text/csv");
+    expect(importFormatOf("todos.jsonl")).toBe("jsonl");
+    expect(importFormatOf("data.ndjson")).toBe("jsonl");
   });
 
   it("creates backups with the options", async () => {

@@ -36,9 +36,35 @@ fn apply_pragmas(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How long opening a connection retries while the database is busy (as `busy_timeout`).
+const OPEN_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `open` again while it fails with `SQLITE_BUSY`. Opening runs the auto-extensions (sqlite-vec) before a busy
+/// timeout can be set, and fails at once with `SQLITE_BUSY_RECOVERY` if another connection is closing the database
+/// at that moment (the last one to close checkpoints the WAL under an exclusive lock), e.g. a background thread of a
+/// `Database` that was just dropped.
+fn open_retrying(mut open: impl FnMut() -> rusqlite::Result<Connection>) -> rusqlite::Result<Connection> {
+    let deadline = std::time::Instant::now() + OPEN_BUSY_TIMEOUT;
+    loop {
+        match open() {
+            Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Open (creating if needed) the read-write connection and ensure the schema exists.
 pub fn open_writer(path: &Path) -> anyhow::Result<Connection> {
-    let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let conn = open_retrying(|| {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        Ok(conn)
+    })
+    .with_context(|| format!("opening {}", path.display()))?;
     let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
     anyhow::ensure!(mode.eq_ignore_ascii_case("wal"), "could not enable WAL mode (got {mode})");
     apply_pragmas(&conn)?;
@@ -49,10 +75,12 @@ pub fn open_writer(path: &Path) -> anyhow::Result<Connection> {
 
 /// Open a read-only connection. The writer must have created the database first.
 pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
-    )
+    let conn = open_retrying(|| {
+        Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        )
+    })
     .with_context(|| format!("opening reader for {}", path.display()))?;
     apply_pragmas(&conn)?;
     conn.set_prepared_statement_cache_capacity(64);

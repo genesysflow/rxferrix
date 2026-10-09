@@ -66,6 +66,10 @@ pub struct OpsServeArgs {
     /// The PEM private key of --tls-cert.
     #[arg(long, value_name = "PEM", requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
+    /// With --tls-cert: re-read the certificate and key this often and use them for new connections when they
+    /// changed (renewals without a restart; a pair that doesn't load is ignored and logged). `0` turns it off.
+    #[arg(long, value_name = "DURATION", default_value = "30s", value_parser = super::parse_duration)]
+    pub tls_reload_every: Duration,
 }
 
 impl OpsServeArgs {
@@ -125,6 +129,7 @@ impl OpsServeArgs {
                 redirect: self.redirect(false)?,
                 cert: cert.clone(),
                 key: key.clone(),
+                reload_every: (!self.tls_reload_every.is_zero()).then_some(self.tls_reload_every),
             });
         }
         Ok(Listen::Http(http))
@@ -412,7 +417,9 @@ mod tests {
 
         // Certificate files: both needed, not with --https; no redirect unless asked.
         let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
-        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: None, .. }));
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: None, reload_every: Some(d), .. } if d == Duration::from_secs(30)));
+        let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-reload-every", "0"]).unwrap();
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { reload_every: None, .. }));
         let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--http-redirect", "127.0.0.1:8080"]).unwrap();
         assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: Some(_), .. }));
         assert!(parse(&["--tls-cert", "c.pem"]).is_err());

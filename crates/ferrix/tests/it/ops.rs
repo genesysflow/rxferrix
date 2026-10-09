@@ -747,6 +747,7 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
         redirect: Some("127.0.0.1:0".parse().unwrap()),
         cert: cert_path.clone(),
         key: key_path.clone(),
+        reload_every: None,
     };
     let server = tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
     let (addr, redirect) = (server.addr, server.redirect_addr.unwrap());
@@ -772,8 +773,78 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     // A key that doesn't match the certificate is refused at startup.
     let other = rcgen::KeyPair::generate().unwrap();
     std::fs::write(&key_path, other.serialize_pem()).unwrap();
-    let bad = Listen::CertFiles { https: "127.0.0.1:0".parse().unwrap(), redirect: None, cert: cert_path, key: key_path };
+    let bad =
+        Listen::CertFiles { https: "127.0.0.1:0".parse().unwrap(), redirect: None, cert: cert_path, key: key_path, reload_every: None };
     assert!(tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &bad).await.is_err());
+
+    server.shutdown();
+    tokio::time::timeout(Duration::from_secs(15), server.wait()).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
+    let t = TestApp::new().await.unwrap();
+    let pair = || {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().self_signed(&key).unwrap();
+        (cert, key)
+    };
+    let (first, first_key) = pair();
+    let (second, second_key) = pair();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert_path, first.pem()).unwrap();
+    std::fs::write(&key_path, first_key.serialize_pem()).unwrap();
+    let listen = Listen::CertFiles {
+        https: "127.0.0.1:0".parse().unwrap(),
+        redirect: None,
+        cert: cert_path.clone(),
+        key: key_path.clone(),
+        reload_every: Some(Duration::from_millis(50)),
+    };
+    let server = tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
+    let addr = server.addr;
+    let url = format!("https://localhost:{}/api/health", addr.port());
+    // Trusts both certificates and reports the one the server presented.
+    let client = || {
+        reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(first.pem().as_bytes()).unwrap())
+            .add_root_certificate(reqwest::Certificate::from_pem(second.pem().as_bytes()).unwrap())
+            .resolve("localhost", addr)
+            .tls_info(true)
+            .build()
+            .unwrap()
+    };
+    async fn presented(client: &reqwest::Client, url: &str) -> Vec<u8> {
+        let r = client.get(url).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        r.extensions().get::<reqwest::tls::TlsInfo>().unwrap().peer_certificate().unwrap().to_vec()
+    }
+    let kept_alive = client();
+    assert_eq!(presented(&kept_alive, &url).await, first.der().to_vec());
+
+    // A half-written renewal (the new certificate, the old key) doesn't load: the current certificate stays.
+    std::fs::write(&cert_path, second.pem()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(presented(&client(), &url).await, first.der().to_vec());
+
+    // Once the key is in place too, new connections get the new certificate; the open one keeps working.
+    std::fs::write(&key_path, second_key.serialize_pem()).unwrap();
+    let mut swapped = false;
+    for _ in 0..100 {
+        if presented(&client(), &url).await == second.der().to_vec() {
+            swapped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(swapped, "the new certificate was never served");
+    assert_eq!(presented(&kept_alive, &url).await, first.der().to_vec(), "the kept-alive connection was not dropped");
+
+    // Garbage in the files: still the second certificate.
+    std::fs::write(&cert_path, "not a certificate").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(presented(&client(), &url).await, second.der().to_vec());
 
     server.shutdown();
     tokio::time::timeout(Duration::from_secs(15), server.wait()).await.unwrap().unwrap();

@@ -196,6 +196,14 @@ pub mod ann {
         let hits = ctx.vector_search(AnnItem::by_vec, &vector, opts).await?;
         Ok(hits.into_iter().map(|(id, score)| Hit { id, score }).collect())
     }
+
+    /// The graph search with an explicit search width.
+    #[action]
+    pub async fn nearest_ef(ctx: &ActionCtx, vector: Vec<f32>, limit: u32, ef: u32) -> Result<Vec<Hit>> {
+        let opts = VectorSearchOpts::new(limit as usize).ef(ef as usize);
+        let hits = ctx.vector_search(AnnItem::by_vec, &vector, opts).await?;
+        Ok(hits.into_iter().map(|(id, score)| Hit { id, score }).collect())
+    }
 }
 
 use pages::Msg;

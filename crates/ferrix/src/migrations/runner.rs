@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     BatchOutcome, ChangeExample, DocChange, MAX_EXAMPLES, MigrationRecord, MigrationReport, MigrationState, RunOutcome,
-    RunResult, StartOutcome, find_row, registry,
+    RunResult, StartOutcome, blocked_error, find_row, registry, unmet_dependencies,
 };
 use crate::db::query::MutationDb;
 use crate::db::schema_check;
@@ -24,6 +24,8 @@ pub struct RunOptions {
     pub dry_run: bool,
     /// Start over from the first document, also if the migration is done (counts are reset).
     pub restart: bool,
+    /// Run a migration even if some it runs after (`#[migration(after = [..])]`) are not done.
+    pub force: bool,
     /// Stop after this many batches, leaving the migration *running*, as if the process had stopped there (a
     /// restart makes it *pending*; the next run resumes). For tests.
     pub max_batches: Option<u64>,
@@ -261,15 +263,39 @@ fn failure(e: &anyhow::Error) -> (String, Option<String>) {
     }
 }
 
+/// Run one migration. A migration whose dependencies aren't done (without `force`) is an error, the
+/// `dependencies_not_done` user error.
 pub(super) async fn run(app: &App, name: &str, options: &RunOptions) -> crate::Result<MigrationReport> {
+    let rep = run_or_block(app, name, options).await?;
+    if rep.outcome == RunOutcome::Blocked {
+        let def = super::lookup(name)?;
+        return Err(blocked_error(name, &unmet(app, def).await?));
+    }
+    Ok(rep)
+}
+
+/// The dependencies of `def` that aren't done, at the latest snapshot.
+async fn unmet(app: &App, def: &MigrationDef) -> crate::Result<Vec<(String, MigrationState)>> {
+    let snapshot = app.db().snapshot().await?;
+    let db = crate::QueryDb::new(crate::db::query::Source::Snapshot(snapshot), app.db().catalog().clone());
+    unmet_dependencies(&db, def).await
+}
+
+/// Run one migration; a migration whose dependencies aren't done is a `Blocked` report (with the reason in `error`).
+async fn run_or_block(app: &App, name: &str, options: &RunOptions) -> crate::Result<MigrationReport> {
     let def = super::lookup(name)?;
     if options.dry_run {
         return dry_run(app, def, name).await;
     }
-    match call::<super::start>(app, (name.to_string(), options.restart).into()).await? {
+    match call::<super::start>(app, (name.to_string(), options.restart, Some(options.force)).into()).await? {
         StartOutcome::Started => drive(app, def, name, options.max_batches).await,
         StartOutcome::AlreadyDone => Ok(report(def, name, RunOutcome::AlreadyDone)),
         StartOutcome::AlreadyRunning => Ok(report(def, name, RunOutcome::AlreadyRunning)),
+        StartOutcome::Blocked => {
+            let mut rep = report(def, name, RunOutcome::Blocked);
+            rep.error = Some(format!("{:#}", blocked_error(name, &unmet(app, def).await?)));
+            Ok(rep)
+        }
     }
 }
 
@@ -344,7 +370,7 @@ async fn dry_run(app: &App, def: &'static MigrationDef, name: &str) -> crate::Re
     }
 }
 
-/// The migrations that aren't done, in name order.
+/// The migrations that aren't done, in run order.
 async fn not_done(app: &App) -> crate::Result<Vec<String>> {
     let summaries = app.migration_summaries().await?;
     Ok(summaries.into_iter().filter(|m| m.declared && m.state != MigrationState::Done).map(|m| m.name).collect())
@@ -353,8 +379,8 @@ async fn not_done(app: &App) -> crate::Result<Vec<String>> {
 pub(super) async fn run_pending(app: &App, options: &RunOptions) -> crate::Result<Vec<MigrationReport>> {
     let mut reports = Vec::new();
     for name in not_done(app).await? {
-        let rep = run(app, &name, options).await?;
-        let stop = matches!(rep.outcome, RunOutcome::Failed | RunOutcome::Canceled | RunOutcome::Stopped);
+        let rep = run_or_block(app, &name, options).await?;
+        let stop = matches!(rep.outcome, RunOutcome::Failed | RunOutcome::Canceled | RunOutcome::Stopped | RunOutcome::Blocked);
         reports.push(rep);
         if stop && !options.dry_run {
             break;
@@ -369,7 +395,7 @@ pub(super) async fn run_in_background(app: &App, name: Option<String>, options: 
     match name {
         Some(name) => {
             let def = super::lookup(&name)?;
-            match call::<super::start>(app, (name.clone(), options.restart).into()).await? {
+            match call::<super::start>(app, (name.clone(), options.restart, Some(options.force)).into()).await? {
                 StartOutcome::Started => {
                     let app = app.clone();
                     result.started.push(name.clone());
@@ -381,6 +407,7 @@ pub(super) async fn run_in_background(app: &App, name: Option<String>, options: 
                 }
                 StartOutcome::AlreadyDone => result.reports.push(report(def, &name, RunOutcome::AlreadyDone)),
                 StartOutcome::AlreadyRunning => result.reports.push(report(def, &name, RunOutcome::AlreadyRunning)),
+                StartOutcome::Blocked => return Err(blocked_error(&name, &unmet(app, def).await?)),
             }
         }
         None => {

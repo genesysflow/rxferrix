@@ -192,6 +192,7 @@
     unicode61: "whole words",
     porter: "English stems: “run” finds “running”",
     trigram: "substrings of 3+ characters",
+    snowball: "stems: inflected forms match each other",
   };
 </script>
 
@@ -246,11 +247,17 @@
                 <code>{s.name}</code>
                 {#if s.kind === "vector"}
                   <span class="badge">vector</span>
-                  <span class="muted">{s.field} · {s.dimensions} dims · {s.method ?? "exact"}{s.method === "hnsw" ? " (approximate)" : ""}</span>
+                  <span class="muted"
+                    >{s.field} · {s.dimensions} dims · {s.method ?? "exact"}{s.method === "hnsw" ? " (approximate)" : ""}{s.hnsw
+                      ? ` · m ${s.hnsw.m}, ef_construction ${s.hnsw.efConstruction}, ef_search ${s.hnsw.efSearch}`
+                      : ""}</span
+                  >
                 {:else}
                   <span class="badge">text</span>
                   <span class="muted"
-                    >{s.field} · tokenizer {s.tokenizer ?? "unicode61"}{s.removeDiacritics === false ? " · diacritics kept" : ""}</span
+                    >{s.field} · tokenizer {s.tokenizer ?? "unicode61"}{s.language ? ` (${s.language})` : ""}{s.removeDiacritics === false
+                      ? " · diacritics kept"
+                      : ""}</span
                   >
                 {/if}
                 {#if s.filterFields.length > 0}<span class="muted"> · filter [{s.filterFields.join(", ")}]</span>{/if}

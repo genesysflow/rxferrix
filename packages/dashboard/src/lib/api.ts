@@ -26,11 +26,15 @@ export interface SearchIndexSummary {
   /** Vector indexes only. */
   dimensions: number | null;
   /** Search indexes only. */
-  tokenizer?: "unicode61" | "porter" | "trigram" | null;
+  tokenizer?: "unicode61" | "porter" | "trigram" | "snowball" | null;
+  /** Stemming tokenizers (`porter`, `snowball`): the language. */
+  language?: string | null;
   /** Search indexes only: whether diacritics are folded (`café` = `cafe`). */
   removeDiacritics?: boolean | null;
   /** Vector indexes only. */
   method?: "exact" | "hnsw" | null;
+  /** HNSW vector indexes only: the graph's parameters. */
+  hnsw?: { m: number; efConstruction: number; efSearch: number } | null;
 }
 
 export interface TableSummary {
@@ -250,6 +254,8 @@ export interface MigrationSummary {
   /** Still declared in code (a row can outlive its migration). */
   declared: boolean;
   batchSize: number | null;
+  /** The migrations it runs after (`#[migration(after = [..])]`), which must be done first. */
+  after: string[];
   state: MigrationState;
   processed: number;
   changed: number;
@@ -265,7 +271,15 @@ export interface MigrationSummary {
   tableMigrating: boolean;
 }
 
-export type RunOutcome = "completed" | "failed" | "canceled" | "alreadyDone" | "alreadyRunning" | "stopped" | "dryRun";
+export type RunOutcome =
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "canceled"
+  | "alreadyDone"
+  | "alreadyRunning"
+  | "stopped"
+  | "dryRun";
 
 export interface ChangeExample {
   id: string;
@@ -292,7 +306,7 @@ export const migrations = {
   list: makeFunctionReference<"query", Record<string, never>, MigrationSummary[]>("query", "_system/migrations:list"),
   run: makeFunctionReference<
     "action",
-    { name?: string | null; dryRun?: boolean | null; restart?: boolean | null },
+    { name?: string | null; dryRun?: boolean | null; restart?: boolean | null; force?: boolean | null },
     { started: string[]; reports: MigrationReport[] }
   >("action", "_system/migrations:run"),
   cancel: makeFunctionReference<"mutation", { name: string }, "canceled" | "notRunning">(

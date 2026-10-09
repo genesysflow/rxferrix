@@ -24,7 +24,7 @@ error: a migration name may only contain letters, digits and `_ - . : /`, not ` 
 12 | #[migration(table = "todos", batch = 20000, name = "not ok!")]
    |                                                    ^^^^^^^^^
 
-error: unknown argument `every` (expected `table`, `batch` or `name`)
+error: unknown argument `every` (expected `table`, `batch`, `name` or `after`)
   --> tests/ui/migration_args.rs:15:30
    |
 15 | #[migration(table = "todos", every = 5)]
@@ -35,3 +35,33 @@ error: `table` must be a table type (`table = Todo`) or a table name (`table = "
    |
 18 | #[migration(table = 5)]
    |                     ^
+
+error: `after` must be a list of migration names, e.g. `after = ["0001_add_priority", "todos:split"]`
+  --> tests/ui/migration_args.rs:21:38
+   |
+21 | #[migration(table = "todos", after = "0001_first")]
+   |                                      ^^^^^^^^^^^^
+
+error: `0001_first` is listed twice in `after`
+  --> tests/ui/migration_args.rs:24:75
+   |
+24 | #[migration(table = "todos", name = "0002_second", after = ["0001_first", "0001_first", "no spaces", first, "0002_second"])]
+   |                                                                           ^^^^^^^^^^^^
+
+error: a migration name may only contain letters, digits and `_ - . : /`, not ` `
+  --> tests/ui/migration_args.rs:24:89
+   |
+24 | #[migration(table = "todos", name = "0002_second", after = ["0001_first", "0001_first", "no spaces", first, "0002_second"])]
+   |                                                                                         ^^^^^^^^^^^
+
+error: `after` lists migration names as string literals, e.g. `after = ["0001_add_priority"]`
+  --> tests/ui/migration_args.rs:24:102
+   |
+24 | #[migration(table = "todos", name = "0002_second", after = ["0001_first", "0001_first", "no spaces", first, "0002_second"])]
+   |                                                                                                      ^^^^^
+
+error: a migration can't run after itself
+  --> tests/ui/migration_args.rs:24:109
+   |
+24 | #[migration(table = "todos", name = "0002_second", after = ["0001_first", "0001_first", "no spaces", first, "0002_second"])]
+   |                                                                                                             ^^^^^^^^^^^^^

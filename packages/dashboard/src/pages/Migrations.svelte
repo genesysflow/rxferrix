@@ -11,7 +11,7 @@
   import JsonValue from "../components/JsonValue.svelte";
   import Modal from "../components/Modal.svelte";
 
-  /** `#[migration]`s: live progress, run / cancel / restart, dry runs with before/after examples. */
+  /** `#[migration]`s in run order: dependencies, live progress, run / cancel / restart, dry runs with before/after examples. */
   const ctx = dashboardContext();
   const list = useQuery(migrations.list, () => ({}));
   const run = useAction(migrations.run);
@@ -28,6 +28,12 @@
   const rows = $derived(list.data ?? []);
   const migratingTables = $derived([...new Set(rows.filter((m) => m.tableMigrating).map((m) => m.table))]);
   const notDone = $derived(rows.filter((m) => m.declared && m.state !== "done" && m.state !== "running"));
+  const states = $derived(new Map(rows.map((m) => [m.name, m.state] as const)));
+
+  /** The migrations `m` runs after that are not done yet. */
+  function unmet(m: MigrationSummary): string[] {
+    return m.after.filter((dep) => states.get(dep) !== "done");
+  }
 
   const stateLabels: Record<MigrationState, string> = {
     pending: "pending",
@@ -46,11 +52,13 @@
   async function start(m: MigrationSummary | null, options: { restart?: boolean } = {}) {
     const name = m?.name ?? null;
     if (options.restart && !confirm(`Run ${name} again from the first document? Documents already in the new shape are left alone by a well-written migration.`)) return;
+    const waiting = m ? unmet(m) : [];
+    if (waiting.length > 0 && !confirm(`${name} runs after ${waiting.join(", ")}, which ${waiting.length === 1 ? "is" : "are"} not done. Run it anyway?`)) return;
     busy = name ?? "*";
     try {
-      const r = await run({ name, restart: options.restart ?? false });
+      const r = await run({ name, restart: options.restart ?? false, force: waiting.length > 0 });
       if (r.started.length) ctx.toast(`Started ${r.started.join(", ")}`);
-      for (const rep of r.reports) ctx.toast(`${rep.name}: ${rep.outcome === "alreadyDone" ? "already done" : rep.outcome === "alreadyRunning" ? "already running" : rep.outcome}`);
+      for (const rep of r.reports) ctx.toast(`${rep.name}: ${outcomeLabels[rep.outcome] ?? rep.outcome}`);
       if (!r.started.length && !r.reports.length) ctx.toast("Nothing to run");
     } catch (e) {
       ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
@@ -88,13 +96,14 @@
     alreadyDone: "already done",
     alreadyRunning: "already running",
     stopped: "stopped",
+    blocked: "waiting for its dependencies",
   };
 </script>
 
 <div class="page">
   <header class="page-header">
     <h1>Migrations</h1>
-    <span class="muted small">Batched, resumable and exactly once per run; each batch is one transaction.</span>
+    <span class="muted small">Batched, resumable and exactly once per run; each batch is one transaction. Listed in run order (dependencies first).</span>
     <span class="spacer"></span>
     {#if notDone.length > 0}
       <button onclick={() => dryRun(null)} disabled={busy !== null}>{busy === "dry:*" ? "Running…" : "Dry run all"}</button>
@@ -131,6 +140,17 @@
                 <span class="mono name">{m.name}</span>
                 {#if !m.declared}<span class="badge" title="Recorded in _migrations but no longer declared in code">not in code</span>{/if}
                 {#if m.batchSize}<div class="faint tiny">batches of {m.batchSize}</div>{/if}
+                {#if m.after.length > 0}
+                  <div class="tiny deps" data-testid="migration-after">
+                    after
+                    {#each m.after as dep, i (dep)}
+                      {@const done = states.get(dep) === "done"}
+                      <span class="mono dep" class:met={done} title={done ? `${dep} is done` : `${dep} is ${states.get(dep) ?? "pending"}`}
+                        >{done ? "✓" : "○"} {dep}</span
+                      >{i < m.after.length - 1 ? ", " : ""}
+                    {/each}
+                  </div>
+                {/if}
               </td>
               <td>
                 <a href={href("data", [m.table])} onclick={link}>{m.table}</a>
@@ -161,7 +181,13 @@
                     {#if m.state === "done"}
                       <button class="small" onclick={() => start(m, { restart: true })} disabled={busy !== null}>Restart</button>
                     {:else}
-                      <button class="small primary" onclick={() => start(m)} disabled={busy !== null}>{m.state === "pending" ? "Run" : "Resume"}</button>
+                      <button
+                        class="small primary"
+                        onclick={() => start(m)}
+                        disabled={busy !== null}
+                        title={unmet(m).length > 0 ? `Waits for ${unmet(m).join(", ")}; running it now asks to force it` : undefined}
+                        >{m.state === "pending" ? "Run" : "Resume"}{unmet(m).length > 0 ? " (force)" : ""}</button
+                      >
                     {/if}
                   {/if}
                 {/if}
@@ -263,6 +289,15 @@
   }
   .name {
     font-weight: 600;
+  }
+  .deps {
+    color: var(--muted);
+  }
+  .dep {
+    color: var(--warn);
+  }
+  .dep.met {
+    color: var(--ok);
   }
   .prog {
     width: 220px;

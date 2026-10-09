@@ -1,6 +1,6 @@
 ---
 source: crates/ferrix-macros/src/tests.rs
-expression: "table(quote!(), quote!\n{\n    #[search_index(s_porter, search = body, tokenizer = \"porter\", language =\n    \"english\")]\n    #[search_index(s_porter_keep, search = body, tokenizer = \"porter\",\n    diacritics = \"keep\")]\n    #[search_index(s_trigram, search = body, filter = [channel], tokenizer =\n    \"trigram\")]\n    #[search_index(s_plain, search = title, tokenizer = \"unicode61\",\n    diacritics = \"remove\")]\n    #[vector_index(v_hnsw, field = embedding, dims = 4, kind = \"hnsw\")]\n    #[vector_index(v_exact, field = embedding, dims = 4, filter = [channel],\n    kind = \"exact\")] struct Doc\n    {\n        channel: String, body: String, title: Option<String>, embedding:\n        Vec<f32>\n    }\n})"
+expression: "table(quote!(), quote!\n{\n    #[search_index(s_porter, search = body, tokenizer = \"porter\", language =\n    \"english\")]\n    #[search_index(s_porter_keep, search = body, tokenizer = \"porter\",\n    diacritics = \"keep\")]\n    #[search_index(s_trigram, search = body, filter = [channel], tokenizer =\n    \"trigram\")]\n    #[search_index(s_plain, search = title, tokenizer = \"unicode61\",\n    diacritics = \"remove\")]\n    #[search_index(s_ro, search = body, tokenizer = \"snowball\", language =\n    \"romanian\")]\n    #[search_index(s_fr_keep, search = body, language = \"french\", tokenizer =\n    \"snowball\", diacritics = \"keep\")]\n    #[vector_index(v_hnsw, field = embedding, dims = 4, kind = \"hnsw\")]\n    #[vector_index(v_tuned, field = embedding, dims = 4, kind = \"hnsw\", m =\n    32, ef_construction = 400, ef_search = 64)]\n    #[vector_index(v_ef, field = embedding, dims = 4, ef_search = 20, kind =\n    \"hnsw\")]\n    #[vector_index(v_exact, field = embedding, dims = 4, filter = [channel],\n    kind = \"exact\")] struct Doc\n    {\n        channel: String, body: String, title: Option<String>, embedding:\n        Vec<f32>\n    }\n})"
 ---
 #[derive(
     ::ferrix::__private::serde::Serialize,
@@ -33,14 +33,28 @@ impl ::ferrix::Table for Doc {
                 search_field : "body", filter_fields : ::std::vec!["channel"], tokenizer
                 : ::ferrix::Tokenizer::trigram(), }, ::ferrix::SearchIndexDef { name :
                 "s_plain", search_field : "title", filter_fields : ::std::vec![],
-                tokenizer : ::ferrix::Tokenizer::unicode61(), }
+                tokenizer : ::ferrix::Tokenizer::unicode61(), }, ::ferrix::SearchIndexDef
+                { name : "s_ro", search_field : "body", filter_fields : ::std::vec![],
+                tokenizer : ::ferrix::Tokenizer::snowball("romanian"), },
+                ::ferrix::SearchIndexDef { name : "s_fr_keep", search_field : "body",
+                filter_fields : ::std::vec![], tokenizer :
+                ::ferrix::Tokenizer::snowball("french").keep_diacritics(), }
             ],
             vector_indexes: ::std::vec![
                 ::ferrix::VectorIndexDef { name : "v_hnsw", vector_field : "embedding",
                 dimensions : 4usize, filter_fields : ::std::vec![], kind :
-                ::ferrix::VectorIndexKind::Hnsw, }, ::ferrix::VectorIndexDef { name :
-                "v_exact", vector_field : "embedding", dimensions : 4usize, filter_fields
-                : ::std::vec!["channel"], kind : ::ferrix::VectorIndexKind::Exact, }
+                ::ferrix::VectorIndexKind::Hnsw, hnsw : ::ferrix::HnswParams::DEFAULT, },
+                ::ferrix::VectorIndexDef { name : "v_tuned", vector_field : "embedding",
+                dimensions : 4usize, filter_fields : ::std::vec![], kind :
+                ::ferrix::VectorIndexKind::Hnsw, hnsw : ::ferrix::HnswParams { m :
+                32usize, ef_construction : 400usize, ef_search : 64usize, }, },
+                ::ferrix::VectorIndexDef { name : "v_ef", vector_field : "embedding",
+                dimensions : 4usize, filter_fields : ::std::vec![], kind :
+                ::ferrix::VectorIndexKind::Hnsw, hnsw : ::ferrix::HnswParams { ef_search
+                : 20usize, .. ::ferrix::HnswParams::DEFAULT }, },
+                ::ferrix::VectorIndexDef { name : "v_exact", vector_field : "embedding",
+                dimensions : 4usize, filter_fields : ::std::vec!["channel"], kind :
+                ::ferrix::VectorIndexKind::Exact, hnsw : ::ferrix::HnswParams::DEFAULT, }
             ],
             ts: || ::ferrix::__private::ts_inline::<Doc>(),
             validate: ::ferrix::__private::validate_doc::<Doc>,
@@ -76,7 +90,15 @@ impl Doc {
     pub const s_plain: ::ferrix::SearchIndex<Doc> = ::ferrix::SearchIndex::new(
         "s_plain",
     );
+    pub const s_ro: ::ferrix::SearchIndex<Doc> = ::ferrix::SearchIndex::new("s_ro");
+    pub const s_fr_keep: ::ferrix::SearchIndex<Doc> = ::ferrix::SearchIndex::new(
+        "s_fr_keep",
+    );
     pub const v_hnsw: ::ferrix::VectorIndex<Doc> = ::ferrix::VectorIndex::new("v_hnsw");
+    pub const v_tuned: ::ferrix::VectorIndex<Doc> = ::ferrix::VectorIndex::new(
+        "v_tuned",
+    );
+    pub const v_ef: ::ferrix::VectorIndex<Doc> = ::ferrix::VectorIndex::new("v_ef");
     pub const v_exact: ::ferrix::VectorIndex<Doc> = ::ferrix::VectorIndex::new(
         "v_exact",
     );
@@ -85,6 +107,10 @@ const _: () = ::ferrix::__private::assert_search_field::<String>();
 const _: () = ::ferrix::__private::assert_search_field::<String>();
 const _: () = ::ferrix::__private::assert_search_field::<String>();
 const _: () = ::ferrix::__private::assert_search_field::<Option<String>>();
+const _: () = ::ferrix::__private::assert_search_field::<String>();
+const _: () = ::ferrix::__private::assert_search_field::<String>();
+const _: () = ::ferrix::__private::assert_vector_field::<Vec<f32>>();
+const _: () = ::ferrix::__private::assert_vector_field::<Vec<f32>>();
 const _: () = ::ferrix::__private::assert_vector_field::<Vec<f32>>();
 const _: () = ::ferrix::__private::assert_vector_field::<Vec<f32>>();
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]

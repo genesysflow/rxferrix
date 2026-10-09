@@ -92,7 +92,8 @@ unsafe fn row_score(api: &ffi::Fts5ExtensionApi, fts: *mut ffi::Fts5Context) -> 
     Ok(score(&tf[..phrases], len.max(0) as u32))
 }
 
-/// Auto-extension entry point: registers `ferrix_score` with the connection's FTS5 module.
+/// Auto-extension entry point: registers `ferrix_score` and the `ferrix_snowball` tokenizer with the connection's
+/// FTS5 module.
 unsafe extern "C" fn register(
     db: *mut ffi::sqlite3,
     _err: *mut *mut c_char,
@@ -116,11 +117,16 @@ unsafe extern "C" fn register(
         let Some(create) = fts5.as_ref().and_then(|a| a.xCreateFunction) else {
             return ffi::SQLITE_ERROR;
         };
-        create(fts5, c"ferrix_score".as_ptr(), ptr::null_mut(), Some(ferrix_score), None)
+        let rc = create(fts5, c"ferrix_score".as_ptr(), ptr::null_mut(), Some(ferrix_score), None);
+        if rc != ffi::SQLITE_OK {
+            return rc;
+        }
+        // The Snowball tokenizer (`super::stem`), on the same connection: tokenizers are per connection too.
+        super::stem::register(fts5)
     }
 }
 
-/// Register `ferrix_score` for every SQLite connection opened afterwards (called once, from
+/// Register `ferrix_score` (and `ferrix_snowball`) for every SQLite connection opened afterwards (called once, from
 /// [`super::register_extensions`]).
 pub(super) fn register_auto_extension() {
     type Init = unsafe extern "C" fn(*mut ffi::sqlite3, *mut *mut c_char, *const ffi::sqlite3_api_routines) -> c_int;

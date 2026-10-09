@@ -44,6 +44,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "items"
       | "lossy"
       | "mig_counted"
+      | "mig_deps"
       | "mig_dry"
       | "mig_dry_log"
       | "mig_flaky"
@@ -60,9 +61,12 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "sched_notes"
       | "search_messages"
       | "search_vectors"
+      | "stem_docs"
       | "tasks"
       | "todos"
       | "tok_docs"
+      | "vq_ann"
+      | "vq_items"
     >
   >();
   // ... and the built-in `_storage` table (file storage).

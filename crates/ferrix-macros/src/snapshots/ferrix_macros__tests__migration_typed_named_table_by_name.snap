@@ -1,6 +1,6 @@
 ---
 source: crates/ferrix-macros/src/tests.rs
-expression: "migration(quote!(table = \"todos\", name = \"0002_split-name\", batch = 7), quote!\n{\n    #[cfg(feature = \"x\")] async fn\n    split(_ctx: &ferrix::MutationCtx, doc: Doc<OldTodo>) ->\n    anyhow::Result<DocChange> { Ok(DocChange::Keep) }\n})"
+expression: "migration(quote!(table = \"todos\", name = \"0002_split-name\", batch = 7, after =\n[\"0001_add_priority\", \"todos:fix\"]), quote!\n{\n    #[cfg(feature = \"x\")] async fn\n    split(_ctx: &ferrix::MutationCtx, doc: Doc<OldTodo>) ->\n    anyhow::Result<DocChange> { Ok(DocChange::Keep) }\n})"
 ---
 #[cfg(feature = "x")]
 async fn split(
@@ -32,6 +32,7 @@ static __FERRIX_MIGRATION_split: ::ferrix::__private::MigrationDef = ::ferrix::_
     name: ::core::option::Option::Some("0002_split-name"),
     table: "todos",
     batch_size: 7usize,
+    after: &["0001_add_priority", "todos:fix"],
     handler: {
         fn __ferrix_migrate<'a>(
             __ferrix_ctx: &'a ::ferrix::MutationCtx,

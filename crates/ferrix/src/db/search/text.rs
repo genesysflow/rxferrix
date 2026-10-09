@@ -14,6 +14,7 @@
 //!   (e.g. Chinese) are indexed as whole runs, so only prefixes of runs match.
 //! - `porter`: like `unicode61`, but words are reduced to their English stem first, so "run", "runs" and "running"
 //!   match each other. The last term is a prefix (of the stem).
+//! - `snowball`: like `porter`, for the index's `language` (Romanian, French, German, ...; see [`super::stem`]).
 //! - `trigram`: substring search. Each term matches anywhere inside a word ("ell" finds "hello"); terms shorter than
 //!   three characters are ignored (FTS5 can't match them), so text whose terms are all shorter matches nothing.
 //!
@@ -256,7 +257,7 @@ impl SearchPlan {
             .find(|i| i.name == index)
             .with_context(|| format!("search index `{index}` not found on table `{}`", table.name))?;
         let SpecialIndexKind::Search { search_field, filter_fields, tokenizer, .. } = &info.kind else {
-            bail!("`{index}` on table `{}` is a vector index; use ctx.vector_search in an action", table.name);
+            bail!("`{index}` on table `{}` is a vector index; use ctx.db.vector_search (or ctx.vector_search in an action)", table.name);
         };
         let ctx = || format!("invalid search on index `{index}` of table `{}`", table.name);
         let [(field, text)] = search else {

@@ -710,12 +710,14 @@ async fn dashboard_lists_search_and_vector_indexes() {
     assert_eq!(
         find("search_messages"),
         json!([{ "name": "search_body", "kind": "search", "field": "body", "filterFields": ["channel", "pinned"],
-                 "dimensions": null, "tokenizer": "unicode61", "removeDiacritics": true, "method": null }])
+                 "dimensions": null, "tokenizer": "unicode61", "language": null, "removeDiacritics": true, "method": null,
+                 "hnsw": null }])
     );
     assert_eq!(
         find("search_vectors"),
         json!([{ "name": "by_embedding", "kind": "vector", "field": "embedding", "filterFields": ["category", "rank"],
-                 "dimensions": 8, "tokenizer": null, "removeDiacritics": null, "method": "exact" }])
+                 "dimensions": 8, "tokenizer": null, "language": null, "removeDiacritics": null, "method": "exact",
+                 "hnsw": null }])
     );
     assert_eq!(find("todos"), json!([]));
 }
@@ -782,7 +784,7 @@ async fn catalog_add_change_remove_across_restarts() {
     let sys = messages_def(vec![SearchIndexDef { name: "s", search_field: "_id", filter_fields: vec![], tokenizer: Default::default() }]);
     assert!(Database::open(dir.path(), &[sys], 1).is_err());
     let zero = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "x", dimensions: 0, filter_fields: vec![], kind: Default::default() }],
+        vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "x", dimensions: 0, filter_fields: vec![], kind: Default::default(), hnsw: Default::default() }],
         ..original.clone()
     };
     assert!(Database::open(dir.path(), &[zero], 1).is_err());
@@ -902,7 +904,7 @@ async fn vector_index_catalog_changes() {
     }
     // Different dimensions: rebuilt; the existing 8-dim vectors don't fit and are skipped (with a warning).
     let four = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 4, filter_fields: vec![], kind: Default::default() }],
+        vector_indexes: vec![VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 4, filter_fields: vec![], kind: Default::default(), hnsw: Default::default() }],
         ..Item::table_def()
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&four), 1).unwrap();

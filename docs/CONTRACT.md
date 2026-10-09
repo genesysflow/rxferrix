@@ -925,7 +925,9 @@ restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a s
 #[search_index(search_body, search = body, filter = [channel])]            // body: String or Option<String>
 #[search_index(search_stems, search = body, tokenizer = "porter", language = "english")]   // "run" finds "running"
 #[search_index(search_sub, search = body, tokenizer = "trigram", diacritics = "keep")]     // substrings
+#[search_index(search_ro, search = body, tokenizer = "snowball", language = "romanian")]   // "orașelor" finds "orașul"
 #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]  // Vec<f32> / Option<Vec<f32>>
+// HNSW parameters (optional, kind = "hnsw" only): #[vector_index(.., kind = "hnsw", m = 32, ef_construction = 256, ef_search = 64)]
 pub struct Message { pub channel: Id<Channel>, pub body: String, pub embedding: Option<Vec<f32>> }
 
 #[query]
@@ -951,6 +953,18 @@ pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>, channel: Id<Channel>)
     let hits = ctx.vector_search(Message::by_embedding, &embedding, opts).await?;   // [(id, cosine similarity)]
     Ok(hits.into_iter().map(|(id, _score)| id).collect())
 }
+
+#[query]   // exact, deterministic, reactive: reruns when a write changes the nearest messages of the channel
+pub async fn more_like(ctx: &QueryCtx, id: Id<Message>) -> Result<Vec<Doc<Message>>> {
+    let Some(msg) = ctx.db.get(id).await? else { return Ok(vec![]) };
+    let Some(embedding) = msg.embedding.clone() else { return Ok(vec![]) };
+    let opts = VectorSearchOpts::new(6).filter(VectorFilter::eq(Message::channel, msg.channel));
+    let mut out = Vec::new();
+    for (other, _score) in ctx.db.vector_search(Message::by_embedding, &embedding, opts).await? {
+        if other != id && let Some(doc) = ctx.db.get(other).await? { out.push(doc); }
+    }
+    Ok(out)
+}
 ```
 
 ```rust
@@ -971,19 +985,42 @@ impl RawSearchQuery<'_> {   // search(field, text), eq(field, json), filter(Fn(&
 pub struct VectorSearchOpts<T> {
     pub limit: usize,                       // 1..=256, default 10
     pub filter: Option<VectorFilter<T>>,
-    pub exact: bool,                        // HNSW indexes: search exactly anyway (default false)
+    pub exact: bool,                        // actions on HNSW indexes: search exactly anyway (default false)
+    pub ef: Option<usize>,                  // actions on HNSW indexes: search width (default: the index's ef_search)
 }
 impl<T> VectorSearchOpts<T> {
     pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; pub fn exact(self) -> Self;
+    pub fn ef(self, ef: usize) -> Self;     // 1..=4096 (HnswParams::EF_SEARCH_RANGE), checked when the search runs
 }
-// TableDef additions: SearchIndexDef { .., tokenizer: Tokenizer }, VectorIndexDef { .., kind: VectorIndexKind }.
-pub struct Tokenizer { pub kind: TokenizerKind /* Unicode61 | Porter | Trigram */, pub language: Option<&'static str>,
-                       pub remove_diacritics: bool }
+impl QueryDb {   // queries and mutations: always exact (vec0) at the snapshot / in the transaction; `exact`, `ef` ignored
+    pub async fn vector_search<T: Table>(&self, index: VectorIndex<T>, vector: impl AsRef<[f32]>,
+                                         opts: VectorSearchOpts<T>) -> Result<Vec<(Id<T>, f32)>>;
+}
+impl ActionCtx {  // the latest committed state; the HNSW graph unless `exact` (or while it isn't ready)
+    pub async fn vector_search<T: Table>(&self, index: VectorIndex<T>, vector: impl AsRef<[f32]>,
+                                         opts: VectorSearchOpts<T>) -> Result<Vec<(Id<T>, f32)>>;
+}
+// TableDef additions: SearchIndexDef { .., tokenizer: Tokenizer },
+//                     VectorIndexDef { .., kind: VectorIndexKind, hnsw: HnswParams }.
+pub struct Tokenizer { pub kind: TokenizerKind /* Unicode61 | Porter | Trigram | Snowball */,
+                       pub language: Option<&'static str>, pub remove_diacritics: bool }
 impl Tokenizer {   // const fns, used by the #[table] expansion
+    pub const LANGUAGES: &[&str];            // porter: ["english"]
+    pub const SNOWBALL_LANGUAGES: &[&str];   // arabic danish dutch english finnish french german greek hungarian italian
+                                             // norwegian portuguese romanian russian spanish swedish tamil turkish
     pub const fn unicode61() -> Self; pub const fn porter(language: &'static str) -> Self; pub const fn trigram() -> Self;
+    pub const fn snowball(language: &'static str) -> Self;
     pub const fn keep_diacritics(self) -> Self;
 }
 pub enum VectorIndexKind { Exact /* default */, Hnsw }
+pub struct HnswParams { pub m: usize, pub ef_construction: usize, pub ef_search: usize }   // camelCase JSON, TS
+impl HnswParams {
+    pub const DEFAULT: HnswParams;           // m 16, ef_construction 128, ef_search 128 (required for exact indexes)
+    pub const M_RANGE: RangeInclusive<usize> = 4..=64;
+    pub const EF_CONSTRUCTION_RANGE: RangeInclusive<usize> = 16..=2048;
+    pub const EF_SEARCH_RANGE: RangeInclusive<usize> = 1..=4096;
+    pub fn check(&self) -> Result<(), String>;
+}
 impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
     pub fn eq<V: Serialize>(field: Field<T, V>, value: V) -> Self;
     pub fn any_of<V: Serialize>(field: Field<T, V>, values: impl IntoIterator<Item = V>) -> Self;
@@ -1002,14 +1039,26 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
   - `"unicode61"` (default): FTS5 `unicode61 remove_diacritics 2`: words, case-insensitive, `café` = `cafe`. Scripts
     without spaces (e.g. Chinese) are indexed as whole runs.
   - `"porter"`: FTS5 `porter unicode61 …`: words reduced to their English stem, so "run", "runs" and "running" match
-    each other (the last term is a prefix of the stem). `language` is only accepted with `porter`, and only
-    `"english"` (the default; FTS5's stemmer is English-only).
+    each other (the last term is a prefix of the stem). `language` is only accepted with `porter` (only
+    `"english"`, the default; FTS5's stemmer is English-only) and `snowball`.
+  - `"snowball"` with `language = "…"` (required; one of `Tokenizer::SNOWBALL_LANGUAGES`): the custom FTS5 tokenizer
+    `ferrix_snowball <language> remove_diacritics <0|2>` (`db::search::stem`), wrapping `unicode61`: words are split
+    and case-folded exactly as by `unicode61`, then reduced to their stem by the language's Snowball stemmer
+    (`rust-stemmers`), so inflected forms match each other (Romanian "orașul" / "orașelor", French "chanter" /
+    "chantait", German "Haus" / "Häusern"); the last term is a prefix of the stem, as with `porter`. Stemming sees
+    the word with its accents (the stemmers' suffix rules need them; Romanian `ș`/`ț` with a comma below are read as
+    the cedilla forms the stemmer knows). With `diacritics = "remove"` (default) the token is the stem folded like
+    `unicode61 remove_diacritics 2`, and, when the stemmer cuts the unaccented spelling differently, the folded
+    word's stem is added as a colocated synonym (in documents and in queries), so a word typed without accents still
+    finds the accented forms. Synonyms don't change relevance: they add no occurrences and no length. With `"keep"`
+    accents distinguish terms. The tokenizer is registered on every SQLite connection (by the same auto extension as
+    `ferrix_score`): the writer, the read-only readers, and those opened by the HNSW thread, backups and exports.
   - `"trigram"`: FTS5 `trigram`: substring search; each term matches anywhere inside a word ("ell" finds "hello"),
     the last term is not a prefix (substrings cover it), and terms shorter than 3 characters are ignored (FTS5
     can't match them), so text whose terms are all shorter matches nothing. Case-insensitive.
   - `diacritics = "remove"` (default) folds diacritics; `"keep"` makes `café` and `cafe` different terms
     (`remove_diacritics 0`).
-  Changing an index's tokenizer rebuilds it at startup (same index id, backfilled).
+  Changing an index's tokenizer (kind, language or diacritics) rebuilds it at startup (same index id, backfilled).
 - **Relevance**: BM25's per-document part (`db::search::score`): for each query phrase with `tf` occurrences in a
   document of `dl` tokens, `Σ tf·(k1+1) / (tf + k1·(1 − b + b·dl/32))`, `k1 = 1.2`, `b = 0.75`. There is no IDF and
   the reference length is fixed (not the corpus average), so a document's score depends only on its own text and the
@@ -1048,18 +1097,32 @@ client behaviour as §1.2.1, so `usePaginatedQuery` works unchanged).
 - **Read set**: the same synthetic key range as `take` (below) plus a `by_id` point per examined document. So every
   page of a search reruns after a write in its filter partition, and none after writes elsewhere.
 
-**Vector search semantics.** Only `ActionCtx` has `vector_search` (a compile error elsewhere). It reads the latest
-committed snapshot; results are `(id, score)` with `score` the cosine similarity (higher = more similar), best first.
-Errors: a query vector whose length isn't the index's `dims` (or containing NaN/inf), `limit` outside `1..=256`, a
-filter on a field that isn't a filter field, more than 64 `or` branches. Writing a document whose vector field has the
+**Vector search semantics.** Two entry points with the same options and results: `(id, score)` with `score` the
+cosine similarity (higher = more similar), best first.
+- **`ctx.db.vector_search` (`QueryDb`: queries, and mutations through `MutationDb`)**: always the **exact** `vec0`
+  scan, also on HNSW indexes (`exact` and `ef` are ignored), at the query's snapshot (a mutation sees its own
+  writes). Deterministic: the same snapshot gives the same results, ties broken by document id. Reactive: see
+  "Reactivity" below. Use it when the query vector is already known to the query (stored on a document, sent by the
+  client); it costs a full scan of the matching entries per run and per rerun (about 18 ms per k=10 search over
+  50k × 384).
+- **`ctx.vector_search` (`ActionCtx`)**: for embeddings from external APIs (only actions may call them) and large
+  indexes: the latest committed snapshot, the HNSW graph when the index has one (approximate), not reactive (actions
+  have no read set). The documents may change before the action loads them (`ctx.run_query`).
+- Why queries never use the graph: an HNSW search is deterministic for a fixed graph, but the graph is not a function
+  of the snapshot (it is updated after commits, rebuilt in the background, loaded from a file at startup), so two
+  runs at one snapshot could return different neighbours, and a rerun could change its result without any write it
+  depends on.
+Errors: a query vector whose length isn't the index's `dims` (or containing NaN/inf), `limit` outside `1..=256`, `ef`
+outside `1..=4096`, a filter on a field that isn't a filter field, more than 64 `or` branches. Writing a document whose vector field has the
 wrong length (or isn't an array of numbers) fails before anything is written, unless the write leaves that field
 unchanged (a vector made unindexable by a change of `dims` stays unindexed, and the document stays editable).
 Documents whose vector field is missing or null are not indexed. Results are `(id, score)` tuples, which can be
 returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struct reads better in the client.
 - **`kind = "exact"`** (default): sqlite-vec's `vec0` brute-force scan; exact (checked against brute force). About
   18 ms per k=10 query at 50k × 384, 75–120 ms at 200k × 384.
-- **`kind = "hnsw"`** (`db::search::hnsw`, `db::search::ann`): an in-memory HNSW graph (M = 16, ef_construction =
-  128, search width `ef = max(128, k')`, cosine) on top of the same `vec0` table, which stays the source of truth.
+- **`kind = "hnsw"`** (`db::search::hnsw`, `db::search::ann`): an in-memory HNSW graph (cosine; by default M = 16,
+  ef_construction = 128, search width `ef = max(ef_search = 128, k')`) on top of the same `vec0` table, which stays
+  the source of truth.
   Approximate: recall@10 ≈ 0.95 at 200k × 384 for embedding-like data (low intrinsic dimension), ~0.4 ms per query;
   uniformly random high-dimensional vectors (no structure) are the known worst case. `opts.exact()` forces the exact
   scan. While the graph isn't ready (building at startup, or failed), searches are exact.
@@ -1075,6 +1138,16 @@ returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struc
     posting set; if at most 4096 live documents match the filter, their distances are computed exactly; otherwise
     the graph is asked for `k' = k · live / matching · 1.25` candidates, filtered, and retried with `4k'` (up to
     three times, then the exact computation) if fewer than `k` remain.
+  - *Parameters*: `#[vector_index(.., kind = "hnsw", m = N, ef_construction = N, ef_search = N)]` (`HnswParams`:
+    `m` in 4..=64, links per node, layer 0 allows 2m; `ef_construction` in 16..=2048; `ef_search` in 1..=4096, the
+    default search width), checked by the macro and at startup (parameters on an exact index are an error). Per
+    search: `VectorSearchOpts::ef(n)` (higher: better recall, slower; e.g. recall@10 0.77 at `ef = 10` and 1.0 at
+    `ef = 400` on 10k random 24-dim vectors). The stored definition holds the parameters: changing `m` or
+    `ef_construction` keeps the `vec0` table but builds a new graph (a saved file whose graph was built with other
+    parameters is discarded and replaced); changing `ef_search` keeps the graph.
+  - *Concurrent inserts*: a node writes its own link lists on every layer before any neighbour links back to it, so
+    it is reachable only once fully linked (otherwise a preempted insert could leave nodes that even a search for
+    their own vector misses).
   - *Persistence*: indexes with ≥ 10 000 live vectors are saved to `<data dir>/vector_index_<id>.hnsw` (graph,
     vectors, per-node doc id, filter values and vector hash; blake3 checksum; written to a temporary file and renamed)
     after the build, after rebuilds and every `max(1000, live/10)` changes. At startup a file with a valid checksum,
@@ -1082,6 +1155,7 @@ returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struc
     snapshot and every difference (changed vector or filter values, missing or extra documents) is applied. A missing,
     stale or corrupt file only costs a rebuild; smaller indexes are rebuilt at every startup. Files of indexes that no
     longer exist (or became exact) are deleted.
+  - The background thread stops, and closes its reader connection, before a dropped `Database` finishes dropping.
   - Benchmarks (`search::perf_hnsw`, release, 16 threads): building 200k × 384 takes 9–25 s; saving the 330 MB
     file ~0.2 s, loading it ~0.2 s.
 
@@ -1092,8 +1166,8 @@ are listed in `_search_indexes` and updated inside the mutation's write transact
 write paths, so search results are always consistent with document reads and roll back with the mutation.
 `App::open` reconciles them like ordinary indexes: creates and backfills new ones, rebuilds (drop, create, backfill)
 indexes whose definition changed (fields, dimensions, tokenizer), and drops removed ones (a backfill skips documents
-whose vector has the wrong length, with a warning). Switching a vector index between `exact` and `hnsw` only updates
-its stored definition (the `vec0` table is kept). Stored definitions from before tokenizers existed read as the
+whose vector has the wrong length, with a warning). Switching a vector index between `exact` and `hnsw`, or changing
+its HNSW parameters, only updates its stored definition (the `vec0` table is kept). Stored definitions from before tokenizers existed read as the
 default tokenizer, so they are not rebuilt. `Database::verify_indexes` also recomputes every search and vector index
 and compares each ready HNSW graph's live nodes with its `vec0` table.
 
@@ -1109,12 +1183,22 @@ index without filter fields adds `[doc id]`). A search query records:
 - without filters: the full range `[b"", ∞)`;
 - plus a `by_id` point for each document it examined.
 So a search with `.eq(channel, c)` is invalidated only by writes to documents whose channel is or was `c` (and by
-changes to documents it returned), never by writes in other channels. This is exact because the relevance of a
+changes to documents it returned), never by writes in other channels.
+
+Vector indexes use the same layout (their filter fields are the `vec0` metadata columns): every write that changes a
+document's vector entry (its vector or a filter value; inserting or deleting a document with a vector) writes the
+same keys for the old and the new entry. A query's `ctx.db.vector_search` records, for each `or` branch of its filter,
+the prefix range of the branch's equality on its lowest filter column, or the full range for an unfiltered search;
+branches that can't match (`f == a AND f == b`) and an empty `any_of` record nothing. No `by_id` points: the results
+are `(id, score)` pairs, which depend only on the entries (loading the documents with `ctx.db.get` records them).
+This is sound because the results are a function of the entries matching the filter: an entry that matches a branch
+before or after a write has a key under that branch's prefix. So a subscribed "nearest in channel `c`" query reruns
+when a nearer vector is written in `c`, and never for other channels. This is exact because the relevance of a
 document depends only on that document (see Relevance): documents outside the filter can neither enter the result nor
 reorder it. Encoded values are self-delimiting, so one value's prefix never contains another's keys, and the
 subscription manager's interval index stabs each written key like any index key. No change to `ReadSet`/`CommitEntry`
-was needed. Vector indexes are not reactive (actions only); HNSW indexes write `(index id, doc id)` for the graph's
-catch-up.
+was needed. HNSW indexes additionally write the bare `(index id, doc id)` (16 bytes; filter keys are longer) for the
+graph's catch-up; it can only make a query rerun more often.
 
 ### 1.9 Migrations
 
@@ -1130,7 +1214,7 @@ async fn add_priority(ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
 }
 
 /// Typed, when the old shape still deserializes; a stable name set explicitly.
-#[migration(table = "todos", name = "0002_split_owner")]
+#[migration(table = "todos", name = "0002_split_owner", after = ["todos:add_priority"])]   // runs after that one
 async fn split_owner(ctx: &MutationCtx, doc: Doc<OldTodo>) -> Result<DocChange> {
     if doc.owner.is_empty() { return Ok(DocChange::Delete); }
     let user = ctx.db.query::<User>().first().await?;                   // ctx is a normal MutationCtx
@@ -1148,29 +1232,42 @@ pub struct RunOptions {
     pub dry_run: bool,              // run over every document, report, write nothing (every batch rolled back)
     pub restart: bool,              // start over from the first document, even if done
     pub max_batches: Option<u64>,   // stop after n batches, still `running` (as if the process died); for tests
+    pub force: bool,                // run even if some migration it runs after isn't done
 }
 impl App {
     pub async fn run_migration<M: MigrationRef>(&self, opts: RunOptions) -> Result<MigrationReport>;
-    pub async fn run_migration_named(&self, name: &str, opts: RunOptions) -> Result<MigrationReport>;
-    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // name order; stops at a failure
+    pub async fn run_migration_named(&self, name: &str, opts: RunOptions) -> Result<MigrationReport>; // dependencies_not_done
+    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // run order; stops at a failure
     pub async fn migration_summaries(&self) -> Result<Vec<MigrationSummary>>;                    // what `list` returns
 }
 pub struct MigrationReport {   // camelCase JSON
     pub name: String, pub table: String,
-    pub outcome: RunOutcome,   // completed | failed | canceled | alreadyDone | alreadyRunning | stopped | dryRun
+    pub outcome: RunOutcome,   // completed | blocked | failed | canceled | alreadyDone | alreadyRunning | stopped | dryRun
     pub batches: u64, pub processed: u64, pub changed: u64,   // this run only
     pub error: Option<String>, pub failed_document: Option<String>,
     pub schema_check: Option<String>,   // "passed" or "failed: <report>" when it ended the table's migrating state
     pub examples: Vec<ChangeExample>,   // dry runs: up to 5 { id, before, after (null = deleted) }
 }
 // ferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
-// of `A-Za-z0-9_-.:/`, batch sizes); App::open also fails if a migration's table is not defined in code.
+// of `A-Za-z0-9_-.:/`, batch sizes, `after` names that exist, no cycle, no duplicate); App::open also fails if a
+// migration's table is not defined in code. Migrations::iter() is in run order; Migrations::dependencies(name).
 ```
 
 - **Names** are stable ids: `name = "..."` or, by default, the function path (`todos:add_priority`, like functions).
   Moving or renaming the function changes a default name, which makes it a new migration: set `name` for
-  migrations that may move. Migrations run in **name order** (`ferrix migrate`, `serve --migrate`, `run` without a
-  name), stopping at the first that fails or is canceled.
+  migrations that may move.
+- **Order and dependencies.** `after = ["name", ...]` lists migrations that must be done before this one (by name:
+  `name = "..."` or the default function path). The dependencies form a DAG, checked at startup: an unknown name, a
+  cycle (a migration after itself included) or a name listed twice is an error naming the migrations involved.
+  Migrations run in a **topological order with name order as the tie-break** (Kahn's algorithm, taking the smallest
+  name among the migrations whose dependencies are ordered; without `after` it is plain name order): `ferrix migrate`,
+  `serve --migrate`, `run_pending_migrations` and `run` without a name, stopping at the first that fails, is
+  canceled, or is `blocked` (a dependency not done, e.g. running in another process). Running **one** migration
+  whose dependencies aren't all `done` is refused before anything is written, with the user error
+  `dependencies_not_done` ("Migration `x` runs after `a` (pending), …"), unless forced (`RunOptions::force`,
+  `ferrix migrate --name x --force`, `force` in `_system/migrations:run`); the check is in the `start` transaction.
+  Dry runs are never refused (they write nothing, and see the data without the changes of dependencies that haven't
+  run).
 - **Batches.** A run first marks the migration `running` (creating its `_migrations` row). Each batch is one mutation
   transaction, the internal system mutation `_system/migrations:run_batch` (so it gets the mutation timeout, panic
   handling and an execution log entry): it reads the cursor from the row, pages through the table's
@@ -1201,9 +1298,9 @@ pub struct MigrationReport {   // camelCase JSON
   logged as an error, the table stays migrating until the process stops, and the next start refuses to open (unless
   a new migration for the table is pending). Invalid documents never survive a restart unnoticed. With
   `--skip-schema-check` nothing is migrating, and migration writes are validated strictly.
-- **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--dir DIR]` runs every migration
-  that isn't done (or one) and prints a report per migration (exit code 1 if one failed); `ferrix migrate status`
-  lists them with their state and progress. Run the CLI while the server is stopped (it is a separate process: a
+- **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--force --name NAME] [--dir DIR]`
+  runs every migration that isn't done (or one) and prints a report per migration (exit code 1 if one failed or was
+  blocked); `ferrix migrate status` lists them in run order with their state, progress and dependencies. Run the CLI while the server is stopped (it is a separate process: a
   running server would not see its writes in its subscriptions); for a running server use the dashboard functions
   (§4.1.3) or start it with `serve --migrate` (`FERRIX_MIGRATE`), which runs pending migrations in the background
   after startup. Without `--migrate`, `serve` logs a warning listing the migrations that aren't done.
@@ -1289,6 +1386,7 @@ pub struct MigrationDef {
     pub name: Option<&'static str>,   // #[migration(name = "...")]
     pub table: &'static str,          // <T as Table>::NAME or the string given
     pub batch_size: usize,
+    pub after: &'static [&'static str],   // #[migration(after = [...])]: names of migrations to run first
     pub handler: MigrationHandler,
 }
 impl MigrationDef { pub fn name(&self) -> String; }   // `name`, else function_path(module_path, fn_name)
@@ -1352,13 +1450,14 @@ index name, an index named `by_id` or `by_creation_time`, and an existing `#[ser
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
 
 **Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...], tokenizer = "...", language =
-"...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...")]` (both
-consumed; `filter`, `tokenizer`, `language`, `diacritics` and `kind` optional) add, for
+"...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...", m = N,
+ef_construction = N, ef_search = N)]` (both consumed; `filter`, `tokenizer`, `language`, `diacritics`, `kind` and the
+HNSW parameters optional) add, for
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel])]
 #[search_index(search_stems, search = body, tokenizer = "porter", language = "english", diacritics = "keep")]
-#[vector_index(by_embedding, field = embedding, dims = 1536, kind = "hnsw")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, kind = "hnsw", m = 32)]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 ```
 these items to the expansion above (the `TableDef` literal always has both fields, `vec![]` when unused):
@@ -1370,10 +1469,13 @@ these items to the expansion above (the `TableDef` literal always has both field
         ::ferrix::SearchIndexDef { name: "search_stems", search_field: "body", filter_fields: vec![],
                                    tokenizer: ::ferrix::Tokenizer::porter("english").keep_diacritics() }],
     vector_indexes: vec![::ferrix::VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 1536usize,
-                                                     filter_fields: vec![], kind: ::ferrix::VectorIndexKind::Hnsw }],
+                                                     filter_fields: vec![], kind: ::ferrix::VectorIndexKind::Hnsw,
+                                                     hnsw: ::ferrix::HnswParams { m: 32usize, ..::ferrix::HnswParams::DEFAULT } }],
     ts: …, validate: … }
-// tokenizer: unicode61() (default or "unicode61"), porter("<language>") (language defaults to "english"), trigram();
-// `.keep_diacritics()` is appended for diacritics = "keep". kind: Exact (default or "exact") or Hnsw.
+// tokenizer: unicode61() (default or "unicode61"), porter("<language>") (language defaults to "english"), trigram(),
+// snowball("<language>") (language required); `.keep_diacritics()` is appended for diacritics = "keep".
+// kind: Exact (default or "exact") or Hnsw. hnsw: ::ferrix::HnswParams::DEFAULT without parameters, the struct with
+// the given ones and `..::ferrix::HnswParams::DEFAULT` for the rest (no `..` when all three are given).
 // in `impl Message { … }`, after by_creation_time:
 pub const search_body: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new("search_body");
 pub const by_embedding: ::ferrix::VectorIndex<Message> = ::ferrix::VectorIndex::new("by_embedding");
@@ -1386,10 +1488,13 @@ searched field itself), system fields, a missing `dims` or one outside `1..=8192
 unknown or duplicate arguments, a name equal to another index (of any kind), to a field handle, or to a reserved name
 (`by_id`, `by_creation_time`, `_id`, `_creation_time`), and a field type that is visibly wrong (`u32` as a search
 field, `Vec<f64>` as a vector field). Types behind aliases are caught by the `assert_*_field` check instead. Also
-(spanned at the string literal): an unknown `tokenizer` (not `"unicode61"`, `"porter"`, `"trigram"`), `diacritics`
-(not `"remove"`, `"keep"`) or `kind` (not `"exact"`, `"hnsw"`), a `language` other than `"english"`, a `language`
-without `tokenizer = "porter"`, a non-string value, and `tokenizer`/`language`/`diacritics` on a vector index or
-`kind` on a search index (unknown arguments). `TableDef`s built by hand are checked at startup the same way.
+(spanned at the string literal): an unknown `tokenizer` (not `"unicode61"`, `"porter"`, `"trigram"`, `"snowball"`),
+`diacritics` (not `"remove"`, `"keep"`) or `kind` (not `"exact"`, `"hnsw"`), a `language` that no Snowball stemmer
+supports, a `language` other than `"english"` with `porter`, a `language` without `tokenizer = "porter"` or
+`"snowball"`, `tokenizer = "snowball"` without a `language`, a non-string value, and `tokenizer`/`language`/
+`diacritics` on a vector index or `kind` on a search index (unknown arguments). Also: `m`, `ef_construction` or
+`ef_search` that aren't integer literals in their range (4..=64, 16..=2048, 1..=4096), given twice, or given without
+`kind = "hnsw"`. `TableDef`s built by hand are checked at startup the same way.
 
 ### 3.2 `#[query]` / `#[mutation]` / `#[action]` (and the `internal_*` variants)
 
@@ -1486,6 +1591,7 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
     name: ::core::option::Option::None,                      // Some("...") with `name = "..."`
     table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
     batch_size: 100usize,
+    after: &[],                                              // `after = ["a", "b"]` → &["a", "b"]
     handler: {
         fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
             -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
@@ -1500,7 +1606,9 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
 };
 ```
 - Arguments: `table` (required; a type path, checked to implement `Table`, or a string literal), `batch` (an integer
-  literal in `1..=10000`, default 100), `name` (a string literal of 1..=128 characters out of `A-Za-z0-9_-.:/`).
+  literal in `1..=10000`, default 100), `name` (a string literal of 1..=128 characters out of `A-Za-z0-9_-.:/`),
+  `after` (an array of migration names, each a valid name; compile errors for a non-array, a non-string element, an
+  invalid or repeated name, and the migration's own `name`; unknown names and cycles are startup errors).
 - The fn takes exactly `(ctx: &MutationCtx, doc: T)` with `T: DeserializeOwned` (`serde_json::Value`, `Doc<Old>`,
   ...) and returns `Result<O>` (any `...::Result`) with `O: MigrationOutput`; an unsupported `O` is reported by
   `#[diagnostic::on_unimplemented]`.
@@ -1661,11 +1769,11 @@ Read-only through the dashboard's generic writes; codegen leaves it out.
 
 | Path `_system/migrations:…` | Kind | Args → result |
 |---|---|---|
-| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in name (= run) order, then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating }`. Live (reruns with each batch and each write to the migrated tables). |
+| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in run order (dependencies first, then name order), then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, after: string[] (its dependencies; [] when not declared), state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating }`. Live (reruns with each batch and each write to the migrated tables). |
 | `status` | query (admin) | `{ name }` → `MigrationSummary \| null`. |
-| `run` | action (admin) | `{ name?, dryRun?, restart? }` → `{ started: string[], reports: MigrationReport[] }`. Without `name`: every migration that isn't done, in name order. Real runs continue in the background (`started`; follow them with `list`); `reports` then holds the ones that didn't start (`alreadyDone`, `alreadyRunning`). Dry runs run to the end and return a report each (`outcome: "dryRun"` or `"failed"`, counts, up to 5 `examples` `{ id, before, after }`). `not_found` for an unknown name. |
+| `run` | action (admin) | `{ name?, dryRun?, restart?, force? }` → `{ started: string[], reports: MigrationReport[] }`. Without `name`: every migration that isn't done, in run order (a `blocked` one stops the background run). With `name`: `dependencies_not_done` if a migration it runs after isn't done, unless `force`. Real runs continue in the background (`started`; follow them with `list`); `reports` then holds the ones that didn't start (`alreadyDone`, `alreadyRunning`). Dry runs run to the end and return a report each (`outcome: "dryRun"` or `"failed"`, counts, up to 5 `examples` `{ id, before, after }`). `not_found` for an unknown name. |
 | `cancel` | mutation (admin) | `{ name }` → `"canceled"` (it stops after its current batch; the next run resumes) or `"notRunning"`. |
-| `start` | internal mutation | `{ name, restart }` → `"started" \| "alreadyRunning" \| "alreadyDone"`. |
+| `start` | internal mutation | `{ name, restart, force? }` → `"started" \| "alreadyRunning" \| "alreadyDone" \| "blocked"` (`blocked`: a dependency isn't done and not `force`; nothing changed). |
 | `run_batch` | internal mutation | `{ name, dryRun, cursor? }` → `{ ran, state, processed, changed, done, cursor, schemaCheck, examples }`: one batch (§1.9). |
 | `fail` | internal mutation | `{ name, error, document? }` → `null`: marks the migration failed. |
 

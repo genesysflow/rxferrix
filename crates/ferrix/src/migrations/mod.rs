@@ -36,13 +36,22 @@
 //! next start refuses to open (unless another migration for it is pending). Invalid documents therefore never
 //! survive a restart unnoticed.
 //!
-//! Migrations run in name order (`ferrix migrate`, `serve --migrate`, the dashboard's `run` without a name), stopping
-//! at the first failure; give them sortable names (`name = "0002_split_name"`) when the order matters.
+//! **Order and dependencies.** `#[migration(.., after = ["0001_add_priority", "todos:split"])]` declares that a
+//! migration needs others to be done first. The dependencies form a DAG, checked when the registry is built (at
+//! startup): an unknown name, a cycle (a migration after itself included) or a name listed twice is an error.
+//! Migrations run in a topological order of that DAG, with name order as the tie-break: among the migrations whose
+//! dependencies are all ordered, the one with the smallest name comes next (so without `after` it is plain name
+//! order). `ferrix migrate`, `serve --migrate`, [`App::run_pending_migrations`] and the dashboard's "Run all pending"
+//! run them in that order, stopping at the first that fails, is canceled, or finds a dependency not done (running
+//! elsewhere: `blocked`). Running *one* migration whose dependencies are not all done is refused with an error
+//! (`dependencies_not_done`) unless forced ([`RunOptions::force`], `ferrix migrate --name x --force`, `force` in
+//! `_system/migrations:run`). Dry runs are never refused: they write nothing, and see the data as it is now (without
+//! the dependencies' changes, if those haven't run).
 
 pub mod tables;
 mod runner;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use anyhow::Context as _;
@@ -125,13 +134,16 @@ pub trait MigrationRef: 'static {
 // Registry
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Every migration linked into the binary, by name.
+/// Every migration linked into the binary, by name, with their run order.
 pub struct Migrations {
     by_name: BTreeMap<String, &'static MigrationDef>,
+    /// Topological order of the `after` DAG, name order as the tie-break (see the module docs).
+    order: Vec<String>,
 }
 
 impl Migrations {
-    fn build(defs: &'static [MigrationDef]) -> Result<Migrations, String> {
+    /// Validate the definitions (names, batch sizes, dependencies) and order them.
+    pub fn build(defs: &'static [MigrationDef]) -> Result<Migrations, String> {
         let mut by_name: BTreeMap<String, &'static MigrationDef> = BTreeMap::new();
         for def in defs {
             let name = def.name();
@@ -146,26 +158,86 @@ impl Migrations {
                 ));
             }
         }
-        Ok(Migrations { by_name })
+        let order = run_order(&by_name)?;
+        Ok(Migrations { by_name, order })
     }
 
     pub fn get(&self, name: &str) -> Option<&'static MigrationDef> {
         self.by_name.get(name).copied()
     }
 
-    /// Every migration with its name, in name order (the order they run in).
+    /// Every migration with its name, in run order: dependencies first, then name order (see the module docs).
     pub fn iter(&self) -> impl Iterator<Item = (&str, &'static MigrationDef)> {
-        self.by_name.iter().map(|(n, d)| (n.as_str(), *d))
+        self.order.iter().map(|n| (n.as_str(), self.by_name[n]))
     }
 
-    /// The migrations of one table, in name order.
+    /// The migrations of one table, in run order.
     pub fn for_table<'a>(&'a self, table: &'a str) -> impl Iterator<Item = (&'a str, &'static MigrationDef)> + 'a {
         self.iter().filter(move |(_, d)| d.table == table)
+    }
+
+    /// The migrations `name` runs after (`#[migration(after = [..])]`), as declared.
+    pub fn dependencies(&self, name: &str) -> &'static [&'static str] {
+        self.get(name).map_or(&[], |d| d.after)
     }
 
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }
+}
+
+/// Check the `after` lists (known names, no duplicates, no cycles) and compute the run order: Kahn's algorithm,
+/// taking the smallest name among the migrations whose dependencies are all ordered.
+fn run_order(by_name: &BTreeMap<String, &'static MigrationDef>) -> Result<Vec<String>, String> {
+    let mut waiting_on: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, def) in by_name {
+        let mut deps = BTreeSet::new();
+        for &dep in def.after {
+            if !by_name.contains_key(dep) {
+                return Err(format!(
+                    "migration `{name}` runs after `{dep}`, but no migration is named `{dep}` (`after` lists migration names: \
+                     `name = \"...\"` or the function path, e.g. `todos:add_priority`)"
+                ));
+            }
+            if dep == name {
+                return Err(format!("migration `{name}` can't run after itself"));
+            }
+            if !deps.insert(dep) {
+                return Err(format!("migration `{name}` lists `{dep}` twice in `after`"));
+            }
+            dependents.entry(dep).or_default().push(name);
+        }
+        waiting_on.insert(name, deps);
+    }
+    let mut ready: BTreeSet<&str> = waiting_on.iter().filter(|(_, d)| d.is_empty()).map(|(n, _)| *n).collect();
+    let mut order = Vec::with_capacity(by_name.len());
+    while let Some(next) = ready.pop_first() {
+        order.push(next.to_string());
+        waiting_on.remove(next);
+        for &dependent in dependents.get(next).map_or(&[][..], Vec::as_slice) {
+            if let Some(deps) = waiting_on.get_mut(dependent) {
+                deps.remove(next);
+                if deps.is_empty() {
+                    ready.insert(dependent);
+                }
+            }
+        }
+    }
+    if let Some((&start, _)) = waiting_on.first_key_value() {
+        // Every migration left waits on another one left: follow the first unmet dependency until a name repeats.
+        let mut path = vec![start];
+        loop {
+            let last = *path.last().expect("not empty");
+            let next = *waiting_on[last].first().expect("left migrations wait on something");
+            if let Some(pos) = path.iter().position(|n| *n == next) {
+                let cycle: Vec<String> = path[pos..].iter().chain([&next]).map(|n| format!("`{n}`")).collect();
+                return Err(format!("migrations depend on each other in a cycle: {}", cycle.join(" → ")));
+            }
+            path.push(next);
+        }
+    }
+    Ok(order)
 }
 
 /// Names are stable ids: 1..=128 characters out of `A-Z a-z 0-9 _ - . : /`.
@@ -179,7 +251,8 @@ fn check_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The migrations linked into the binary, validated once (unique names, valid names and batch sizes).
+/// The migrations linked into the binary, validated once (unique names, valid names and batch sizes, dependencies
+/// that exist and form no cycle).
 pub fn registry() -> crate::Result<&'static Migrations> {
     static REGISTRY: OnceLock<Result<Migrations, String>> = OnceLock::new();
     REGISTRY.get_or_init(|| Migrations::build(&MIGRATIONS)).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
@@ -234,6 +307,9 @@ pub(crate) fn coverage(
 pub enum RunOutcome {
     /// Every document was processed; the migration is done.
     Completed,
+    /// Nothing ran: a migration it runs after is not done (e.g. running elsewhere). Only in
+    /// `run_pending_migrations` reports (running one such migration directly is an error unless forced).
+    Blocked,
     /// It failed on a document (see `error`, `failedDocument`); fix it and run again to resume.
     Failed,
     /// It was canceled during the run.
@@ -292,6 +368,8 @@ pub struct MigrationSummary {
     pub declared: bool,
     /// `null` when not declared.
     pub batch_size: Option<u64>,
+    /// The migrations it runs after (`#[migration(after = [..])]`; empty when not declared).
+    pub after: Vec<String>,
     #[ts(type = "\"pending\" | \"running\" | \"done\" | \"failed\" | \"canceled\"")]
     pub state: MigrationState,
     pub processed: u64,
@@ -314,7 +392,7 @@ async fn find_row(db: &crate::QueryDb, name: &str) -> crate::Result<Option<Doc<M
         .await
 }
 
-/// Every declared migration (in name order), then rows of migrations no longer declared.
+/// Every declared migration (in run order), then rows of migrations no longer declared.
 async fn summaries(db: &crate::QueryDb) -> crate::Result<Vec<MigrationSummary>> {
     let mut rows: BTreeMap<String, Doc<MigrationRecord>> =
         db.query::<MigrationRecord>().collect().await?.into_iter().map(|r| (r.name.clone(), r)).collect();
@@ -331,6 +409,7 @@ async fn summaries(db: &crate::QueryDb) -> crate::Result<Vec<MigrationSummary>> 
             table: table.to_string(),
             declared: def.is_some(),
             batch_size: def.map(|d| d.batch_size as u64),
+            after: def.map_or_else(Vec::new, |d| d.after.iter().map(|a| a.to_string()).collect()),
             state: row.as_ref().map_or(MigrationState::Pending, |r| r.state),
             processed: row.as_ref().map_or(0, |r| r.processed),
             changed: row.as_ref().map_or(0, |r| r.changed),
@@ -360,14 +439,20 @@ impl App {
         self.run_migration_named(&M::name(), options).await
     }
 
-    /// Run the migration named `name`. Errors only for an unknown name or a database failure; a migration that fails
-    /// on a document is a report with `outcome: Failed`.
+    /// Run the migration named `name`. Errors for an unknown name, a database failure, or (unless
+    /// [`RunOptions::force`]) a migration it runs after that isn't done (`dependencies_not_done`); a migration that
+    /// fails on a document is a report with `outcome: Failed`.
     pub async fn run_migration_named(&self, name: &str, options: RunOptions) -> crate::Result<MigrationReport> {
         runner::run(self, name, &options).await
     }
 
-    /// Run every migration that isn't done, in name order, stopping after the first that doesn't complete (fails or
-    /// is canceled). With `dry_run`, every one is dry-run (each sees the data as it is now).
+    /// Run the migration named `name`. Errors for an unknown name, a database failure, or (unless
+    /// [`RunOptions::force`]) a migration it runs after that isn't done (`dependencies_not_done`); a migration that
+    /// fails on a document is a report with `outcome: Failed`.
+    ///
+    /// Run every migration that isn't done, in run order (dependencies first, then name order), stopping after the
+    /// first that doesn't complete (fails, is canceled, or is blocked by a dependency running elsewhere). With
+    /// `dry_run`, every one is dry-run (each sees the data as it is now).
     pub async fn run_pending_migrations(&self, options: RunOptions) -> crate::Result<Vec<MigrationReport>> {
         runner::run_pending(self, &options).await
     }
@@ -418,15 +503,53 @@ pub enum StartOutcome {
     Started,
     AlreadyRunning,
     AlreadyDone,
+    /// A migration it runs after is not done (and `force` was not given): nothing changed.
+    Blocked,
 }
 
-/// Mark a migration running (creating its row), unless it is running or done. With `restart`, a migration in any
-/// state but running starts over from the first document (cursor and counts reset).
+/// The dependencies (`after`) of a migration that are not done, with their state, in declaration order.
+async fn unmet_dependencies(db: &crate::QueryDb, def: &MigrationDef) -> crate::Result<Vec<(String, MigrationState)>> {
+    let mut out = Vec::new();
+    for dep in def.after {
+        let state = find_row(db, dep).await?.map_or(MigrationState::Pending, |r| r.value.state);
+        if state != MigrationState::Done {
+            out.push((dep.to_string(), state));
+        }
+    }
+    Ok(out)
+}
+
+/// The error for running a migration whose dependencies aren't done.
+fn blocked_error(name: &str, unmet: &[(String, MigrationState)]) -> Error {
+    let list: Vec<String> = unmet.iter().map(|(n, s)| format!("`{n}` ({})", s.as_str())).collect();
+    user_error(
+        "dependencies_not_done",
+        format!(
+            "Migration `{name}` runs after {}, which {} not done; run {} first, or force it",
+            list.join(", "),
+            if unmet.len() == 1 { "is" } else { "are" },
+            if unmet.len() == 1 { "it" } else { "them" }
+        ),
+    )
+}
+
+/// Mark a migration running (creating its row), unless it is running or done, or (without `force`) a migration it
+/// runs after is not done. With `restart`, a migration in any state but running starts over from the first document
+/// (cursor and counts reset).
 #[internal_mutation]
-pub async fn start(ctx: &MutationCtx, name: String, restart: bool) -> Result<StartOutcome> {
+pub async fn start(ctx: &MutationCtx, name: String, restart: bool, force: Option<bool>) -> Result<StartOutcome> {
     let def = lookup(&name)?;
     let now = ctx.now();
-    let Some(row) = find_row(&ctx.db, &name).await? else {
+    let row = find_row(&ctx.db, &name).await?;
+    match row.as_ref().map(|r| r.state) {
+        Some(MigrationState::Running) => return Ok(StartOutcome::AlreadyRunning),
+        Some(MigrationState::Done) if !restart => return Ok(StartOutcome::AlreadyDone),
+        _ => {}
+    }
+    if !force.unwrap_or(false) && !unmet_dependencies(&ctx.db, def).await?.is_empty() {
+        return Ok(StartOutcome::Blocked);
+    }
+    let Some(row) = row else {
         ctx.db
             .insert(MigrationRecord {
                 name,
@@ -505,8 +628,8 @@ pub async fn fail(ctx: &MutationCtx, name: String, error: String, document: Opti
     ctx.db.replace(row.id, value).await
 }
 
-/// Every migration: those declared in code (in name order, the order they run in), then rows of migrations no
-/// longer declared. Live: progress updates with every batch. Admin only.
+/// Every migration: those declared in code (in run order: dependencies first, then name order), with the migrations
+/// each runs after, then rows of migrations no longer declared. Live: progress updates with every batch. Admin only.
 #[query]
 pub async fn list(ctx: &QueryCtx) -> Result<Vec<MigrationSummary>> {
     ctx.auth.require_admin()?;
@@ -532,12 +655,24 @@ pub struct RunResult {
     pub reports: Vec<MigrationReport>,
 }
 
-/// Run the migration `name`, or every migration that isn't done (in name order) when `name` is omitted. Real runs
-/// continue in the background (`started`); dry runs run to the end and return their reports. Admin only.
+/// Run the migration `name`, or every migration that isn't done (in run order) when `name` is omitted. Real runs
+/// continue in the background (`started`); dry runs run to the end and return their reports. Running one migration
+/// whose dependencies aren't done fails with `dependencies_not_done` unless `force`. Admin only.
 #[action]
-pub async fn run(ctx: &ActionCtx, name: Option<String>, dry_run: Option<bool>, restart: Option<bool>) -> Result<RunResult> {
+pub async fn run(
+    ctx: &ActionCtx,
+    name: Option<String>,
+    dry_run: Option<bool>,
+    restart: Option<bool>,
+    force: Option<bool>,
+) -> Result<RunResult> {
     ctx.auth.require_admin()?;
-    let options = RunOptions { dry_run: dry_run.unwrap_or(false), restart: restart.unwrap_or(false), ..Default::default() };
+    let options = RunOptions {
+        dry_run: dry_run.unwrap_or(false),
+        restart: restart.unwrap_or(false),
+        force: force.unwrap_or(false),
+        ..Default::default()
+    };
     if let Some(name) = &name {
         lookup(name)?;
     }
@@ -565,4 +700,59 @@ pub async fn cancel(ctx: &MutationCtx, name: String) -> Result<String> {
     value.state = MigrationState::Canceled;
     ctx.db.replace(row.id, value).await?;
     Ok("canceled".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noop<'a>(_: &'a MutationCtx, _: Value) -> futures::future::BoxFuture<'a, crate::Result<DocChange>> {
+        Box::pin(async { Ok(DocChange::Keep) })
+    }
+
+    /// A registry of migrations `(name, after)` on one table.
+    fn build(defs: &[(&'static str, &'static [&'static str])]) -> Result<Vec<String>, String> {
+        let defs: Vec<MigrationDef> = defs
+            .iter()
+            .map(|&(name, after)| MigrationDef {
+                module_path: "app::m",
+                fn_name: "f",
+                name: Some(name),
+                table: "t",
+                batch_size: 10,
+                after,
+                handler: noop,
+            })
+            .collect();
+        let m = Migrations::build(Vec::leak(defs))?;
+        Ok(m.iter().map(|(n, _)| n.to_string()).collect())
+    }
+
+    #[test]
+    fn run_order_is_topological_with_name_order_ties() {
+        assert_eq!(build(&[("b", &[]), ("a", &[]), ("c", &[])]).unwrap(), ["a", "b", "c"], "no dependencies: names");
+        assert_eq!(build(&[("a", &["c"]), ("b", &[]), ("c", &[])]).unwrap(), ["b", "c", "a"]);
+        assert_eq!(build(&[("a", &["d"]), ("b", &["a"]), ("c", &[]), ("d", &[])]).unwrap(), ["c", "d", "a", "b"]);
+        // A diamond.
+        assert_eq!(
+            build(&[("top", &[]), ("l", &["top"]), ("r", &["top"]), ("z_bottom", &["r", "l"]), ("a", &["z_bottom"])]).unwrap(),
+            ["top", "l", "r", "z_bottom", "a"]
+        );
+    }
+
+    #[test]
+    fn invalid_dependencies_are_errors() {
+        let err = build(&[("a", &["nope"])]).unwrap_err();
+        assert!(err.contains("migration `a` runs after `nope`, but no migration is named `nope`"), "{err}");
+        let err = build(&[("a", &["a"])]).unwrap_err();
+        assert!(err.contains("`a` can't run after itself"), "{err}");
+        let err = build(&[("a", &["b", "b"]), ("b", &[])]).unwrap_err();
+        assert!(err.contains("lists `b` twice"), "{err}");
+        let err = build(&[("a", &["c"]), ("b", &["a"]), ("c", &["b"]), ("d", &[])]).unwrap_err();
+        assert!(err.contains("cycle: `a` → `c` → `b` → `a`"), "{err}");
+        let err = build(&[("x", &["y"]), ("y", &["x"]), ("a", &["x"])]).unwrap_err();
+        assert!(err.contains("cycle: `x` → `y` → `x`"), "{err}");
+        let err = build(&[("a", &[]), ("a", &[])]).unwrap_err();
+        assert!(err.contains("two migrations are named `a`"), "{err}");
+    }
 }

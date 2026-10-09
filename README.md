@@ -250,6 +250,7 @@ reactive like any other query (docs/CONTRACT.md §1.8).
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel], tokenizer = "porter")]
+#[search_index(search_ro, search = body, tokenizer = "snowball", language = "romanian")]   // "orașelor" finds "orașul"
 #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 
@@ -261,10 +262,18 @@ pub async fn search(ctx: &QueryCtx, channel: String, text: String) -> Result<Vec
         .await
 }
 
-#[action]  // vector search is for actions only; returns (id, cosine similarity) pairs
+#[action]  // an embedding from an API: (id, cosine similarity) pairs, from the HNSW graph
 pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>) -> Result<Vec<Id<Message>>> {
     let hits = ctx.vector_search(Message::by_embedding, &embedding, VectorSearchOpts::new(10)).await?;
     Ok(hits.into_iter().map(|(id, _score)| id).collect())
+}
+
+#[query]   // a vector the query already has: exact, deterministic and live (reruns when a nearer one is written)
+pub async fn more_like(ctx: &QueryCtx, id: Id<Message>) -> Result<Vec<Id<Message>>> {
+    let Some(msg) = ctx.db.get(id).await? else { return Ok(vec![]) };
+    let Some(embedding) = &msg.embedding else { return Ok(vec![]) };
+    let opts = VectorSearchOpts::new(5).filter(VectorFilter::eq(Message::channel, msg.channel.clone()));
+    Ok(ctx.db.vector_search(Message::by_embedding, embedding, opts).await?.into_iter().map(|(id, _)| id).collect())
 }
 ```
 
@@ -278,15 +287,27 @@ corpus statistics), so a document's rank depends only on itself and the query. T
 - **Invalidation per filter value**: a search with `.eq(Message::channel, c)` reruns only after writes to messages
   whose channel is (or was) `c`; an unfiltered search reruns after any write to the index.
 
-Tokenizers: `tokenizer = "porter"` (English stemming: "run" finds "running"), `tokenizer = "trigram"` (substring
-search: "ell" finds "hello"), default `"unicode61"`; `diacritics = "keep"` stops folding `café` into `cafe`. Changing
-the tokenizer rebuilds the index at startup.
+Tokenizers: `tokenizer = "porter"` (English stemming: "run" finds "running"), `tokenizer = "snowball", language =
+"…"` (Snowball stemmers for 18 languages, e.g. `"romanian"`, `"french"`, `"german"`, `"spanish"`, `"russian"`: a
+custom FTS5 tokenizer, so "chantait" finds "chanter" and "Häusern" finds "Haus"), `tokenizer = "trigram"` (substring
+search: "ell" finds "hello"), default `"unicode61"`; `diacritics = "keep"` stops folding `café` into `cafe` (with
+folding, a word typed without its accents still finds the accented forms). Changing the tokenizer or its language
+rebuilds the index at startup.
 
 Vector indexes are exact by default (sqlite-vec). For large sets, `kind = "hnsw"` adds an in-memory HNSW graph
 (approximate, recall@10 ≈ 0.95 on embedding-like data) that follows commits through the write log, so a search sees
 everything committed before it; filters are applied after the graph search with oversampling (exactly, when few
 documents match), deletes become tombstones that a background rebuild drops, and graphs of 10k+ vectors are saved
-next to `data.db` and validated against the table at startup. `VectorSearchOpts::exact()` bypasses the graph.
+next to `data.db` and validated against the table at startup. `VectorSearchOpts::exact()` bypasses the graph. Tune
+it per index with `m`, `ef_construction` (changing either rebuilds the graph) and `ef_search`
+(`#[vector_index(.., kind = "hnsw", m = 32, ef_construction = 256, ef_search = 64)]`), or per search with
+`VectorSearchOpts::ef(n)`.
+
+Which vector search: `ctx.db.vector_search` in a query (or mutation) is always the exact scan at the query's snapshot
+(also on an HNSW index), so it is deterministic and reactive, with reruns narrowed per filter value like text search;
+use it when the query vector is already in the database or comes from the client, and the index is small enough for
+a scan per rerun. `ctx.vector_search` in an action is for embeddings from an API and for large indexes (the graph),
+but is not reactive.
 
 Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.35 ms, a broad two-letter
 prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
@@ -307,6 +328,9 @@ pub struct Todo { pub text: String, pub done: bool, pub priority: i64 }   // `pr
 async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> {
     Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // a patch, or None to keep it
 }
+
+#[migration(table = Todo, name = "0003_rank", after = ["todos:add_priority"])]   // runs once that one is done
+async fn rank(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> { /* … */ }
 ```
 
 Return `DocChange::{Keep, Patch, Replace, Delete}` for more, or take a typed `Doc<OldTodo>` when the old shape still
@@ -316,7 +340,7 @@ subscriptions update as documents change.
 
 ```sh
 todo-server migrate --dry-run          # what would change (with examples); writes nothing
-todo-server migrate                    # run every migration that isn't done, in name order
+todo-server migrate                    # run every migration that isn't done: dependencies first, then name order
 todo-server migrate status             # state and progress of each
 todo-server serve --migrate            # or: start, then run them in the background
 ```
@@ -324,7 +348,9 @@ todo-server serve --migrate            # or: start, then run them in the backgro
 While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
 table is *migrating*, writes may leave a document invalid only if it already was, and reads of not-yet-migrated
 documents fail. When its last migration finishes, the table is validated again in the same transaction; if anything
-is still invalid, the next start refuses. The dashboard's Migrations page shows their live progress and runs, cancels,
+is still invalid, the next start refuses. `after = [..]` dependencies are checked at startup (unknown names and cycles
+are errors); running one migration before its dependencies are done is refused unless forced (`migrate --name x
+--force`). The dashboard's Migrations page shows their dependencies and live progress and runs, cancels,
 restarts and dry-runs them (`_system/migrations:{list, status, run, cancel}`). Details:
 [docs/CONTRACT.md](docs/CONTRACT.md) §1.9. The todo example has one (`0001_trim_todo_text`).
 
@@ -344,7 +370,7 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   pages load as you scroll), filters on index fields, a search box for tables with a search index (live, most
   relevant first), a quick filter over the loaded rows, JSONL/CSV export, a side panel with a JSON editor (insert,
   edit, delete; validated against the table's Rust type), and clickable ids that open the referenced document. The
-  schema view lists indexes, tokenizers and vector index kinds. Secrets (password and token hashes) are never shown,
+  schema view lists indexes, tokenizers (with their language) and vector index kinds (with HNSW parameters). Secrets (password and token hashes) are never shown,
   and system tables are read-only except the `name`, `image` and `emailVerified` of users.
 - **Functions**: every function with its TS signature, a runner (JSON args, optionally *as a user* through a real,
   short-lived, audited session), and latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
@@ -356,7 +382,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
 - **Scheduler**: crons with their schedule, time zone, last and next run, and "run now" (system crons last);
   scheduled jobs live, by state, with cancel (running actions too), run now and retry.
-- **Migrations**: every `#[migration]` with live progress, errors linking to the failing document, the schema check,
+- **Migrations**: every `#[migration]` in run order with its dependencies, live progress, errors linking to the failing
+  document, the schema check,
   run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
 - **Backups**: create (optionally with `aux.db` and files), download, delete and **restore** backups (a stored one
   or an archive from your computer: checked completely, then applied at the next start; cancel, or "Restart now"

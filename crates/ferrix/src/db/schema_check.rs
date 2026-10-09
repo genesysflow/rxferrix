@@ -218,7 +218,7 @@ mod tests {
     }
 
     fn def(ts: fn() -> String) -> TableDef {
-        TableDef { name: "rows", indexes: vec![], ts, validate: |_| Ok(()) }
+        TableDef { name: "rows", indexes: vec![], search_indexes: vec![], vector_indexes: vec![], ts, validate: |_| Ok(()) }
     }
 
     #[test]

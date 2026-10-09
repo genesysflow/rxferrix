@@ -1,0 +1,11 @@
+error: the search field of #[search_index] must be a `String` or `Option<String>`; `count` is not
+ --> tests/ui/table_index_field_types.rs:7:35
+  |
+7 | #[search_index(by_count, search = count)]
+  |                                   ^^^^^
+
+error: the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `wide` is not
+ --> tests/ui/table_index_field_types.rs:8:33
+  |
+8 | #[vector_index(by_wide, field = wide, dims = 3)]
+  |                                 ^^^^

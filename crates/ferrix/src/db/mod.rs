@@ -20,6 +20,7 @@ pub mod pagination;
 pub mod query;
 pub mod readset;
 pub mod schema_check;
+pub mod search;
 pub mod storage;
 
 use std::path::{Path, PathBuf};
@@ -71,6 +72,7 @@ impl Database {
     /// `options.skip_schema_check` (see [`schema_check`]).
     pub fn open_with(dir: &Path, tables: &[TableDef], options: &OpenOptions) -> anyhow::Result<Database> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
+        search::vector::register_extension();
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
         dedup::ensure_schema(&writer)?;
@@ -160,6 +162,7 @@ impl Database {
             if orphans > 0 {
                 problems.push(format!("{orphans} index entries belong to no index"));
             }
+            problems.extend(search::verify(conn, &catalog)?);
             Ok(problems)
         })
     }
@@ -352,6 +355,8 @@ impl WriteState {
         new: Option<&Map<String, Value>>,
     ) -> anyhow::Result<()> {
         let ts = self.prev_ts + 1;
+        // Validated before anything is written (e.g. a vector of the wrong dimension).
+        let special = search::SpecialWrites::prepare(table, old, new)?;
         for index in table.stored_indexes() {
             let old_key = old.map(|d| keys::index_key(d, &index.fields, &id.0));
             let new_key = new.map(|d| keys::index_key(d, &index.fields, &id.0));
@@ -371,6 +376,7 @@ impl WriteState {
             }
         }
         self.writes.push((table.by_id().id, id.0.to_vec()));
+        special.apply(&self.conn, id, &mut self.writes)?;
         match new {
             Some(doc) => storage::put_document(&self.conn, &id.0, table.number, &serde_json::to_string(doc)?, ts)?,
             None => storage::delete_document(&self.conn, &id.0)?,

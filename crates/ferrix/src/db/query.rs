@@ -25,10 +25,11 @@ use serde_json::{Map, Value};
 use crate::db::catalog::{Catalog, IndexInfo, TableInfo};
 use crate::db::pagination::{PaginationOpts, PaginationResult};
 use crate::db::readset::{KeyRange, ReadSet};
+use crate::db::search::{SearchFilter, SearchQuery};
 use crate::db::{Snapshot, WriteTxn, check_table, storage};
 use crate::id::{DocId, Id};
 use crate::keys;
-use crate::schema::{BY_CREATION_TIME, Doc, Field, Index, Order, Table};
+use crate::schema::{BY_CREATION_TIME, Doc, Field, Index, Order, SearchIndex, Table};
 
 /// Rows fetched per SQL round trip when scanning.
 pub(super) const SCAN_BATCH: usize = 256;
@@ -530,6 +531,18 @@ impl<'a, T: Table> Query<'a, T> {
     pub fn order(mut self, order: Order) -> Self {
         self.order = order;
         self
+    }
+
+    /// Full-text search over a search index, most relevant first (see [`SearchQuery`]):
+    /// `.with_search_index(T::search_body, |q| q.search(T::body, "hello wor").eq(T::channel, c)).take(10)`.
+    /// Must not follow `with_index` or `order` (the query then fails); a preceding `filter` is kept.
+    pub fn with_search_index(
+        self,
+        index: SearchIndex<T>,
+        search: impl FnOnce(SearchFilter<T>) -> SearchFilter<T>,
+    ) -> SearchQuery<'a, T> {
+        let conflict = self.index != BY_CREATION_TIME || !self.range.ops.0.is_empty() || self.order != Order::Asc;
+        SearchQuery::new(self.db, index, search(SearchFilter::new()), self.filter, conflict)
     }
 
     /// Keep only documents matching `pred`. Filtered-out documents still count as read.

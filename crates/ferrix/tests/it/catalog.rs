@@ -36,6 +36,8 @@ async fn reconcile_and_backfill() {
             IndexDef { name: "by_name", fields: vec!["name", "group"] },
             IndexDef { name: "by_score", fields: vec!["score"] },
         ],
+        search_indexes: vec![],
+        vector_indexes: vec![],
         ts: || ferrix::__private::ts_inline::<items::Item>(),
         validate: ferrix::__private::validate_doc::<items::Item>,
     };

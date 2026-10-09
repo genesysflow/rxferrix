@@ -140,12 +140,18 @@ pub trait Table: Serialize + DeserializeOwned + ts_rs::TS + Clone + Send + Sync 
 pub struct TableDef {
     pub name: &'static str,
     pub indexes: Vec<IndexDef>,
+    pub search_indexes: Vec<SearchIndexDef>,
+    pub vector_indexes: Vec<VectorIndexDef>,
     pub ts: fn() -> String,
     pub validate: fn(&serde_json::Value) -> std::result::Result<(), String>,
 }
 impl PartialEq for TableDef {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.indexes == other.indexes && (self.ts)() == (other.ts)()
+        self.name == other.name
+            && self.indexes == other.indexes
+            && self.search_indexes == other.search_indexes
+            && self.vector_indexes == other.vector_indexes
+            && (self.ts)() == (other.ts)()
     }
 }
 
@@ -154,6 +160,59 @@ pub struct IndexDef {
     pub name: &'static str,
     pub fields: Vec<&'static str>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchIndexDef {
+    pub name: &'static str,
+    pub search_field: &'static str,
+    pub filter_fields: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorIndexDef {
+    pub name: &'static str,
+    pub vector_field: &'static str,
+    pub dimensions: usize,
+    pub filter_fields: Vec<&'static str>,
+}
+
+pub struct SearchIndex<T> {
+    name: &'static str,
+    _t: PhantomData<fn() -> T>,
+}
+impl<T> SearchIndex<T> {
+    pub const fn new(name: &'static str) -> Self {
+        Self { name, _t: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+impl<T> Clone for SearchIndex<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for SearchIndex<T> {}
+
+pub struct VectorIndex<T> {
+    name: &'static str,
+    _t: PhantomData<fn() -> T>,
+}
+impl<T> VectorIndex<T> {
+    pub const fn new(name: &'static str) -> Self {
+        Self { name, _t: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+impl<T> Clone for VectorIndex<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for VectorIndex<T> {}
 
 pub struct Field<T, V> {
     name: &'static str,
@@ -395,6 +454,24 @@ pub mod __private {
     pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String {
         T::inline(&ts_rs::Config::default())
     }
+
+    #[diagnostic::on_unimplemented(
+        message = "the search field of a #[search_index] must be a `String` or `Option<String>`, not `{Self}`",
+        label = "not a string field"
+    )]
+    pub trait SearchFieldType {}
+    impl SearchFieldType for String {}
+    impl SearchFieldType for Option<String> {}
+    pub const fn assert_search_field<T: SearchFieldType + ?Sized>() {}
+
+    #[diagnostic::on_unimplemented(
+        message = "the field of a #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`, not `{Self}`",
+        label = "not a `Vec<f32>` field"
+    )]
+    pub trait VectorFieldType {}
+    impl VectorFieldType for Vec<f32> {}
+    impl VectorFieldType for Option<Vec<f32>> {}
+    pub const fn assert_vector_field<T: VectorFieldType + ?Sized>() {}
 
     pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
         <crate::Doc<T> as serde::Deserialize>::deserialize(doc)

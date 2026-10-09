@@ -1,0 +1,11 @@
+error: `dims` must be an integer between 1 and 8192
+ --> tests/ui/table_vector_index_dims.rs:7:58
+  |
+7 | #[vector_index(by_embedding_2, field = embedding, dims = 0)]
+  |                                                          ^
+
+error: #[vector_index] `by_embedding` needs `dims = <number of dimensions>`
+ --> tests/ui/table_vector_index_dims.rs:6:16
+  |
+6 | #[vector_index(by_embedding, field = embedding)]
+  |                ^^^^^^^^^^^^

@@ -52,7 +52,10 @@ pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention,
 pub use private::FunctionKind;
 pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
-pub use schema::{Doc, Field, Index, IndexDef, Order, Table, TableDef};
+pub use schema::{
+    Doc, Field, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, VectorIndex, VectorIndexDef,
+};
+pub use db::search::{SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
 pub use server::{router, serve, serve_with_shutdown};
 pub use serde_json::json;
 
@@ -80,5 +83,6 @@ pub mod prelude {
         ActionCtx, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
         internal_action, internal_mutation, internal_query, json, mutation, query, table,
     };
+    pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};
 }

@@ -1,0 +1,11 @@
+error: unknown search field `bdy` in #[search_index] `search_body`; struct `Message` has no such field
+ --> tests/ui/table_search_index_unknown_field.rs:6:38
+  |
+6 | #[search_index(search_body, search = bdy, filter = [channel, chanel])]
+  |                                      ^^^
+
+error: unknown filter field `chanel` in #[search_index] `search_body`; struct `Message` has no such field
+ --> tests/ui/table_search_index_unknown_field.rs:6:62
+  |
+6 | #[search_index(search_body, search = bdy, filter = [channel, chanel])]
+  |                                                              ^^^^^^

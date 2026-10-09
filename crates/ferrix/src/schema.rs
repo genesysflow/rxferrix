@@ -29,6 +29,10 @@ pub struct TableDef {
     pub name: &'static str,
     /// User-defined indexes (the built-in ones are implicit).
     pub indexes: Vec<IndexDef>,
+    /// Full-text search indexes (`#[search_index]`, SQLite FTS5).
+    pub search_indexes: Vec<SearchIndexDef>,
+    /// Vector indexes (`#[vector_index]`, sqlite-vec).
+    pub vector_indexes: Vec<VectorIndexDef>,
     /// The inline TS object type of the table struct (without system fields), for codegen.
     pub ts: fn() -> String,
     /// Checks that a stored document (system fields included) deserializes as `Doc<T>`; `Err` carries the serde
@@ -40,10 +44,33 @@ pub struct TableDef {
 /// are not compared: their addresses are not meaningful.
 impl PartialEq for TableDef {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.indexes == other.indexes && (self.ts)() == (other.ts)()
+        self.name == other.name
+            && self.indexes == other.indexes
+            && self.search_indexes == other.search_indexes
+            && self.vector_indexes == other.vector_indexes
+            && (self.ts)() == (other.ts)()
     }
 }
 impl Eq for TableDef {}
+
+/// A full-text search index: one string field searched with SQLite FTS5, plus fields usable for equality filters.
+/// All names are JSON field names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchIndexDef {
+    pub name: &'static str,
+    pub search_field: &'static str,
+    pub filter_fields: Vec<&'static str>,
+}
+
+/// A vector index over a `Vec<f32>` (or `Option<Vec<f32>>`) field of exactly `dimensions` elements, plus fields
+/// usable for equality filters. All names are JSON field names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorIndexDef {
+    pub name: &'static str,
+    pub vector_field: &'static str,
+    pub dimensions: usize,
+    pub filter_fields: Vec<&'static str>,
+}
 
 /// A user-defined index: a name and the JSON names of the indexed fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +131,60 @@ impl<T> Copy for Index<T> {}
 impl<T> std::fmt::Debug for Index<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Index({})", self.name)
+    }
+}
+
+/// Typed handle for a full-text search index of table `T` (`#[search_index]`); see `Query::with_search_index`.
+pub struct SearchIndex<T> {
+    name: &'static str,
+    _p: PhantomData<fn() -> T>,
+}
+
+impl<T> SearchIndex<T> {
+    pub const fn new(name: &'static str) -> Self {
+        SearchIndex { name, _p: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+impl<T> Clone for SearchIndex<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for SearchIndex<T> {}
+impl<T> std::fmt::Debug for SearchIndex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SearchIndex({})", self.name)
+    }
+}
+
+/// Typed handle for a vector index of table `T` (`#[vector_index]`); see `ActionCtx::vector_search`.
+pub struct VectorIndex<T> {
+    name: &'static str,
+    _p: PhantomData<fn() -> T>,
+}
+
+impl<T> VectorIndex<T> {
+    pub const fn new(name: &'static str) -> Self {
+        VectorIndex { name, _p: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+impl<T> Clone for VectorIndex<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for VectorIndex<T> {}
+impl<T> std::fmt::Debug for VectorIndex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VectorIndex({})", self.name)
     }
 }
 

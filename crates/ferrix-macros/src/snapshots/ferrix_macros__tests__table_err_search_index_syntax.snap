@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!\n{ #[search_index(name = s, search = text)] struct T { text: String } })"
+---
+the index name comes first, without `=`; expected `#[search_index(name, search = field, filter = [field, ...])]`

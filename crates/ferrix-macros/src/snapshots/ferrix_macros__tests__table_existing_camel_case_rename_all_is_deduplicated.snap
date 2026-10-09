@@ -23,6 +23,8 @@ impl ::ferrix::Table for User {
         ::ferrix::TableDef {
             name: "user",
             indexes: ::std::vec![],
+            search_indexes: ::std::vec![],
+            vector_indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<User>(),
             validate: ::ferrix::__private::validate_doc::<User>,
         }

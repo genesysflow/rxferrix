@@ -14,6 +14,7 @@ use anyhow::{Context, bail};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
+use crate::db::search::{self, SearchIndexInfo};
 use crate::db::storage;
 use crate::keys;
 use crate::schema::{BY_CREATION_TIME, BY_ID, CREATION_TIME_FIELD, TableDef};
@@ -43,6 +44,8 @@ pub struct TableInfo {
     /// The table's definition in code (its TS type and validator). `None` for a table that exists in the database
     /// but is no longer defined in code: its documents can still be read, but untyped writes are refused.
     pub def: Option<TableDef>,
+    /// Full-text search and vector indexes (`db::search`).
+    pub search_indexes: Vec<SearchIndexInfo>,
 }
 
 impl TableInfo {
@@ -86,7 +89,10 @@ impl Catalog {
             let mut rows = stmt.query([])?;
             while let Some(r) = rows.next()? {
                 let number: u32 = r.get(0)?;
-                tables.insert(number, TableInfo { name: r.get(1)?, number, indexes: Vec::new(), def: None });
+                tables.insert(
+                    number,
+                    TableInfo { name: r.get(1)?, number, indexes: Vec::new(), def: None, search_indexes: Vec::new() },
+                );
             }
         }
         let mut stmt = conn.prepare("SELECT index_id, table_number, name, fields FROM _indexes ORDER BY index_id")?;
@@ -99,8 +105,10 @@ impl Catalog {
                 t.indexes.push(info);
             }
         }
+        let mut search_indexes = search::load(conn)?;
         let mut catalog = Catalog::default();
         for (number, mut t) in tables {
+            t.search_indexes = search_indexes.remove(&number).unwrap_or_default();
             t.def = defs.iter().find(|d| d.name == t.name).cloned();
             let t = Arc::new(t);
             catalog.by_name.insert(t.name.clone(), t.clone());
@@ -135,6 +143,7 @@ fn validate_defs(defs: &[TableDef]) -> anyhow::Result<Vec<TableDef>> {
                 bail!("table `{}`: index `{}` has no fields", def.name, idx.name);
             }
         }
+        search::validate_def(def)?;
         seen.insert(def.name, def);
     }
     Ok(seen.into_values().cloned().collect())
@@ -144,6 +153,7 @@ fn validate_defs(defs: &[TableDef]) -> anyhow::Result<Vec<TableDef>> {
 pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Catalog> {
     let defs = validate_defs(defs)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    search::ensure_schema(&tx)?;
     let existing = Catalog::load(&tx, &defs)?;
     let mut next_table: u32 = tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
     let mut next_index: u32 = tx.query_row("SELECT COALESCE(MAX(index_id), 0) + 1 FROM _indexes", [], |r| r.get(0))?;
@@ -200,6 +210,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
                 tx.execute("DELETE FROM _indexes WHERE index_id = ?1", [cur.id])?;
             }
         }
+        search::reconcile_table(&tx, def, number)?;
     }
     tx.commit()?;
     Catalog::load(conn, &defs)

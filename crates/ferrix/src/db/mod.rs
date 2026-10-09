@@ -15,6 +15,7 @@
 //! for the duration of synchronous SQLite calls, never across an `.await`.
 
 pub mod catalog;
+pub mod pagination;
 pub mod query;
 pub mod readset;
 pub mod storage;

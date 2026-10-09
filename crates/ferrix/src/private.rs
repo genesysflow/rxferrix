@@ -141,9 +141,18 @@ pub fn encode_output<O: Serialize>(out: O) -> crate::Result<serde_json::Value> {
 ///
 /// While a codegen session is active on this thread (see [`crate::codegen`]), the named types `T` refers to are
 /// also recorded, recursively, so that codegen can declare them.
+///
+/// A *generic* named type (a `#[derive(TS)] struct Page<T>`, e.g. [`crate::PaginationResult`]) is the exception: it
+/// is referred to by name (`PaginationResult<Doc<"todos">>`) and declared, which reads better than its inlined body
+/// and lets client-side types match on it.
 pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String {
+    let cfg = ts_config();
+    if T::output_path().is_some() && T::name(cfg) != T::ident(cfg) {
+        crate::codegen::collect_type::<T>();
+        return T::name(cfg);
+    }
     crate::codegen::collect_dependencies::<T>();
-    T::inline(ts_config())
+    T::inline(cfg)
 }
 
 /// The one ts-rs configuration used for every generated TS type. Large integers (`u64`, `i64`, ...) are `number`,

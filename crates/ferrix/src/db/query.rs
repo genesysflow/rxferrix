@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::db::catalog::{Catalog, IndexInfo, TableInfo};
+use crate::db::pagination::{PaginationOpts, PaginationResult};
 use crate::db::readset::{KeyRange, ReadSet};
 use crate::db::{Snapshot, WriteTxn, check_table, storage};
 use crate::id::Id;
@@ -20,7 +21,7 @@ use crate::keys;
 use crate::schema::{BY_CREATION_TIME, Doc, Field, Index, Order, Table};
 
 /// Rows fetched per SQL round trip when scanning.
-const SCAN_BATCH: usize = 256;
+pub(super) const SCAN_BATCH: usize = 256;
 
 #[derive(Clone)]
 pub(crate) enum Source {
@@ -46,14 +47,14 @@ impl QueryDb {
         self.read_set.clone()
     }
 
-    fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
+    pub(super) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
         match &self.source {
             Source::Snapshot(s) => s.with_conn(f),
             Source::Write(t) => t.with_state(|s| f(s.conn())),
         }
     }
 
-    fn record(&self, index_id: crate::db::catalog::IndexId, range: KeyRange) {
+    pub(super) fn record(&self, index_id: crate::db::catalog::IndexId, range: KeyRange) {
         self.read_set.lock().unwrap_or_else(|e| e.into_inner()).record(index_id, range);
     }
 
@@ -84,7 +85,7 @@ impl QueryDb {
     }
 }
 
-fn parse_doc<T: Table>(json: &str) -> anyhow::Result<Doc<T>> {
+pub(super) fn parse_doc<T: Table>(json: &str) -> anyhow::Result<Doc<T>> {
     serde_json::from_str(json).with_context(|| format!("document does not match table `{}`", T::NAME))
 }
 
@@ -270,11 +271,11 @@ type Filter<'a, T> = Box<dyn Fn(&Doc<T>) -> bool + Send + Sync + 'a>;
 
 /// A query over one index of table `T`.
 pub struct Query<'a, T> {
-    db: &'a QueryDb,
+    pub(super) db: &'a QueryDb,
     index: &'static str,
     range: IndexRange<T>,
-    order: Order,
-    filter: Option<Filter<'a, T>>,
+    pub(super) order: Order,
+    pub(super) filter: Option<Filter<'a, T>>,
 }
 
 impl<'a, T: Table> Query<'a, T> {
@@ -316,9 +317,26 @@ impl<'a, T: Table> Query<'a, T> {
         Ok(docs.pop())
     }
 
-    async fn run(self, limit: Option<usize>) -> crate::Result<Vec<Doc<T>>> {
-        let db = self.db;
-        let table = db.table::<T>()?;
+    /// One page of results, with a cursor to continue from. See [`PaginationOpts`] for the semantics.
+    ///
+    /// ```ignore
+    /// #[query]
+    /// pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOpts)
+    ///     -> Result<PaginationResult<Doc<Message>>> {
+    ///     ctx.db.query::<Message>()
+    ///         .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
+    ///         .order(Order::Desc)
+    ///         .paginate(pagination_opts)
+    ///         .await
+    /// }
+    /// ```
+    pub async fn paginate(self, opts: PaginationOpts) -> crate::Result<PaginationResult<Doc<T>>> {
+        crate::db::pagination::paginate(self, opts).await
+    }
+
+    /// The scanned index and the key range of the query's constraints on it.
+    pub(super) fn resolve(&self) -> anyhow::Result<(&'a IndexInfo, KeyRange)> {
+        let table: &'a Arc<TableInfo> = self.db.table::<T>()?;
         let index = table
             .index(self.index)
             .with_context(|| format!("index `{}` not found on table `{}`", self.index, table.name))?;
@@ -326,6 +344,12 @@ impl<'a, T: Table> Query<'a, T> {
             bail!("index `by_id` cannot be scanned; use db.get(id)");
         }
         let range = self.range.to_key_range(&table.name, index)?;
+        Ok((index, range))
+    }
+
+    async fn run(self, limit: Option<usize>) -> crate::Result<Vec<Doc<T>>> {
+        let db = self.db;
+        let (index, range) = self.resolve()?;
         let mut out = Vec::new();
         if limit == Some(0) {
             return Ok(out);

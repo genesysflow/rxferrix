@@ -134,18 +134,52 @@ where
     CaptureLayer.with_filter(CaptureFilter)
 }
 
-/// The subscriber `ferrix serve` installs: `fmt` output to `writer` filtered by `filter` (`RUST_LOG`), plus the
-/// capture layer, each with its own filter so neither limits the other.
+/// How the server's own log lines are written (`--log-format`, `FERRIX_LOG_FORMAT`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// One JSON object per line: `timestamp` (RFC 3339, UTC), `level`, `target`, `fields` (`message` and the
+    /// event's key-values), `span` (the innermost span, with its fields) and `spans` (every enclosing span, outermost
+    /// first). For log shippers (Loki, Vector, CloudWatch, journald).
+    Json,
+    /// Human-readable, one line per event (`tracing`'s full format; colors on a terminal).
+    Pretty,
+    /// Like `pretty`, shorter: span names without their fields.
+    Compact,
+}
+
+impl LogFormat {
+    /// The default when none is given: `pretty` when stdout is a terminal, `json` otherwise (systemd, Docker,
+    /// files, pipes).
+    pub fn default_for_stdout() -> LogFormat {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() { LogFormat::Pretty } else { LogFormat::Json }
+    }
+}
+
+/// The subscriber `ferrix serve` installs: `fmt` output to `writer` in `format`, filtered by `filter` (`RUST_LOG`),
+/// plus the capture layer, each with its own filter so neither limits the other (function log lines are captured
+/// the same way whatever the output format).
 pub(crate) fn cli_subscriber<W>(
     filter: tracing_subscriber::EnvFilter,
     writer: W,
+    format: LogFormat,
 ) -> impl Subscriber + Send + Sync + 'static
 where
     W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
 {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(writer).with_filter(filter))
-        .with(layer())
+    use tracing_subscriber::registry::Registry;
+    let output: Box<dyn Layer<Registry> + Send + Sync> = match format {
+        LogFormat::Json => tracing_subscriber::fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_writer(writer)
+            .boxed(),
+        LogFormat::Pretty => tracing_subscriber::fmt::layer().with_writer(writer).boxed(),
+        LogFormat::Compact => tracing_subscriber::fmt::layer().compact().with_writer(writer).boxed(),
+    };
+    tracing_subscriber::registry().with(output.with_filter(filter)).with(layer())
 }
 
 /// Install a global subscriber containing only the capture layer, unless a global subscriber is already set.
@@ -299,7 +333,7 @@ mod tests {
         }
         let out = Buf::default();
         let writer = out.clone();
-        let subscriber = cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone());
+        let subscriber = cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Pretty);
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let ((), lines) = tracing::subscriber::with_default(subscriber, || {
             rt.block_on(capture(async {
@@ -310,6 +344,51 @@ mod tests {
         assert_eq!(lines, vec!["[INFO] to both", "[DEBUG] capture only"]);
         let printed = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
         assert!(printed.contains("to both") && !printed.contains("capture only"), "{printed}");
+    }
+
+    /// `--log-format json`: every line is a JSON object with the timestamp, level, target, fields and span context,
+    /// and function log lines are still captured.
+    #[test]
+    fn json_lines() {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let out = Buf::default();
+        let writer = out.clone();
+        let subscriber = cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Json);
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ((), lines) = tracing::subscriber::with_default(subscriber, || {
+            info!(target: "json_test", "outside");
+            rt.block_on(capture(async {
+                let span = tracing::info_span!("request", path = "/api/x", n = 3);
+                let _g = span.enter();
+                warn!(target: "json_test", user = "ann", count = 2, "quote \" and\nnewline");
+                debug!(target: "json_test", "capture only");
+            }))
+        });
+        assert_eq!(lines, vec!["[WARN] quote \" and\nnewline user=ann count=2", "[DEBUG] capture only"]);
+        let printed = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let events: Vec<serde_json::Value> =
+            printed.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))).collect();
+        assert_eq!(events.len(), 2, "one line per event, newlines escaped: {printed}");
+        let first = &events[0];
+        assert_eq!((first["level"].as_str(), first["target"].as_str()), (Some("INFO"), Some("json_test")));
+        assert_eq!(first["fields"]["message"], "outside");
+        assert!(chrono::DateTime::parse_from_rfc3339(first["timestamp"].as_str().unwrap()).is_ok(), "{first}");
+        let second = &events[1];
+        assert_eq!(second["level"], "WARN");
+        assert_eq!(second["fields"]["message"], "quote \" and\nnewline");
+        assert_eq!((second["fields"]["user"].as_str(), second["fields"]["count"].as_i64()), (Some("ann"), Some(2)));
+        assert_eq!((second["span"]["name"].as_str(), second["span"]["path"].as_str()), (Some("request"), Some("/api/x")));
+        assert_eq!(second["spans"][0]["n"], 3);
     }
 
     #[tokio::test]

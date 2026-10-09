@@ -70,6 +70,9 @@ struct MigrateArgs {
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     dir: PathBuf,
+    /// Format of the progress log lines (default: pretty; the report itself is plain text).
+    #[arg(long, env = "FERRIX_LOG_FORMAT", value_enum, value_name = "FORMAT")]
+    log_format: Option<crate::log::LogFormat>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -165,6 +168,10 @@ struct ServeArgs {
     /// expiring URLs (ctx.storage.get_signed_url).
     #[arg(long, env = "FERRIX_STORAGE_PRIVATE")]
     storage_private: bool,
+    /// How log lines are written to stdout: `json` (one object per line), `pretty` or `compact`. Default: pretty on a
+    /// terminal, json otherwise. `RUST_LOG` filters them either way.
+    #[arg(long, env = "FERRIX_LOG_FORMAT", value_enum, value_name = "FORMAT")]
+    log_format: Option<crate::log::LogFormat>,
     /// Metrics, scheduled backups and TLS (`crate::ops::cli`).
     #[command(flatten)]
     ops: crate::ops::cli::OpsServeArgs,
@@ -352,7 +359,8 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
 fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, scheduler: SchedulerOptions) -> crate::Result<()> {
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,ferrix::migrations=info".into());
-    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
+    let format = args.log_format.unwrap_or(crate::log::LogFormat::Pretty);
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout, format).try_init();
     let dir = match &args.command {
         Some(MigrateCommand::Status { dir }) => dir.clone(),
         None => args.dir.clone(),
@@ -532,7 +540,8 @@ fn serve(
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
-    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
+    let format = args.log_format.unwrap_or_else(crate::log::LogFormat::default_for_stdout);
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout, format).try_init();
     if args.dev {
         let out = args.codegen_out.clone().or_else(|| std::env::var_os(CODEGEN_OUT_ENV).map(PathBuf::from));
         if let Some(out) = out.filter(|o| !o.as_os_str().is_empty()) {
@@ -722,6 +731,23 @@ mod tests {
         assert!(parse(&["migrate", "--restart"]).is_err(), "--restart needs --name");
         let cli = parse(&["serve", "--migrate"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Serve(ref a)) if a.migrate));
+    }
+
+    #[test]
+    fn log_format_flag() {
+        use crate::log::LogFormat;
+        assert_eq!(parse(&["serve", "--log-format", "json"]).unwrap().command.map(|c| match c {
+            Command::Serve(a) => a.log_format,
+            _ => None,
+        }), Some(Some(LogFormat::Json)));
+        assert_eq!(parse(&["--log-format", "compact"]).unwrap().serve.log_format, Some(LogFormat::Compact));
+        assert_eq!(parse(&["--log-format", "pretty"]).unwrap().serve.log_format, Some(LogFormat::Pretty));
+        assert!(parse(&["--log-format", "xml"]).is_err());
+        // Tests don't run on a terminal: the default is JSON.
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            assert_eq!(LogFormat::default_for_stdout(), LogFormat::Json);
+        }
     }
 
     #[test]

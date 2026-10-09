@@ -85,7 +85,8 @@ pub struct BackupInfo {
     pub created_at: f64,
     /// Written by a scheduled backup (`ferrix-auto-*`; only those are rotated).
     pub scheduled: bool,
-    /// The commit ts of the snapshot (known for backups made by this process).
+    /// The commit ts of the snapshot. Embedded in the archive name, so listings report it too; `None` for archives
+    /// named before that (or renamed by hand).
     #[ts(type = "number | null")]
     pub ts: Option<u64>,
 }
@@ -390,7 +391,7 @@ impl BackupTarget {
                 bytes: meta.size,
                 created_at: meta.last_modified.timestamp_millis() as f64,
                 scheduled: name.starts_with(AUTO_PREFIX),
-                ts: None,
+                ts: ts_from_name(name),
             });
         }
         // Names embed the UTC time, so they sort chronologically.
@@ -466,6 +467,21 @@ pub fn archive_name(now_ms: f64, scheduled: bool) -> String {
     format!("{prefix}{}{EXTENSION}", super::file_timestamp(now_ms))
 }
 
+/// The stored name of a backup made at `now_ms` whose snapshot is at commit `ts`: `ferrix-<time>-ts<ts>.tar.zst`. The
+/// ts in the name lets [`BackupTarget::list`] report it without opening archives (cheap on S3 too); names still sort
+/// chronologically since the time comes first.
+pub fn archive_name_with_ts(now_ms: f64, scheduled: bool, ts: u64) -> String {
+    let base = archive_name(now_ms, scheduled);
+    format!("{}-ts{ts}{EXTENSION}", base.trim_end_matches(EXTENSION))
+}
+
+/// The snapshot ts embedded in a backup name by [`archive_name_with_ts`], if any (older names have none).
+pub fn ts_from_name(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(EXTENSION)?;
+    let (_, ts) = stem.rsplit_once("-ts")?;
+    ts.parse().ok()
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Backups of a running app
 // ---------------------------------------------------------------------------------------------------------------------
@@ -484,6 +500,7 @@ pub async fn create(app: &App, spec: &BackupSpec, target: &BackupTarget, schedul
     let (spec2, local2, source2) = (*spec, local.clone(), source.clone());
     let manifest = tokio::task::spawn_blocking(move || write_archive(&source2, &spec2, &local2, now)).await??;
     let bytes = std::fs::metadata(&local)?.len();
+    let name = archive_name_with_ts(now, scheduled, manifest.ts);
     target.upload_file(&local, &name).await.with_context(|| format!("storing the backup in {}", target.location))?;
     tracing::info!(name, bytes, ts = manifest.ts, target = %target.location, "backup written");
     Ok(BackupInfo { name, bytes, created_at: now, scheduled, ts: Some(manifest.ts) })
@@ -742,6 +759,10 @@ mod tests {
         assert_eq!(n, "ferrix-20251009T120000.123Z.tar.zst");
         assert!(validate_name(&n).is_ok());
         assert!(archive_name(0.0, true).starts_with("ferrix-auto-"));
+        let with_ts = archive_name_with_ts(1_760_011_200_123.0, true, 4321);
+        assert!(validate_name(&with_ts).is_ok() && with_ts.starts_with("ferrix-auto-") && with_ts.ends_with("-ts4321.tar.zst"));
+        assert_eq!(ts_from_name(&with_ts), Some(4321));
+        assert_eq!(ts_from_name(&n), None, "older names have no ts");
         for bad in ["../ferrix-x.tar.zst", "ferrix-a/b.tar.zst", "x.tar.zst", "ferrix-x.tar", "ferrix-..tar.zst"] {
             assert!(validate_name(bad).is_err(), "{bad}");
         }

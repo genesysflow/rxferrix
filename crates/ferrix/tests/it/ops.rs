@@ -141,7 +141,9 @@ async fn backup_during_writes_restores_a_consistent_snapshot() {
     let ts_after = t.app().db().write_log().latest();
     let snapshot_ts = info.ts.unwrap();
     assert!(written > 0 && snapshot_ts >= ts_before && snapshot_ts < ts_after, "{ts_before} {snapshot_ts} {ts_after} {written}");
-    assert_eq!(target.list().await.unwrap()[0].name, info.name);
+    let listed = &target.list().await.unwrap()[0];
+    assert_eq!(listed.name, info.name);
+    assert_eq!(listed.ts, Some(snapshot_ts), "listings report the snapshot ts");
 
     let restored = tempfile::tempdir().unwrap();
     let report = backup::restore(&archive_path(target_dir.path(), &info), restored.path(), &RestoreOptions::default())

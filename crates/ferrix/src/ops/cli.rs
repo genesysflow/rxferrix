@@ -204,6 +204,7 @@ pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()>
             let local = work.path().join(&name);
             let manifest = backup::write_archive(&source, &spec, &local, now)?;
             let bytes = std::fs::metadata(&local)?.len();
+            let name = backup::archive_name_with_ts(now, false, manifest.ts);
             runtime()?.block_on(target.upload_file(&local, &name))?;
             println!("Wrote {name} to {} (ts {}, {bytes} bytes)", target.location, manifest.ts);
         }

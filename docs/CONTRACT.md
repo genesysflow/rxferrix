@@ -1766,7 +1766,8 @@ is served; the system functions and `/api/admin/*` exist either way.
 
 ### 4.4 Operations: backups, export and import (`crate::ops`)
 
-**Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>.tar.zst`; scheduled ones `ferrix-auto-…`): a zstd-compressed
+**Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `ferrix-auto-…`; the
+snapshot ts in the name is what `GET /api/admin/backups` reports as `ts`, `null` for older names without it): a zstd-compressed
 tar of `data.db` (a `VACUUM INTO` snapshot: one read transaction, so a consistent copy at one commit ts that never
 blocks the writer), optionally `aux.db` (same), `storage/<storage id>` for the blob of every `_storage` document of
 the snapshot (local storage only), `auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`:

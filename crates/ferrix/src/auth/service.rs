@@ -156,7 +156,7 @@ impl AuthService {
         })
     }
 
-    /// The configuration given in code and on the command line (without `_settings`; see [`AuthService::current`]).
+    /// The configuration given in code and on the command line (without `_settings`; the merged result is `current()`).
     pub fn config(&self) -> &AuthConfig {
         &self.config
     }

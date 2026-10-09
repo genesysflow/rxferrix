@@ -8,7 +8,7 @@
 //!   stored, so a leaked database alone does not allow brute-forcing 6-digit codes or matching tokens;
 //! - the HMAC key that signs file upload URLs (`crate::storage`);
 //! - the XChaCha20-Poly1305 key that encrypts secrets stored in `_settings` (OAuth client secrets, the SMTP password;
-//!   see [`super::secretbox`]).
+//!   see `super::secretbox`).
 //!
 //! Deleting the file signs everyone out: every access token and every stored token hash becomes invalid.
 //!

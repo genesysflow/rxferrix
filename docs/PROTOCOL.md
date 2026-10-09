@@ -38,10 +38,10 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 { "type": "Action",   "requestId": 1, "udfPath": "ai:summarize", "args": {} }
 
 // Set or clear identity (token = null clears it: anonymous). token is an access token from /api/auth/* (see
-// "Auth" below). Valid: the socket's identity becomes the token's user (or admin), every query is re-evaluated
-// for the new identity, and the next Transition carries endVersion.identity = baseVersion + 1 (with the results that
-// changed). Invalid, expired, or its session ended (signed
-// out, revoked): AuthError, then the server closes the socket; the identity is unchanged.
+// "Auth" below), or a JWT of a configured external issuer ("External tokens"). Valid: the socket's identity becomes
+// the token's user (or admin), every query is re-evaluated for the new identity, and the next Transition carries
+// endVersion.identity = baseVersion + 1 (with the results that changed). Invalid, expired, or its session ended
+// (signed out, revoked): AuthError, then the server closes the socket; the identity is unchanged.
 { "type": "Authenticate", "baseVersion": 0, "token": "eyJ…" }
 
 // Keepalive answer to a server Ping (optional for the client to send unprompted).
@@ -72,9 +72,11 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 
 // Unrecoverable for this socket. The server closes it after sending. The client reconnects with backoff.
 { "type": "FatalError", "error": "…" }
-// The token of an Authenticate was rejected, or the socket's token expired. error is one of "malformed access
-// token", "invalid access token signature", "access token expired", "session has ended". The server closes the
-// socket; the client fetches a fresh token (forceRefresh) and reconnects with it.
+// The token of an Authenticate was rejected, the socket's token expired, or its session ended while the socket was
+// open (guarantee 10). error is one of "malformed access token", "invalid access token signature", "access token
+// expired", "session has ended", and for external tokens "unknown token issuer", "unknown token signing key",
+// "invalid access token claims", "access token not yet valid". The server closes the socket; the client fetches a
+// fresh token (forceRefresh) and reconnects with it, or, when that fails, continues anonymously.
 { "type": "AuthError", "error": "…" }
 
 // Sent every 15s. If the client hears nothing for 30s it assumes the socket is dead and reconnects.
@@ -107,6 +109,14 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 9. **Token expiry.** While a socket is authenticated, the server sends `AuthError` ("access token expired") and
    closes the socket when the token's `exp` passes, unless the client has sent a fresher token with `Authenticate`
    before then. The TS client refreshes 30s before `exp`, so this only happens to clients that stopped refreshing.
+10. **Live revocation.** When the session a socket authenticated with ends, the server sends `AuthError`
+   ("session has ended") and closes the socket right away (within milliseconds of the commit), without waiting for
+   the token's `exp`; no Transition follows it, so identity-dependent results stop at once. A session ends on
+   sign-out (`/api/auth/signout`), refresh-token reuse detection, a password reset (other sessions), an admin's
+   `revoke_session` or `delete_user`, and any other deletion of its `_sessions` row. For external tokens (no session
+   row) the same happens when the provisioned user is deleted. The TS client answers with a forced refresh, which
+   fails for an ended session, and then continues anonymously (`getAuth` signs out). Refreshing a session does not
+   affect its sockets. The admin log stream (`/api/admin/logs/stream`) ends the same way, with `event: revoked`.
 8. **`logLines`** (on `QueryUpdated`, `QueryFailed`, `MutationResponse`, `ActionResponse` and the HTTP responses)
    are the log lines the function emitted while it ran, formatted as `"[LEVEL] message key=value ..."`, including
    those of functions an action called. They are sent **only in `--dev`**; otherwise they are always `[]` (the server
@@ -183,11 +193,20 @@ or signed-out token it fails with 401 and `errorData.code = "invalid_token"` (ne
   by default. Signed with a key derived from `<data dir>/auth_secret.key` (created on first start, mode 0600; deleting
   it signs everyone out). Validation checks the header, the signature (constant time), `iss`, `typ`, `exp`, and that
   the session still exists and is unexpired (so sign-out and revocation apply immediately to new sockets and HTTP
-  calls; a socket that is already authenticated keeps its identity until its token expires or it re-authenticates).
+  calls; sockets already authenticated with it get `AuthError` right away, guarantee 10). The access token never
+  outlives its session (its `exp` is capped at the session's expiry).
 - **Refresh token**: 43 random URL-safe characters (256 bits), stored only as a keyed BLAKE3 hash. Every refresh
   rotates it. Presenting an already-rotated refresh token revokes the whole session (reuse detection), except within
   10 seconds of its rotation, when it is answered with `stale_refresh_token` and the session survives (two tabs
-  refreshing at once). Sessions expire after 30 days without a refresh (sliding).
+  refreshing at once). Sessions expire after 30 days without a refresh (sliding). Impersonation sessions (minted by an
+  admin, `impersonatedBy` set) have a fixed expiry that refreshing never extends.
+- **External tokens** (`AuthConfig::jwt`, docs/CONTRACT.md §1.5): a JWT from a configured issuer (Clerk, Auth0,
+  Supabase, any OIDC provider) is accepted wherever an access token is, on `Authenticate` and as an HTTP Bearer token.
+  A token whose header says `HS256` is always one of ferrix's own; any other is routed by its `iss` (exact match) to
+  the issuer's verifier: RS256, ES256 or EdDSA against the issuer's JWKS (by `kid`), then `exp` (required) and `nbf`
+  with a leeway (60s), and `aud`. Its subject maps to a ferrix user (created on first sight), so the identity is an
+  ordinary user without a session id. The client simply passes the provider's token getter:
+  `client.setAuth(({ forceRefresh }) => clerk.session.getToken({ skipCache: forceRefresh }))`.
 
 ### Endpoints
 
@@ -228,10 +247,12 @@ loopback URL is allowed too. A URL that doesn't match is refused (400 `invalid_r
 ## Admin endpoints
 
 `GET /api/admin/logs`, `GET /api/admin/logs/stream` (Server-Sent Events) and `GET /api/admin/stats` serve the
-dashboard's execution log and stats. They require `Authorization: Bearer <access token>` of an admin session (also
-for the event stream, which clients read with `fetch()` rather than `EventSource`, so tokens never go in URLs). The
-dashboard's data views use the admin-only system functions `_system/dashboard:*` over this protocol. Both are
-specified in docs/CONTRACT.md §4.1 and §4.2.
+dashboard's execution log and stats; `POST /api/admin/impersonate` mints a short-lived session of a user. They
+require `Authorization: Bearer <access token>` of an admin session (also for the event stream, which clients read
+with `fetch()` rather than `EventSource`, so tokens never go in URLs). The event stream ends with `event: expired`
+when the token expires and with `event: revoked` as soon as the admin's session ends. The dashboard's data views use
+the admin-only system functions (`_system/dashboard:*`, `_system/settings:*`, `_system/audit:*`, ...) over this
+protocol. All of it is specified in docs/CONTRACT.md §4.
 
 ## File storage
 

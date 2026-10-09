@@ -24,11 +24,13 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
     Equals<
       TableNames,
       | "attachments"
+      | "audited_items"
       | "dash_items"
       | "items"
       | "lossy"
       | "notes"
       | "private_notes"
+      | "revocation_notes"
       | "sched_notes"
       | "search_messages"
       | "search_vectors"

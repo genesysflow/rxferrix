@@ -402,7 +402,8 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   The builder is `AuthConfig::password()` rather than `Auth::password()`, because `ferrix::Auth` is `ctx.auth`'s type.)
 - **Endpoints**: `/api/auth/{signup,signin,signout,refresh,verify,reset,oauth/:provider,oauth/:provider/callback}`.
 - **Hardening**: rate limits on auth endpoints (`tower` governor), a constant-time compare, and no account enumeration.
-- **Later**: accept external JWTs (Clerk, Auth0) through a JWKS URL.
+- **External JWTs** (Clerk, Auth0, Supabase, any OIDC issuer) verified through the issuer's JWKS and mapped to
+  provisioned `_users` (built in Phase 5).
 
 ### 7.2 File storage
 - Backend: `object_store`, either `LocalFileSystem` at `fx_data/storage/` or S3-compatible storage (R2, MinIO, AWS).
@@ -535,8 +536,13 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] The SPA (`packages/dashboard`, Svelte 5) embedded with `rust-embed` (feature `dashboard`) and served at `/_/`:
   sign-in and setup, data browser (live grid, index filters, JSON editor, follow IDs, schema view), function runner,
   live logs tail, users and sessions, overview. Built assets are committed; a test fails when they are stale.
-- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, audited dashboard writes, per-function
-  latency charts, impersonation via a real session.
+- [x] Audited dashboard writes: `_audit_log` written in each write's own transaction (generic writes,
+  `revoke_session`, `delete_user`, settings, impersonation, `run_function`), `_system/audit:list` (live, filterable),
+  90-day retention (docs/CONTRACT.md §4.1.4). The dashboard page for it is still to build.
+- [x] Impersonation via a real session: `run_function` "as user" runs through a short-lived, audited session marked
+  `impersonatedBy`; `POST /api/admin/impersonate` mints one to open the app as a user (§4.2). No UI button yet.
+- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, per-function latency charts, and the UI for
+  settings, the audit log and impersonation.
 
 ### Phase 5 — Auth (M) — mostly done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
@@ -547,9 +553,15 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
   React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
 - [x] The dashboard Users page (users, linked providers, sessions, revoke, delete; "act as user" in the runner).
-- [ ] Provider configuration in `_settings`, editable from the dashboard.
-- [ ] External JWTs via JWKS; live revocation of already-authenticated sockets on sign-out (today they keep their
-  identity until the access token expires).
+- [x] Provider configuration in `_settings` (OAuth providers, SMTP, redirect allowlist, sign-ups, token lifetimes,
+  CORS origins), secrets encrypted at rest (XChaCha20-Poly1305, key from `auth_secret.key`), applied without a
+  restart, config wins over settings; admin-only `_system/settings:get|update|send_test_email` (docs/CONTRACT.md
+  §4.1.3). The dashboard Settings page is still to build.
+- [x] External JWTs via JWKS (`AuthConfig::jwt(JwtProvider)`: RS256/ES256/EdDSA, cached JWKS with rate-limited
+  refetch on unknown `kid`, iss/aud/exp/nbf with leeway, subjects provisioned as `_users` + `_accounts`), on WS and
+  HTTP Bearer (§1.5).
+- [x] Live revocation: sockets and the admin log stream end with `AuthError` / `event: revoked` as soon as their
+  session (or, for external tokens, user) is deleted (docs/PROTOCOL.md guarantee 10).
 - **Milestone: usable for real apps with users.**
 
 ### Phase 6 — Scheduler and cron (M) — done

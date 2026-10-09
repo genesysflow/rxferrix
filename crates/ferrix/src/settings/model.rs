@@ -1,7 +1,7 @@
 //! The `_settings` table and its decrypted in-memory form, [`StoredSettings`].
 //!
 //! One row per setting key. `value` holds the non-secret part as JSON; `encrypted` holds the secret part (OAuth
-//! client secrets, the SMTP password) sealed with [`crate::auth::secretbox`], bound to the row's key. Secrets never
+//! client secrets, the SMTP password) sealed with `crate::auth::secretbox`, bound to the row's key. Secrets never
 //! leave the server in clear: `_system/settings:get` returns `"••••"` for a stored secret, the dashboard's data
 //! browser masks the `encrypted` field, and execution logs never see them (the settings functions take them as
 //! arguments only on `update`, whose arguments are not logged; see `super`).

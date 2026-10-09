@@ -12,11 +12,13 @@
 //! | `document` | query | One document by id (any table), with its table name. |
 //! | `insert_document`, `patch_document`, `replace_document`, `delete_documents` | mutation | Untyped writes, validated with `TableDef::validate`. |
 //! | `functions` | query | The function registry, internal and system functions included. |
-//! | `run_function` | action | Run any function by path with JSON args, optionally as a given user. |
+//! | `run_function` | action | Run any function by path with JSON args, optionally as a given user (through a real, audited, short-lived session). |
 //! | `users`, `user_sessions`, `revoke_session`, `delete_user` | query / mutation | The Users page. |
 //! | `me` | query | The signed-in admin. |
 //!
-//! Secrets are never returned and system tables are mostly read-only; see [`secrets`].
+//! Secrets are never returned and system tables are mostly read-only; see [`secrets`]. Every write is recorded in the
+//! audit log (`crate::audit`) in its own transaction. Settings are in `crate::settings`, the audit log's query in
+//! `crate::audit`, and `POST /api/admin/impersonate` in [`impersonate`].
 
 #[cfg(feature = "dashboard")]
 pub mod assets;

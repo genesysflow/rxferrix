@@ -1,6 +1,6 @@
 //! Runtime settings, editable from the dashboard without a restart: OAuth providers, SMTP, the redirect allowlist,
 //! sign-ups, token lifetimes and CORS origins. Stored in the `_settings` system table ([`model`]); secrets (OAuth
-//! client secrets, the SMTP password) are encrypted at rest ([`crate::auth::secretbox`]) and never returned in clear.
+//! client secrets, the SMTP password) are encrypted at rest (`crate::auth::secretbox`) and never returned in clear.
 //!
 //! **Precedence.** What the code, the command line or the environment configures (`AuthConfig`) wins over
 //! `_settings`, field by field (see `crate::auth::config`); `get` lists those fields in `locked`. Settings fill in what

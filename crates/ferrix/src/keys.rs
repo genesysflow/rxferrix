@@ -1,7 +1,9 @@
 //! Memcomparable (order-preserving) key encoding for index keys.
 //!
 //! Every value starts with a type tag, so values of different types order by tag:
-//! `Undefined (missing) < Null < Int64 < Float64 < Bool < String < Array < Object`.
+//! `Undefined (missing) < Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`.
+//! Bytes are JSON objects in the tagged form `{"$bytes": "<base64>"}` ([`crate::Bytes`]); any other object (including
+//! one whose `$bytes` is not canonical base64) is an Object.
 //! Each encoding is *self-delimiting* (no encoding is a proper prefix of another), which gives two properties the
 //! query engine relies on:
 //!
@@ -20,8 +22,13 @@ pub const TAG_INT: u8 = 0x03;
 pub const TAG_FLOAT: u8 = 0x04;
 pub const TAG_BOOL: u8 = 0x05;
 pub const TAG_STRING: u8 = 0x06;
-pub const TAG_ARRAY: u8 = 0x07;
-pub const TAG_OBJECT: u8 = 0x08;
+pub const TAG_BYTES: u8 = 0x07;
+pub const TAG_ARRAY: u8 = 0x08;
+pub const TAG_OBJECT: u8 = 0x09;
+
+/// Version of this encoding, stored in `_meta` (`key_encoding`). Version 1 had no Bytes tag (arrays were 0x07,
+/// objects 0x08); opening a database written with an older version rebuilds every index (`db::catalog`).
+pub const KEY_ENCODING_VERSION: u64 = 2;
 
 const SIGN: u64 = 1 << 63;
 
@@ -98,6 +105,10 @@ pub fn encode_value(v: &Value, out: &mut Vec<u8>) {
                 encode_value(item, out);
             }
             out.push(0x00);
+        }
+        Value::Object(map) if let Some(bytes) = crate::bytes::decode_tagged(map) => {
+            out.push(TAG_BYTES);
+            encode_str_body(&bytes, out);
         }
         Value::Object(map) => {
             out.push(TAG_OBJECT);
@@ -189,6 +200,10 @@ pub fn decode_value(bytes: &[u8]) -> Result<(Decoded, &[u8]), String> {
             let (s, rest) = decode_str_body(rest)?;
             Ok((Some(Value::String(s)), rest))
         }
+        TAG_BYTES => {
+            let (b, rest) = decode_bytes_body(rest)?;
+            Ok((Some(crate::Bytes(b).to_json()), rest))
+        }
         TAG_ARRAY => {
             let mut items = Vec::new();
             let mut rest = rest;
@@ -234,6 +249,12 @@ fn take8(bytes: &[u8]) -> Result<(u64, &[u8]), String> {
 }
 
 fn decode_str_body(bytes: &[u8]) -> Result<(String, &[u8]), String> {
+    let (out, rest) = decode_bytes_body(bytes)?;
+    let s = String::from_utf8(out).map_err(|e| e.to_string())?;
+    Ok((s, rest))
+}
+
+fn decode_bytes_body(bytes: &[u8]) -> Result<(Vec<u8>, &[u8]), String> {
     let mut out = Vec::new();
     let mut i = 0;
     loop {
@@ -253,8 +274,7 @@ fn decode_str_body(bytes: &[u8]) -> Result<(String, &[u8]), String> {
             }
         }
     }
-    let s = String::from_utf8(out).map_err(|e| e.to_string())?;
-    Ok((s, &bytes[i + 2..]))
+    Ok((out, &bytes[i + 2..]))
 }
 
 #[cfg(test)]
@@ -266,7 +286,14 @@ mod tests {
 
     // ---- Reference order, defined independently of the byte encoding. ----
 
+    fn as_bytes(v: &Option<Value>) -> Option<Vec<u8>> {
+        v.as_ref().and_then(crate::Bytes::from_json).map(|b| b.0)
+    }
+
     fn rank(v: &Option<Value>) -> u8 {
+        if as_bytes(v).is_some() {
+            return 6;
+        }
         match v {
             None => 0,
             Some(Value::Null) => 1,
@@ -276,8 +303,8 @@ mod tests {
             },
             Some(Value::Bool(_)) => 4,
             Some(Value::String(_)) => 5,
-            Some(Value::Array(_)) => 6,
-            Some(Value::Object(_)) => 7,
+            Some(Value::Array(_)) => 7,
+            Some(Value::Object(_)) => 8,
         }
     }
 
@@ -285,6 +312,9 @@ mod tests {
         let (ra, rb) = (rank(a), rank(b));
         if ra != rb {
             return ra.cmp(&rb);
+        }
+        if let (Some(x), Some(y)) = (as_bytes(a), as_bytes(b)) {
+            return x.cmp(&y);
         }
         match (a, b) {
             (None, None) | (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
@@ -368,6 +398,11 @@ mod tests {
             arb_float().prop_map(|f| Value::Number(Number::from_f64(f).unwrap())),
             any::<bool>().prop_map(Value::Bool),
             arb_string().prop_map(Value::String),
+            prop::collection::vec(prop_oneof![Just(0u8), Just(0xFF), Just(1), any::<u8>()], 0..6)
+                .prop_map(|b| crate::Bytes(b).to_json()),
+            // Look like bytes but aren't (bad base64, extra keys): plain objects.
+            Just(json!({"$bytes": "not base64!"})),
+            Just(json!({"$bytes": "AA==", "x": 1})),
         ]
     }
 
@@ -442,10 +477,38 @@ mod tests {
 
     #[test]
     fn type_tags_order() {
-        let vals = [None, Some(json!(null)), Some(json!(5)), Some(json!(1.5)), Some(json!(false)), Some(json!("")), Some(json!([])), Some(json!({}))];
+        let vals = [
+            None,
+            Some(json!(null)),
+            Some(json!(5)),
+            Some(json!(1.5)),
+            Some(json!(false)),
+            Some(json!("")),
+            Some(json!("\u{10ffff}")),
+            Some(json!({"$bytes": ""})),
+            Some(json!({"$bytes": "//8="})),
+            Some(json!([])),
+            Some(json!({})),
+        ];
         for w in vals.windows(2) {
             assert!(enc_opt(&w[0]) < enc_opt(&w[1]), "{:?} < {:?}", w[0], w[1]);
         }
+    }
+
+    #[test]
+    fn bytes_order_bytewise_and_roundtrip() {
+        let b = |v: &[u8]| crate::Bytes(v.to_vec()).to_json();
+        let ordered = [b(&[]), b(&[0]), b(&[0, 0]), b(&[0, 1]), b(&[1]), b(&[0xFE, 0xFF]), b(&[0xFF])];
+        for w in ordered.windows(2) {
+            assert!(encode(&w[0]) < encode(&w[1]), "{} < {}", w[0], w[1]);
+        }
+        for v in &ordered {
+            assert_eq!(encode(v)[0], TAG_BYTES);
+            assert_eq!(decode_value(&encode(v)).unwrap(), (Some(v.clone()), &[][..]));
+        }
+        // Not canonical base64, or more keys: an object.
+        assert_eq!(encode(&json!({"$bytes": "AB=="}))[0], TAG_OBJECT);
+        assert_eq!(encode(&json!({"$bytes": "AA==", "y": 2}))[0], TAG_OBJECT);
     }
 
     #[test]

@@ -367,9 +367,49 @@ pub trait ActionFunction: FunctionRef {}
 pub trait SchedulableFunction: FunctionRef {}
 
 pub mod prelude {
+    pub use crate::migrations::DocChange;
     pub use crate::{
         ActionCtx, Doc, Error, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError,
     };
+}
+
+/// `#[migration]` items (CONTRACT.md §1.9).
+pub mod migrations {
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum DocChange {
+        Keep,
+        Patch(serde_json::Value),
+        Replace(serde_json::Value),
+        Delete,
+    }
+
+    #[diagnostic::on_unimplemented(
+        message = "a #[migration] must return `Result<Option<serde_json::Value>>` (a patch or None), `Result<DocChange>` or `Result<()>`, not `Result<{Self}>`",
+        label = "not a migration result"
+    )]
+    pub trait MigrationOutput {
+        fn into_change(self) -> DocChange;
+    }
+    impl MigrationOutput for DocChange {
+        fn into_change(self) -> DocChange {
+            self
+        }
+    }
+    impl MigrationOutput for Option<serde_json::Value> {
+        fn into_change(self) -> DocChange {
+            self.map_or(DocChange::Keep, DocChange::Patch)
+        }
+    }
+    impl MigrationOutput for () {
+        fn into_change(self) -> DocChange {
+            DocChange::Keep
+        }
+    }
+
+    pub trait MigrationRef: 'static {
+        fn name() -> String;
+        fn table() -> &'static str;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -392,6 +432,41 @@ pub mod __private {
 
     #[linkme::distributed_slice]
     pub static FUNCTIONS: [FunctionDef];
+
+    #[linkme::distributed_slice]
+    pub static MIGRATIONS: [MigrationDef];
+
+    pub type MigrationHandler = for<'a> fn(
+        &'a MutationCtx,
+        serde_json::Value,
+    ) -> BoxFuture<'a, Result<crate::migrations::DocChange>>;
+
+    pub struct MigrationDef {
+        pub module_path: &'static str,
+        pub fn_name: &'static str,
+        pub name: Option<&'static str>,
+        pub table: &'static str,
+        pub batch_size: usize,
+        pub handler: MigrationHandler,
+    }
+    impl MigrationDef {
+        pub fn name(&self) -> String {
+            match self.name {
+                Some(n) => n.to_string(),
+                None => function_path(self.module_path, self.fn_name),
+            }
+        }
+    }
+
+    pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> Result<T> {
+        serde_json::from_value(doc).map_err(|e| anyhow::anyhow!("the document does not deserialize: {e}"))
+    }
+
+    pub fn migration_output<O: crate::migrations::MigrationOutput>(
+        out: O,
+    ) -> Result<crate::migrations::DocChange> {
+        Ok(out.into_change())
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FunctionKind {

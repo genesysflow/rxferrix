@@ -1,0 +1,54 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "migration(quote!(table = Todo, batch = 100), quote!\n{\n    #[doc = r\" Adds a default priority.\"] pub async fn\n    add_priority(ctx: &MutationCtx, doc: serde_json::Value) ->\n    Result<Option<serde_json::Value>>\n    { Ok(doc.get(\"priority\").is_none().then(|| json!({ \"priority\": 0 }))) }\n})"
+---
+/// Adds a default priority.
+pub async fn add_priority(
+    ctx: &MutationCtx,
+    doc: serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority" : 0 })))
+}
+/// Migration reference for [`add_priority`](fn@add_priority).
+#[allow(non_camel_case_types, dead_code)]
+pub struct add_priority {}
+impl ::ferrix::migrations::MigrationRef for add_priority {
+    fn name() -> ::std::string::String {
+        ::ferrix::__private::MigrationDef::name(&__FERRIX_MIGRATION_add_priority)
+    }
+    fn table() -> &'static str {
+        __FERRIX_MIGRATION_add_priority.table
+    }
+}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::ferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "add_priority",
+    name: ::core::option::Option::None,
+    table: <Todo as ::ferrix::Table>::NAME,
+    batch_size: 100usize,
+    handler: {
+        fn __ferrix_migrate<'a>(
+            __ferrix_ctx: &'a ::ferrix::MutationCtx,
+            __ferrix_doc: ::ferrix::__private::serde_json::Value,
+        ) -> ::ferrix::__private::BoxFuture<
+            'a,
+            ::ferrix::Result<::ferrix::migrations::DocChange>,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let __ferrix_doc: serde_json::Value = ::ferrix::__private::decode_migration_doc::<
+                    serde_json::Value,
+                >(__ferrix_doc)?;
+                let __ferrix_out: Option<serde_json::Value> = add_priority(
+                        __ferrix_ctx,
+                        __ferrix_doc,
+                    )
+                    .await?;
+                ::ferrix::__private::migration_output(__ferrix_out)
+            })
+        }
+        __ferrix_migrate
+    },
+};

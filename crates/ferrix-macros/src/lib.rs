@@ -1,5 +1,5 @@
-//! Procedural macros for ferrix: `#[table]`, `#[query]`, `#[mutation]`, `#[action]` and the `internal_*`
-//! variants.
+//! Procedural macros for ferrix: `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, the `internal_*`
+//! variants, and `#[migration]`.
 //!
 //! The expansions are specified normatively in `docs/CONTRACT.md` §3. Every path the expansions use is fully
 //! qualified (`::core::..`, `::std::..`, `::ferrix::..`), so `use` items in user code cannot change their meaning.
@@ -13,6 +13,7 @@
 use proc_macro::TokenStream;
 
 mod function;
+mod migration;
 mod search;
 mod table;
 mod util;
@@ -38,6 +39,19 @@ fn into_tokens(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 #[proc_macro_attribute]
 pub fn table(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(table::expand_table(attr.into(), item.into()))
+}
+
+/// Declares a data migration over one table, run in batches. See `docs/CONTRACT.md` §1.9 and §3.3.
+///
+/// ```ignore
+/// #[migration(table = Todo, batch = 100)]             // `name = "0002_priority"` sets a stable id (default: the path)
+/// async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> {
+///     Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // a patch, or None to keep it
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn migration(attr: TokenStream, item: TokenStream) -> TokenStream {
+    into_tokens(migration::expand_migration(attr.into(), item.into()))
 }
 
 /// Declares a public query function. See `docs/CONTRACT.md` §3.2.

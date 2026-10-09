@@ -1,0 +1,9 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "migration_err(quote!(batch = 0, name = \"has space\", tables = X, name = \"x\"),\nquote!(async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}))"
+---
+`batch` must be between 1 and 10000
+a migration name may only contain letters, digits and `_ - . : /`, not ` `
+unknown argument `tables` (expected `table`, `batch` or `name`)
+duplicate argument `name`
+#[migration] needs the table it migrates: `#[migration(table = TableType)]`

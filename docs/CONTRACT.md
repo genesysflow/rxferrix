@@ -14,9 +14,9 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 
 ```rust
 use ferrix::prelude::*;
-// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError,
-//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts,
-//           table, query, mutation, action, internal_query, internal_mutation, internal_action, json!, Ferrix
+// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
+//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, DocChange,
+//           table, query, mutation, action, internal_query, internal_mutation, internal_action, migration, json!, Ferrix
 use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
@@ -130,7 +130,30 @@ pub struct SearchIndex<T> { /* … */ }
 pub struct VectorIndex<T> { /* … */ }
 
 pub enum Order { Asc, Desc }
+
+/// Binary data (`ferrix::Bytes`, in the prelude). JSON on the wire and in storage: `{"$bytes": "<base64>"}`
+/// (standard alphabet, padded; decoding is strict, so every value has exactly one form). TS: `{ $bytes: string }`;
+/// `@ferrix/client` exports `type Bytes`, `bytesToJson(Uint8Array | ArrayBuffer | ArrayBufferView)`,
+/// `bytesFromJson(b): Uint8Array` and `isBytes(v)`.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Bytes(pub Vec<u8>);   // Deref<Target = Vec<u8>>, AsRef<[u8]>, From<Vec<u8> | &[u8] | [u8; N]>, Into<Vec<u8>>,
+                                 // From/Into axum::body::Bytes (so `ctx.storage.store(bytes, ..)` takes it)
+impl Bytes {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self;
+    pub fn into_vec(self) -> Vec<u8>;
+    pub fn to_json(&self) -> serde_json::Value;               // {"$bytes": "..."}
+    pub fn from_json(v: &serde_json::Value) -> Option<Bytes>; // only an object whose single key is "$bytes"
+}
 ```
+**Bytes in indexes.** The key encoding (PLAN.md §4.3, `ferrix::keys`) recognizes the tagged form and gives it its own
+type tag between strings and arrays, `Undefined < Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`,
+with an order-preserving body (bytes compare byte-wise; a prefix sorts first), so `Bytes` fields work in `#[index]`,
+`with_index` ranges, search filter fields and the dashboard's index filters. Any other object, including one whose
+`$bytes` is not canonical base64, stays an Object. Adding the tag renumbered Array and Object, so the key encoding
+has a version in `_meta` (`key_encoding`, now 2; absent = 1): opening a database written with an older version
+rebuilds every index (ordinary, search and vector) before anything else. Pagination cursors from before such an
+upgrade may then fail with `paginate: cursor does not belong to this query` if their range bounds held arrays or
+objects.
 
 ### 1.2 Contexts and database API
 
@@ -364,7 +387,9 @@ impl Default for AppOptions { /* the defaults above, dev = false */ }
   fail and up to 20 ids with their serde errors, plus how to fix it. Fingerprints are then not updated, so the
   check runs again next time. With `skip_schema_check` nothing is validated or recorded. The check misses changes
   that don't show in the TS type (e.g. `u32` → `u8`, or `deny_unknown_fields`); reads of such documents still fail
-  with a clear error.
+  with a clear error. A table with failing documents **opens anyway while `#[migration]`s for it are pending** (not
+  `done` in `_migrations`): it is then *migrating*, with lenient writes, until its last migration has run (§1.9).
+  The error message suggests a migration (with a snippet) and names migrations of the table that are already done.
 
 **Running functions with their log lines** (what the WS worker and the HTTP API use):
 ```rust
@@ -515,7 +540,7 @@ fires the watches of deleted ones. So every way a session ends is covered (sign-
 deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
 guarantee 10).
 
-**Runtime settings and precedence** (`ferrix::settings`, §4.1.3). Administrators can configure OAuth providers, SMTP,
+**Runtime settings and precedence** (`ferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
 the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
 encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
 wins, field by field: an explicit `signups(..)`, `access_token_ttl(..)` or `session_ttl(..)` call; a non-empty
@@ -800,7 +825,7 @@ written, unless the write leaves that field unchanged (a vector made unindexable
 unindexed, and the document stays editable). Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
 can't inline them for codegen): map results to a struct to return them.
 
-**Storage and consistency.** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
+**Storage and consistency (search).** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
 `UNINDEXED` columns, each the hex of its memcomparable encoding, and `_search_<n>_docs` mapping FTS rowids to doc
 ids); each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filter fields as metadata columns). They
 are listed in `_search_indexes` and updated inside the mutation's write transaction by both the typed and untyped
@@ -815,6 +840,98 @@ index id plus a `by_id` point read for each document it examined; every write th
 search index (its text or a filter value; inserts and deletes of indexed documents) adds `(search index id, doc id)`
 to the commit entry. So a subscription is invalidated by any such write to the table (and by any change to a document
 it returned), never by unrelated tables. No change to `ReadSet`/`CommitEntry` was needed.
+
+### 1.9 Migrations
+
+```rust
+use ferrix::prelude::*;          // migration, DocChange
+use serde_json::Value;
+
+/// Old todos have no priority. Untyped: the document is the stored JSON (system fields included), so it works
+/// however far the Rust type has moved on.
+#[migration(table = Todo, batch = 100)]          // table = a #[table] type or "name"; batch 1..=10000 (default 100)
+async fn add_priority(ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // Some(patch) or None (keep)
+}
+
+/// Typed, when the old shape still deserializes; a stable name set explicitly.
+#[migration(table = "todos", name = "0002_split_owner")]
+async fn split_owner(ctx: &MutationCtx, doc: Doc<OldTodo>) -> Result<DocChange> {
+    if doc.owner.is_empty() { return Ok(DocChange::Delete); }
+    let user = ctx.db.query::<User>().first().await?;                   // ctx is a normal MutationCtx
+    Ok(DocChange::Patch(json!({ "ownerId": user.map(|u| u.id) })))
+}
+```
+
+```rust
+pub enum DocChange { Keep, Patch(Value) /* shallow merge */, Replace(Value) /* system fields optional, unchanged */, Delete }
+pub trait MigrationOutput { fn into_change(self) -> DocChange; }   // DocChange, Option<Value> (None = Keep), () (Keep)
+pub trait MigrationRef: 'static { fn name() -> String; fn table() -> &'static str; }   // emitted by the macro
+
+#[derive(Default)]
+pub struct RunOptions {
+    pub dry_run: bool,              // run over every document, report, write nothing (every batch rolled back)
+    pub restart: bool,              // start over from the first document, even if done
+    pub max_batches: Option<u64>,   // stop after n batches, still `running` (as if the process died); for tests
+}
+impl App {
+    pub async fn run_migration<M: MigrationRef>(&self, opts: RunOptions) -> Result<MigrationReport>;
+    pub async fn run_migration_named(&self, name: &str, opts: RunOptions) -> Result<MigrationReport>;
+    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // name order; stops at a failure
+    pub async fn migration_summaries(&self) -> Result<Vec<MigrationSummary>>;                    // what `list` returns
+}
+pub struct MigrationReport {   // camelCase JSON
+    pub name: String, pub table: String,
+    pub outcome: RunOutcome,   // completed | failed | canceled | alreadyDone | alreadyRunning | stopped | dryRun
+    pub batches: u64, pub processed: u64, pub changed: u64,   // this run only
+    pub error: Option<String>, pub failed_document: Option<String>,
+    pub schema_check: Option<String>,   // "passed" or "failed: <report>" when it ended the table's migrating state
+    pub examples: Vec<ChangeExample>,   // dry runs: up to 5 { id, before, after (null = deleted) }
+}
+// ferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
+// of `A-Za-z0-9_-.:/`, batch sizes); App::open also fails if a migration's table is not defined in code.
+```
+
+- **Names** are stable ids: `name = "..."` or, by default, the function path (`todos:add_priority`, like functions).
+  Moving or renaming the function changes a default name, which makes it a new migration: set `name` for
+  migrations that may move. Migrations run in **name order** (`ferrix migrate`, `serve --migrate`, `run` without a
+  name), stopping at the first that fails or is canceled.
+- **Batches.** A run first marks the migration `running` (creating its `_migrations` row). Each batch is one mutation
+  transaction, the internal system mutation `_system/migrations:run_batch` (so it gets the mutation timeout, panic
+  handling and an execution log entry): it reads the cursor from the row, pages through the table's
+  `by_creation_time` index (`query_table(..).paginate`, `batch` documents after the cursor), calls the migration on
+  each document, applies the change with `patch_raw` / `replace_raw` / `delete_raw` (the normal write path: indexes,
+  search, write log, so **subscriptions update**), and stores the new cursor and counts in the same transaction.
+  Each document is therefore processed **exactly once per run**, also across crashes and with concurrent runners.
+  Documents inserted during a run (by the app, or by the migration into its own table) come after the cursor and are
+  processed too, so a migration must leave documents already in the new shape alone (return `None`).
+- **Failure.** An error or panic from the migration, a rejected write (validation, a patch that isn't an object, a
+  replacement that changes `_id`), or the batch timing out rolls the whole batch back; then the row becomes
+  `failed` with `error` and `failedDocument` (when one document caused it). Running again resumes at the failed
+  batch. `cancel` stops a run after its current batch (`canceled`); running again resumes. A restart turns rows left
+  `running` into `pending` (cursor kept; `App::open` does this). `done` migrations don't run again unless
+  `restart`ed.
+- **Dry runs** go through every document from the start in batches that are rolled back (writes the migration makes
+  through `ctx.db` included) and never touch `_migrations`; they report counts and examples, or the first failure.
+- **Schema check interplay (lenient mode).** At startup a changed table whose documents don't match its type opens
+  only if it has pending migrations; it is then *migrating* (`Catalog::is_migrating`; `tableMigrating` in `list`),
+  and its fingerprint is not recorded. In a migrating table, a patch or replace may leave a document that doesn't
+  match the type **only if it didn't match before the write either** (so migrations can rewrite documents step by
+  step, and app writes to not-yet-migrated documents still work); inserts, and writes to documents that match, are
+  validated strictly. So the number of invalid documents can only go down. Typed reads of not-yet-migrated documents
+  still fail (`document does not match table`), so run the migrations promptly (`serve --migrate` runs them right
+  after startup) or keep the type backward compatible. In the transaction where the table's **last** pending
+  migration finishes, every document of the table is validated: if all match, the fingerprint is recorded and the
+  table leaves the migrating state (`schemaCheck: "passed"`); otherwise the report is stored in `schemaCheck` and
+  logged as an error, the table stays migrating until the process stops, and the next start refuses to open (unless
+  a new migration for the table is pending). Invalid documents never survive a restart unnoticed. With
+  `--skip-schema-check` nothing is migrating, and migration writes are validated strictly.
+- **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--dir DIR]` runs every migration
+  that isn't done (or one) and prints a report per migration (exit code 1 if one failed); `ferrix migrate status`
+  lists them with their state and progress. Run the CLI while the server is stopped (it is a separate process: a
+  running server would not see its writes in its subscriptions); for a running server use the dashboard functions
+  (§4.1.3) or start it with `serve --migrate` (`FERRIX_MIGRATE`), which runs pending migrations in the background
+  after startup. Without `--migrate`, `serve` logs a warning listing the migrations that aren't done.
 
 ---
 
@@ -859,6 +976,19 @@ pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::inline(cf
                                                                  // ('static: codegen also walks T's dependencies)
 /// `TableDef::validate` of a table: Ok iff `doc` deserializes as `Doc<T>`; Err = the serde error message.
 pub fn validate_doc<T: Table>(doc: &serde_json::Value) -> Result<(), String>;
+#[linkme::distributed_slice] pub static MIGRATIONS: [MigrationDef];
+pub type MigrationHandler = for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, Result<DocChange>>;
+pub struct MigrationDef {
+    pub module_path: &'static str, pub fn_name: &'static str,
+    pub name: Option<&'static str>,   // #[migration(name = "...")]
+    pub table: &'static str,          // <T as Table>::NAME or the string given
+    pub batch_size: usize,
+    pub handler: MigrationHandler,
+}
+impl MigrationDef { pub fn name(&self) -> String; }   // `name`, else function_path(module_path, fn_name)
+/// Deserialize the document for the migration's parameter type (identity for `Value`).
+pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> Result<T>;
+pub fn migration_output<O: MigrationOutput>(out: O) -> Result<DocChange>;
 /// Field type checks for #[search_index] / #[vector_index] (`#[diagnostic::on_unimplemented]` explains failures).
 pub trait SearchFieldType {}   // String, Option<String>
 pub trait VectorFieldType {}   // Vec<f32>, Option<Vec<f32>>
@@ -1005,6 +1135,59 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
   Both also get `impl ::ferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
   don't.
 
+### 3.3 `#[migration]`
+
+Input:
+```rust
+/// Adds a default priority.
+#[migration(table = Todo, batch = 100)]
+pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> { BODY }
+```
+Output (the fn is emitted unchanged; `#[cfg]`s are copied to every generated item):
+```rust
+/// Adds a default priority.
+pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> { BODY }
+
+/// Migration reference for [`add_priority`](fn@add_priority).
+#[allow(non_camel_case_types, dead_code)]
+pub struct add_priority {}
+impl ::ferrix::migrations::MigrationRef for add_priority {
+    fn name() -> ::std::string::String { ::ferrix::__private::MigrationDef::name(&__FERRIX_MIGRATION_add_priority) }
+    fn table() -> &'static str { __FERRIX_MIGRATION_add_priority.table }
+}
+
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::ferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "add_priority",
+    name: ::core::option::Option::None,                      // Some("...") with `name = "..."`
+    table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
+    batch_size: 100usize,
+    handler: {
+        fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
+            -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
+            ::std::boxed::Box::pin(async move {
+                let __ferrix_doc: serde_json::Value = ::ferrix::__private::decode_migration_doc::<serde_json::Value>(__ferrix_doc)?;
+                let __ferrix_out: Option<serde_json::Value> = add_priority(__ferrix_ctx, __ferrix_doc).await?;
+                ::ferrix::__private::migration_output(__ferrix_out)
+            })
+        }
+        __ferrix_migrate
+    },
+};
+```
+- Arguments: `table` (required; a type path, checked to implement `Table`, or a string literal), `batch` (an integer
+  literal in `1..=10000`, default 100), `name` (a string literal of 1..=128 characters out of `A-Za-z0-9_-.:/`).
+- The fn takes exactly `(ctx: &MutationCtx, doc: T)` with `T: DeserializeOwned` (`serde_json::Value`, `Doc<Old>`,
+  ...) and returns `Result<O>` (any `...::Result`) with `O: MigrationOutput`; an unsupported `O` is reported by
+  `#[diagnostic::on_unimplemented]`.
+- Compile errors (with spans) for: a missing `table`, unknown or duplicate arguments, values of the wrong kind, `batch`
+  out of range, an invalid `name`, a non-async fn, `const`/`unsafe`/ABI/generics/variadics, a wrong context
+  (`&QueryCtx`, by value, ...), a parameter count other than two, non-identifier patterns, parameter attributes, a
+  borrowed document type, and a missing or non-`Result` return type.
+
 ---
 
 ## 4. Built-in (system) tables and functions
@@ -1053,7 +1236,7 @@ Write errors (schema validation, unknown table, missing document) are user error
 written: …``).
 
 **Audited.** `insert_document`, `patch_document`, `replace_document`, `delete_documents` (one entry per document),
-`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.4), so an entry exists
+`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.5), so an entry exists
 exactly for the writes that committed.
 
 **Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` or `encrypted` (case-insensitive:
@@ -1103,7 +1286,29 @@ indexes `by_name` and `by_next_run`.
 The admin functions start with `ctx.auth.require_admin()` like §4.1; `invalid_id` / `not_found` for bad ids. The
 dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`), its Scheduler page at `/_/scheduler`.
 
-### 4.1.3 Settings (`_settings`, `_system/settings:*`)
+### 4.1.3 Migration table and system functions
+
+Defined in `crates/ferrix/src/migrations` with the normal macros (§1.9).
+
+**`_migrations`** (`MigrationRecord`), one row per migration that has run at least once (a declared migration without
+a row is pending): `{ name, table, state: "pending" | "running" | "done" | "failed" | "canceled", cursor: string |
+null (a pagination cursor over the table's by_creation_time index), processed, changed, startedAt, finishedAt, error
+(cut to 4 KiB), failedDocument, schemaCheck: string | null ("passed" or "failed: <report>") }`, index `by_name`.
+Read-only through the dashboard's generic writes; codegen leaves it out.
+
+| Path `_system/migrations:…` | Kind | Args → result |
+|---|---|---|
+| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in name (= run) order, then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating }`. Live (reruns with each batch and each write to the migrated tables). |
+| `status` | query (admin) | `{ name }` → `MigrationSummary \| null`. |
+| `run` | action (admin) | `{ name?, dryRun?, restart? }` → `{ started: string[], reports: MigrationReport[] }`. Without `name`: every migration that isn't done, in name order. Real runs continue in the background (`started`; follow them with `list`); `reports` then holds the ones that didn't start (`alreadyDone`, `alreadyRunning`). Dry runs run to the end and return a report each (`outcome: "dryRun"` or `"failed"`, counts, up to 5 `examples` `{ id, before, after }`). `not_found` for an unknown name. |
+| `cancel` | mutation (admin) | `{ name }` → `"canceled"` (it stops after its current batch; the next run resumes) or `"notRunning"`. |
+| `start` | internal mutation | `{ name, restart }` → `"started" \| "alreadyRunning" \| "alreadyDone"`. |
+| `run_batch` | internal mutation | `{ name, dryRun, cursor? }` → `{ ran, state, processed, changed, done, cursor, schemaCheck, examples }`: one batch (§1.9). |
+| `fail` | internal mutation | `{ name, error, document? }` → `null`: marks the migration failed. |
+
+The admin functions start with `ctx.auth.require_admin()` like §4.1.
+
+### 4.1.4 Settings (`_settings`, `_system/settings:*`)
 
 Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
 need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`; there are
@@ -1147,7 +1352,7 @@ Precedence: §1.5 ("Runtime settings and precedence"); `locked` and `effective` 
 accepted, never returned, and never logged: the execution log stores system functions' arguments with every
 `password` / `secret` / `token` field and every URL password replaced by `"••••"` (`settings::redact_args`).
 
-### 4.1.4 Audit log (`_audit_log`, `_system/audit:list`)
+### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
 
 Defined in `crates/ferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
 action, targetTable, targetId, before, after, details, at }` with indexes `by_at = [at]`, `by_admin = [admin, at]`,

@@ -10,6 +10,7 @@
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
 //! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`), the job runner, crons and `_scheduled_jobs`.
+//! - [`migrations`]: `#[migration]` data migrations in batches, `_migrations`, and the schema check's lenient mode.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, external JWTs, admins, and `ctx.auth`; live
 //!   revocation. [`settings`]: runtime settings (`_settings`). [`audit`]: the admin audit log (`_audit_log`).
 //! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).
@@ -22,6 +23,7 @@ extern crate self as ferrix;
 
 pub mod audit;
 pub mod auth;
+pub mod bytes;
 pub mod cli;
 pub mod codegen;
 pub mod dashboard;
@@ -31,6 +33,7 @@ pub mod exec_log;
 pub mod id;
 pub mod keys;
 pub mod log;
+pub mod migrations;
 pub mod runtime;
 pub mod scheduler;
 pub mod schema;
@@ -49,8 +52,9 @@ pub mod __private {
     pub use crate::private::*;
 }
 
+pub use bytes::Bytes;
 pub use cli::Ferrix;
-pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, mutation, query, table};
+pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, migration, mutation, query, table};
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
@@ -104,9 +108,10 @@ pub trait SchedulableFunction: FunctionRef {}
 /// crate): add `use ferrix::log;` and write `log::info!(...)`. See [`log`](crate::log).
 pub mod prelude {
     pub use crate::{
-        ActionCtx, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
-        internal_action, internal_mutation, internal_query, json, mutation, query, table,
+        ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
+        internal_action, internal_mutation, internal_query, json, migration, mutation, query, table,
     };
+    pub use crate::migrations::DocChange;
     pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};
 }

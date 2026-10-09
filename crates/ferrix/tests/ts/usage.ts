@@ -1,6 +1,15 @@
 // Type-level usage of the code generated from the `it` test binary's registry (see tests/it/codegen.rs).
 // Copied next to `generated/` and checked with `tsc --noEmit`; nothing here runs.
-import { FerrixClient, type ArgsOf, type OutputOf, type PaginatedQueryArgs, type PaginatedQueryItem } from "@ferrix/client";
+import {
+  FerrixClient,
+  bytesFromJson,
+  bytesToJson,
+  type ArgsOf,
+  type Bytes,
+  type OutputOf,
+  type PaginatedQueryArgs,
+  type PaginatedQueryItem,
+} from "@ferrix/client";
 import {
   api,
   type DataModel,
@@ -25,9 +34,16 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       TableNames,
       | "attachments"
       | "audited_items"
+      | "blobs"
       | "dash_items"
       | "items"
       | "lossy"
+      | "mig_counted"
+      | "mig_dry"
+      | "mig_dry_log"
+      | "mig_flaky"
+      | "mig_slow"
+      | "mig_tasks"
       | "notes"
       | "private_notes"
       | "revocation_notes"
@@ -50,6 +66,17 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   assertType<Equals<typeof job.state, "pending" | "inProgress" | "success" | "failed" | "canceled">>();
   // @ts-expect-error `_crons` is not exposed
   void ({} as Id<"_crons">);
+  // @ts-expect-error `_migrations` is not exposed either
+  void ({} as Id<"_migrations">);
+  // `ferrix::Bytes` is `{ $bytes: string }`, converted with the client's helpers.
+  assertType<Equals<DataModel["blobs"]["data"], Bytes>>();
+  assertType<Equals<DataModel["blobs"]["thumb"], Bytes | null>>();
+  await client.mutation(api.bytes.blobs.add_blob, { name: "b", data: bytesToJson(new Uint8Array([1, 2])), tags: [] });
+  const ordered = await client.query(api.bytes.blobs.ordered);
+  const allBytes: Uint8Array[] = ordered.map(bytesFromJson);
+  void allBytes;
+  // @ts-expect-error a Uint8Array must be wrapped with bytesToJson
+  await client.mutation(api.bytes.blobs.add_blob, { name: "b", data: new Uint8Array([1]), tags: [] });
   // App tables may reference the built-in `_users` table (auth); its documents carry no secrets.
   assertType<Equals<DataModel["private_notes"]["owner"], Id<"_users">>>();
   const user = {} as Doc<"_users">;

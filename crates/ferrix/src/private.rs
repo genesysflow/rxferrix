@@ -42,6 +42,63 @@ pub static TABLES: [fn() -> TableDef];
 #[linkme::distributed_slice]
 pub static FUNCTIONS: [FunctionDef];
 
+/// Every `#[migration]` registers a definition here (`crate::migrations`).
+#[linkme::distributed_slice]
+pub static MIGRATIONS: [MigrationDef];
+
+/// Runs a migration on one document (the stored JSON, system fields included), inside a batch's transaction.
+pub type MigrationHandler = for<'a> fn(
+    &'a MutationCtx,
+    serde_json::Value,
+) -> BoxFuture<'a, crate::Result<crate::migrations::DocChange>>;
+
+/// A `#[migration]` (docs/CONTRACT.md §3.3).
+pub struct MigrationDef {
+    /// `module_path!()` at the definition site.
+    pub module_path: &'static str,
+    /// The Rust fn name.
+    pub fn_name: &'static str,
+    /// `#[migration(name = "...")]`; without it the name is the function path (`function_path`).
+    pub name: Option<&'static str>,
+    /// The migrated table's name (`<T as Table>::NAME` or the string given).
+    pub table: &'static str,
+    /// Documents per batch (one transaction each).
+    pub batch_size: usize,
+    pub handler: MigrationHandler,
+}
+
+impl MigrationDef {
+    /// The migration's stable id.
+    pub fn name(&self) -> String {
+        match self.name {
+            Some(n) => n.to_string(),
+            None => function_path(self.module_path, self.fn_name),
+        }
+    }
+}
+
+impl std::fmt::Debug for MigrationDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MigrationDef")
+            .field("name", &self.name())
+            .field("table", &self.table)
+            .field("batch_size", &self.batch_size)
+            .finish()
+    }
+}
+
+/// Deserialize a document for a `#[migration]` whose parameter is not `serde_json::Value` (e.g. `Doc<OldTodo>`).
+pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> crate::Result<T> {
+    serde_json::from_value(doc).map_err(|e| {
+        anyhow::anyhow!("the document does not deserialize as `{}`: {e}", std::any::type_name::<T>())
+    })
+}
+
+/// Turn a `#[migration]`'s return value into the change to apply.
+pub fn migration_output<O: crate::migrations::MigrationOutput>(out: O) -> crate::Result<crate::migrations::DocChange> {
+    Ok(out.into_change())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionKind {
     Query,

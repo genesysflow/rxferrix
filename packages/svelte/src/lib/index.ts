@@ -7,9 +7,19 @@ export {
 } from "./use_paginated_query.svelte.js";
 export { useMutation, useAction, type Mutation, type Action } from "./use_mutation.js";
 export { useConnectionState } from "./connection.js";
+export { useAuth, useCurrentUser, type UseAuthResult } from "./auth.js";
 export {
   FerrixClient,
   FerrixError,
+  FerrixAuth,
+  getAuth,
+  systemApi,
+  MemoryAuthStorage,
+  type AuthState,
+  type AuthStorage,
+  type FerrixAuthOptions,
+  type RedirectResult,
+  type User,
   makeFunctionReference,
   type FunctionReference,
   type ArgsOf,

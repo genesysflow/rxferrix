@@ -12,9 +12,19 @@ export {
   type ReactMutation,
   type ReactAction,
 } from "./use_mutation.js";
+export { useFerrixAuth, useAuthActions, useCurrentUser, type AuthActions } from "./use_auth.js";
 export {
   FerrixClient,
   FerrixError,
+  FerrixAuth,
+  getAuth,
+  systemApi,
+  MemoryAuthStorage,
+  type AuthState,
+  type AuthStorage,
+  type FerrixAuthOptions,
+  type RedirectResult,
+  type User,
   makeFunctionReference,
   type FunctionReference,
   type ArgsOf,

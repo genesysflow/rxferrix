@@ -16,6 +16,7 @@
 //! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).
 //! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
+//! - [`ops`]: backups and restore, export and import, `/metrics`, the app's static frontend, TLS.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
 
 // The macros emit `::ferrix::...` paths; this lets ferrix define its own system tables and functions with them.
@@ -34,6 +35,7 @@ pub mod id;
 pub mod keys;
 pub mod log;
 pub mod migrations;
+pub mod ops;
 pub mod runtime;
 pub mod scheduler;
 pub mod schema;
@@ -71,6 +73,8 @@ pub use schema::{
 pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
 pub use server::{router, serve, serve_with_shutdown};
 pub use serde_json::json;
+/// For `Ferrix::embed_static`: `#[derive(ferrix::rust_embed::Embed)] #[crate_path = "ferrix::rust_embed"]`.
+pub use rust_embed;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;

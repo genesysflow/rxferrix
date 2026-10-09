@@ -27,3 +27,11 @@ proptest = "1.11.0"
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Release binaries (`scripts/release.sh`): release plus link-time optimization, one codegen unit and no symbols.
+# Panics must keep unwinding: a panicking function becomes an error instead of killing the server.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true

@@ -46,6 +46,8 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "mig_slow"
       | "mig_tasks"
       | "notes"
+      | "ops_docs"
+      | "ops_pairs"
       | "page_messages"
       | "private_notes"
       | "revocation_notes"

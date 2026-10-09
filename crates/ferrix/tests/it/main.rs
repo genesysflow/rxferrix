@@ -16,6 +16,7 @@ mod jwt;
 mod macros;
 mod migrations;
 mod model;
+mod ops;
 mod pagination;
 mod query_engine;
 mod readsets;

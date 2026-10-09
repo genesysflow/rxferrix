@@ -614,6 +614,42 @@ impl WriteState {
         let old = self.load(table, id)?;
         self.write(table, id, Some(&old), None)
     }
+
+    /// Write a document with a given id and, optionally, creation time (`ops::export` imports): inserted, or, with
+    /// `overwrite`, replacing an existing document with that id (keeping its creation time when none is given).
+    /// `validate` sees the complete document. Returns whether a document was replaced.
+    pub(crate) fn put_imported(
+        &mut self,
+        table: &TableInfo,
+        id: DocId,
+        mut fields: Map<String, Value>,
+        creation_time: Option<f64>,
+        overwrite: bool,
+        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<bool> {
+        reject_system_fields(&fields)?;
+        check_table(table, id)?;
+        let old = match storage::get_document(&self.conn, &id.0)? {
+            None => None,
+            Some(_) if !overwrite => bail!("document {id} already exists in `{}`", table.name),
+            Some(_) => Some(self.load(table, id)?),
+        };
+        let ct = match (creation_time, &old) {
+            (Some(t), _) => {
+                anyhow::ensure!(t.is_finite(), "`_creationTime` must be a finite number");
+                // Later inserts must still get strictly greater creation times.
+                self.last_creation_time = self.last_creation_time.max(t);
+                t
+            }
+            (None, Some(o)) => o.get(CREATION_TIME_FIELD).and_then(Value::as_f64).unwrap_or(self.now),
+            (None, None) => self.next_creation_time(),
+        };
+        fields.insert(ID_FIELD.into(), Value::String(id.encode()));
+        fields.insert(CREATION_TIME_FIELD.into(), serde_json::Number::from_f64(ct).context("bad time")?.into());
+        validate(&fields)?;
+        self.write(table, id, old.as_ref(), Some(&fields))?;
+        Ok(old.is_some())
+    }
 }
 
 /// Ids carry their table number; using one with the wrong table is an error rather than a silent miss.

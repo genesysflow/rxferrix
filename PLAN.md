@@ -467,6 +467,14 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - **Serving the frontend**: `.static_dir(...)` or `.embed_static::<Assets>()` serves the SPA from the same binary with SPA fallback routing, so an entire app ships as one binary.
 - **Observability**: `tracing` to stdout as JSON in production, optional Prometheus `/metrics`, and dashboard metrics read from `aux.db`.
 - **Config**: CLI flags, then env vars (`FERRIX_*`), then `_settings` (set in the dashboard).
+- (As built, `crates/ferrix/src/ops`, docs/CONTRACT.md §4.4, README "Deploying": backups are `.tar.zst` archives of a
+  `VACUUM INTO` snapshot plus, on request, `aux.db`, local file blobs and `auth_secret.key`, kept in `<dir>/backups`,
+  any directory or S3 (`--backup-to`); scheduled with `--backup-every/--backup-keep` as the cron `ferrix-backup`;
+  `restore` is offline behind `<dir>/ferrix.lock` and validates before swapping. `export` writes JSONL/CSV from one
+  snapshot, `import` loads JSONL through the write path. `/metrics` is off unless `--metrics`. `--https <domain>` uses
+  `rustls-acme` (TLS-ALPN-01, cache in `<dir>/acme`), `--tls-cert/--tls-key` takes files. `scripts/release.sh` builds
+  the static musl binary with cargo-zigbuild; `Dockerfile` (`FROM scratch`), `deploy/ferrix.service`. JSON logs and
+  `_settings` are not done.)
 
 ---
 
@@ -678,8 +686,26 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
 
 ### Phase 9 — Operations polish (M)
-- [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`).
-- [ ] Backup and restore, export and import, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.
+- [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
+  `auth_secret.key` only with `--include-secret`), `ferrix backup`, scheduled backups with rotation to a directory or
+  S3 (`--backup-every/--backup-keep/--backup-to`, the cron `ferrix-backup`), an offline `ferrix restore` that refuses
+  while a server holds the data dir and validates (checksums, integrity check, schema, `verify_indexes`) before
+  swapping, and admin endpoints to list, create, download and delete backups.
+- [x] Export and import: `ferrix export` (JSONL/CSV, one snapshot, `files/` for blobs), `ferrix import` (JSONL through
+  the write path in validated batches; ids and creation times kept, ids rewritten when table numbers differ;
+  insert/upsert/replace), streaming `GET /api/admin/export/{table}` and `POST /api/admin/import/{table}`.
+- [x] Prometheus `/metrics` (off by default, `--metrics`, `--metrics-token`).
+- [x] `--https <domain>` (Let's Encrypt via `rustls-acme`, HTTP→HTTPS redirect, `--acme-email`, `--acme-staging`,
+  cache in `<dir>/acme`) and `--tls-cert/--tls-key`; graceful shutdown on SIGTERM.
+- [x] Static frontend serving: `.static_dir()`, `.embed_static::<A>()`, `.routes(axum::Router)`; SPA fallback,
+  caching, precompressed files. The todo example embeds its web app.
+- [x] Release builds: `scripts/release.sh` (static `x86_64-unknown-linux-musl` via cargo-zigbuild, ~20 MB),
+  `Dockerfile` (`FROM scratch`), `.dockerignore`, `deploy/ferrix.service`.
+- [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`). Running them
+  (not `status`) takes the data directory lock like `import`.
+- [ ] Dashboard UI for backups, export/import and metrics (the endpoints exist); JSON logs.
+- [ ] Not yet: incremental/streaming backups (use Litestream), restoring from the dashboard, CSV import, hot reload of
+  `--tls-cert` files, building the Docker image in CI (not built here: no Docker daemon was available).
 - [x] An interval-tree invalidation index (done in Phase 2).
 
 ---

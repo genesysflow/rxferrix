@@ -180,6 +180,8 @@ pub struct AppOptions {
     pub storage: crate::storage::StorageConfig,
     /// Scheduled jobs and crons: concurrency, retention, declared crons (`crate::scheduler`).
     pub scheduler: crate::scheduler::SchedulerOptions,
+    /// Operations: `/metrics` and the backup target (`crate::ops`).
+    pub ops: crate::ops::OpsOptions,
 }
 
 /// Default [`AppOptions::mutation_timeout`].
@@ -196,6 +198,7 @@ impl Default for AppOptions {
             log_retention: LogRetention::default(),
             storage: Default::default(),
             scheduler: Default::default(),
+            ops: Default::default(),
         }
     }
 }
@@ -273,6 +276,8 @@ pub struct Metrics {
     last_round_reruns: AtomicU64,
     stale_runs: AtomicU64,
     holds: AtomicU64,
+    /// Request and execution counters for `/metrics` (`crate::ops::metrics`).
+    pub(crate) ops: crate::ops::metrics::Counters,
 }
 
 impl Metrics {
@@ -573,7 +578,7 @@ impl App {
         let ctx = QueryCtx { db, auth, storage, now: snapshot.time };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
-        exec.finish(self.logs(), &result, &log_lines);
+        exec.finish(self, &result, &log_lines);
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
         QueryRun { result, read_set, ts, log_lines, auth_deps: auth_access.deps() }
     }
@@ -682,7 +687,7 @@ impl App {
             }
         };
         let (result, log_lines) = crate::log::capture(run).await;
-        exec.finish(self.logs(), &result, &log_lines);
+        exec.finish(self, &result, &log_lines);
         MutationRun { result, log_lines }
     }
 
@@ -710,7 +715,7 @@ impl App {
         // Inside a scheduled job that gets canceled, the handler is dropped after the grace period.
         let run = crate::scheduler::cancellation::abortable(catch_panics(handler(ctx, args)));
         let (result, log_lines) = crate::log::capture(run).await;
-        exec.finish(self.logs(), &result, &log_lines);
+        exec.finish(self, &result, &log_lines);
         ActionRun { result, log_lines }
     }
 }
@@ -751,16 +756,19 @@ impl Execution {
         }
     }
 
-    fn finish<T>(self, logs: &Logs, result: &crate::Result<T>, log_lines: &[String]) {
+    fn finish<T>(self, app: &App, result: &crate::Result<T>, log_lines: &[String]) {
         let (args, args_truncated) = self.args;
-        logs.record(crate::exec_log::LogEntry {
+        let elapsed = self.started.elapsed();
+        let outcome = crate::exec_log::LogOutcome::of(result);
+        crate::ops::metrics::record_execution(app, &self.path, self.kind, outcome, elapsed);
+        app.logs().record(crate::exec_log::LogEntry {
             id: 0,
             timestamp: self.timestamp,
             path: self.path,
             kind: self.kind,
             identity: self.identity,
-            duration_us: self.started.elapsed().as_micros() as u64,
-            outcome: crate::exec_log::LogOutcome::of(result),
+            duration_us: elapsed.as_micros() as u64,
+            outcome,
             error: result.as_ref().err().map(|e| format!("{e:#}")),
             log_lines: log_lines.to_vec(),
             args,

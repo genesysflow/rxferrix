@@ -6,7 +6,8 @@ WebSocket and get updated results automatically whenever a write affects them.
 
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
-Phase 9 (operations: backups, release builds) is next; data migrations (`#[migration]`) are built.
+Phase 9 (operations) is built: data migrations (`#[migration]`), backups, export and import, metrics, TLS, frontend
+serving and release builds (see [Deploying](#deploying)).
 
 ## Layout
 
@@ -315,6 +316,80 @@ view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The
 `bun run build:dashboard` and commit `crates/ferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
 work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` proxied to :8090. Build without it with
 `default-features = false` on the `ferrix` dependency.
+
+## Deploying
+
+A Ferrix app is one binary plus one data directory (`--dir`, default `fx_data`: `data.db`, `aux.db` with the
+execution log, `storage/` for files, `auth_secret.key`, `backups/`).
+
+**Serve the frontend from the binary.** `.static_dir("./web/dist")` reads a directory at runtime;
+`.embed_static::<Assets>()` embeds it at compile time, so the whole app ships as one file:
+
+```rust
+#[derive(ferrix::rust_embed::Embed)]
+#[folder = "../web/dist/"]                        // relative to the crate
+#[crate_path = "ferrix::rust_embed"]
+struct Assets;
+
+ferrix::Ferrix::new()
+    .embed_static::<Assets>()
+    .routes(axum::Router::new().route("/webhooks/stripe", post(stripe)))   // your own routes, if any
+    .run()
+```
+
+Unknown paths get `index.html` (client-side routing) except under `/api` and `/_`, which static files never shadow.
+HTML is `no-cache`, hashed assets (`assets/*`, `name-<hash>.js`) are cached for a year, and `<file>.br` / `.gz`
+next to a file are served to clients that accept them. The todo example embeds `examples/todo/web/dist` when it
+exists.
+
+**Release binary.** `scripts/release.sh` builds the web app and a static `x86_64-unknown-linux-musl` binary of
+`todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 20 MB). C code is
+cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not installed. For your app:
+`PACKAGE=my-server WEB=web scripts/release.sh`.
+
+**systemd.** [`deploy/ferrix.service`](deploy/ferrix.service) runs the binary as a dynamic unprivileged user with
+its data in `/var/lib/ferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM.
+
+**Docker.** The [`Dockerfile`](Dockerfile) runs `scripts/release.sh` and copies the binary into a `FROM scratch`
+image with CA certificates, running as an unprivileged user with the data in the `/data` volume:
+
+```sh
+docker build -t todo-server .                     # --build-arg PACKAGE=my-server --build-arg WEB=web for yours
+docker run -p 8090:8090 -v todo-data:/data todo-server
+```
+
+**TLS.** Either terminate TLS in a reverse proxy (pass `--public-url https://…`), or let the server do it:
+`serve --https example.com --acme-email you@example.com` gets and renews Let's Encrypt certificates (TLS-ALPN-01 on
+port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port 80 to HTTPS. `--tls-cert cert.pem
+--tls-key key.pem` uses your own certificate. Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
+(default `0.0.0.0:80` with `--https`; `off`).
+
+**Backups.** `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
+snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus
+the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
+can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
+in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
+schedule (the cron `ferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones; admins can list,
+create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md §4.2). `todo-server restore
+<archive|s3://…>` is offline: it refuses while a server holds the data directory, checks the archive (checksums,
+SQLite integrity, schema, indexes) and only then swaps the database, keeping the old files in
+`<dir>/pre-restore-<time>/`.
+
+**Litestream.** `data.db` is a normal SQLite database in WAL mode, so [Litestream](https://litestream.io) can
+replicate it continuously next to the server (`litestream replicate fx_data/data.db s3://bucket/data.db`); restore
+with `litestream restore` into an empty data directory before starting the server. Replicate `data.db` only (`aux.db`
+is the execution log), and keep `auth_secret.key` and local file blobs (`storage/`) backed up separately (or keep
+files in S3 with `--storage s3://…`). Archive backups and Litestream can be used together.
+
+**Export and import.** `todo-server export [--tables a,b] [--format jsonl|csv] [--out dir]` writes tables from one
+consistent snapshot (CSV is export-only); `todo-server import <dir|file.jsonl> [--mode insert|upsert|replace]` loads
+JSONL through the normal write path in batches (validated, indexed, ids and creation times kept), offline. Admins can
+stream one table with `GET /api/admin/export/{table}?format=csv` and import into a running server with
+`POST /api/admin/import/{table}`.
+
+**Metrics.** `serve --metrics [--metrics-token T]` exposes Prometheus metrics at `/metrics`: requests by route and
+status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,
+scheduler queue depth and dropped log entries.
 
 ## Running the example
 

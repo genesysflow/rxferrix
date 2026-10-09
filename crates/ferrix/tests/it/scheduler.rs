@@ -224,10 +224,16 @@ mod app {
     pub static CRON_HANG_STARTED: Notify = Notify::const_new();
     pub static CRON_HANG_RELEASE: Notify = Notify::const_new();
 
+    /// Only the first run blocks: the cron (every second of *real* time, as the clock follows it) may fire again after
+    /// the test releases it, and a second blocking run would hang the test's final `run_due_jobs` forever.
+    pub static CRON_HANG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
     #[internal_action]
     pub async fn cron_hang(_ctx: &ActionCtx) -> Result<()> {
-        CRON_HANG_STARTED.notify_one();
-        CRON_HANG_RELEASE.notified().await;
+        if CRON_HANG_ARMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            CRON_HANG_STARTED.notify_one();
+            CRON_HANG_RELEASE.notified().await;
+        }
         Ok(())
     }
 
@@ -620,8 +626,11 @@ async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
     assert!(row["nextRun"].as_f64().unwrap() > last_due, "skipped runs still advance nextRun");
 
     CRON_HANG_RELEASE.notify_one();
-    assert_eq!(first.await.unwrap().unwrap(), 1);
-    assert_eq!(t.query::<all_jobs>(()).await.unwrap()[0].state, JobState::Success);
+    // At least the held run; the real-time cron may have come due again meanwhile (those runs don't block).
+    let ran = tokio::time::timeout(Duration::from_secs(30), first).await.expect("run_due_jobs finished").unwrap().unwrap();
+    assert!(ran >= 1, "{ran}");
+    let jobs = t.query::<all_jobs>(()).await.unwrap();
+    assert!(jobs.iter().all(|j| j.state == JobState::Success), "{jobs:?}");
 }
 
 #[tokio::test]

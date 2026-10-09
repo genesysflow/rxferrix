@@ -94,17 +94,25 @@ impl Scheduler {
         ScheduleWith { scheduler: self, retries }
     }
 
-    /// Cancel a job. A pending job becomes `canceled` and won't run; canceling a finished job does nothing, and an
-    /// action already in progress runs to completion. Fails with the user error `not_found` for an unknown id.
-    /// Inside a mutation, the cancel commits (or rolls back) with it.
+    /// Cancel a job. A pending job becomes `canceled` and won't run. An action in progress becomes `canceled` too and
+    /// is signaled ([`ActionCtx::is_canceled`](crate::ActionCtx::is_canceled) / `canceled()`); if it hasn't stopped
+    /// `SchedulerOptions::cancel_grace` (5s) later, it is aborted at its next `.await` (mutations it already ran stay
+    /// committed). Canceling a finished job does nothing. Fails with the user error `not_found` for an unknown id.
+    /// Inside a mutation, the cancel commits (or rolls back) with it, and a running action is signaled only after the
+    /// commit. The job's `error` records who canceled it (`Canceled by <this function's path>`).
     pub async fn cancel(&self, id: Id<ScheduledJob>) -> crate::Result<()> {
+        self.cancel_with_reason(id, &format!("Canceled by {}", self.origin)).await
+    }
+
+    /// [`Scheduler::cancel`], recording `reason` as the job's `error` instead.
+    pub async fn cancel_with_reason(&self, id: Id<ScheduledJob>, reason: &str) -> crate::Result<()> {
         match &self.target {
             Target::Mutation(txn) => {
-                store::cancel(&MutationDb::new(txn.clone()), id, txn.now()).await?;
+                store::cancel(&MutationDb::new(txn.clone()), id, txn.now(), reason).await?;
                 Ok(())
             }
             Target::Action { app, identity } => {
-                app.typed_mutation::<super::cancel>((id,).into(), identity).await?;
+                app.typed_mutation::<super::cancel>((id, Some(reason.to_string())).into(), identity).await?;
                 Ok(())
             }
         }

@@ -1,11 +1,13 @@
 //! `#[search_index(...)]` and `#[vector_index(...)]` on `#[table]` structs (CONTRACT.md §3.1).
 //!
 //! ```ignore
-//! #[search_index(search_body, search = body, filter = [channel])]
-//! #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+//! #[search_index(search_body, search = body, filter = [channel], tokenizer = "porter", language = "english",
+//!                diacritics = "keep")]
+//! #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
 //! ```
 
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenStream};
+use quote::quote;
 use syn::parse::ParseStream;
 use syn::punctuated::Punctuated;
 use syn::{Token, bracketed};
@@ -14,6 +16,13 @@ use syn::{Token, bracketed};
 pub const MAX_FILTER_FIELDS: usize = 16;
 /// Largest `dims` accepted (sqlite-vec's limit for `float[N]` columns).
 pub const MAX_DIMENSIONS: usize = 8192;
+/// `tokenizer = ...` values.
+const TOKENIZERS: &[&str] = &["unicode61", "porter", "trigram"];
+/// `language = ...` values (FTS5's Porter stemmer is English only). Keep in sync with `ferrix::Tokenizer::LANGUAGES`.
+const LANGUAGES: &[&str] = &["english"];
+
+/// A string argument and where it was written.
+pub type StrArg = Option<(String, Span)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -40,6 +49,14 @@ pub struct SpecialIndexSpec {
     pub dims: Option<(usize, Span)>,
     pub filter: Vec<syn::Ident>,
     pub filter_span: Option<Span>,
+    /// `tokenizer = "..."` (search indexes only), validated.
+    pub tokenizer: StrArg,
+    /// `language = "..."` (search indexes with the porter tokenizer), validated.
+    pub language: StrArg,
+    /// `diacritics = "remove" | "keep"` (search indexes), validated.
+    pub diacritics: StrArg,
+    /// `kind = "exact" | "hnsw"` (vector indexes), validated.
+    pub vector_kind: StrArg,
     /// Problems found while parsing that don't prevent reading the rest (reported together with the others).
     pub errors: Vec<syn::Error>,
 }
@@ -48,10 +65,10 @@ impl SpecialIndexSpec {
     pub fn parse(kind: Kind, attr: &syn::Attribute) -> syn::Result<SpecialIndexSpec> {
         let usage = match kind {
             Kind::Search => {
-                "expected `#[search_index(name, search = field, filter = [field, ...])]`"
+                "expected `#[search_index(name, search = field, filter = [field, ...], tokenizer = \"...\")]`"
             }
             Kind::Vector => {
-                "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...])]`"
+                "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...], kind = \"...\")]`"
             }
         };
         let syn::Meta::List(list) = &attr.meta else {
@@ -77,6 +94,10 @@ impl SpecialIndexSpec {
             dims: None,
             filter: Vec::new(),
             filter_span: None,
+            tokenizer: None,
+            language: None,
+            diacritics: None,
+            vector_kind: None,
             errors: Vec::new(),
         };
         let mut seen_filter = false;
@@ -128,10 +149,33 @@ impl SpecialIndexSpec {
                 seen_filter = true;
                 spec.filter = fields.into_iter().collect();
                 spec.filter_span = Some(bracket.span.join());
+            } else if let Some((allowed, slot)) = match (kind, key_name.as_str()) {
+                (Kind::Search, "tokenizer") => Some((TOKENIZERS, &mut spec.tokenizer)),
+                (Kind::Search, "language") => Some((LANGUAGES, &mut spec.language)),
+                (Kind::Search, "diacritics") => Some((&["remove", "keep"][..], &mut spec.diacritics)),
+                (Kind::Vector, "kind") => Some((&["exact", "hnsw"][..], &mut spec.vector_kind)),
+                _ => None,
+            } {
+                let lit: syn::LitStr = input.parse()?;
+                let value = lit.value();
+                if slot.is_some() {
+                    spec.errors
+                        .push(syn::Error::new(key.span(), format!("duplicate `{key_name}` argument")));
+                }
+                if !allowed.contains(&value.as_str()) {
+                    let list = allowed.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ");
+                    let what = if key_name == "language" {
+                        format!("unsupported language \"{value}\"; the porter stemmer supports {list}")
+                    } else {
+                        format!("unknown {key_name} \"{value}\"; expected one of {list}")
+                    };
+                    spec.errors.push(syn::Error::new(lit.span(), what));
+                }
+                *slot = Some((value, lit.span()));
             } else {
                 let expected = match kind {
-                    Kind::Search => "`search` or `filter`",
-                    Kind::Vector => "`field`, `dims` or `filter`",
+                    Kind::Search => "`search`, `filter`, `tokenizer`, `language` or `diacritics`",
+                    Kind::Vector => "`field`, `dims`, `filter` or `kind`",
                 };
                 return Err(syn::Error::new(
                     key.span(),
@@ -142,7 +186,39 @@ impl SpecialIndexSpec {
                 ));
             }
         }
+        if let Some((_, span)) = &spec.language
+            && spec.tokenizer.as_ref().is_none_or(|(t, _)| t != "porter")
+        {
+            spec.errors.push(syn::Error::new(
+                *span,
+                "`language` only applies to `tokenizer = \"porter\"` (stemming)",
+            ));
+        }
         Ok(spec)
+    }
+
+    /// The `::ferrix::Tokenizer` expression of a search index.
+    pub fn tokenizer_expr(&self) -> TokenStream {
+        let base = match self.tokenizer.as_ref().map(|(t, _)| t.as_str()) {
+            Some("porter") => {
+                let language = self.language.as_ref().map_or("english", |(l, _)| l.as_str());
+                quote!(::ferrix::Tokenizer::porter(#language))
+            }
+            Some("trigram") => quote!(::ferrix::Tokenizer::trigram()),
+            _ => quote!(::ferrix::Tokenizer::unicode61()),
+        };
+        match self.diacritics.as_ref().map(|(d, _)| d.as_str()) {
+            Some("keep") => quote!(#base.keep_diacritics()),
+            _ => base,
+        }
+    }
+
+    /// The `::ferrix::VectorIndexKind` expression of a vector index.
+    pub fn vector_kind_expr(&self) -> TokenStream {
+        match self.vector_kind.as_ref().map(|(k, _)| k.as_str()) {
+            Some("hnsw") => quote!(::ferrix::VectorIndexKind::Hnsw),
+            _ => quote!(::ferrix::VectorIndexKind::Exact),
+        }
     }
 }
 

@@ -65,9 +65,10 @@ pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
 pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
 pub use schema::{
-    Doc, Field, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, VectorIndex, VectorIndexDef,
+    Doc, Field, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, Tokenizer, TokenizerKind,
+    VectorIndex, VectorIndexDef, VectorIndexKind,
 };
-pub use db::search::{SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
+pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
 pub use server::{router, serve, serve_with_shutdown};
 pub use serde_json::json;
 

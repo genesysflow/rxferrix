@@ -16,10 +16,12 @@
 //! (in a mutation: transactionally) and then its blob after the commit. Blobs without a document (a crash in
 //! between, a failed delete) are removed by a periodic sweep ([`StorageService::sweep`]).
 //!
-//! - [`config`]: [`StorageConfig`] (backend, size limit, URL lifetime, rate limit, sweep).
-//! - [`service`]: [`StorageService`] (`app.storage()`), blobs, upload tokens and the sweep.
-//! - [`ctx`]: `ctx.storage` for queries, mutations and actions.
-//! - [`http`]: the upload and serving endpoints.
+//! - [`config`]: [`StorageConfig`] (backend, size limit, URL lifetime, rate limit, sweep, private mode, thumbnails).
+//! - [`service`]: [`StorageService`] (`app.storage()`), blobs, upload tokens, signed file URLs, the thumbnail cache
+//!   and the sweep.
+//! - [`ctx`]: `ctx.storage` for queries, mutations and actions (`get_url`, `get_signed_url`, ...).
+//! - [`http`]: the upload and serving endpoints (ranges, `multipart/byteranges`, signatures).
+//! - [`thumbs`]: thumbnail rendering (`?thumb=WxH`) and its limits.
 //!
 //! The functions below are the dashboard's admin-only Files page backend (`_system/storage:*`).
 
@@ -27,6 +29,7 @@ pub mod config;
 pub mod ctx;
 pub mod http;
 pub mod service;
+pub mod thumbs;
 
 pub use axum::body::Bytes;
 pub use config::{StorageBackend, StorageConfig};
@@ -77,14 +80,19 @@ pub struct FileSummary {
     pub content_type: Option<String>,
     pub created_by: Option<String>,
     pub filename: Option<String>,
-    /// The serving URL (`get_url`).
+    /// The serving URL (`get_url`; in private mode a signed URL, valid for one to two hours). Add variants with
+    /// `&` when it already has a query string (`?exp=…&sig=…`), e.g. `&thumb=200x200`.
     pub url: String,
+    /// `url` with `download=1` (served as an attachment).
+    pub download_url: String,
 }
 
 fn summary(ctx: &QueryCtx, doc: Doc<StoredFile>) -> FileSummary {
     let id = doc.id.as_str();
+    let url = ctx.storage.url_unchecked(&id);
     FileSummary {
-        url: ctx.storage.url_unchecked(&id),
+        download_url: format!("{url}{}download=1", if url.contains('?') { '&' } else { '?' }),
+        url,
         id,
         creation_time: doc.creation_time,
         sha256: doc.value.sha256,
@@ -127,4 +135,12 @@ pub async fn delete_file(ctx: &MutationCtx, id: String) -> Result<()> {
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
     ctx.auth.require_admin()?;
     ctx.storage.generate_upload_url().await
+}
+
+/// The orphan sweep ([`StorageService::sweep`]), run by the system cron `_storage_sweep` every
+/// `StorageConfig::sweep_interval`.
+#[internal_action]
+pub async fn sweep_orphans(ctx: &ActionCtx) -> Result<SweepStats> {
+    let app = ctx.app.clone();
+    app.storage().clone().sweep(&app).await
 }

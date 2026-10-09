@@ -579,8 +579,13 @@ pub async fn attach(ctx: &MutationCtx, doc: Id<Note>, file: Id<StoredFile>) -> R
 #[query]
 pub async fn file_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> { ctx.storage.get_url(file).await }
 
+#[query]   // private files: an expiring, signed URL (see "Signed URLs" for how queries stay deterministic)
+pub async fn private_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
+    ctx.storage.get_signed_url(file, Duration::from_secs(3600)).await
+}
+
 fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new().storage(StorageConfig::s3("my-bucket", "uploads").max_upload_size(20 << 20)).run()
+    ferrix::Ferrix::new().storage(StorageConfig::s3("my-bucket", "uploads").max_upload_size(20 << 20).private(true)).run()
 }
 ```
 
@@ -606,13 +611,15 @@ Files page).
 ```rust
 impl QueryStorage {      // deterministic, tracked reads: a query reruns when the file is deleted
     pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>>;           // None if no such file
+    pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>>; // expiry bucketed
     pub async fn get_metadata(&self, id: Id<StoredFile>) -> Result<Option<Doc<StoredFile>>>;
 }
-impl MutationStorage {   // the same reads, in the mutation's transaction, plus:
+impl MutationStorage {   // the same reads (get_signed_url: exactly ttl from `now()`), in the mutation's transaction, plus:
     pub async fn generate_upload_url(&self) -> Result<String>;   // single-use, signed, upload_url_ttl (1h)
     pub async fn delete(&self, id: Id<StoredFile>) -> Result<()>; // transactional; UserError "not_found" if missing
 }
-impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest snapshot), delete (own transaction), plus:
+impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact), get_metadata (latest snapshot),
+                         // delete (own transaction), plus:
     pub async fn store(&self, bytes: impl Into<Bytes>, content_type: Option<&str>) -> Result<Id<StoredFile>>;
     pub async fn get(&self, id: Id<StoredFile>) -> Result<Option<Bytes>>;   // None if no such file
 }
@@ -621,10 +628,23 @@ impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest s
   public URL (`--public-url`, which `serve` defaults to `http://<--http address>`), else nothing (a root-relative
   `/api/storage/<id>`, e.g. in `TestApp`). The id carries 96 random bits, so the URL is an **unguessable capability
   URL**: whoever has it can read the file, nobody can enumerate files. It never changes, which keeps
-  `get_url` deterministic inside queries. Signed or expiring URLs for private files are a possible later addition.
+  `get_url` deterministic inside queries. In private mode `get_url` fails with the user error `storage_private`.
   Upload URLs are `<base>/api/storage/upload?token=<token>`, token = `base64url(json {n: nonce, e: exp_s, b?:
   created_by}) "." base64url(HMAC-SHA256)`, keyed by a key derived from `auth_secret.key` (BLAKE3 KDF, context
   `"ferrix storage v1 upload url HMAC key"`), so restarting keeps URLs valid and deleting the secret voids them.
+- **Signed URLs** (`get_signed_url(id, ttl)`): `<base>/api/storage/<id>?exp=<unix seconds>&sig=<base64url
+  HMAC-SHA256(id "\n" exp)>`, keyed by `blake3::derive_key("ferrix storage v1 signed file url HMAC key", storage
+  key)`. The server checks them in constant time against its clock (`Database::clock`); `thumb`, `fit` and
+  `download` may be appended (the signature covers the file and the expiry, not the variant). `ttl` is 1 s to
+  `max_signed_url_ttl` (7 days), else the user error `invalid_ttl`; `None` if the file doesn't exist.
+  **Determinism:** in mutations and actions the expiry is exactly `now + ttl`. In a **query** it is the snapshot
+  time plus `ttl` **rounded up to a multiple of `ttl`**: every run within one `ttl` window (aligned to the epoch)
+  returns the same URL, so results stay deterministic per ts and browsers can cache the file; the URL is valid for
+  between `ttl` and `2·ttl`. A subscription reruns only when its data changes, not when a URL expires: pick a `ttl`
+  longer than the result will be shown, or fetch fresh URLs from a mutation or action.
+- **Private mode** (`StorageConfig::private(true)`, `--storage-private` / `FERRIX_STORAGE_PRIVATE`): `GET
+  /api/storage/<id>` without `exp`/`sig` is 403 `signature_required` (for unknown ids too), so only signed URLs
+  work; `get_url` fails with `storage_private`. The dashboard's file list returns signed URLs (an hour, bucketed).
 - **Single use.** A token's nonce is recorded (raw table `_storage_used_upload_tokens` in `data.db`, kept until the
   token expires) in the same transaction that inserts the file's document. A failed upload (413, a dropped
   connection) does not use the URL up; a concurrent second upload with the same URL is refused (409).
@@ -633,10 +653,21 @@ impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest s
   otherwise a multipart upload completed at the end: a staged file renamed into place locally, a completed multipart
   upload on S3; aborted on failure), and the document is inserted after that. So a document always has a complete
   blob. `MutationStorage::delete` deletes the document in the transaction and registers the blob deletion as an
-  after-commit hook (`WriteTxn::on_commit`), which never runs if the mutation rolls back. **Orphans** (a crash between
-  blob and document, a failed delete) are removed by `StorageService::sweep`, run every `sweep_interval` (6 h; first
-  after 5 minutes): blobs named like a `_storage` id, without a document, older than `orphan_grace` (1 h), and not
-  being uploaded. Other keys under the prefix are left alone.
+  after-commit hook (`WriteTxn::on_commit`), which never runs if the mutation rolls back; it deletes the file's cached
+  thumbnails too. **Orphans** (a crash between blob and document, a failed delete) are removed by
+  `StorageService::sweep`: blobs named like a `_storage` id and thumbnails under `_thumbs/<id>/`, without a document,
+  older than `orphan_grace` (1 h, by the app clock), and not being uploaded. Other keys under the prefix are left
+  alone. The sweep runs as the **system cron `_storage_sweep`** (§1.7): an interval of `sweep_interval` (6 h; the
+  first run 6 h after the first start, then on schedule across restarts) running the internal action
+  `_system/storage:sweep_orphans`, whose job result is the `SweepStats` (`{ scanned, deleted, thumbnails }`). With
+  `sweep_interval: None` there is no such cron (`StorageService::sweep(&app)` still works).
+- **Thumbnails** (`GET /api/storage/<id>?thumb=WxH|N[&fit=contain|cover]`, docs/PROTOCOL.md): JPEG, PNG, WebP and GIF
+  (first frame) sources up to `thumbnail_max_source_bytes`, decoded with the `image` crate only after the header's
+  dimensions passed `thumbnail_max_source_pixels` (decompression-bomb guard; the decoder also runs with matching
+  `image::Limits`); EXIF orientation applied; `contain` never upscales, `cover` fills exactly; PNG output when the
+  image has alpha, else JPEG (quality 85). Each variant is cached at `<prefix>/_thumbs/<id>/<W>x<H>-<fit>` and has
+  the ETag `"<sha256>.t1.<W>x<H>.<fit>"`. At most min(cores, 4) thumbnails are generated at once, on blocking
+  threads.
 - **Configuration.**
   ```rust
   pub struct StorageConfig {
@@ -646,18 +677,25 @@ impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest s
       pub cache_max_age: Duration,              // 30 days (Cache-Control of served files)
       pub public_url: Option<String>,           // see URLs
       pub upload_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP; Some((60, 120))
-      pub sweep_interval: Option<Duration>,     // Some(6 h); None = no background sweep
+      pub sweep_interval: Option<Duration>,     // Some(6 h): the `_storage_sweep` system cron; None = none
       pub orphan_grace: Duration,               // 1 h
+      pub private: bool,                        // false; `--storage-private`
+      pub max_signed_url_ttl: Duration,         // 7 days
+      pub thumbnail_max_dimension: u32,         // 1024 (W and H in 1..=this) unless:
+      pub thumbnail_sizes: Option<Vec<(u32, u32)>>, // None; Some(allowlist) = only these sizes (bounds the cache)
+      pub thumbnail_max_source_pixels: u64,     // 40_000_000
+      pub thumbnail_max_source_bytes: u64,      // 32 MiB
   }
-  // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder setters.
+  // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder
+  // setters (`.private(true)`, `.thumbnail_sizes(&[(64, 64), (256, 256)])`, ...).
   ```
   `--storage <location>` (`FERRIX_STORAGE`): a directory, `file:///dir`, or `s3://bucket[/prefix]`. S3 (feature `s3`,
   default) reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` /
   `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (R2, MinIO), `AWS_ALLOW_HTTP`, ... (`object_store`'s `from_env`).
   `ferrix::storage::object_store` re-exports the crate, e.g. `object_store::memory::InMemory` for tests. Configure an
   abort-incomplete-multipart-uploads lifecycle rule on S3 buckets.
-- `App::storage() -> &Arc<StorageService>`: `object_store()`, `blob_path(id)`, `file_url(id)`, `config()`,
-  `sweep(&app)`.
+- `App::storage() -> &Arc<StorageService>`: `object_store()`, `blob_path(id)`, `thumbnail_path(id, variant)`,
+  `file_url(id)`, `signed_url(id, expires_s)`, `config()`, `sweep(&app)`.
 ### 1.7 Scheduler and crons
 
 ```rust
@@ -670,9 +708,21 @@ pub async fn send(ctx: &MutationCtx, body: String) -> Result<Id<ScheduledJob>> {
     ctx.scheduler.run_after::<moderate>(Duration::ZERO, (id,)).await          // any mutation or action, internal too
 }
 
+#[internal_action]
+pub async fn import(ctx: &ActionCtx, pages: u32) -> Result<u32> {
+    for page in 0..pages {
+        tokio::select! {
+            _ = ctx.canceled() => return Ok(page),                           // canceled while running: stop cleanly
+            r = fetch_page(page) => { ctx.run_mutation::<save_page>((r?,)).await?; }
+        }
+    }
+    Ok(pages)
+}
+
 fn main() -> ferrix::Result<()> {
     ferrix::Ferrix::new()
         .cron::<cleanup>("cleanup", "0 0 3 * * *", ())                       // 6 fields with seconds, UTC
+        .cron_tz::<report>("report", "0 0 9 * * Mon-Fri", "Europe/Bucharest", ())   // local time, DST-aware
         .interval::<sync_feeds>("sync-feeds", Duration::from_secs(300), ())
         .run()
 }
@@ -683,19 +733,45 @@ pub struct Scheduler { /* private */ }   // ctx.scheduler in MutationCtx and Act
 impl Scheduler {
     pub async fn run_after<F: SchedulableFunction>(&self, delay: Duration, args: impl Into<F::Args>) -> Result<Id<ScheduledJob>>;
     pub async fn run_at<F: SchedulableFunction>(&self, at_ms: f64, args: impl Into<F::Args>) -> Result<Id<ScheduledJob>>;
-    pub async fn cancel(&self, id: Id<ScheduledJob>) -> Result<()>;
+    pub async fn cancel(&self, id: Id<ScheduledJob>) -> Result<()>;      // reason "Canceled by <caller path>"
+    pub async fn cancel_with_reason(&self, id: Id<ScheduledJob>, reason: &str) -> Result<()>;
     pub fn with_retries(&self, retries: u32) -> ScheduleWith<'_>;   // .run_after::<F>(..) / .run_at::<F>(..); actions only
+}
+impl ActionCtx {
+    pub fn is_canceled(&self) -> bool;     // this scheduled action's job was canceled (false outside scheduled jobs)
+    pub async fn canceled(&self);          // resolves when it is (never outside scheduled jobs); for `select!`
 }
 ```
 - **In a mutation** the job row is written in the mutation's transaction: it exists only if the mutation commits.
   `run_after` counts from `ctx.now()`. `cancel` is just as atomic.
 - **In an action** scheduling and canceling take effect immediately: they run the internal system mutations
-  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin }` and `_system/scheduler:cancel { id }`.
+  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin }` and `_system/scheduler:cancel { id,
+  reason? }`.
 - Args are serialized when scheduling (at most 1 MiB of JSON). `run_at` in the past means "as soon as possible".
-- `cancel`: a pending job becomes `canceled`; a finished job is left alone; an action in progress runs to completion
-  (no error either way). An unknown id is the user error `not_found`.
+- `cancel`: a pending job, or an action in progress, becomes `canceled` with `completedAt` and the reason in `error`
+  (`"Canceled by <path>"`, the `cancel_with_reason` text, or `"Canceled from the dashboard by admin:<id>"`; `" (while
+  running)"` is appended for a running action); a finished job is left alone (no error either way). An unknown id is
+  the user error `not_found`.
 - Scheduled functions run with **no identity** (`ctx.auth` is anonymous). The execution log names their caller
   `scheduler` (filter `identity=scheduler`), including the functions they call.
+
+**Canceling a running action** (`crate::scheduler::cancellation`). The cancel commits the job as `canceled`; only
+after that commit is the running action signaled (`ctx.is_canceled()` becomes true, `ctx.canceled()` resolves). If it
+hasn't returned `SchedulerOptions::cancel_grace` (5 s) after the cancel, its future is **dropped at its next
+`.await`** (a hard abort; CPU-bound code that never awaits can't be interrupted), and the execution log records the
+error `ActionAborted` ("canceled: the action was aborted 5s after its job was canceled"). Consequences:
+- **Nested calls:** mutations the action already ran (`ctx.run_mutation`, `ctx.scheduler`, `ctx.storage` writes)
+  **stay committed**: an action is not a transaction. A nested mutation still in flight at the abort is rolled back
+  (its transaction is dropped uncommitted). Nested `ctx.run_action` calls see the same cancellation (it lives in a
+  task-local of the job's task) and are aborted with it.
+- **At most once:** a canceled job is finished; it is never retried (not even `with_retries`), a restart leaves it
+  alone, and the action's late outcome doesn't change its state: the runner only appends how it ended to `error`
+  (`"; it returned before being aborted"` (its value kept in `result`), `"; it stopped with an error: …"`, or
+  `"; aborted after the 5s grace period"`).
+- Only scheduled actions can be canceled; an action called by a client (or directly) never sees a cancellation.
+  A job canceled between its claim and its start never starts.
+- The cron no-pile-up rule sees a canceled job as finished, so a cron's next run may start while a canceled action
+  is still winding down (for at most `cancel_grace`). The action keeps its concurrency slot until it really stops.
 
 **Delivery guarantees** (`crate::scheduler::runner`).
 - **Mutations: exactly once.** The runner calls the mutation with a hook inside its write transaction: first it
@@ -714,19 +790,33 @@ impl Scheduler {
 - **Waking:** the background loop sleeps until the next job or cron is due (at most 60s) and wakes as soon as a commit
   in the write log touches `_scheduled_jobs`.
 
-**Crons.** `Ferrix::cron::<F>(name, expr, args)` / `Ferrix::interval::<F>(name, every, args)` (or the same methods on
-`SchedulerOptions`; `CronSpec::cron` / `CronSpec::interval`). Expressions have 6 fields with seconds (`sec min hour
-day-of-month month day-of-week`, an optional 7th is the year; `cron` crate syntax), evaluated in UTC; an interval runs
-first `every` after startup. `App::open` fails on an invalid expression (or one with 5 fields), a duplicate or empty
-name, a zero interval, or args that don't serialize.
+**Crons.** `Ferrix::cron::<F>(name, expr, args)` / `Ferrix::cron_tz::<F>(name, expr, tz, args)` /
+`Ferrix::interval::<F>(name, every, args)` (or the same methods on `SchedulerOptions`; `CronSpec::cron` /
+`CronSpec::cron_tz` / `CronSpec::interval`, and `CronSpec::timezone(tz)`). Expressions have 6 fields with seconds
+(`sec min hour day-of-month month day-of-week`, an optional 7th is the year; `cron` crate syntax), evaluated in UTC or
+in the given IANA zone (`chrono-tz`); an interval runs first `every` after startup. `App::open` fails on an invalid
+expression (or one with 5 fields), an unknown zone, a zone on an interval, a duplicate or empty name, a name starting
+with `_` (reserved for system crons), a zero interval, or args that don't serialize.
+- **Time zones and DST.** Matching local times are mapped to instants: one in a **spring-forward gap** runs later by
+  the gap's length (`0 30 2 * * *` in `America/New_York` runs at 03:30 EDT that day), so daily jobs never skip a day;
+  one in a **fall-back fold** runs once, at its first occurrence, except for expressions whose hour field is `*`,
+  which also run in the repeated hour (they follow elapsed time). `_crons.timezone` holds the zone (`null` for UTC;
+  `"UTC"` is normalized to `null`).
+- **System crons** are declared by ferrix itself, named with a leading `_`: today `_storage_sweep` (§1.6). They are
+  ordinary `_crons` rows and jobs (origin `cron:_storage_sweep`); the dashboard's `crons` lists them last with
+  `system: true`. Their row is inserted by the startup reconcile, so a fresh app has already committed once (ts 1)
+  before any function runs; don't assume a new `TestApp` starts at ts 0 (`app.db().write_log().latest()` is the
+  starting ts).
 - At startup the declared crons are **reconciled** into `_crons`: new ones are inserted with their next run, changed
-  ones (schedule, function or args) get a fresh next run, and rows of crons no longer declared are deleted (jobs
+  ones (schedule, zone, function or args) get a fresh next run, and rows of crons no longer declared are deleted (jobs
   they already enqueued stay).
 - A due cron **enqueues an ordinary job** (origin `cron:<name>`, due now): one execution path for everything.
 - **Missed runs** (downtime, or a test clock jump) run **once**: the next run is computed from now, not from the missed
   time.
 - **No pile-up:** while the job of the cron's previous run is still `pending` or `inProgress`, a due run is skipped
   (logged as a warning); its next run still advances.
+- **Run now:** `_system/scheduler:run_cron_now { name, force? }` (admin, §4.1.2) enqueues a job due immediately and
+  makes it the cron's `lastRun` / `lastJob` (`nextRun` unchanged); the no-pile-up rule applies unless `force`.
 
 **Retention.** Finished jobs (`success`, `failed`, `canceled`) are deleted `retention` (7 days; `None` keeps them)
 after they finished, by a built-in cleanup that runs at startup and every `cleanup_interval` (1h).
@@ -739,6 +829,7 @@ pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::schedul
     pub retention: Option<Duration>,   // Some(7 days)
     pub cleanup_interval: Duration,    // 1 hour
     pub retry_backoff: Duration,       // 1 second
+    pub cancel_grace: Duration,        // 5 seconds: a canceled action is aborted this long after the cancel
     pub crons: Vec<CronSpec>,
 }
 impl App {
@@ -759,7 +850,9 @@ restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a s
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel])]            // body: String or Option<String>
-#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]   // Vec<f32> or Option<Vec<f32>>
+#[search_index(search_stems, search = body, tokenizer = "porter", language = "english")]   // "run" finds "running"
+#[search_index(search_sub, search = body, tokenizer = "trigram", diacritics = "keep")]     // substrings
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]  // Vec<f32> / Option<Vec<f32>>
 pub struct Message { pub channel: Id<Channel>, pub body: String, pub embedding: Option<Vec<f32>> }
 
 #[query]
@@ -767,6 +860,15 @@ pub async fn search(ctx: &QueryCtx, channel: Id<Channel>, text: String) -> Resul
     ctx.db.query::<Message>()
         .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
         .take(10)
+        .await
+}
+
+#[query]   // works with usePaginatedQuery like index pagination (§1.2.1)
+pub async fn search_page(ctx: &QueryCtx, channel: Id<Channel>, text: String, pagination_opts: PaginationOpts)
+    -> Result<PaginationResult<Doc<Message>>> {
+    ctx.db.query::<Message>()
+        .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
+        .paginate(pagination_opts)
         .await
 }
 
@@ -783,14 +885,32 @@ impl<T> SearchFilter<T> {
     pub fn search<V>(self, field: Field<T, V>, text: impl Into<String>) -> Self;   // exactly once, on the search field
     pub fn eq<V: Serialize>(self, field: Field<T, V>, value: V) -> Self;          // any filter field, any number
 }
-impl<'a, T: Table> SearchQuery<'a, T> {      // no order / paginate: results are ordered by relevance
+impl<'a, T: Table> SearchQuery<'a, T> {      // no order: results are ordered by relevance
     pub fn filter(self, pred: impl Fn(&Doc<T>) -> bool + Send + Sync + 'a) -> Self;   // applied after ranking
     pub async fn take(self, n: usize) -> Result<Vec<Doc<T>>>;     // n clamped to MAX_SEARCH_RESULTS (1024)
     pub async fn first(self) -> Result<Option<Doc<T>>>;
     pub async fn collect(self) -> Result<Vec<Doc<T>>>;            // up to MAX_SEARCH_RESULTS
+    pub async fn paginate(self, opts: PaginationOpts) -> Result<PaginationResult<Doc<T>>>;   // see "Pagination"
 }
-pub struct VectorSearchOpts<T> { pub limit: usize /* 1..=256, default 10 */, pub filter: Option<VectorFilter<T>> }
-impl<T> VectorSearchOpts<T> { pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; }
+impl QueryDb { pub fn search_table(&self, table: &str, index: &str) -> RawSearchQuery<'_>; }   // untyped (dashboard)
+impl RawSearchQuery<'_> {   // search(field, text), eq(field, json), filter(Fn(&Value) -> bool), take, collect, paginate
+}
+pub struct VectorSearchOpts<T> {
+    pub limit: usize,                       // 1..=256, default 10
+    pub filter: Option<VectorFilter<T>>,
+    pub exact: bool,                        // HNSW indexes: search exactly anyway (default false)
+}
+impl<T> VectorSearchOpts<T> {
+    pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; pub fn exact(self) -> Self;
+}
+// TableDef additions: SearchIndexDef { .., tokenizer: Tokenizer }, VectorIndexDef { .., kind: VectorIndexKind }.
+pub struct Tokenizer { pub kind: TokenizerKind /* Unicode61 | Porter | Trigram */, pub language: Option<&'static str>,
+                       pub remove_diacritics: bool }
+impl Tokenizer {   // const fns, used by the #[table] expansion
+    pub const fn unicode61() -> Self; pub const fn porter(language: &'static str) -> Self; pub const fn trigram() -> Self;
+    pub const fn keep_diacritics(self) -> Self;
+}
+pub enum VectorIndexKind { Exact /* default */, Hnsw }
 impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
     pub fn eq<V: Serialize>(field: Field<T, V>, value: V) -> Self;
     pub fn any_of<V: Serialize>(field: Field<T, V>, values: impl IntoIterator<Item = V>) -> Self;
@@ -805,25 +925,92 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
   are separators or plain words). A document matches when its search field contains **every** term; the **last
   term is a prefix** (search-as-you-type: `"hello wor"` matches "hello world"). At most 32 terms are used.
 - **Empty text** (or text with no alphanumeric characters) matches nothing: the query returns `[]` and reads nothing.
-- Tokenizer: FTS5 `unicode61 remove_diacritics 2` (case-insensitive, `café` = `cafe`). Scripts without spaces (e.g.
-  Chinese) are indexed as whole runs.
-- Results are ordered by bm25 (best first; ties by first-indexed). At most `MAX_SEARCH_RESULTS` (1024) documents are
-  examined per query; `take(n)` with a larger `n` is clamped. `eq` filters are applied inside FTS5 (they don't use
-  up the cap); a `.filter(...)` predicate is applied to the ranked candidates.
+- **Tokenizers** (`#[search_index(.., tokenizer = .., language = .., diacritics = ..)]`, all optional):
+  - `"unicode61"` (default): FTS5 `unicode61 remove_diacritics 2`: words, case-insensitive, `café` = `cafe`. Scripts
+    without spaces (e.g. Chinese) are indexed as whole runs.
+  - `"porter"`: FTS5 `porter unicode61 …`: words reduced to their English stem, so "run", "runs" and "running" match
+    each other (the last term is a prefix of the stem). `language` is only accepted with `porter`, and only
+    `"english"` (the default; FTS5's stemmer is English-only).
+  - `"trigram"`: FTS5 `trigram`: substring search; each term matches anywhere inside a word ("ell" finds "hello"),
+    the last term is not a prefix (substrings cover it), and terms shorter than 3 characters are ignored (FTS5
+    can't match them), so text whose terms are all shorter matches nothing. Case-insensitive.
+  - `diacritics = "remove"` (default) folds diacritics; `"keep"` makes `café` and `cafe` different terms
+    (`remove_diacritics 0`).
+  Changing an index's tokenizer rebuilds it at startup (same index id, backfilled).
+- **Relevance**: BM25's per-document part (`db::search::score`): for each query phrase with `tf` occurrences in a
+  document of `dl` tokens, `Σ tf·(k1+1) / (tf + k1·(1 − b + b·dl/32))`, `k1 = 1.2`, `b = 0.75`. There is no IDF and
+  the reference length is fixed (not the corpus average), so a document's score depends only on its own text and the
+  query: more occurrences rank higher (saturating), shorter documents rank higher for equal occurrences. Every term
+  must match anyway (AND), so IDF would only re-weigh terms every result contains; in exchange, results, page
+  boundaries and per-filter-value invalidation are exact (see below). Ties: first-indexed first (FTS rowid).
+- At most `MAX_SEARCH_RESULTS` (1024) documents are examined per query (per page with `paginate`); `take(n)` with a
+  larger `n` is clamped. `eq` filters are applied inside FTS5 (they don't use up the cap); a `.filter(...)` predicate
+  is applied to the ranked candidates.
 - Documents whose search field is missing, null or not a string are not indexed (never returned).
 - `with_search_index` after `with_index` or `order(Desc)` fails when run. Using a field other than the index's search
   field in `search`, a field that is not a filter field in `eq`, or `search` other than exactly once is an error.
 - Equality on filter fields compares the memcomparable encoding (§4.3 of PLAN.md), i.e. the same equality as index
   keys: a missing field is not equal to `null`.
 
+**Pagination** (`SearchQuery::paginate`, `RawSearchQuery::paginate`; same `PaginationOpts` / `PaginationResult` and
+client behaviour as §1.2.1, so `usePaginatedQuery` works unchanged).
+- **Order and positions.** Matches are ordered by `(score desc, FTS rowid asc)`. Because a score depends only on its
+  document (see Relevance), this is a *stable ordering key*: a document's position changes only when that document
+  is written. A cursor is a position "just past `(score, rowid)`" or "the end": URL-safe base64 (no padding) of
+  `[2][fingerprint: 8 bytes][0][score: f64 bits BE][rowid: i64 BE]` or `[2][fingerprint][1]`, the fingerprint being a
+  blake3 hash of the index id, the FTS5 match expression (the normalized terms: whitespace and punctuation don't
+  matter) and the `eq` filters. A cursor of another search (text, filters, index) or of index pagination fails with
+  `paginate: cursor does not belong to this query`; garbage with `paginate: malformed cursor`.
+- **Without `end_cursor`**: the first `numItems` matches after `cursor` (clamped to 1024) passing `.filter(..)`,
+  examining at most 1024 matches; `continueCursor` is just past the last examined match. `isDone` is exact (one more
+  match is looked up), so a page ending at the last match is done (`continueCursor` = the end) and no trailing empty
+  page is needed.
+- **With `end_cursor`**: every match in `(cursor, endCursor]`, whatever `numItems` says; `continueCursor =
+  endCursor`, `isDone` iff `endCursor` is the end. `endCursor` before `cursor` is an error.
+- **Within one snapshot** a chain of pinned pages partitions the matches: no document is duplicated or skipped (the
+  client applies all its pages at one ts, so this holds on screen). **Across changes**, only written documents move:
+  a new or newly matching document appears in the page whose interval contains its position (pinned pages grow, the
+  last page grows up to `numItems`), a deleted or no longer matching one disappears, an edited one may move to
+  another page. Nothing else shifts.
+- **Read set**: the same synthetic key range as `take` (below) plus a `by_id` point per examined document. So every
+  page of a search reruns after a write in its filter partition, and none after writes elsewhere.
+
 **Vector search semantics.** Only `ActionCtx` has `vector_search` (a compile error elsewhere). It reads the latest
-committed snapshot; results are `(id, score)` with `score` the cosine similarity (higher = more similar), best first,
-exact (vec0 does a brute-force scan). Errors: a query vector whose length isn't the index's `dims` (or containing
-NaN/inf), `limit` outside `1..=256`, a filter on a field that isn't a filter field, more than 64 `or` branches.
-Writing a document whose vector field has the wrong length (or isn't an array of numbers) fails before anything is
-written, unless the write leaves that field unchanged (a vector made unindexable by a change of `dims` stays
-unindexed, and the document stays editable). Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
-can't inline them for codegen): map results to a struct to return them.
+committed snapshot; results are `(id, score)` with `score` the cosine similarity (higher = more similar), best first.
+Errors: a query vector whose length isn't the index's `dims` (or containing NaN/inf), `limit` outside `1..=256`, a
+filter on a field that isn't a filter field, more than 64 `or` branches. Writing a document whose vector field has the
+wrong length (or isn't an array of numbers) fails before anything is written, unless the write leaves that field
+unchanged (a vector made unindexable by a change of `dims` stays unindexed, and the document stays editable).
+Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs can't inline
+them for codegen): map results to a struct to return them.
+- **`kind = "exact"`** (default): sqlite-vec's `vec0` brute-force scan; exact (checked against brute force). About
+  18 ms per k=10 query at 50k × 384, 75–120 ms at 200k × 384.
+- **`kind = "hnsw"`** (`db::search::hnsw`, `db::search::ann`): an in-memory HNSW graph (M = 16, ef_construction =
+  128, search width `ef = max(128, k')`, cosine) on top of the same `vec0` table, which stays the source of truth.
+  Approximate: recall@10 ≈ 0.95 at 200k × 384 for embedding-like data (low intrinsic dimension), ~0.4 ms per query;
+  uniformly random high-dimensional vectors (no structure) are the known worst case. `opts.exact()` forces the exact
+  scan. While the graph isn't ready (building at startup, or failed), searches are exact.
+  - *Consistency*: every write changing an HNSW entry adds `(index id, doc id)` to its commit entry; the graph is
+    updated after commit from the write log (a background thread follows commits, and every search first catches
+    the graph up to its own snapshot), so a search sees every commit up to its snapshot (or later). If the log no
+    longer covers the gap (5 min / 100k commits), the whole `vec0` table is diffed instead. Rolled-back writes never
+    reach the log.
+  - *Deletes*: a deleted or changed document's node becomes a tombstone (still routing, never returned); when
+    tombstones exceed 25% of the nodes (and 256) the graph is rebuilt from the live nodes on all cores in the
+    background, with changes made meanwhile journaled and replayed before the swap.
+  - *Filters*: post-filtering with oversampling. Each node keeps its filter values and each `(field, value)` has a
+    posting set; if at most 4096 live documents match the filter, their distances are computed exactly; otherwise
+    the graph is asked for `k' = k · live / matching · 1.25` candidates, filtered, and retried with `4k'` (up to
+    three times, then the exact computation) if fewer than `k` remain.
+  - *Persistence*: indexes with ≥ 10 000 live vectors are saved to `<data dir>/vector_index_<id>.hnsw` (graph,
+    vectors, per-node doc id, filter values and vector hash; blake3 checksum; written to a temporary file and renamed)
+    after the build, after rebuilds and every `max(1000, live/10)` changes. At startup a file with a valid checksum,
+    format and definition is loaded and **validated against the table**: the whole `vec0` table is scanned at one
+    snapshot and every difference (changed vector or filter values, missing or extra documents) is applied. A missing,
+    stale or corrupt file only costs a rebuild; smaller indexes are rebuilt at every startup. Files of indexes that no
+    longer exist (or became exact) are deleted.
+  - Benchmarks (`search::perf_hnsw`, release, 16 threads): building 200k × 384 takes 9–25 s; saving the 330 MB
+    file ~0.2 s, loading it ~0.2 s.
 
 **Storage and consistency (search).** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
 `UNINDEXED` columns, each the hex of its memcomparable encoding, and `_search_<n>_docs` mapping FTS rowids to doc
@@ -831,15 +1018,30 @@ ids); each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filte
 are listed in `_search_indexes` and updated inside the mutation's write transaction by both the typed and untyped
 write paths, so search results are always consistent with document reads and roll back with the mutation.
 `App::open` reconciles them like ordinary indexes: creates and backfills new ones, rebuilds (drop, create, backfill)
-indexes whose definition changed, and drops removed ones (a backfill skips documents whose vector has the wrong
-length, with a warning). `Database::verify_indexes` also recomputes every search and vector index.
+indexes whose definition changed (fields, dimensions, tokenizer), and drops removed ones (a backfill skips documents
+whose vector has the wrong length, with a warning). Switching a vector index between `exact` and `hnsw` only updates
+its stored definition (the `vec0` table is kept). Stored definitions from before tokenizers existed read as the
+default tokenizer, so they are not rebuilt. `Database::verify_indexes` also recomputes every search and vector index
+and compares each ready HNSW graph's live nodes with its `vec0` table.
 
-**Reactivity (coarse).** Search and vector indexes have ids in the upper half of the index id space
-(`db::search::SPECIAL_INDEX_BASE = 1 << 31`). A search query records the full key range `[b"", ∞)` of its search
-index id plus a `by_id` point read for each document it examined; every write that changes a document's entry in a
-search index (its text or a filter value; inserts and deletes of indexed documents) adds `(search index id, doc id)`
-to the commit entry. So a subscription is invalidated by any such write to the table (and by any change to a document
-it returned), never by unrelated tables. No change to `ReadSet`/`CommitEntry` was needed.
+**Reactivity (per filter value).** Search and vector indexes have ids in the upper half of the index id space
+(`db::search::SPECIAL_INDEX_BASE = 1 << 31`). A search index's synthetic keys are laid out as
+`[filter column i: 1 byte][memcomparable encoding of the document's value of filter field i][doc id: 16 bytes]`:
+every write that changes a document's entry in a search index (its text or a filter value; inserts and deletes of
+indexed documents) adds, for the old entry and for the new one, one such key per filter field to the commit entry (an
+index without filter fields adds `[doc id]`). A search query records:
+- with `eq` filters: the prefix range `[i][enc(v)]` of its `eq` on the lowest filter column (a document matching
+  every filter has a key under each prefix, so one is enough), i.e. the documents whose value of that field is, or was
+  before the write, `v`;
+- without filters: the full range `[b"", ∞)`;
+- plus a `by_id` point for each document it examined.
+So a search with `.eq(channel, c)` is invalidated only by writes to documents whose channel is or was `c` (and by
+changes to documents it returned), never by writes in other channels. This is exact because the relevance of a
+document depends only on that document (see Relevance): documents outside the filter can neither enter the result nor
+reorder it. Encoded values are self-delimiting, so one value's prefix never contains another's keys, and the
+subscription manager's interval index stabs each written key like any index key. No change to `ReadSet`/`CommitEntry`
+was needed. Vector indexes are not reactive (actions only); HNSW indexes write `(index id, doc id)` for the graph's
+catch-up.
 
 ### 1.9 Migrations
 
@@ -1045,21 +1247,29 @@ Compile errors (with spans) for: tuple or unit structs, enums, generics, an inde
 index name, an index named `by_id` or `by_creation_time`, and an existing `#[serde(rename_all)]` other than camelCase.
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
 
-**Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...])]` and
-`#[vector_index(name, field = f, dims = N, filter = [f, ...])]` (both consumed; `filter` optional) add, for
+**Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...], tokenizer = "...", language =
+"...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...")]` (both
+consumed; `filter`, `tokenizer`, `language`, `diacritics` and `kind` optional) add, for
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel])]
-#[vector_index(by_embedding, field = embedding, dims = 1536)]
+#[search_index(search_stems, search = body, tokenizer = "porter", language = "english", diacritics = "keep")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, kind = "hnsw")]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 ```
 these items to the expansion above (the `TableDef` literal always has both fields, `vec![]` when unused):
 ```rust
 ::ferrix::TableDef { name: "messages", indexes: vec![],
-    search_indexes: vec![::ferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"] }],
+    search_indexes: vec![
+        ::ferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"],
+                                   tokenizer: ::ferrix::Tokenizer::unicode61() },
+        ::ferrix::SearchIndexDef { name: "search_stems", search_field: "body", filter_fields: vec![],
+                                   tokenizer: ::ferrix::Tokenizer::porter("english").keep_diacritics() }],
     vector_indexes: vec![::ferrix::VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 1536usize,
-                                                     filter_fields: vec![] }],
+                                                     filter_fields: vec![], kind: ::ferrix::VectorIndexKind::Hnsw }],
     ts: …, validate: … }
+// tokenizer: unicode61() (default or "unicode61"), porter("<language>") (language defaults to "english"), trigram();
+// `.keep_diacritics()` is appended for diacritics = "keep". kind: Exact (default or "exact") or Hnsw.
 // in `impl Message { … }`, after by_creation_time:
 pub const search_body: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new("search_body");
 pub const by_embedding: ::ferrix::VectorIndex<Message> = ::ferrix::VectorIndex::new("by_embedding");
@@ -1071,7 +1281,11 @@ Compile errors (with spans) for: a missing or unknown `search`/`field`, unknown 
 searched field itself), system fields, a missing `dims` or one outside `1..=8192`, more than 16 filter fields,
 unknown or duplicate arguments, a name equal to another index (of any kind), to a field handle, or to a reserved name
 (`by_id`, `by_creation_time`, `_id`, `_creation_time`), and a field type that is visibly wrong (`u32` as a search
-field, `Vec<f64>` as a vector field). Types behind aliases are caught by the `assert_*_field` check instead.
+field, `Vec<f64>` as a vector field). Types behind aliases are caught by the `assert_*_field` check instead. Also
+(spanned at the string literal): an unknown `tokenizer` (not `"unicode61"`, `"porter"`, `"trigram"`), `diacritics`
+(not `"remove"`, `"keep"`) or `kind` (not `"exact"`, `"hnsw"`), a `language` other than `"english"`, a `language`
+without `tokenizer = "porter"`, a non-string value, and `tokenizer`/`language`/`diacritics` on a vector index or
+`kind` on a search index (unknown arguments). `TableDef`s built by hand are checked at startup the same way.
 
 ### 3.2 `#[query]` / `#[mutation]` / `#[action]` (and the `internal_*` variants)
 
@@ -1216,8 +1430,9 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 
 | Path `_system/dashboard:…` | Kind | Args → result |
 |---|---|---|
-| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
+| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions, tokenizer: "unicode61" \| "porter" \| "trigram" \| null, removeDiacritics, method: "exact" \| "hnsw" \| null }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
 | `documents` | query | `{ table, index?, filters?: [{ field, op: "eq"\|"gt"\|"gte"\|"lt"\|"lte", value }], order?: "asc"\|"desc", paginationOpts }` → `PaginationResult<object>`. Untyped `query_table(..).with_index(..).paginate(..)`: same cursors and read sets as typed queries, so pages update live (`usePaginatedQuery` works). Filters follow the `with_index` rules. Errors: `unknown_table`, `invalid_query`, `index_not_allowed`. |
+| `search_documents` | query | `{ table, index, text, filters?: [{ field, value }], paginationOpts }` → `PaginationResult<object>`, most relevant first: untyped `search_table(table, index).search(<its search field>, text).eq(field, value)….paginate(..)` (§1.8: same matching, cursors and per-filter-value read sets, so pages update live and `usePaginatedQuery` works). For the Data page's search box; `tables` lists each table's `searchIndexes` (`kind: "search"`, `field`, `filterFields`, `tokenizer`, `removeDiacritics`). Errors: `unknown_table`, `invalid_query` (no such search index, a vector index, a field that is not a filter field, a bad cursor), `index_not_allowed` (an index over a secret field). |
 | `document` | query | `{ id }` → `{ table, document } \| null` (any table; the table number is in the id). `invalid_id`. |
 | `insert_document` | mutation | `{ table, document }` → new id. System fields in `document` are ignored. |
 | `patch_document` | mutation | `{ id, patch }` → `null`. Shallow merge, validated. |
@@ -1257,10 +1472,13 @@ field: `read_only_field`; `image` must be an http(s) URL). Users and sessions ar
 
 | Path `_system/storage:…` | Kind | Args → result |
 |---|---|---|
-| `files` | query | `{ paginationOpts }` → `PaginationResult<FileSummary>`, newest first, live. `FileSummary` = `{ _id, _creationTime, sha256, size, contentType, createdBy, filename, url }`. |
+| `files` | query | `{ paginationOpts }` → `PaginationResult<FileSummary>`, newest first, live. `FileSummary` = `{ _id, _creationTime, sha256, size, contentType, createdBy, filename, url, downloadUrl }`. In private mode `url` is a signed URL (valid one to two hours, stable within the hour) that already has a query string: append variants with `&` (`&thumb=96x96&fit=cover` for a preview), or use `downloadUrl` (`download=1` appended correctly). |
 | `file` | query | `{ id }` → `FileSummary \| null`. `invalid_id` for a malformed id. |
 | `delete_file` | mutation | `{ id }` → `null` (`ctx.storage.delete`). `not_found` if missing. |
 | `generate_upload_url` | mutation | `{}` → an upload URL (the dashboard's upload button; `createdBy` = the admin). |
+| `sweep_orphans` | internal action | `{}` → `{ scanned, deleted, thumbnails }`: the orphan sweep, run by the system cron `_storage_sweep` (run it now with `_system/scheduler:run_cron_now { name: "_storage_sweep" }`). |
+
+Thumbnails for previews: `<url>?thumb=WxH&fit=cover` (or `&thumb=…` on a signed URL), see docs/PROTOCOL.md.
 ### 4.1.2 Scheduler tables and system functions
 
 Defined in `crates/ferrix/src/scheduler` with the normal macros (§1.7).
@@ -1271,17 +1489,18 @@ JSON text), error: string | null (both cut to 4 KiB), scheduledAt, startedAt, co
 scheduling function's path, "cron:<name>" or "dashboard") }`, with indexes `by_state_run_at = [state, runAt,
 scheduledAt]` and `by_completed_at = [completedAt]`. Mutation jobs never show `inProgress`.
 
-**`_crons`** (`Cron`): `{ name, schedule (the expression, or "every 5m"), path, args, lastRun, nextRun, lastJob }`,
-indexes `by_name` and `by_next_run`.
+**`_crons`** (`Cron`): `{ name, schedule (the expression, or "every 5m"), timezone (IANA name, null for UTC), path,
+args, lastRun, nextRun, lastJob }`, indexes `by_name` and `by_next_run`. Names starting with `_` are system crons.
 
 | Path `_system/scheduler:…` | Kind | Args → result |
 |---|---|---|
 | `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin? }` → job id. `ctx.scheduler` in actions. |
-| `cancel` | internal mutation | `{ id }` → `"canceled" \| "alreadyFinished" \| "running"`. `ctx.scheduler.cancel` in actions. |
+| `cancel` | internal mutation | `{ id, reason? }` → `"canceled" \| "alreadyFinished"`. `ctx.scheduler.cancel` in actions. |
 | `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. |
-| `cancel_job` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished" \| "running"`. |
+| `cancel_job` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished"`. Pending jobs and **actions in progress** (signaled, then aborted after `cancel_grace`; §1.7); `error` = `"Canceled from the dashboard by admin:<id>"` (+ `" (while running)"`, then how the action ended). |
 | `run_job_now` | mutation (admin) | `{ id }` → the id of the job that will run: a pending job becomes due now (same id); a finished one is run again as a new job (same path and args, origin `dashboard`). `running` for an action in progress. |
-| `crons` | query (admin) | `{}` → `[{ _id, name, schedule, path, args, lastRun, nextRun, lastJob, lastJobState }]` by name. Live. |
+| `crons` | query (admin) | `{}` → `[{ _id, name, schedule, timezone, system, path, args, lastRun, nextRun, lastJob, lastJobState }]`: the app's crons by name, then the system crons (`system: true`, e.g. `_storage_sweep`). Live. |
+| `run_cron_now` | mutation (admin) | `{ name, force? }` → the id of the job enqueued now (origin `cron:<name>`), which becomes the cron's `lastRun` / `lastJob` (`nextRun` unchanged). `running` while the cron's previous job is pending or in progress, unless `force: true`; `not_found` for an unknown name. Works for system crons. |
 
 The admin functions start with `ctx.auth.require_admin()` like §4.1; `invalid_id` / `not_found` for bad ids. The
 dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`), its Scheduler page at `/_/scheduler`.

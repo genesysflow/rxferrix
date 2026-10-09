@@ -6,6 +6,9 @@
 //! computation. Filter fields are vec0 metadata columns, so filters are applied during the scan (the `limit` nearest
 //! *matching* documents are returned, not the nearest documents filtered afterwards).
 //!
+//! An HNSW index (`kind = "hnsw"`) answers from its in-memory graph instead ([`super::ann`]): approximate, with
+//! filters applied after the graph search (oversampled), and exact again while the graph is not ready.
+//!
 //! Vector search is only available in actions (`ActionCtx` is the only context with `vector_search`): embeddings come
 //! from external APIs, which only actions may call, and keeping it out of queries keeps queries cheap and
 //! deterministic. It reads the latest committed snapshot; actions have no transaction, so the documents may change
@@ -28,8 +31,13 @@ pub const MAX_VECTOR_RESULTS: usize = 256;
 /// The most `or` branches a [`VectorFilter`] may have.
 pub const MAX_FILTER_BRANCHES: usize = 64;
 
-/// Register sqlite-vec for every SQLite connection opened afterwards in this process. Idempotent.
+/// Register sqlite-vec (and the other search extensions, see [`super::register_extensions`]) for every SQLite
+/// connection opened afterwards in this process. Idempotent.
 pub fn register_extension() {
+    super::register_extensions();
+}
+
+pub(super) fn register_sqlite_vec() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         type Init = unsafe extern "C" fn(
@@ -116,15 +124,23 @@ pub struct VectorSearchOpts<T> {
     pub limit: usize,
     /// Only documents matching this filter. Default: all documents.
     pub filter: Option<VectorFilter<T>>,
+    /// On an HNSW index, search exactly (the `vec0` scan) instead of the graph. No effect on exact indexes.
+    pub exact: bool,
 }
 
 impl<T> VectorSearchOpts<T> {
     pub fn new(limit: usize) -> Self {
-        VectorSearchOpts { limit, filter: None }
+        VectorSearchOpts { limit, filter: None, exact: false }
     }
 
     pub fn filter(mut self, filter: VectorFilter<T>) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Search exactly even on an HNSW index (e.g. to measure its recall).
+    pub fn exact(mut self) -> Self {
+        self.exact = true;
         self
     }
 }
@@ -137,7 +153,7 @@ impl<T> Default for VectorSearchOpts<T> {
 
 impl<T> Clone for VectorSearchOpts<T> {
     fn clone(&self) -> Self {
-        VectorSearchOpts { limit: self.limit, filter: self.filter.clone() }
+        VectorSearchOpts { limit: self.limit, filter: self.filter.clone(), exact: self.exact }
     }
 }
 
@@ -207,9 +223,26 @@ impl ActionCtx {
                 out
             }
         };
-        let blob = to_blob(vector);
         let limit = opts.limit;
         let snapshot = self.app.db().snapshot().await?;
+        // HNSW: catch the graph up to this snapshot, then search it (exact while the graph isn't ready).
+        if !opts.exact
+            && let Some(ann) = self.app.db().ann().index(info.id).filter(|a| a.is_ready()).cloned()
+        {
+            let log = self.app.db().ann().log().clone();
+            let query = vector.to_vec();
+            let snapshot = snapshot.clone();
+            let branches = branches.clone();
+            let found = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                snapshot.with_conn(|conn| ann.catch_up(conn, snapshot.ts, &log))?;
+                Ok(ann.search(&query, limit, &branches))
+            })
+            .await??;
+            if let Some(found) = found {
+                return Ok(found.into_iter().map(|(id, score)| (Id::from_doc_id(id), score)).collect());
+            }
+        }
+        let blob = to_blob(vector);
         let storage = info.storage_table();
         let rows = tokio::task::spawn_blocking(move || {
             snapshot.with_conn(|conn| {

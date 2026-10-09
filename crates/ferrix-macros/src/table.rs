@@ -466,10 +466,16 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             pub const #iident: ::ferrix::Index<#ident> = ::ferrix::Index::new(#name);
         }
     });
-    let search_def_exprs = special_defs.iter().filter(|(s, ..)| s.kind == Kind::Search).map(|(_, name, info, filter)| {
+    let search_def_exprs = special_defs.iter().filter(|(s, ..)| s.kind == Kind::Search).map(|(spec, name, info, filter)| {
         let field = &info.json_name;
+        let tokenizer = spec.tokenizer_expr();
         quote! {
-            ::ferrix::SearchIndexDef { name: #name, search_field: #field, filter_fields: ::std::vec![#(#filter),*] }
+            ::ferrix::SearchIndexDef {
+                name: #name,
+                search_field: #field,
+                filter_fields: ::std::vec![#(#filter),*],
+                tokenizer: #tokenizer,
+            }
         }
     });
     let vector_def_exprs = special_defs
@@ -478,12 +484,14 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         .map(|(spec, name, info, filter)| {
             let field = &info.json_name;
             let dims = spec.dims.map(|(n, _)| n).unwrap_or(1);
+            let kind = spec.vector_kind_expr();
             quote! {
                 ::ferrix::VectorIndexDef {
                     name: #name,
                     vector_field: #field,
                     dimensions: #dims,
                     filter_fields: ::std::vec![#(#filter),*],
+                    kind: #kind,
                 }
             }
         });

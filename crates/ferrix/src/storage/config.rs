@@ -15,6 +15,14 @@ pub const DEFAULT_MAX_UPLOAD_SIZE: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_URL_TTL: Duration = Duration::from_secs(3600);
 /// Default [`StorageConfig::cache_max_age`]: 30 days (the content of a storage id never changes).
 pub const DEFAULT_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Default [`StorageConfig::max_signed_url_ttl`]: 7 days.
+pub const DEFAULT_MAX_SIGNED_URL_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+/// Default [`StorageConfig::thumbnail_max_dimension`].
+pub const DEFAULT_THUMBNAIL_MAX_DIMENSION: u32 = 1024;
+/// Default [`StorageConfig::thumbnail_max_source_pixels`]: 40 megapixels.
+pub const DEFAULT_THUMBNAIL_MAX_SOURCE_PIXELS: u64 = 40_000_000;
+/// Default [`StorageConfig::thumbnail_max_source_bytes`]: 32 MiB.
+pub const DEFAULT_THUMBNAIL_MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Where blobs are stored.
 #[derive(Clone)]
@@ -89,6 +97,23 @@ pub struct StorageConfig {
     /// A blob is only swept once it is older than this (an upload's document is inserted right after its blob is
     /// complete). Default one hour.
     pub orphan_grace: Duration,
+    /// Private mode (`--storage-private`): `GET /api/storage/{id}` without a valid signature is refused (403), so
+    /// files are only reachable through `ctx.storage.get_signed_url(id, ttl)`, and `get_url` fails. Default off
+    /// (file URLs are unguessable capability URLs).
+    pub private: bool,
+    /// The longest TTL `get_signed_url` accepts. Default 7 days.
+    pub max_signed_url_ttl: Duration,
+    /// Largest thumbnail width and height (`?thumb=WxH`), when [`StorageConfig::thumbnail_sizes`] is not set.
+    /// Default 1024.
+    pub thumbnail_max_dimension: u32,
+    /// If set, the only thumbnail sizes served (`(width, height)` pairs); others get 400. Default: any size up to
+    /// `thumbnail_max_dimension`. Every variant served is cached, so an allowlist also bounds the cache.
+    pub thumbnail_sizes: Option<Vec<(u32, u32)>>,
+    /// Images with more pixels are refused for thumbnails before being decoded (a decompression-bomb guard).
+    /// Default 40 megapixels.
+    pub thumbnail_max_source_pixels: u64,
+    /// Larger files get no thumbnails (the source is read into memory). Default 32 MiB.
+    pub thumbnail_max_source_bytes: u64,
 }
 
 impl Default for StorageConfig {
@@ -102,6 +127,12 @@ impl Default for StorageConfig {
             upload_rate_limit: Some((60, 120)),
             sweep_interval: Some(Duration::from_secs(6 * 3600)),
             orphan_grace: Duration::from_secs(3600),
+            private: false,
+            max_signed_url_ttl: DEFAULT_MAX_SIGNED_URL_TTL,
+            thumbnail_max_dimension: DEFAULT_THUMBNAIL_MAX_DIMENSION,
+            thumbnail_sizes: None,
+            thumbnail_max_source_pixels: DEFAULT_THUMBNAIL_MAX_SOURCE_PIXELS,
+            thumbnail_max_source_bytes: DEFAULT_THUMBNAIL_MAX_SOURCE_BYTES,
         }
     }
 }
@@ -163,6 +194,38 @@ impl StorageConfig {
 
     pub fn orphan_grace(mut self, grace: Duration) -> Self {
         self.orphan_grace = grace;
+        self
+    }
+
+    /// Private mode: see [`StorageConfig::private`].
+    pub fn private(mut self, private: bool) -> Self {
+        self.private = private;
+        self
+    }
+
+    pub fn max_signed_url_ttl(mut self, ttl: Duration) -> Self {
+        self.max_signed_url_ttl = ttl;
+        self
+    }
+
+    pub fn thumbnail_max_dimension(mut self, max: u32) -> Self {
+        self.thumbnail_max_dimension = max;
+        self
+    }
+
+    /// Serve only these thumbnail sizes (`(width, height)`).
+    pub fn thumbnail_sizes(mut self, sizes: &[(u32, u32)]) -> Self {
+        self.thumbnail_sizes = Some(sizes.to_vec());
+        self
+    }
+
+    pub fn thumbnail_max_source_pixels(mut self, pixels: u64) -> Self {
+        self.thumbnail_max_source_pixels = pixels;
+        self
+    }
+
+    pub fn thumbnail_max_source_bytes(mut self, bytes: u64) -> Self {
+        self.thumbnail_max_source_bytes = bytes;
         self
     }
 

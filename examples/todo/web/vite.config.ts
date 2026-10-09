@@ -8,7 +8,7 @@ const FERRIX = process.env.FERRIX_URL ?? "http://127.0.0.1:8090";
 export default defineConfig({
   plugins: [svelte()],
   server: {
-    port: 5173,
+    port: Number(process.env.VITE_PORT ?? 5173),
     proxy: { "/api": { target: FERRIX, ws: true, changeOrigin: true } },
   },
 });

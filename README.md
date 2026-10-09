@@ -374,6 +374,16 @@ work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` prox
 A Ferrix app is one binary plus one data directory (`--dir`, default `fx_data`: `data.db`, `aux.db` with the
 execution log, `storage/` for files, `auth_secret.key`, `backups/`).
 
+**Build your app with these SQLite flags.** Put this in your app's `.cargo/config.toml` (this repository has the same
+file). Without it, rusqlite's bundled SQLite shares one page cache behind a global mutex, so concurrent queries don't
+run in parallel (measured: 8 parallel readers ran no faster than one; with the flags they scale to ~4x the single-reader
+throughput and beyond). Ferrix logs a warning at startup when the flags are missing.
+
+```toml
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0"
+```
+
 **Serve the frontend from the binary.** `.static_dir("./web/dist")` reads a directory at runtime;
 `.embed_static::<Assets>()` embeds it at compile time, so the whole app ships as one file:
 

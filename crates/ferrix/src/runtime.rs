@@ -304,6 +304,8 @@ pub struct Metrics {
     rounds: AtomicU64,
     reruns: AtomicU64,
     last_round_reruns: AtomicU64,
+    stale_runs: AtomicU64,
+    holds: AtomicU64,
     /// Request and execution counters for `/metrics` (`crate::ops::metrics`).
     pub(crate) ops: crate::ops::metrics::Counters,
 }
@@ -334,6 +336,8 @@ impl Metrics {
             rounds: self.rounds.load(Ordering::Relaxed),
             reruns: self.reruns.load(Ordering::Relaxed),
             last_round_reruns: self.last_round_reruns.load(Ordering::Relaxed),
+            stale_runs: self.stale_runs.load(Ordering::Relaxed),
+            holds: self.holds.load(Ordering::Relaxed),
         }
     }
 
@@ -361,6 +365,16 @@ impl Metrics {
     pub(crate) fn record_round(&self, reruns: u64) {
         self.rounds.fetch_add(1, Ordering::Relaxed);
         self.last_round_reruns.store(reruns, Ordering::Relaxed);
+    }
+
+    /// A run finished with a result that commits had invalidated meanwhile.
+    pub(crate) fn record_stale_run(&self) {
+        self.stale_runs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// New generations are held for a starving connection.
+    pub(crate) fn record_hold(&self) {
+        self.holds.fetch_add(1, Ordering::Relaxed);
     }
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { JsonObject } from "../lib/api.js";
+  import { useQuery } from "@ferrix/svelte";
+  import { migrations, type JsonObject } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
@@ -17,6 +18,9 @@
   const docId = $derived(route.params.get("doc"));
   let inserting = $state<JsonObject | null>(null);
   let filter = $state("");
+  // Tables opened in lenient "migrating" mode (documents that don't match their type, migrations pending).
+  const migrationList = useQuery(migrations.list, () => ({}));
+  const migrating = $derived(new Set((migrationList.data ?? []).filter((m) => m.tableMigrating).map((m) => m.table)));
 
   // /_/data opens the first app table (or the first table).
   $effect(() => {
@@ -52,7 +56,9 @@
         {#each appTables.filter((t) => matches(t.name)) as t (t.name)}
           <li>
             <a href={href("data", [t.name])} onclick={link} class:active={t.name === tableName}>
-              <span class="name">{t.name}</span><span class="count">{t.documents}</span>
+              <span class="name">{t.name}</span>
+              {#if migrating.has(t.name)}<span class="mig" title="Migrating: documents may not match the type until its migrations finish">⇄</span>{/if}
+              <span class="count">{t.documents}</span>
             </a>
           </li>
         {/each}
@@ -75,6 +81,7 @@
       {#key table.name}
         <DocumentGrid
           {table}
+          migrating={migrating.has(table.name)}
           selectedId={docId}
           oninsert={(template) => {
             inserting = template;
@@ -151,6 +158,10 @@
   .name.system {
     font-family: var(--mono);
     font-size: 12.5px;
+  }
+  .mig {
+    color: var(--warn);
+    margin-left: auto;
   }
   .count {
     color: var(--faint);

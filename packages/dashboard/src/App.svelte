@@ -5,13 +5,19 @@
   import { setDashboard } from "./lib/context.js";
   import { href, link, router, type Page } from "./lib/router.svelte.js";
   import { theme } from "./lib/theme.svelte.js";
+  import { type Command } from "./lib/commands.js";
+  import CommandPalette from "./components/CommandPalette.svelte";
+  import Audit from "./pages/Audit.svelte";
+  import Backups from "./pages/Backups.svelte";
   import Data from "./pages/Data.svelte";
   import Files from "./pages/Files.svelte";
   import Functions from "./pages/Functions.svelte";
   import Login from "./pages/Login.svelte";
   import Logs from "./pages/Logs.svelte";
+  import Migrations from "./pages/Migrations.svelte";
   import Overview from "./pages/Overview.svelte";
   import Scheduler from "./pages/Scheduler.svelte";
+  import Settings from "./pages/Settings.svelte";
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
 
@@ -39,29 +45,95 @@
     },
     toast(message, kind = "info") {
       const id = nextToast++;
-      toasts = [...toasts, { id, message, kind }];
+      // At most 4 at a time: the oldest go first.
+      toasts = [...toasts.slice(-3), { id, message, kind }];
       setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), kind === "error" ? 8000 : 3500);
     },
   });
 
-  const nav: { page: Page; label: string; icon: string }[] = [
-    { page: "overview", label: "Overview", icon: "◎" },
-    { page: "data", label: "Data", icon: "▦" },
-    { page: "functions", label: "Functions", icon: "ƒ" },
-    { page: "logs", label: "Logs", icon: "≡" },
-    { page: "users", label: "Users", icon: "◍" },
-    { page: "files", label: "Files", icon: "▤" },
-    { page: "scheduler", label: "Scheduler", icon: "◷" },
+  interface NavItem {
+    page: Page;
+    label: string;
+    icon: string;
+    /** Words the command palette also matches. */
+    keywords?: string;
+  }
+  const groups: { label: string | null; items: NavItem[] }[] = [
+    { label: null, items: [{ page: "overview", label: "Overview", icon: "◎", keywords: "stats home" }] },
+    {
+      label: "Build",
+      items: [
+        { page: "data", label: "Data", icon: "▦", keywords: "tables documents" },
+        { page: "functions", label: "Functions", icon: "ƒ", keywords: "runner latency charts" },
+        { page: "logs", label: "Logs", icon: "≡", keywords: "executions tail" },
+      ],
+    },
+    {
+      label: "Manage",
+      items: [
+        { page: "users", label: "Users", icon: "◍", keywords: "sessions auth impersonate" },
+        { page: "files", label: "Files", icon: "▤", keywords: "storage uploads" },
+        { page: "scheduler", label: "Scheduler", icon: "◷", keywords: "crons jobs" },
+      ],
+    },
+    {
+      label: "Operate",
+      items: [
+        { page: "migrations", label: "Migrations", icon: "⇄", keywords: "schema" },
+        { page: "backups", label: "Backups", icon: "⧉", keywords: "export import restore" },
+      ],
+    },
+    {
+      label: "Admin",
+      items: [
+        { page: "settings", label: "Settings", icon: "✱", keywords: "smtp oauth cors redirect signups tokens" },
+        { page: "audit", label: "Audit log", icon: "✎", keywords: "history changes" },
+      ],
+    },
   ];
+  const nav = groups.flatMap((g) => g.items);
+  /** Alt+1…9, then Alt+0, open the pages in sidebar order. */
+  const shortcutOf = (i: number) => (i < 9 ? `Alt+${i + 1}` : i === 9 ? "Alt+0" : undefined);
 
   const route = $derived(router.route);
   const live = $derived(connection.current.isWebSocketConnected);
+  let palette = $state(false);
+
+  const commands = $derived<Command[]>([
+    ...nav.map((item, i) => ({
+      id: `page:${item.page}`,
+      label: item.label,
+      group: "Page",
+      keywords: item.keywords,
+      shortcut: shortcutOf(i),
+      run: () => router.navigate(href(item.page)),
+    })),
+    ...(tables.data ?? []).map((t) => ({
+      id: `table:${t.name}`,
+      label: t.name,
+      group: t.system ? "System table" : "Table",
+      keywords: `data ${t.name}`,
+      run: () => router.navigate(href("data", [t.name])),
+    })),
+    { id: "cmd:theme", label: "Switch theme (light, dark, system)", group: "Command", keywords: "dark mode", run: () => theme.cycle() },
+    { id: "cmd:signout", label: "Sign out", group: "Command", keywords: "logout", run: () => void signOut() },
+  ]);
 
   function onkeydown(e: KeyboardEvent) {
-    // Alt+1…7 switches pages.
-    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-7]$/.test(e.key) && isAdmin) {
+    if (!isAdmin) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      router.navigate(href(nav[Number(e.key) - 1]!.page));
+      palette = !palette;
+      return;
+    }
+    // Alt+1…9 and Alt+0 switch pages (e.code: Alt+digit types other characters on some layouts).
+    const digit = /^Digit(\d)$/.exec(e.code)?.[1] ?? (/^\d$/.test(e.key) ? e.key : null);
+    if (e.altKey && !e.ctrlKey && !e.metaKey && digit !== null) {
+      const item = nav[digit === "0" ? 9 : Number(digit) - 1];
+      if (item) {
+        e.preventDefault();
+        router.navigate(href(item.page));
+      }
     }
   }
 
@@ -88,21 +160,30 @@
   <div class="shell">
     <nav class="sidebar" aria-label="Dashboard">
       <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> ferrix</a>
-      <ul>
-        {#each nav as item, i (item.page)}
-          <li>
-            <a
-              href={href(item.page)}
-              onclick={link}
-              class:active={route.page === item.page}
-              aria-current={route.page === item.page ? "page" : undefined}
-              title={`${item.label} (Alt+${i + 1})`}
-            >
-              <span class="icon" aria-hidden="true">{item.icon}</span>{item.label}
-            </a>
-          </li>
+      <button class="palette-button" onclick={() => (palette = true)} title="Command palette">
+        <span>Go to…</span><kbd>Ctrl K</kbd>
+      </button>
+      <div class="groups">
+        {#each groups as g, gi (gi)}
+          {#if g.label}<div class="group-label" aria-hidden="true">{g.label}</div>{/if}
+          <ul aria-label={g.label ?? "Home"}>
+            {#each g.items as item (item.page)}
+              {@const i = nav.indexOf(item)}
+              <li>
+                <a
+                  href={href(item.page)}
+                  onclick={link}
+                  class:active={route.page === item.page}
+                  aria-current={route.page === item.page ? "page" : undefined}
+                  title={shortcutOf(i) ? `${item.label} (${shortcutOf(i)})` : item.label}
+                >
+                  <span class="icon" aria-hidden="true">{item.icon}</span>{item.label}
+                </a>
+              </li>
+            {/each}
+          </ul>
         {/each}
-      </ul>
+      </div>
       <div class="foot">
         <div class="conn" title={live ? "Connected: views update live" : "Reconnecting…"}>
           <span class="dot" class:on={live}></span>{live ? "live" : "offline"}
@@ -129,11 +210,23 @@
         <Users />
       {:else if route.page === "files"}
         <Files {route} />
+      {:else if route.page === "migrations"}
+        <Migrations />
+      {:else if route.page === "backups"}
+        <Backups />
+      {:else if route.page === "settings"}
+        <Settings />
+      {:else if route.page === "audit"}
+        <Audit {route} />
       {:else}
         <Overview />
       {/if}
     </main>
   </div>
+{/if}
+
+{#if palette && isAdmin}
+  <CommandPalette {commands} onclose={() => (palette = false)} />
 {/if}
 
 <div class="toasts" aria-live="polite">
@@ -195,13 +288,35 @@
     padding: 0;
     display: flex;
     flex-direction: column;
+    gap: 1px;
+  }
+  .groups {
+    display: flex;
+    flex-direction: column;
     gap: 2px;
+    overflow: auto;
+    min-height: 0;
+  }
+  .group-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+    padding: 10px 8px 3px;
+  }
+  .palette-button {
+    justify-content: space-between;
+    color: var(--muted);
+    background: var(--panel-2);
+    border-color: var(--border);
+    font-size: 13px;
   }
   ul a {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 6px 8px;
+    padding: 5px 8px;
     border-radius: var(--radius);
     color: var(--text);
     text-decoration: none;

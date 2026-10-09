@@ -1,7 +1,7 @@
 <script lang="ts">
   import { FerrixError } from "@ferrix/client";
   import { useMutation, usePaginatedQuery, useQuery } from "@ferrix/svelte";
-  import { scheduler, type JobState, type ScheduledJob } from "../lib/api.js";
+  import { scheduler, type CronSummary, type JobState, type ScheduledJob } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatRelative, formatTime, pretty, prettyArgs } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
@@ -35,6 +35,10 @@
   const crons = useQuery(scheduler.crons, () => ({}));
   const cancelJob = useMutation(scheduler.cancelJob);
   const runJobNow = useMutation(scheduler.runJobNow);
+  const runCronNow = useMutation(scheduler.runCronNow);
+  const appCrons = $derived((crons.data ?? []).filter((c) => !c.system));
+  const systemCrons = $derived((crons.data ?? []).filter((c) => c.system));
+  let startingCron = $state<string | null>(null);
   let open = $state<string | null>(null);
 
   // Relative times ("in 5m") tick.
@@ -49,14 +53,32 @@
   }
 
   async function cancel(job: ScheduledJob) {
+    if (job.state === "inProgress" && !confirm(`Stop the running action ${job.path}? It is signaled now and aborted at its next await after a grace period; mutations it already committed stay.`)) return;
     try {
       const outcome = await cancelJob({ id: job._id });
-      ctx.toast(
-        outcome === "canceled" ? "Job canceled" : outcome === "running" ? "The job is running; it can't be stopped" : "The job had already finished",
-        outcome === "canceled" ? "info" : "error",
-      );
+      if (outcome === "canceled") ctx.toast(job.state === "inProgress" ? "Canceling the running action" : "Job canceled");
+      else ctx.toast("The job had already finished", "error");
     } catch (e) {
       ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+    }
+  }
+
+  /** "Run now" for a cron; when its previous run hasn't finished, offer to run it anyway (`force`). */
+  async function runCron(c: CronSummary) {
+    startingCron = c.name;
+    try {
+      try {
+        await runCronNow({ name: c.name });
+      } catch (e) {
+        if (!(e instanceof FerrixError && e.code === "running")) throw e;
+        if (!confirm(`The previous run of “${c.name}” hasn't finished yet. Start another run anyway?`)) return;
+        await runCronNow({ name: c.name, force: true });
+      }
+      ctx.toast(`Started ${c.name}`);
+    } catch (e) {
+      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+    } finally {
+      startingCron = null;
     }
   }
 
@@ -74,11 +96,30 @@
   }
 </script>
 
+{#snippet cronRow(c: CronSummary)}
+  <tr class:system={c.system}>
+    <td><strong class:mono={c.system}>{c.name}</strong>{#if c.system}<span class="badge sys">system</span>{/if}</td>
+    <td class="mono">{c.schedule}</td>
+    <td class:faint={!c.timezone}>{c.timezone ?? "UTC"}</td>
+    <td class="mono">{c.path}</td>
+    <td title={c.lastRun ? formatTime(c.lastRun) : ""}>{c.lastRun ? formatRelative(c.lastRun, now) : "never"}</td>
+    <td title={c.nextRun ? formatTime(c.nextRun) : ""}>{c.nextRun ? formatRelative(c.nextRun, now) : "never"}</td>
+    <td>
+      {#if c.lastJobState}<span class="badge state {c.lastJobState}">{stateLabels[c.lastJobState]}</span>{/if}
+    </td>
+    <td class="actions">
+      <button class="small" onclick={() => runCron(c)} disabled={startingCron === c.name} title="Enqueue a run now; the schedule is unchanged">
+        {startingCron === c.name ? "Starting…" : "▶ Run now"}
+      </button>
+    </td>
+  </tr>
+{/snippet}
+
 <div class="page">
   <header class="page-header">
     <h1>Scheduler</h1>
     <span class="spacer"></span>
-    <span class="muted small-text">Times are local; cron expressions are UTC.</span>
+    <span class="muted small-text">Times are local; cron expressions run in their time zone (UTC unless set).</span>
   </header>
   <div class="body">
     <section aria-labelledby="crons-heading">
@@ -90,21 +131,18 @@
       {:else if crons.data}
         <table class="grid" data-testid="crons">
           <thead>
-            <tr><th>Name</th><th>Schedule</th><th>Function</th><th>Last run</th><th>Next run</th><th>Last job</th></tr>
+            <tr><th>Name</th><th>Schedule</th><th>Time zone</th><th>Function</th><th>Last run</th><th>Next run</th><th>Last job</th><th></th></tr>
           </thead>
           <tbody>
-            {#each crons.data as c (c._id)}
-              <tr>
-                <td><strong>{c.name}</strong></td>
-                <td class="mono">{c.schedule}</td>
-                <td class="mono">{c.path}</td>
-                <td title={c.lastRun ? formatTime(c.lastRun) : ""}>{c.lastRun ? formatRelative(c.lastRun, now) : "never"}</td>
-                <td title={c.nextRun ? formatTime(c.nextRun) : ""}>{c.nextRun ? formatRelative(c.nextRun, now) : "never"}</td>
-                <td>
-                  {#if c.lastJobState}<span class="badge state {c.lastJobState}">{stateLabels[c.lastJobState]}</span>{/if}
-                </td>
-              </tr>
+            {#each appCrons as c (c._id)}
+              {@render cronRow(c)}
             {/each}
+            {#if systemCrons.length > 0}
+              <tr class="group"><td colspan="8">System crons <span class="faint">· run by ferrix itself</span></td></tr>
+              {#each systemCrons as c (c._id)}
+                {@render cronRow(c)}
+              {/each}
+            {/if}
           </tbody>
         </table>
       {/if}
@@ -148,7 +186,9 @@
                   {#if job.state === "pending"}
                     <button class="small" onclick={() => runNow(job)}>Run now</button>
                     <button class="small danger" onclick={() => cancel(job)}>Cancel</button>
-                  {:else if job.state !== "inProgress"}
+                  {:else if job.state === "inProgress"}
+                    <button class="small danger" onclick={() => cancel(job)} title="Signal the running action to stop">Cancel</button>
+                  {:else}
                     <button class="small" onclick={() => runNow(job)}>Retry</button>
                   {/if}
                 </td>
@@ -234,10 +274,24 @@
     border-color: transparent;
     font-weight: 600;
   }
-  .actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
+  tr.group td {
+    background: var(--panel-2);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: default;
+  }
+  tr.system td {
+    color: var(--muted);
+  }
+  .badge.sys {
+    margin-left: 6px;
+  }
+  table.grid tbody tr.group:hover,
+  table.grid tbody tr.system:hover {
+    background: none;
   }
   .badge.state.pending {
     color: var(--link);

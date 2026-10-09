@@ -10,12 +10,24 @@
   const ctx = dashboardContext();
   let stats = $state<Stats | null>(null);
   let error = $state<string | null>(null);
+  /** Recent samples of the live counters (one per poll), for the sparklines. */
+  let history = $state<{ at: number; commits: number; reruns: number }[]>([]);
+  let previous: Stats | null = null;
 
   onMount(() => {
     let stopped = false;
     async function poll() {
       try {
-        stats = await fetchStats(ctx.auth);
+        const next = await fetchStats(ctx.auth);
+        const o = next.overview;
+        // Reruns per second between two polls (the server reports a running total).
+        const reruns =
+          previous && o.queryReruns !== undefined && previous.overview.queryReruns !== undefined
+            ? Math.max(0, o.queryReruns - previous.overview.queryReruns) / Math.max(0.001, (o.now - previous.overview.now) / 1000)
+            : 0;
+        history = [...history, { at: o.now, commits: o.commitsPerSecond ?? 0, reruns }].slice(-60);
+        previous = next;
+        stats = next;
         error = null;
       } catch (e) {
         error = e instanceof Error ? e.message : String(e);
@@ -39,6 +51,16 @@
   );
   const appTables = $derived((ctx.tables ?? []).filter((t) => !t.system));
   const totalBytes = $derived((stats?.overview.files ?? []).reduce((n, f) => n + f.bytes, 0));
+
+  /** A sparkline path (0 at the bottom) over the samples. */
+  function spark(values: number[], w = 120, h = 26): string {
+    if (values.length < 2) return "";
+    const max = Math.max(...values, 1e-9);
+    return values
+      .map((v, i) => `${i ? "L" : "M"}${((i / (values.length - 1)) * w).toFixed(1)},${(h - 1 - (v / max) * (h - 2)).toFixed(1)}`)
+      .join("");
+  }
+  const rate = (n: number) => (n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2));
 </script>
 
 {#snippet fnTable(rows: FunctionStats[], empty: string)}
@@ -84,6 +106,39 @@
         <div class="card stat"><div class="label">Uptime</div><div class="value">{formatUptime(o.now - o.startedAt)}</div><div class="sub">since {formatTime(o.startedAt)}</div></div>
         <div class="card stat" class:warn={o.droppedLogEntries > 0}><div class="label">Dropped log entries</div><div class="value">{o.droppedLogEntries}</div><div class="sub">execution log backlog</div></div>
       </section>
+
+      {#if o.commitsPerSecond !== undefined}
+        <h2 class="section">Live</h2>
+        <section class="cards" data-testid="live-stats">
+          <div class="card stat">
+            <div class="label">Commits / s</div>
+            <div class="value" data-testid="stat-commits">{rate(o.commitsPerSecond)}</div>
+            <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"><path d={spark(history.map((h) => h.commits))} /></svg>
+            <div class="sub">over the last 10 seconds</div>
+          </div>
+          <div class="card stat">
+            <div class="label">Query reruns / s</div>
+            <div class="value">{rate(history.at(-1)?.reruns ?? 0)}</div>
+            <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"><path d={spark(history.map((h) => h.reruns))} /></svg>
+            <div class="sub">{o.queryReruns ?? 0} reruns in {o.subscriptionRounds ?? 0} rounds</div>
+          </div>
+          <div class="card stat">
+            <div class="label">Shared queries</div>
+            <div class="value">{o.sharedQueries ?? 0}</div>
+            <div class="sub">serving {o.subscriptions} subscriptions</div>
+          </div>
+          <a class="card stat link" href={href("scheduler", [], { state: "pending" })} onclick={link}>
+            <div class="label">Scheduler queue</div>
+            <div class="value" data-testid="stat-queue">{o.queueDepth ?? 0}</div>
+            <div class="sub">pending jobs · {o.runningJobs ?? 0} running</div>
+          </a>
+          <div class="card stat">
+            <div class="label">Prometheus</div>
+            <div class="value small-value">{o.metricsEnabled ? "on" : "off"}</div>
+            <div class="sub">{o.metricsEnabled ? "/metrics is served" : "start with --metrics"}</div>
+          </div>
+        </section>
+      {/if}
 
       <section class="two">
         <div class="card pad">
@@ -146,6 +201,33 @@
   }
   .stat.warn {
     border-color: var(--warn);
+  }
+  .stat.link {
+    color: inherit;
+    text-decoration: none;
+  }
+  .stat.link:hover {
+    border-color: var(--border-strong);
+  }
+  .small-value {
+    font-size: 18px;
+  }
+  h2.section {
+    margin: 4px 0 10px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .spark {
+    display: block;
+    width: 100%;
+    height: 26px;
+    margin: 2px 0;
+  }
+  .spark path {
+    fill: none;
+    stroke: var(--series-1);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
   }
   .label {
     font-size: 12px;

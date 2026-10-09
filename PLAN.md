@@ -513,11 +513,20 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] `examples/todo` (Svelte), with Playwright e2e scripts. `examples/chat-react` is still to do.
 - **Milestone reached: usable for a real (unauthenticated) app.**
 
-### Phase 4 — Dashboard v1 (L)
+### Phase 4 — Dashboard v1 (L) — mostly done
 - [x] Admin auth (`_admins`, `admin create|reset-password`, `/api/auth/admin/signin`, `ctx.auth.require_admin()`) and
-  the setup link (`/_/setup#token=…`, a minimal page until the dashboard exists).
-- [ ] Admin-only `_system:*` functions for the dashboard (so far only `_system/auth:me` / `update_profile` exist).
-- [ ] Data browser (live grid, edit, follow IDs), schema view, function runner, logs tail.
+  the setup link (`/_/setup#token=…`, now the dashboard's setup page).
+- [x] Admin-only `_system/dashboard:*` functions (docs/CONTRACT.md §4.1): tables, untyped live paginated documents,
+  untyped CRUD validated with `TableDef::validate`, the function registry, `run_function` (act as user), users and
+  sessions. Secrets (`*Hash` fields of system tables) are masked; system tables are read-only except the profile
+  fields of `_users`.
+- [x] An untyped (table-name) path through the query engine and pagination, sharing the typed API's scan core.
+- [x] `/api/admin/logs`, `/api/admin/logs/stream` (SSE, bearer auth) and `/api/admin/stats` (§4.2).
+- [x] The SPA (`packages/dashboard`, Svelte 5) embedded with `rust-embed` (feature `dashboard`) and served at `/_/`:
+  sign-in and setup, data browser (live grid, index filters, JSON editor, follow IDs, schema view), function runner,
+  live logs tail, users and sessions, overview. Built assets are committed; a test fails when they are stale.
+- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, audited dashboard writes, per-function
+  latency charts, impersonation via a real session.
 
 ### Phase 5 — Auth (M) — mostly done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
@@ -527,7 +536,8 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   Discord and Apple presets are still to do).
 - [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
   React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
-- [ ] The dashboard Auth page (users, sessions, revoke, impersonate); provider config in `_settings`.
+- [x] The dashboard Users page (users, linked providers, sessions, revoke, delete; "act as user" in the runner).
+- [ ] Provider configuration in `_settings`, editable from the dashboard.
 - [ ] External JWTs via JWKS; live revocation of already-authenticated sockets on sign-out (today they keep their
   identity until the access token expires).
 - **Milestone: usable for real apps with users.**

@@ -186,6 +186,25 @@ impl<T> IndexRange<T> {   // fields must follow the index field order: eq* then 
     pub fn eq<V: Serialize>(self, f: Field<T, V>, v: V) -> Self;
     pub fn gt<V: Serialize>(self, f: Field<T, V>, v: V) -> Self;   // also gte, lt, lte
 }
+// Untyped API (table names and JSON; used by the dashboard). Same engine, read sets and pagination as the typed
+// API: both build one ScanPlan (table, index, key range, order) run by a shared scan core.
+impl QueryDb {
+    pub fn query_table(&self, table: &str) -> RawQuery<'_>;                 // unknown tables/indexes fail when it runs
+    pub async fn get_raw(&self, id: &str) -> Result<Option<(Arc<TableInfo>, Value)>>;  // any table (from the id)
+    pub async fn count(&self, table: &str) -> Result<u64>;                  // read set: the whole table
+    pub fn catalog(&self) -> &Arc<Catalog>;
+}
+impl RawQuery<'_> {   // with_index(name, |r| r.eq("field", json).gte(..)), order, filter(Fn(&Value) -> bool),
+                      // collect, take, first, paginate(PaginationOpts) -> PaginationResult<Value>
+}
+impl MutationDb {     // validated with TableDef::validate (same rule and error message as the typed writes)
+    pub async fn insert_raw(&self, table: &str, fields: Value) -> Result<String>;   // returns the new id
+    pub async fn replace_raw(&self, id: &str, fields: Value) -> Result<()>;
+    pub async fn patch_raw(&self, id: &str, patch: Value) -> Result<()>;
+    pub async fn delete_raw(&self, id: &str) -> Result<()>;
+}
+// The catalog keeps each table's TableDef (`TableInfo::def`); a table that exists only in data.db (no longer
+// defined in code) has `def: None`: readable, but untyped writes are refused.
 impl ActionCtx {
     pub async fn run_query<F: QueryFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output>;
     pub async fn run_mutation<F: MutationFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output>;
@@ -340,7 +359,12 @@ thread that inserts in batches. When the channel is full, entries are dropped an
 function down.
 
 ```rust
-impl App { pub fn logs(&self) -> &Logs; }
+impl App {
+    pub fn logs(&self) -> &Logs;
+    pub fn dir(&self) -> &Path;               // the data directory
+    pub fn metrics(&self) -> &Metrics;        // .sockets(), .subscriptions(): open WebSockets and live subscriptions
+    pub fn started_at(&self) -> f64;          // ms since the epoch
+}
 
 #[derive(Clone)] pub struct Logs { /* … */ }
 impl Logs {
@@ -360,7 +384,10 @@ pub struct LogFilter {
     pub since: Option<i64>,               // ms since the epoch, inclusive
     pub limit: Option<usize>,             // default 100, max 1000
     pub before_id: Option<i64>,           // page backwards: pass the last id of the previous page
+    pub identity: Option<String>,         // "user:<id>" | "admin:<id>" | "anonymous"
+    pub exclude_system: bool,             // leave out `_system/…` functions (e.g. the dashboard's own queries)
 }
+impl LogFilter { pub fn matches(&self, entry: &LogEntry) -> bool; }   // same conditions, for the live tail
 
 #[derive(Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
@@ -424,7 +451,8 @@ appear in function args or the execution log.
 
 **System functions**: `_system/auth:me` (query: the signed-in `Doc<User>` or null) and `_system/auth:update_profile`
 (mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@ferrix/client` exports hand-written references
-as `systemApi.auth.me` / `systemApi.auth.updateProfile`.
+as `systemApi.auth.me` / `systemApi.auth.updateProfile`. The admin-only dashboard functions are listed in §4.1;
+`FerrixAuth.setupAdmin({ token, email, password })` completes the printed setup link.
 
 ---
 
@@ -594,3 +622,68 @@ ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping)
   them. Codegen leaves them out of the app's `api`. Who may call a public system function from a client (anyone, a
   signed-in user, or only an admin) is decided by the function itself (e.g. `ctx.auth.require_admin()`), not by the
   path.
+
+### 4.1 Dashboard system functions
+
+`crates/ferrix/src/dashboard` defines the admin dashboard's backend with the same macros. Every function starts with
+`ctx.auth.require_admin()`: anonymous callers get the user error `unauthenticated`, signed-in users `forbidden`. They
+are called over the normal sync protocol (or the HTTP function API), so every dashboard view is a live query.
+`@ferrix/dashboard` holds hand-written references (`packages/dashboard/src/lib/api.ts`).
+
+| Path `_system/dashboard:…` | Kind | Args → result |
+|---|---|---|
+| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
+| `documents` | query | `{ table, index?, filters?: [{ field, op: "eq"\|"gt"\|"gte"\|"lt"\|"lte", value }], order?: "asc"\|"desc", paginationOpts }` → `PaginationResult<object>`. Untyped `query_table(..).with_index(..).paginate(..)`: same cursors and read sets as typed queries, so pages update live (`usePaginatedQuery` works). Filters follow the `with_index` rules. Errors: `unknown_table`, `invalid_query`, `index_not_allowed`. |
+| `document` | query | `{ id }` → `{ table, document } \| null` (any table; the table number is in the id). `invalid_id`. |
+| `insert_document` | mutation | `{ table, document }` → new id. System fields in `document` are ignored. |
+| `patch_document` | mutation | `{ id, patch }` → `null`. Shallow merge, validated. |
+| `replace_document` | mutation | `{ id, document }` → `null`. System fields are ignored (`_id`, if given, must match). |
+| `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
+| `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
+| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` (`Identity::user(id, None)`; the user must exist). A failing function is a result with `success: false`, not an error. |
+| `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
+| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired }]` (no token hashes). |
+| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens. |
+| `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
+| `me` | query | `{}` → `{ _id, email }` of the signed-in admin. |
+
+Write errors (schema validation, unknown table, missing document) are user errors with codes `invalid_document` /
+`not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
+written: …``).
+
+**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` (case-insensitive: `passwordHash`,
+`refreshTokenHash`, `tokenHash`, `codeHash`) is replaced by `"••••"` in everything the dashboard returns, and indexes
+over such a field are `usable: false` and refused by `documents` (a range filter on them would let an admin
+binary-search a hash).
+
+**System tables are read-only** through the generic writes (`read_only_table`), with one exception: in `_users`,
+`name`, `image` and `emailVerified` can be changed through `patch_document` / `replace_document` (any other changed
+field: `read_only_field`; `image` must be an http(s) URL). Users and sessions are removed with `delete_user` and
+`revoke_session`, which keep the auth invariants (no orphaned credentials, accounts, or rotated-token rows).
+
+### 4.2 Admin HTTP endpoints
+
+The execution log and server stats live outside the reactive database, so they are plain HTTP. Every endpoint
+requires `Authorization: Bearer <access token>` with the `adm` claim: 401 `unauthenticated` without a token, 401
+`invalid_token` for an invalid, expired or revoked one, 403 `forbidden` for a user's token. Errors have the auth
+endpoints' shape; responses carry `Cache-Control: no-store`.
+
+| Endpoint | Response |
+|---|---|
+| `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
+| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
+| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, droppedLogEntries, files: [{ name, bytes }] } }`. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
+
+**Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
+server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the
+short-lived access token travels only in the `Authorization` header. The stream ends when that token expires (at most
+15 minutes); revoking the session stops new streams, while one already open runs until then.
+
+### 4.3 The embedded dashboard
+
+With the cargo feature `dashboard` (default), `GET /_/` and `/_/{*path}` serve the SPA from
+`crates/ferrix/dashboard-dist` (embedded with `rust-embed`): existing files as is (`assets/*` cached immutably),
+everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<id>` and `/_/setup#token=…`), with a
+restrictive Content-Security-Policy and `X-Frame-Options: DENY`. Without the feature, only a minimal `/_/setup` page
+is served; the system functions and `/api/admin/*` exist either way.
+

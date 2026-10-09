@@ -4,8 +4,8 @@ A single-binary reactive backend in Rust, deployed as one file.
 You write typed `#[query]` / `#[mutation]` / `#[action]` functions in Rust. Clients subscribe with `useQuery` over a
 WebSocket and get updated results automatically whenever a write affects them.
 
-Status: Phases 0–3 and auth (Phase 5) are mostly done (see [PLAN.md](PLAN.md) §10). The dashboard, the scheduler,
-files and search are not built yet.
+Status: Phases 0–5 (core, sync, clients, the admin dashboard and auth) are mostly done (see [PLAN.md](PLAN.md) §10).
+The scheduler, files and search are not built yet.
 
 ## Layout
 
@@ -16,6 +16,7 @@ files and search are not built yet.
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
 | `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery`, `useMutation`, `useAction`. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
+| `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
 | `docs/CONTRACT.md` | Rust API and the exact code each macro generates. |
 | `docs/PROTOCOL.md` | WebSocket and HTTP protocol. |
@@ -87,6 +88,29 @@ on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). W
 one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
 ("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
 
+## Dashboard
+
+Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an
+administrator with the `/_/setup#token=…` link that `serve` prints on first start, or with
+`todo-server admin create you@example.com`, then sign in.
+
+- **Data**: every table (system tables grouped below), with a live, paginated document grid, filters on index
+  fields, a side panel with a JSON editor (insert, edit, delete; validated against the table's Rust type), and
+  clickable ids that open the referenced document. Secrets (password and token hashes) are never shown, and system
+  tables are read-only except the `name`, `image` and `emailVerified` of users.
+- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user*, showing the
+  result, log lines and duration.
+- **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
+- **Users**: users, linked providers, sessions (revoke), delete.
+- **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
+
+It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every
+view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The built assets are committed, so
+`cargo build` needs no JS toolchain; after changing `packages/dashboard` (or the client packages it bundles), run
+`bun run build:dashboard` and commit `crates/ferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
+work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` proxied to :8090. Build without it with
+`default-features = false` on the `ferrix` dependency.
+
 ## Running the example
 
 Prerequisites: Rust via mise (`mise.toml`) and bun.
@@ -106,7 +130,12 @@ and `todo-server codegen --out <dir>` writes the TS API once.
 ```sh
 cargo test --workspace                                          # Rust: unit, proptests, model-based reactivity, WS e2e
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # generated TS type-checks with tsc
-bun run typecheck && bun run test                               # TS packages
+bun run typecheck && bun run test                               # TS packages (dashboard included)
+bun run check:dashboard                                         # the committed dashboard build matches its sources
+(cd packages/dashboard && bun e2e/dashboard.ts)                 # after `cargo build -p todo-server`; starts its own servers
 cd examples/todo/web && bun e2e/two-tabs.ts                     # needs the backend and Vite running
 bun e2e/reconnect.ts ../../../target/debug/todo-server <data dir>  # Vite running, backend NOT running
 ```
+
+`bun e2e/dashboard.ts [binary] [screenshot dir]` takes the todo-server binary (default `target/debug/todo-server`)
+and optionally saves screenshots of each page.

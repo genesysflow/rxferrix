@@ -192,7 +192,7 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, or `#ferrix_error=<code>&ferrix_error_description=…`. |
 | `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
 | `GET /api/auth/admin/setup` | | `{ needsSetup }` |
-| `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). |
+| `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
 
 Codes are 6 digits (5 wrong attempts burn a code); link tokens are 256-bit. Both are stored as keyed hashes and work
 once. Verification codes last 24 hours, reset codes 30 minutes, sign-in codes 15 minutes.
@@ -203,3 +203,11 @@ loopback URL is allowed too. A URL that doesn't match is refused (400 `invalid_r
 `redirectTo` the first allowlist entry is used. Email links point at the app with the token in the fragment:
 `<app url>#ferrix_verify_token=…`, `#ferrix_reset_token=…`, `#ferrix_magic_token=…`; the TS client's
 `handleRedirectCallback()` consumes them (and the OAuth fragment) and removes them from the address bar.
+
+## Admin endpoints
+
+`GET /api/admin/logs`, `GET /api/admin/logs/stream` (Server-Sent Events) and `GET /api/admin/stats` serve the
+dashboard's execution log and stats. They require `Authorization: Bearer <access token>` of an admin session (also
+for the event stream, which clients read with `fetch()` rather than `EventSource`, so tokens never go in URLs). The
+dashboard's data views use the admin-only system functions `_system/dashboard:*` over this protocol. Both are
+specified in docs/CONTRACT.md §4.1 and §4.2.

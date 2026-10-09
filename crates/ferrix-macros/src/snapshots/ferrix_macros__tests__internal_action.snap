@@ -50,6 +50,7 @@ static __FERRIX_FN_ia: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     module_path: ::core::module_path!(),
     name: "ia",
     visibility: ::ferrix::__private::Visibility::Internal,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Action(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_ia = ::ferrix::__private::decode_args(
             "ia",
@@ -60,6 +61,6 @@ static __FERRIX_FN_ia: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_ia>(),
-        ::ferrix::__private::ts_inline::<String>(),
+        ::ferrix::__private::ts_output::<String>(),
     ),
 };

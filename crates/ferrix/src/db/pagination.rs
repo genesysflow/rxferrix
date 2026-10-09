@@ -94,6 +94,57 @@ impl<T> PaginationResult<T> {
     pub fn map<U>(self, f: impl FnMut(T) -> U) -> PaginationResult<U> {
         PaginationResult { page: self.page.into_iter().map(f).collect(), is_done: self.is_done, continue_cursor: self.continue_cursor }
     }
+
+    /// Transforms the documents with an async function, one after the other, keeping the cursors:
+    /// `page.map_async(|m| async move { describe(ctx, m).await }).await`.
+    ///
+    /// The closure returns a future (`|x| async move { .. }`, or a call of an `async fn`). It takes
+    /// `FnMut(T) -> impl Future` rather than an `AsyncFnMut`: the futures of async closures that borrow their
+    /// captures are not provably `Send` today, and function handlers must be. A cache shared across the page can
+    /// live behind a `std::sync::Mutex` (locked between awaits, never across one) or be filled before the call.
+    pub async fn map_async<U, Fut>(self, f: impl FnMut(T) -> Fut) -> PaginationResult<U>
+    where
+        Fut: Future<Output = U>,
+    {
+        let mut page = Vec::with_capacity(self.page.len());
+        for fut in self.page.into_iter().map(f) {
+            page.push(fut.await);
+        }
+        PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor }
+    }
+
+    /// [`PaginationResult::map_async`] with a fallible function: stops at the first error, which it returns.
+    ///
+    /// ```ignore
+    /// let page = query.paginate(opts).await?;
+    /// page.try_map(|message| view(ctx, &names, message)).await
+    /// ```
+    pub async fn try_map<U, E, Fut>(self, f: impl FnMut(T) -> Fut) -> Result<PaginationResult<U>, E>
+    where
+        Fut: Future<Output = Result<U, E>>,
+    {
+        let mut page = Vec::with_capacity(self.page.len());
+        for fut in self.page.into_iter().map(f) {
+            page.push(fut.await?);
+        }
+        Ok(PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor })
+    }
+
+    /// [`PaginationResult::try_map`] running up to `concurrency` futures at a time (at least one); the page keeps
+    /// its order, and the first error (in page order) is returned. In a query or mutation the reads still go
+    /// through one connection; this pays off when the futures wait on something else (an action's HTTP calls).
+    pub async fn try_map_concurrent<U, E, Fut>(
+        self,
+        concurrency: usize,
+        f: impl Fn(T) -> Fut,
+    ) -> Result<PaginationResult<U>, E>
+    where
+        Fut: Future<Output = Result<U, E>>,
+    {
+        use futures::{StreamExt, TryStreamExt};
+        let page = futures::stream::iter(self.page.into_iter().map(f)).buffered(concurrency.max(1)).try_collect().await?;
+        Ok(PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

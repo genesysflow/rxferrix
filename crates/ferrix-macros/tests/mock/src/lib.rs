@@ -545,6 +545,7 @@ pub mod __private {
         pub module_path: &'static str,
         pub name: &'static str,
         pub visibility: Visibility,
+        pub dev_only: bool,
         pub handler: Handler,
         pub ts: fn() -> (String, String),
     }
@@ -573,6 +574,10 @@ pub mod __private {
 
     pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String {
         T::inline(&ts_rs::Config::default())
+    }
+
+    pub fn ts_output<T: ts_rs::TS + ?Sized + 'static>() -> String {
+        T::name(&ts_rs::Config::default())
     }
 
     #[diagnostic::on_unimplemented(

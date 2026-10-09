@@ -41,6 +41,8 @@ pub struct AuthConfig {
     pub(crate) redirect_urls: Vec<String>,
     pub(crate) smtp: Option<SmtpConfig>,
     pub(crate) mailer: Option<Arc<dyn Mailer>>,
+    /// Replaces the built-in [`super::DevLogMailer`] in `--dev` when no other mailer is configured.
+    pub(crate) dev_mailer: Option<Arc<dyn Mailer>>,
     pub(crate) rate_limits: Option<RateLimits>,
     pub(crate) trust_proxy: bool,
     /// External JWT issuers whose tokens are accepted (`super::jwt`).
@@ -76,6 +78,7 @@ impl Default for AuthConfig {
             redirect_urls: Vec::new(),
             smtp: None,
             mailer: None,
+            dev_mailer: None,
             rate_limits: Some(RateLimits::default()),
             trust_proxy: false,
             jwt: Vec::new(),
@@ -101,6 +104,7 @@ impl fmt::Debug for AuthConfig {
             .field("redirect_urls", &self.redirect_urls)
             .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
             .field("mailer", &self.mailer.as_ref().map(|_| "<custom>"))
+            .field("dev_mailer", &self.dev_mailer.as_ref().map(|_| "<custom>"))
             .field("rate_limits", &self.rate_limits)
             .field("trust_proxy", &self.trust_proxy)
             .field("jwt", &self.jwt)
@@ -212,6 +216,25 @@ impl AuthConfig {
     /// Send email through a custom [`Mailer`] (e.g. [`super::MemoryMailer`] in tests). Takes precedence over SMTP.
     pub fn mailer(mut self, mailer: Arc<dyn Mailer>) -> Self {
         self.mailer = Some(mailer);
+        self
+    }
+
+    /// The mailer used in `--dev` when no email is configured (no [`AuthConfig::mailer`], no SMTP in code, on the
+    /// command line or in the dashboard settings), in place of the built-in [`super::DevLogMailer`], which prints
+    /// every email to the log. Outside `--dev` it is never used. To keep the log lines, forward to
+    /// `DevLogMailer` from your mailer:
+    ///
+    /// ```ignore
+    /// impl Mailer for DevInbox {
+    ///     fn send(&self, email: Email) -> BoxFuture<'_, ferrix::Result<()>> {
+    ///         self.emails.lock().unwrap().push(email.clone());   // e.g. for an e2e test to read codes
+    ///         DevLogMailer.send(email)
+    ///     }
+    /// }
+    /// AuthConfig::password().dev_mailer(Arc::new(DevInbox::default()))
+    /// ```
+    pub fn dev_mailer(mut self, mailer: Arc<dyn Mailer>) -> Self {
+        self.dev_mailer = Some(mailer);
         self
     }
 

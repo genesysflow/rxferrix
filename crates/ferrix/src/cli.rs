@@ -495,8 +495,21 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     auth
 }
 
+/// Whether a public URL was given explicitly (`--public-url` / `FERRIX_PUBLIC_URL`, `AuthConfig::public_url`, or a
+/// TLS domain), before [`auth_config`] fills in the default `http://<--http address>`.
+fn explicit_public_url(args: &ServeArgs, auth: &AuthConfig) -> bool {
+    args.public_url.is_some() || auth.public_url.is_some() || args.ops.public_url().is_some()
+}
+
 /// The builder's storage config with `--storage` / `--max-upload-size` / `--storage-private` applied on top.
-fn storage_config(args: &ServeArgs, mut storage: StorageConfig) -> crate::Result<StorageConfig> {
+///
+/// In `--dev`, unless a public URL was set explicitly (`explicit_public_url`, or `StorageConfig::public_url`), file
+/// and upload URLs are root-relative (`/api/storage/<id>`), so an app served by a dev server that proxies `/api`
+/// (Vite) loads and uploads files through the proxy, same-origin, instead of from the backend's own address.
+fn storage_config(args: &ServeArgs, mut storage: StorageConfig, explicit_public_url: bool) -> crate::Result<StorageConfig> {
+    if args.dev && !explicit_public_url && storage.public_url.is_none() {
+        storage.public_url = Some(String::new());
+    }
     if let Some(location) = args.storage.as_deref().filter(|l| !l.trim().is_empty()) {
         storage.backend = StorageBackend::parse(location)?;
     }
@@ -529,8 +542,9 @@ fn serve(
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
+        let explicit = explicit_public_url(&args, &auth);
         let auth = auth_config(&args, auth);
-        let storage = storage_config(&args, storage)?;
+        let storage = storage_config(&args, storage, explicit)?;
         let public_url = auth.public_url.clone().unwrap_or_default();
         let mut options = AppOptions {
             dev: args.dev,
@@ -653,13 +667,14 @@ mod tests {
     fn storage_flags() {
         let cli = parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB", "--storage-private"]).unwrap();
         let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
-        let storage = storage_config(&args, StorageConfig::default()).unwrap();
+        let storage = storage_config(&args, StorageConfig::default(), false).unwrap();
         assert!(matches!(storage.backend, StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "some/prefix"));
         assert_eq!(storage.max_upload_size, 2 << 30);
         assert!(storage.private);
+        assert_eq!(storage.public_url, None, "not in --dev: the public URL (default: the --http address) applies");
         // Without flags the builder's config stands.
         let cli = parse(&[]).unwrap();
-        let storage = storage_config(&cli.serve, StorageConfig::local("/srv/files").max_upload_size(5)).unwrap();
+        let storage = storage_config(&cli.serve, StorageConfig::local("/srv/files").max_upload_size(5), false).unwrap();
         assert!(matches!(storage.backend, StorageBackend::Local(Some(_))) && storage.max_upload_size == 5);
         assert_eq!(parse_size("100MB").unwrap(), 100 << 20);
         assert_eq!(parse_size("512kb").unwrap(), 512 << 10);
@@ -667,7 +682,31 @@ mod tests {
         assert_eq!(parse_size("1234").unwrap(), 1234);
         assert!(parse_size("5TB").is_err() && parse_size("big").is_err());
         let cli = parse(&["--storage", "gs://x"]).unwrap();
-        assert!(storage_config(&cli.serve, StorageConfig::default()).is_err());
+        assert!(storage_config(&cli.serve, StorageConfig::default(), false).is_err());
+    }
+
+    #[test]
+    fn dev_storage_urls_are_root_relative_unless_a_public_url_is_set() {
+        let serve_args = |args: &[&str]| match parse(args).unwrap().command {
+            Some(Command::Serve(a)) => a,
+            _ => panic!("expected serve"),
+        };
+        let storage = |args: &ServeArgs, auth: &AuthConfig, storage: StorageConfig| {
+            storage_config(args, storage, explicit_public_url(args, auth)).unwrap().public_url
+        };
+        // --dev alone: root-relative (an empty base URL).
+        let dev = serve_args(&["serve", "--dev", "--http", "127.0.0.1:8097"]);
+        assert_eq!(storage(&dev, &AuthConfig::default(), StorageConfig::default()).as_deref(), Some(""));
+        // An explicit public URL (flag, builder, storage config) wins.
+        let flag = serve_args(&["serve", "--dev", "--public-url", "http://localhost:5180"]);
+        assert_eq!(storage(&flag, &AuthConfig::default(), StorageConfig::default()), None);
+        let builder = AuthConfig::default().public_url("https://app.test");
+        assert_eq!(storage(&dev, &builder, StorageConfig::default()), None);
+        let own = StorageConfig::default().public_url("https://cdn.test");
+        assert_eq!(storage(&dev, &AuthConfig::default(), own).as_deref(), Some("https://cdn.test"));
+        // Not --dev: unchanged (absolute URLs from the default public URL).
+        let prod = serve_args(&["serve", "--http", "127.0.0.1:8097"]);
+        assert_eq!(storage(&prod, &AuthConfig::default(), StorageConfig::default()), None);
     }
 
     #[test]

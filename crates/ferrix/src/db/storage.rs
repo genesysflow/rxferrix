@@ -147,6 +147,20 @@ pub fn count_documents(conn: &Connection, table_number: u32) -> anyhow::Result<u
     Ok(n as u64)
 }
 
+/// The number of entries of one index in `range` (a range count over the `index_entries` primary key; documents
+/// are not read).
+pub fn count_index_range(conn: &Connection, index_id: IndexId, range: &KeyRange) -> anyhow::Result<u64> {
+    let n: i64 = match &range.end {
+        Some(end) => conn
+            .prepare_cached("SELECT COUNT(*) FROM index_entries WHERE index_id = ?1 AND key >= ?2 AND key < ?3")?
+            .query_row(params![index_id, range.start, end], |r| r.get(0))?,
+        None => conn
+            .prepare_cached("SELECT COUNT(*) FROM index_entries WHERE index_id = ?1 AND key >= ?2")?
+            .query_row(params![index_id, range.start], |r| r.get(0))?,
+    };
+    Ok(n as u64)
+}
+
 /// One batch of an index scan: up to `limit` `(key, json)` rows of `range` in `order`, continuing strictly after
 /// (Asc) or before (Desc) `cursor` if given.
 pub fn scan_index_batch(

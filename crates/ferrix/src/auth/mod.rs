@@ -19,7 +19,7 @@ pub mod http;
 pub mod identity;
 pub mod jwt;
 pub mod oauth;
-mod password;
+pub(crate) mod password;
 pub mod rate_limit;
 pub mod revocation;
 pub(crate) mod secretbox;
@@ -30,7 +30,7 @@ pub mod tokens;
 
 
 pub use config::{AuthConfig, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
-pub use email::{Email, Mailer, MemoryMailer};
+pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
 pub use identity::{Auth, FORBIDDEN, Identity, UNAUTHENTICATED};
 pub use jwt::{JwtAlgorithm, JwtProvider};
 pub use revocation::{Revocations, SessionWatch};

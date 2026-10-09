@@ -1,0 +1,23 @@
+error: #[object] already derives `Serialize`; remove it from this #[derive]
+ --> tests/ui/object_misuse.rs:6:10
+  |
+6 | #[derive(serde::Serialize, Clone, PartialEq)]
+  |          ^^^^^^^^^^^^^^^^
+
+error: #[object] sets `#[ts(crate = ...)]` itself; remove this
+  --> tests/ui/object_misuse.rs:10:6
+   |
+10 | #[ts(crate = "ts_rs")]
+   |      ^^^^^^^^^^^^^^^
+
+error: #[object] does not take arguments
+  --> tests/ui/object_misuse.rs:13:10
+   |
+13 | #[object(camel)]
+   |          ^^^^^
+
+error: #[object] can only be used on a struct or an enum
+  --> tests/ui/object_misuse.rs:17:1
+   |
+17 | pub fn not_a_type() {}
+   | ^^^^^^^^^^^^^^^^^^^^^^

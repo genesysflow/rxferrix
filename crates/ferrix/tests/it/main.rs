@@ -11,6 +11,7 @@ mod catalog;
 mod codegen;
 mod contract;
 mod dashboard;
+mod dx;
 mod hardening;
 mod index_order;
 mod jwt;

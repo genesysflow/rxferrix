@@ -59,10 +59,13 @@ impl Mailer for SmtpMailer {
     }
 }
 
-/// `--dev` without SMTP: prints every email, links and codes included, to the log.
-pub struct LogMailer;
+/// The mailer of `--dev` without SMTP: prints every email, links and codes included, to the log. Replace it with
+/// [`super::AuthConfig::dev_mailer`]; a custom mailer can forward to it (`DevLogMailer.send(email)`) to keep the
+/// log lines.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DevLogMailer;
 
-impl Mailer for LogMailer {
+impl Mailer for DevLogMailer {
     fn send(&self, email: Email) -> BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
             tracing::info!(

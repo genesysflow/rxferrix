@@ -142,11 +142,25 @@ pub fn expand_function(
 ) -> syn::Result<TokenStream> {
     let macro_name = kind.macro_name(internal);
     let mut errors = Errors::default();
-    if !attr.is_empty() {
-        errors.error(
-            &attr,
-            format_args!("#[{macro_name}] does not take arguments"),
-        );
+    let mut dev_only = false;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("dev_only") {
+            if dev_only {
+                return Err(meta.error("duplicate `dev_only`"));
+            }
+            if !meta.input.is_empty() && !meta.input.peek(syn::Token![,]) {
+                return Err(meta.error(format_args!("`dev_only` takes no value: write `#[{macro_name}(dev_only)]`")));
+            }
+            dev_only = true;
+            Ok(())
+        } else {
+            Err(meta.error(format_args!(
+                "unknown #[{macro_name}] argument; the only one is `dev_only` (refused unless the server runs with --dev)"
+            )))
+        }
+    });
+    if let Err(e) = syn::parse::Parser::parse2(parser, attr) {
+        errors.push(e);
     }
     let mut func: syn::ItemFn = match syn::parse2(item) {
         Ok(f) => f,
@@ -411,10 +425,11 @@ pub fn expand_function(
             module_path: ::core::module_path!(),
             name: #name_str,
             visibility: ::ferrix::__private::Visibility::#visibility,
+            dev_only: #dev_only,
             handler: #handler,
             ts: || (
                 ::ferrix::__private::ts_inline::<#args_ident>(),
-                ::ferrix::__private::ts_inline::<#output>(),
+                ::ferrix::__private::ts_output::<#output>(),
             ),
         };
     })

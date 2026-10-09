@@ -307,4 +307,10 @@ impl<T: Table> ts_rs::TS for Doc<T> {
     fn inline(cfg: &ts_rs::Config) -> String {
         Self::name(cfg)
     }
+
+    /// `#[serde(flatten)] doc: Doc<T>` in an `#[object]` struct: the struct's TS type is `{ ...its fields } &
+    /// Doc<"table">`.
+    fn inline_flattened(cfg: &ts_rs::Config) -> String {
+        Self::name(cfg)
+    }
 }

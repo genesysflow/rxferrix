@@ -533,6 +533,14 @@ async fn scan<D: Send>(
     result.map(|()| out)
 }
 
+/// Count the index entries of `plan`'s range, recording the whole range as read.
+async fn count_range(plan: ScanPlan<'_>) -> crate::Result<u64> {
+    let ScanPlan { db, index, range, .. } = plan;
+    let result = db.with_conn(|c| storage::count_index_range(c, index.id, &range));
+    db.record(index.id, range);
+    result
+}
+
 /// A query's document predicate (`D` = `Doc<T>` or JSON).
 type Filter<'a, D> = Box<dyn Fn(&D) -> bool + Send + Sync + 'a>;
 
@@ -585,6 +593,25 @@ impl<'a, T: Table> Query<'a, T> {
 
     pub async fn first(self) -> crate::Result<Option<Doc<T>>> {
         Ok(self.run(Some(1)).await?.into_iter().next())
+    }
+
+    /// The number of matching documents. Without a `filter`, it counts index entries in the range (documents are
+    /// not read, so it stays cheap on large ranges); with one, it scans and counts the matches. Either way the
+    /// whole range is recorded in the read set: any insert, delete or change of an indexed value inside it reruns
+    /// the query.
+    ///
+    /// ```ignore
+    /// let unread = ctx.db.query::<Message>()
+    ///     .with_index(Message::by_channel, |q| q.eq(Message::channel, c).gt(Message::_creation_time, last_read))
+    ///     .count()
+    ///     .await?;
+    /// ```
+    pub async fn count(self) -> crate::Result<u64> {
+        let plan = self.plan()?;
+        match self.filter {
+            Some(filter) => Ok(scan(plan, None, |_, json| parse_doc::<T>(json), Some(&*filter)).await?.len() as u64),
+            None => count_range(plan).await,
+        }
     }
 
     /// The only matching document, if any. Errors if more than one matches.
@@ -664,6 +691,15 @@ impl<'a> RawQuery<'a> {
 
     pub async fn first(self) -> crate::Result<Option<Value>> {
         Ok(self.run(Some(1)).await?.into_iter().next())
+    }
+
+    /// The number of matching documents; see [`Query::count`].
+    pub async fn count(self) -> crate::Result<u64> {
+        let plan = ScanPlan::new(self.db, &self.table, &self.index, &self.range, self.order)?;
+        match self.filter {
+            Some(filter) => Ok(scan(plan, None, parse_value, Some(&*filter)).await?.len() as u64),
+            None => count_range(plan).await,
+        }
     }
 
     /// One page of results; see [`Query::paginate`].

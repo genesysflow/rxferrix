@@ -75,13 +75,14 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
     module_path: module_path!(),
     name: "list",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Query(|ctx, args| ::std::boxed::Box::pin(async move {
         let a: __ferrix_args_list = ::ferrix::__private::decode_args("list", args)?;
         let out = list(&ctx, a.done).await?;
         ::ferrix::__private::encode_output(out)
     })),
     ts: || (::ferrix::__private::ts_inline::<__ferrix_args_list>(),
-            ::ferrix::__private::ts_inline::<Vec<Doc<Todo>>>()),
+            ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
 };
 
 // ---- #[mutation] add ----
@@ -120,12 +121,13 @@ static __FERRIX_FN_add: ::ferrix::__private::FunctionDef = ::ferrix::__private::
     module_path: module_path!(),
     name: "add",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Mutation(|ctx, args| ::std::boxed::Box::pin(async move {
         let a: __ferrix_args_add = ::ferrix::__private::decode_args("add", args)?;
         let out = add(&ctx, a.text).await?;
         ::ferrix::__private::encode_output(out)
     })),
-    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add>(), ::ferrix::__private::ts_inline::<Id<Todo>>()),
+    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add>(), ::ferrix::__private::ts_output::<Id<Todo>>()),
 };
 
 // ---- #[action] add_many ----
@@ -164,12 +166,13 @@ static __FERRIX_FN_add_many: ::ferrix::__private::FunctionDef = ::ferrix::__priv
     module_path: module_path!(),
     name: "add_many",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Action(|ctx, args| ::std::boxed::Box::pin(async move {
         let a: __ferrix_args_add_many = ::ferrix::__private::decode_args("add_many", args)?;
         let out = add_many(&ctx, a.n).await?;
         ::ferrix::__private::encode_output(out)
     })),
-    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add_many>(), ::ferrix::__private::ts_inline::<()>()),
+    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add_many>(), ::ferrix::__private::ts_output::<()>()),
 };
 
 // ---- More functions, via the macro_rules stand-in ----

@@ -6,7 +6,9 @@
 //! - the HS256 key that signs access tokens;
 //! - the key of the keyed hash ("pepper") applied to refresh tokens, link tokens and numeric codes before they are
 //!   stored, so a leaked database alone does not allow brute-forcing 6-digit codes or matching tokens;
-//! - the HMAC key that signs file upload URLs (`crate::storage`).
+//! - the HMAC key that signs file upload URLs (`crate::storage`);
+//! - the XChaCha20-Poly1305 key that encrypts secrets stored in `_settings` (OAuth client secrets, the SMTP password;
+//!   see `super::secretbox`).
 //!
 //! Deleting the file signs everyone out: every access token and every stored token hash becomes invalid.
 //!
@@ -35,6 +37,7 @@ pub struct Keys {
     jwt: [u8; 32],
     hash: [u8; 32],
     storage: [u8; 32],
+    settings: [u8; 32],
 }
 
 impl Keys {
@@ -69,12 +72,18 @@ impl Keys {
             jwt: blake3::derive_key("ferrix auth v1 access token HS256 key", secret),
             hash: blake3::derive_key("ferrix auth v1 stored token hash key", secret),
             storage: blake3::derive_key("ferrix storage v1 upload url HMAC key", secret),
+            settings: blake3::derive_key("ferrix settings v1 XChaCha20-Poly1305 secret encryption key", secret),
         }
     }
 
     /// The HMAC-SHA256 key that signs file upload URLs (`crate::storage`).
     pub(crate) fn storage_key(&self) -> &[u8; 32] {
         &self.storage
+    }
+
+    /// Encrypts and decrypts secrets stored in `_settings`.
+    pub(crate) fn secret_box(&self) -> super::secretbox::SecretBox {
+        super::secretbox::SecretBox::new(self.settings)
     }
 
     /// The keyed hash under which a token or code is stored (hex).
@@ -126,6 +135,15 @@ impl Keys {
     }
 }
 
+/// The `alg` of a JWT's header, without verifying anything (to route a token to ferrix's own verifier or to an
+/// external issuer's).
+pub fn header_alg(token: &str) -> Option<String> {
+    let header = token.split('.').next()?;
+    let json = BASE64URL_NOPAD.decode(header.as_bytes()).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&json).ok()?;
+    v.get("alg")?.as_str().map(str::to_string)
+}
+
 /// Claims of an access token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessClaims {
@@ -155,6 +173,14 @@ pub enum TokenError {
     Expired,
     /// Signed and unexpired, but its session has ended (signed out, revoked or expired).
     SessionEnded,
+    /// An external token (not HS256) whose `iss` is not a configured JWT provider (`super::jwt`).
+    UnknownIssuer,
+    /// An external token whose `kid` (or key type) matches no key of the issuer's JWKS, even after a refetch.
+    UnknownKey,
+    /// An external token with a wrong audience, or no `exp` or user id.
+    InvalidClaims,
+    /// An external token whose `nbf` is still in the future.
+    NotYetValid,
 }
 
 impl std::fmt::Display for TokenError {
@@ -164,6 +190,10 @@ impl std::fmt::Display for TokenError {
             TokenError::BadSignature => "invalid access token signature",
             TokenError::Expired => "access token expired",
             TokenError::SessionEnded => "session has ended",
+            TokenError::UnknownIssuer => "unknown token issuer",
+            TokenError::UnknownKey => "unknown token signing key",
+            TokenError::InvalidClaims => "invalid access token claims",
+            TokenError::NotYetValid => "access token not yet valid",
         })
     }
 }

@@ -4,7 +4,8 @@
 //! - `GET /api/admin/logs?<LogFilter>`: history, newest first. `{ "entries": [LogEntry] }`.
 //! - `GET /api/admin/logs/stream?<LogFilter>`: live tail as Server-Sent Events (`event: ready`, then one
 //!   `event: log` per entry with the `LogEntry` as JSON, `event: lagged` with the number of skipped entries when the
-//!   client fell behind, and `event: expired` right before the stream ends at the access token's expiry).
+//!   client fell behind, `event: expired` right before the stream ends at the access token's expiry, and
+//!   `event: revoked` when it ends because the admin's session ended: signed out or revoked).
 //! - `GET /api/admin/stats?since=<ms>`: per-function stats since `since` (default: the last 24 hours) and an overview.
 //!
 //! **Authentication**: every endpoint requires `Authorization: Bearer <access token>` whose `adm` claim is set
@@ -30,7 +31,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::auth::{AuthFailure, Authenticated};
+use crate::auth::{AuthFailure, Authenticated, SessionWatch};
 use crate::exec_log::LogFilter;
 use crate::runtime::App;
 
@@ -40,6 +41,7 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/logs", get(logs))
         .route("/api/admin/logs/stream", get(logs_stream))
         .route("/api/admin/stats", get(stats))
+        .route("/api/admin/impersonate", axum::routing::post(super::impersonate::impersonate))
 }
 
 fn no_store() -> [(header::HeaderName, &'static str); 1] {
@@ -48,14 +50,28 @@ fn no_store() -> [(header::HeaderName, &'static str); 1] {
 
 /// The caller's admin session, or the failure (401 without or with a bad token, 403 for a user token).
 pub async fn require_admin(app: &App, headers: &HeaderMap) -> Result<Authenticated, Box<AuthFailure>> {
+    require_admin_watched(app, headers, false).await.map(|(a, _)| a)
+}
+
+/// [`require_admin`], plus (with `watch`) a watch on the admin's session for streams that must end when it does.
+pub(crate) async fn require_admin_watched(
+    app: &App,
+    headers: &HeaderMap,
+    watch: bool,
+) -> Result<(Authenticated, Option<SessionWatch>), Box<AuthFailure>> {
     let Some(token) = crate::auth::http::bearer_token(headers) else {
         return Err(Box::new(AuthFailure::new(401, crate::auth::UNAUTHENTICATED, "An administrator access token is required")));
     };
-    let auth = app.auth().authenticate(app, token).await.map_err(|e| Box::new(crate::auth::http::token_failure(e)))?;
+    let failure = |e| Box::new(crate::auth::http::token_failure(e));
+    let (auth, session) = if watch {
+        app.auth().authenticate_watched(app, token).await.map_err(failure)?
+    } else {
+        (app.auth().authenticate(app, token).await.map_err(failure)?, None)
+    };
     if auth.identity.admin_id.is_none() {
         return Err(Box::new(AuthFailure::new(403, crate::auth::FORBIDDEN, "Only administrators may do this")));
     }
-    Ok(auth)
+    Ok((auth, session))
 }
 
 fn bad_query(e: impl std::fmt::Display) -> Response {
@@ -88,7 +104,7 @@ async fn logs_stream(
     headers: HeaderMap,
     filter: Result<Query<LogFilter>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let auth = match require_admin(&app, &headers).await {
+    let (auth, session) = match require_admin_watched(&app, &headers, true).await {
         Ok(a) => a,
         Err(failure) => return failure.into_response(),
     };
@@ -102,18 +118,25 @@ async fn logs_stream(
         rx: tokio::sync::broadcast::Receiver<crate::LogEntry>,
         filter: LogFilter,
         expires: tokio::time::Instant,
+        /// Ends the stream (`event: revoked`) as soon as the admin's session ends.
+        session: Option<SessionWatch>,
         done: bool,
     }
-    let tail = Tail { rx: app.logs().subscribe(), filter, expires, done: false };
+    let tail = Tail { rx: app.logs().subscribe(), filter, expires, session, done: false };
     let entries = futures::stream::unfold(tail, |mut t| async move {
         loop {
             if t.done {
                 return None;
             }
+            let revoked = t.session.as_ref().map(|s| s.ended());
             let event = tokio::select! {
                 _ = tokio::time::sleep_until(t.expires) => {
                     t.done = true;
                     Event::default().event("expired").data("access token expired")
+                }
+                _ = async { match revoked { Some(r) => r.await, None => std::future::pending().await } } => {
+                    t.done = true;
+                    Event::default().event("revoked").data(crate::auth::revocation::SESSION_ENDED)
                 }
                 received = t.rx.recv() => match received {
                     Ok(entry) if t.filter.matches(&entry) => match Event::default().event("log").json_data(&entry) {

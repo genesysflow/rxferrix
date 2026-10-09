@@ -190,6 +190,24 @@ describe("FerrixAuth", () => {
     expect(auth.state()).toEqual({ isLoading: false, isAuthenticated: false, userId: null, isAdmin: false });
   });
 
+  it("drops to signed out when the server revokes the session of a live socket", async () => {
+    storage.setItem(KEY, stored("a", Date.now() + 600_000));
+    const { fetch, calls } = mockFetch({ "/api/auth/refresh": () => authError(401, "invalid_refresh_token") });
+    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+    server.transition({ identity: 1, ts: 1 });
+    expect(auth.state().isAuthenticated).toBe(true);
+    // Signed out elsewhere, or revoked from the dashboard: the server ends the socket right away.
+    server.push({ type: "AuthError", error: "session has ended" });
+    await settle();
+    expect(calls.map((c) => c.path)).toEqual(["/api/auth/refresh"]);
+    expect(auth.state()).toEqual({ isLoading: false, isAuthenticated: false, userId: null, isAdmin: false });
+    expect(storage.getItem(KEY)).toBeNull();
+    vi.advanceTimersByTime(20_000);
+    const sent = await openAndDrain();
+    expect(sent.map((m) => m.type)).toEqual(["Connect"]);
+  });
+
   it("adopts tokens another tab rotated when its own refresh is stale", async () => {
     storage.setItem(KEY, stored("a", Date.now() - 1000));
     const other = stored("other-tab", Date.now() + 600_000);

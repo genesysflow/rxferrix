@@ -11,7 +11,8 @@
 //! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
 //! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`), the job runner, crons and `_scheduled_jobs`.
 //! - [`migrations`]: `#[migration]` data migrations in batches, `_migrations`, and the schema check's lenient mode.
-//! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
+//! - [`auth`]: users, sessions, access tokens, email codes, OAuth, external JWTs, admins, and `ctx.auth`; live
+//!   revocation. [`settings`]: runtime settings (`_settings`). [`audit`]: the admin audit log (`_audit_log`).
 //! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).
 //! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
@@ -20,6 +21,7 @@
 // The macros emit `::ferrix::...` paths; this lets ferrix define its own system tables and functions with them.
 extern crate self as ferrix;
 
+pub mod audit;
 pub mod auth;
 pub mod bytes;
 pub mod cli;
@@ -36,6 +38,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod schema;
 pub mod server;
+pub mod settings;
 pub mod storage;
 pub mod sync;
 pub mod testing;

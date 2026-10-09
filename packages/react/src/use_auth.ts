@@ -34,6 +34,7 @@ export type AuthActions = Pick<
   | "requestEmailVerification"
   | "verifyEmail"
   | "getAccessToken"
+  | "providers"
 >;
 
 export function useAuthActions(): AuthActions {
@@ -55,6 +56,7 @@ export function useAuthActions(): AuthActions {
       requestEmailVerification: auth.requestEmailVerification.bind(auth),
       verifyEmail: auth.verifyEmail.bind(auth),
       getAccessToken: auth.getAccessToken.bind(auth),
+      providers: auth.providers.bind(auth),
     }),
     [auth],
   );

@@ -2,7 +2,9 @@ export { FerrixProvider, useFerrix, type FerrixProviderProps } from "./context.j
 export { useQuery, useQueryWithStatus, type UseQueryResult } from "./use_query.js";
 export {
   usePaginatedQuery,
+  usePaginatedQueryWithStatus,
   type UsePaginatedQueryResult,
+  type UsePaginatedQueryWithStatusResult,
   type UsePaginatedQueryOptions,
 } from "./use_paginated_query.js";
 export {
@@ -22,6 +24,9 @@ export {
   MemoryAuthStorage,
   type AuthState,
   type AuthStorage,
+  type AuthTokens,
+  type AuthProviders,
+  type CodeProof,
   type FerrixAuthOptions,
   type RedirectResult,
   type User,

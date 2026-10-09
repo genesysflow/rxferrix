@@ -9,7 +9,13 @@ import {
   type PaginationResult,
 } from "@ferrix/client";
 import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
-import { FerrixProvider, usePaginatedQuery, type UsePaginatedQueryResult } from "../src/index.js";
+import {
+  FerrixProvider,
+  usePaginatedQuery,
+  usePaginatedQueryWithStatus,
+  type UsePaginatedQueryResult,
+  type UsePaginatedQueryWithStatusResult,
+} from "../src/index.js";
 
 type Message = { _id: Id<"messages">; body: string };
 const api = {
@@ -188,10 +194,50 @@ describe("usePaginatedQuery", () => {
     expect(screen.getByText("caught nope")).toBeTruthy();
   });
 
+  it("returns a failed page as `error` with usePaginatedQueryWithStatus, keeping the loaded pages", async () => {
+    function Status() {
+      const { results, status, isLoading, error, loadMore } = usePaginatedQueryWithStatus(
+        api.messages.list,
+        { channel: "a" },
+        { initialNumItems: 2 },
+      );
+      return (
+        <div>
+          <p data-testid="status">
+            {status} {String(isLoading)} {error ? `error: ${error.message}` : "ok"} [{results.map((m) => m.body).join(",")}]
+          </p>
+          <button onClick={() => loadMore(2)}>more</button>
+        </div>
+      );
+    }
+    render(
+      <FerrixProvider client={client}>
+        <Status />
+      </FerrixProvider>,
+    );
+    await settle();
+    expect(screen.getByTestId("status").textContent).toBe("LoadingFirstPage true ok []");
+    act(() => server.transition({ querySet: 1, ts: 1 }, [update(0, page(["m1", "m2"], "c1"))]));
+    expect(screen.getByTestId("status").textContent).toBe("CanLoadMore false ok [m1,m2]");
+    fireEvent.click(screen.getByText("more"));
+    await settle();
+    sentModifications();
+    // The second page fails: no throw, the first page stays.
+    act(() =>
+      server.transition({ querySet: 2, ts: 2 }, [
+        { type: "QueryFailed", queryId: 2, errorMessage: "not_a_member", errorData: null, logLines: [] },
+      ]),
+    );
+    const shown = screen.getByTestId("status").textContent!;
+    expect(shown).toBe("LoadingMore false error: not_a_member [m1,m2]");
+  });
+
   it("infers the item type and requires the args without paginationOpts", () => {
     const _check = () => {
       const r = usePaginatedQuery(api.messages.list, { channel: "x" }, { initialNumItems: 1 });
       expectTypeOf(r).toEqualTypeOf<UsePaginatedQueryResult<Message>>();
+      const s = usePaginatedQueryWithStatus(api.messages.list, { channel: "x" }, { initialNumItems: 1 });
+      expectTypeOf(s).toEqualTypeOf<UsePaginatedQueryWithStatusResult<Message>>();
       usePaginatedQuery(api.messages.list, "skip", { initialNumItems: 1 });
       // @ts-expect-error missing `channel`
       usePaginatedQuery(api.messages.list, {}, { initialNumItems: 1 });

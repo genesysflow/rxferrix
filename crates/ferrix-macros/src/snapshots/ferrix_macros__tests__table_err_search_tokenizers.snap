@@ -1,0 +1,14 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!\n{\n    #[search_index(s1, search = text, tokenizer = \"snowball\")]\n    #[search_index(s2, search = text, language = \"english\")]\n    #[search_index(s3, search = text, tokenizer = \"porter\", language =\n    \"french\")] #[search_index(s4, search = text, diacritics = \"strip\")]\n    #[search_index(s5, search = text, tokenizer = \"trigram\", tokenizer =\n    \"porter\", language = \"english\")]\n    #[search_index(s6, search = text, tokenizer = porter)]\n    #[search_index(s7, search = text, kind = \"hnsw\")]\n    #[vector_index(v1, field = emb, dims = 2, kind = \"ivf\")]\n    #[vector_index(v2, field = emb, dims = 2, tokenizer = \"porter\")]\n    #[vector_index(v3, field = emb, dims = 2, kind = \"hnsw\", kind = \"exact\")]\n    struct T { text: String, emb: Vec<f32> }\n})"
+---
+unknown tokenizer "snowball"; expected one of "unicode61", "porter", "trigram"
+`language` only applies to `tokenizer = "porter"` (stemming)
+unsupported language "french"; the porter stemmer supports "english"
+unknown diacritics "strip"; expected one of "remove", "keep"
+duplicate `tokenizer` argument
+expected string literal
+unknown #[search_index] argument `kind`; expected `search`, `filter`, `tokenizer`, `language` or `diacritics`
+unknown kind "ivf"; expected one of "exact", "hnsw"
+unknown #[vector_index] argument `tokenizer`; expected `field`, `dims`, `filter` or `kind`
+duplicate `kind` argument

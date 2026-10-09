@@ -23,6 +23,7 @@ mod revocation;
 mod storage;
 mod scheduler;
 mod search;
+mod search_pages;
 mod settings;
 mod shared;
 mod websocket;

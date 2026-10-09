@@ -439,12 +439,17 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - `#[search_index(name, search = field, filter = [f1, f2])]` creates an FTS5 table per search index, with filter fields stored as `UNINDEXED` columns.
 - The index is maintained **inside the mutation transaction**, so search results are always consistent with document reads. This is the main advantage over tantivy, which would need a separate index kept in sync.
 - Query API: `.with_search_index(Message::search_body, |q| q.search(Message::body, "hello wor").eq(Message::channel, c)).take(10)`, ordered by bm25 relevance. The last term gets prefix matching for search-as-you-type.
-- Reactivity is coarse (see §4.5), which is good enough.
+- Reactivity is per filter value: a search with `.eq(channel, c)` only reruns after writes to documents whose channel
+  is or was `c` (docs/CONTRACT.md §1.8). Relevance is a per-document BM25 so that this, and pagination, are exact.
+- `tokenizer = "unicode61" | "porter" | "trigram"` (stemming, substring search), `diacritics = "keep"`.
+- `.paginate(opts)` like index pagination.
 
 ### 7.5 Vector search (`sqlite-vec`)
 - `#[vector_index(name, field = embedding, dims = 1536, filter = [f])]` on a `Vec<f32>` field.
 - `ctx.vector_search(Table::index, query_vec, { limit, filter })` is available **in actions only**. Embeddings come from external APIs, which only actions can call, so this keeps queries deterministic and cheap.
-- Brute-force or `vec0` virtual tables handle roughly 100k to 1M vectors on a small VPS. If that ever runs out, the fallback is an HNSW crate.
+- Brute-force or `vec0` virtual tables handle roughly 100k vectors comfortably (75–120 ms per query at 200k × 384).
+  Beyond that, `kind = "hnsw"` adds an in-memory HNSW graph kept consistent with the committed `vec0` table (done in
+  Phase 8; ~0.4 ms per query at 200k × 384).
 
 ---
 
@@ -600,7 +605,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Later: signed, expiring URLs for private files; image thumbnails; multiple-range responses; running the orphan
   sweep as a built-in cron once the scheduler exists.
 
-### Phase 8 — Search (M) — mostly done
+### Phase 8 — Search (M) — done
 - [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`
   with span-accurate errors, typed `SearchIndex<T>` / `VectorIndex<T>` handles, `TableDef::{search_indexes,
   vector_indexes}` (docs/CONTRACT.md §1.8, §3.1).
@@ -615,8 +620,24 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   with `sqlite3_auto_extension`); `ActionCtx::vector_search` (actions only), dimension-checked, OR/AND equality
   filters, exact results (checked against brute force). ~18 ms per k=10 query over 50k × 384.
 - [x] Dashboard schema view lists search and vector indexes; the todo example has a live search box.
-- [ ] Not yet: search pagination, a dashboard search box, per-filter-value read sets (finer invalidation), an
-  approximate (HNSW) index for millions of vectors, configurable tokenizers.
+- [x] Search pagination: `SearchQuery::paginate` (and untyped `RawSearchQuery::paginate`) with the same
+  `PaginationOpts`/`PaginationResult` and pinned-`endCursor` behaviour as index pagination, so `usePaginatedQuery`
+  works. Relevance is a per-document BM25 (no corpus statistics), so `(score, rowid)` is a stable ordering key:
+  cursors are positions in it (fingerprinted by index, terms and filters), pinned pages partition the matches at
+  every snapshot, and only written documents move across changes (docs/CONTRACT.md §1.8 "Pagination").
+- [x] Per-filter-value read sets: synthetic keys `[filter column][encoded value][doc id]`; a search with `eq`
+  reads only its value's prefix (old and new values are written), unfiltered searches the full range. Randomized
+  soundness test (no missed change) plus a pinned-pages partition test.
+- [x] Configurable tokenizers: `tokenizer = "unicode61" | "porter" | "trigram"`, `language = "english"` (porter),
+  `diacritics = "remove" | "keep"`; validated by the macro (trybuild) and at startup; changing one rebuilds the index.
+- [x] Approximate vector indexes: `kind = "hnsw"`, an in-house HNSW graph (no crate fit: deletes, a validated
+  persisted form, concurrent search + insert) on top of the `vec0` table: updated after commit from the write log,
+  tombstones plus background rebuilds, post-filtering with oversampling (exact below 4096 matches), persisted next to
+  `data.db` for ≥ 10k vectors and validated against the table at startup. Recall@10 ≥ 0.9 asserted against exact
+  search; 200k × 384: built in 9–25 s on 16 threads, ~0.4 ms per query at recall ≈ 0.95 (embedding-like data).
+- [x] Backend for a dashboard search box: admin-only `_system/dashboard:search_documents` (docs/CONTRACT.md §4.1).
+- [ ] Not yet: the dashboard UI for search, stemmers for languages other than English, vector search in queries
+  (reactive), tunable HNSW parameters (`M`, `ef`) per index.
 
 ### Phase 10 — DX fixes found by `examples/chat-react` (M)
 - [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild

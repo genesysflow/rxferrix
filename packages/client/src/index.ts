@@ -23,6 +23,20 @@ export {
   type QueryWatch,
 } from "./client.js";
 export { FerrixError, CONNECTION_LOST, CLIENT_CLOSED } from "./errors.js";
+export {
+  FerrixAuth,
+  getAuth,
+  systemApi,
+  MemoryAuthStorage,
+  type AuthStorage,
+  type AuthState,
+  type AuthTokens,
+  type AuthProviders,
+  type CodeProof,
+  type FerrixAuthOptions,
+  type RedirectResult,
+  type User,
+} from "./auth.js";
 export type { OptimisticLocalStore, OptimisticUpdate } from "./optimistic_updates.js";
 export { LOADING, type QueryState } from "./query_state.js";
 export { canonicalJSON, queryToken, jsonEqual, type QueryToken } from "./canonical.js";

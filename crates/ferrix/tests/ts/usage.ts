@@ -32,6 +32,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   assertType<
     Equals<
       TableNames,
+      | "ann_items"
       | "attachments"
       | "blobs"
       | "dash_items"
@@ -44,12 +45,14 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "mig_slow"
       | "mig_tasks"
       | "notes"
+      | "page_messages"
       | "private_notes"
       | "sched_notes"
       | "search_messages"
       | "search_vectors"
       | "tasks"
       | "todos"
+      | "tok_docs"
     >
   >();
   // ... and the built-in `_storage` table (file storage).

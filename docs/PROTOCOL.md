@@ -38,8 +38,9 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 { "type": "Action",   "requestId": 1, "udfPath": "ai:summarize", "args": {} }
 
 // Set or clear identity (token = null clears it: anonymous). token is an access token from /api/auth/* (see
-// "Auth" below). Valid: the socket's identity becomes the token's user (or admin), every query reruns, and the
-// next Transition carries endVersion.identity = baseVersion + 1. Invalid, expired, or its session ended (signed
+// "Auth" below). Valid: the socket's identity becomes the token's user (or admin), every query is re-evaluated
+// for the new identity, and the next Transition carries endVersion.identity = baseVersion + 1 (with the results that
+// changed). Invalid, expired, or its session ended (signed
 // out, revoked): AuthError, then the server closes the socket; the identity is unchanged.
 { "type": "Authenticate", "baseVersion": 0, "token": "eyJ…" }
 
@@ -127,6 +128,26 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
   "a Transition at ts ≥ M, consistent for the whole subscribed set".
 - **Results for unknown queryIds** (the client removed the query while a Transition was in flight) are ignored by
   the client, but the version still advances.
+- **`QueryRemoved`** is sent only for a query the client was sent a result for. Adding and removing the same
+  queryId in one `ModifyQuerySet` produces neither a result nor a `QueryRemoved`.
+
+## Shared subscriptions (server side)
+
+Nothing here changes the messages or the guarantees above; it describes how the server meets them.
+
+- The server runs each distinct query once per invalidation and sends the result to every socket subscribed to it.
+  Queries are shared by `(udfPath, canonical args, identity scope)`, where the scope is what the query's last run
+  read of `ctx.auth`: nothing (shared by every socket), the user or admin id (shared by that principal's sockets;
+  all anonymous sockets share one), or the session id (one session). Tokens and session ids never key a query
+  that doesn't read the session id.
+- The server brings every shared query to one snapshot ts per round, so a Transition's results are valid at its
+  `endVersion.ts` even when they come from queries shared with other sockets (guarantee 1). A `ModifyQuerySet` whose
+  queries are already live elsewhere is answered from their current results, without running them.
+- **Slow sockets.** The server never waits for one socket. While a socket isn't reading, the updates waiting for it
+  are merged: it later gets fewer Transitions, each consistent at its `endVersion.ts` and carrying the newest result
+  of every query that changed (intermediate states may be skipped, as they may anyway). Each `ModifyQuerySet` and
+  `Authenticate` still gets its own Transition (guarantee 3). A socket with more than 1024 of those unanswered is
+  closed with `FatalError`.
 
 ## Client rules
 

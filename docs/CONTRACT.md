@@ -145,6 +145,9 @@ impl Auth {
     pub fn session_id(&self) -> Option<Id<Session>>;
     pub fn identity(&self) -> &Identity;
 }
+// What a query reads of `ctx.auth` decides who shares its subscription (docs/PROTOCOL.md "Shared subscriptions"):
+// nothing → every socket; user/admin id (user_id, require_user, user, is_admin, admin_id, require_admin) → every
+// socket of that principal (all anonymous sockets share one); session_id or identity → that session only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Identity {                                   // ferrix::Identity = ferrix::auth::Identity
     pub user_id: Option<String>, pub admin_id: Option<String>, pub session_id: Option<String>,  // string ids, no tokens
@@ -353,7 +356,8 @@ impl App {
 ```
 
 **Execution log** (`<dir>/aux.db`, table `_logs`). Every execution is recorded: queries (including subscription
-reruns), mutations, actions, and nested `ctx.run_*` calls. Duplicate mutations answered from the dedup table and
+reruns: one entry per shared rerun, however many sockets it served, with the identity it ran as), mutations,
+actions, and nested `ctx.run_*` calls. Duplicate mutations answered from the dedup table and
 calls to unknown functions are not recorded. Writes go through a bounded channel (8192 entries) to a background
 thread that inserts in batches. When the channel is full, entries are dropped and counted rather than slowing the
 function down.
@@ -362,7 +366,11 @@ function down.
 impl App {
     pub fn logs(&self) -> &Logs;
     pub fn dir(&self) -> &Path;               // the data directory
-    pub fn metrics(&self) -> &Metrics;        // .sockets(), .subscriptions(): open WebSockets and live subscriptions
+    pub fn metrics(&self) -> &Metrics;        // .sockets(), .subscriptions(), .shared_queries(): open WebSockets, live
+                                              // (socket, queryId) subscriptions, distinct shared queries
+    pub fn subscription_stats(&self) -> SubscriptionStats; // ferrix::sync::subscriptions: { connections, shared_queries,
+                                              // subscriptions, index_ranges, rounds, reruns, last_round_reruns }
+    pub fn subscriptions(&self) -> &SubscriptionManager;   // the shared subscription manager (started on first use)
     pub fn started_at(&self) -> f64;          // ms since the epoch
 }
 
@@ -672,7 +680,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`.
 |---|---|
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
-| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, droppedLogEntries, files: [{ name, bytes }] } }`. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
+| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the

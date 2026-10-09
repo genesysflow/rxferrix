@@ -272,18 +272,18 @@ Why use generic tables instead of one SQLite table per user table:
   - `.filter(...)` does **not** narrow the range. The whole scanned range was read, so the read set covers all of it.
 - `db.get(id)` records a point range on `by_id`.
 - A search query records a coarse `(table, search_index)` dependency: any write to that table that changes the search field or a filter field invalidates it.
-- `ctx.auth` access marks the query as identity-dependent.
+- `ctx.auth` access is tracked: whether the run read nothing, the principal (user/admin id), or the session id.
 
-**Subscription manager** (a single task that owns all subscriptions):
-1. On a new subscription `(fn, args, identity?)`, it **deduplicates**: if an identical query is already live, it attaches to it. Many clients watching the same thing cost one execution.
-2. It runs the query at snapshot `T` and stores `result`, `result_hash` (blake3), `read_set`, and `ts = T`.
-3. It then **checks the write log for commits in `(T, now]`** that overlap the read set. If any overlap, it reruns immediately. This closes the race where a commit lands while the query is running.
-4. On each new `CommitEntry`: for every `IndexWrite` with an old or new key, it finds subscriptions whose ranges on that `index_id` contain the key, and marks them invalidated.
-   - Version 1 does a linear scan per index, which is fine for thousands of subscriptions. Version 2 uses an interval tree per index.
-5. Invalidated queries rerun on a bounded worker pool. **Invalidations coalesce**: if a query is invalidated again while rerunning, it runs once more afterwards rather than N times.
-6. If `result_hash` is unchanged, the query's version just advances silently. Otherwise the new result is pushed.
+**Subscription manager** (`sync/subscriptions.rs`: one task per app that owns all subscriptions; built):
+1. On a new subscription it **deduplicates**: queries are keyed by `(udfPath, canonical args, identity scope)`, where the scope is what the last run read of `ctx.auth` (nothing → shared by everyone; principal → by that user's or admin's sockets, all anonymous sockets share one; session → one session). A query that already has a result valid at the manager's ts is reused with no execution. A new query is keyed by the full identity until its first run; a rerun that reads more of the identity splits the subscribers that no longer match off to queries of their own, run in the same round.
+2. Commits are processed in **rounds**. A round opens one snapshot `S` (several at the same ts for big rounds, to rerun on several threads), finds the queries whose read sets contain a key written in `(ts, S.ts]` through an **interval index** (per `index_id`, a treap with max-end augmentation; `sync/interval.rs`, property-tested against the linear `ReadSet::overlaps`) — or all of them if the write log was trimmed — reruns those in `S`, and leaves every other query valid at `S.ts`. **Invalidations coalesce**: commits that land during a round are handled together by the next one.
+3. Each connection gets ONE update per round at `S.ts` with the queries of its set whose `result_hash` (blake3) changed, as soon as none of its queries is still running. All results in a Transition are therefore valid at `endVersion.ts`, across shared queries too.
+4. `ModifyQuerySet` and `Authenticate` (which re-keys all of the socket's queries) go through the same task: answered at once from cached results, or after the next round when something must run; later commands of that socket wait behind, so replies and commit-driven updates are never reordered.
+5. The per-socket worker (`sync/worker.rs`) keeps the protocol state: versions, auth, mutations, actions, read-your-writes (it asks the manager to *cover* a mutation's ts) and pings. Updates reach it through a per-socket mailbox that never blocks the manager: commit-driven updates for a socket that isn't reading are merged into the latest state; a socket with over 1024 unanswered query-set/identity changes gets `FatalError`.
+6. Counters (`App::subscription_stats`): connections, shared queries, subscriptions, index ranges, rounds, reruns; `debug` tracing per round.
+7. Measured (`tests/it/bench.rs`, release, 200 commits/s): 100 clients watching the same 10 queries cost 1 execution per commit instead of 100, with p50 commit-to-client latency 0.22 ms instead of 1.7 ms (500 clients: 0.42 ms instead of 52 ms, where per-socket workers could no longer keep up). With no sharing possible (every client's queries distinct) it is on par until saturated; when saturated, the round barrier roughly doubles latency (p50 105 ms vs 51 ms at 500 clients × 10 distinct queries). A remaining limit: reruns spread over the read connections scale poorly across threads (per-query cost grows ~5× when 6 run in parallel; likely SQLite-level contention).
 
-The write log is a ring buffer of recent commits, trimmed past the oldest in-flight query's `T`.
+The write log is a ring buffer of recent commits (100k entries or 5 minutes).
 
 **Determinism contract.** Queries must be pure functions of (DB snapshot, args, identity). In Rust this can't be enforced the way a V8 sandbox enforces it, so it is a documented contract. To make it easy to follow, `QueryCtx` exposes no network, `ctx.now()` returns the snapshot's commit time, and there is no randomness API.
 
@@ -496,9 +496,10 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] `TestApp` harness.
 - [x] A mutation timeout (`AppOptions::mutation_timeout`, `--mutation-timeout`, default 5s; enforced at await points only).
 
-### Phase 2 — Sync and reactivity, done properly (L) — mostly done
-- [x] Per-connection sync worker: one consistent snapshot per refresh, write-log catch-up, coalescing, concurrent reruns.
-- [ ] **Deduplicating identical subscriptions across connections** (each socket reruns its own queries today), plus an interval-tree invalidation index.
+### Phase 2 — Sync and reactivity, done properly (L) — done
+- [x] Per-connection sync worker (protocol state), with one consistent snapshot ts per refresh, write-log catch-up, coalescing and concurrent reruns (now in the shared manager below).
+- [x] **Shared subscriptions**: each distinct query (path, args, identity scope from its `ctx.auth` reads) runs once per invalidation and is fanned out to every subscriber, in rounds at one snapshot ts (§4.5); per-socket mailboxes that coalesce for slow sockets; a model-based test with overlapping query sets, a dedup proof (50 sockets, one execution per commit) and a benchmark (`tests/it/bench.rs`).
+- [x] Interval-tree invalidation index (per `index_id`, property-tested against the linear scan).
 - [x] The full protocol: versions, atomic transitions, mutation `ts`, read-your-writes, reconnect and resubscribe.
 - [x] Mutation idempotency on reconnect, keyed by `(sessionId, requestId)` and recorded in the mutation's own transaction.
 - [x] HTTP API fallback.
@@ -553,7 +554,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 
 ### Phase 9 — Operations polish (M)
 - [ ] Backup and restore, export and import, migrations CLI, metrics and overview, `--https` autocert, static frontend serving, musl release builds, and a Docker image.
-- [ ] An interval-tree invalidation index if profiling shows it's needed.
+- [x] An interval-tree invalidation index (done in Phase 2).
 
 ---
 

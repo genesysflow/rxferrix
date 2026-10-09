@@ -1111,18 +1111,25 @@ impl Manager {
                 while self.runners[lane] < wanted.max(1) {
                     // The fast lane's first runner uses the generation's snapshot; other runners an idle reader's.
                     let shared = if lane == FAST && self.runners[FAST] == 0 { self.gen_snapshot.clone() } else { None };
+                    let may_advance = lane == FAST && self.runners[FAST] * 2 <= wanted && !advanced;
+                    // Opening a snapshot that can only be newer than the frontier is wasted unless it starts the next
+                    // generation.
+                    let stale_frontier = self.write_log.latest() > self.ts && !may_advance;
                     let snapshot = match shared {
                         Some(s) => s,
-                        None => match self.take_snapshot(app) {
+                        None => match if stale_frontier { None } else { self.take_snapshot(app) } {
                             Some(s) if s.ts == self.ts => s,
-                            Some(s) if lane == FAST && self.runners[FAST] == 0 && !advanced => {
-                                // Newer, and nothing runs at the frontier: move on to it (the queue runs there).
+                            Some(s) if may_advance => {
+                                // Newer, and the fast lane runs at under half the runners it wants (no reader was
+                                // free when the generation started, and a commit landed since: none ever will be at
+                                // this ts). Move on to the newer ts: the queue runs there, on as many readers as are
+                                // free, rather than on a few for the whole generation.
                                 self.advance(s).await;
                                 advanced = true;
                                 continue 'pump;
                             }
                             other => {
-                                if other.is_some() {
+                                if other.is_some() || stale_frontier {
                                     self.need_round = true; // newer: commits landed, for the next generation
                                 }
                                 // A slow lane without a runner shares the generation's snapshot rather than wait.
@@ -1251,6 +1258,9 @@ impl Manager {
         self.runners = [0, 0];
         self.gen_snapshot = Some(snapshot);
         let invalidated = stale.len();
+        // In id order rather than in the order commits hit them: queries subscribed together have neighbouring ids, so
+        // a connection's queries run close together and it gets its update early in the generation, not at its end.
+        stale.sort_unstable();
         let queued = self.launch(stale);
         self.metrics.record_round(queued);
         self.need_round = *self.commits.borrow_and_update() > s;

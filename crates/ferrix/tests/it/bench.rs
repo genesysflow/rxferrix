@@ -162,6 +162,9 @@ async fn scenario(name: &str, shared: bool, slow_clients: u64) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let executions = EXECUTIONS.swap(0, Ordering::Relaxed);
+    if std::env::var_os("BENCH_STATS").is_some() {
+        println!("[{name}] {:?}", app.subscription_stats());
+    }
     drop(inputs);
     for task in tasks {
         let _ = task.await;

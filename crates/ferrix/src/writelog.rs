@@ -73,6 +73,13 @@ impl WriteLog {
         *self.latest_tx.borrow()
     }
 
+    /// How many commits were appended within the last `window` (at most the retained ones; for metrics).
+    pub fn commits_within(&self, window: Duration) -> usize {
+        let inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        inner.entries.iter().rev().take_while(|(at, _)| now.duration_since(*at) <= window).count()
+    }
+
     /// A receiver that changes whenever a commit is appended.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.latest_tx.subscribe()

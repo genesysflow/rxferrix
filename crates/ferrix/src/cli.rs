@@ -1,6 +1,7 @@
 //! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]
-//! [--storage LOCATION] [--max-upload-size SIZE]`,
-//! `ferrix functions`, `ferrix codegen [--out DIR]` and `ferrix admin create|reset-password <email>`.
+//! [--storage LOCATION] [--max-upload-size SIZE] [operations flags]`,
+//! `ferrix functions`, `ferrix codegen [--out DIR]`, `ferrix admin create|reset-password <email>`, and the
+//! operations commands `backup`, `restore`, `export`, `import` (flags and commands in `crate::ops::cli`).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,8 @@ struct Cli {
     serve: ServeArgs,
 }
 
+// Parsed once at startup: the size difference between variants doesn't matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run the server (default).
@@ -36,6 +39,14 @@ enum Command {
     /// Manage dashboard administrators.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Take a consistent backup (.tar.zst) of the data directory; works while the server runs.
+    Backup(crate::ops::cli::BackupArgs),
+    /// Restore a backup into the data directory (offline: refuses while a server uses it).
+    Restore(crate::ops::cli::RestoreArgs),
+    /// Export tables as JSONL or CSV; works while the server runs.
+    Export(crate::ops::cli::ExportArgs),
+    /// Import JSONL (an export directory or files) through the normal write path (offline).
+    Import(crate::ops::cli::ImportArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -114,6 +125,9 @@ struct ServeArgs {
     /// Largest accepted upload, e.g. `100MB` (default), `2GB`, `512KB`, or a number of bytes.
     #[arg(long, env = "FERRIX_MAX_UPLOAD_SIZE", value_name = "SIZE", value_parser = parse_size)]
     max_upload_size: Option<u64>,
+    /// Metrics, scheduled backups and TLS (`crate::ops::cli`).
+    #[command(flatten)]
+    ops: crate::ops::cli::OpsServeArgs,
 }
 
 /// `"100MB"`, `"2GB"`, `"512KB"`, `"1.5MB"` (powers of 1024), or a bare number of bytes.
@@ -155,9 +169,35 @@ pub struct Ferrix {
     auth: AuthConfig,
     storage: StorageConfig,
     scheduler: SchedulerOptions,
+    web: crate::ops::WebOptions,
 }
 
 impl Ferrix {
+    /// Serve the app's frontend from a directory (read at runtime; relative to the working directory), with SPA
+    /// fallback to `index.html` (see [`crate::ops::web`]).
+    pub fn static_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.web.static_files = Some(crate::ops::StaticFiles::Dir(dir.into()));
+        self
+    }
+
+    /// Serve the app's frontend from files embedded in the binary:
+    /// `#[derive(ferrix::rust_embed::Embed)] #[folder = "../web/dist/"] #[crate_path = "ferrix::rust_embed"] struct
+    /// Assets;` then `.embed_static::<Assets>()` (see [`crate::ops::web`]).
+    pub fn embed_static<A: rust_embed::RustEmbed>(mut self) -> Self {
+        self.web.static_files = Some(crate::ops::StaticFiles::Embedded(A::get));
+        self
+    }
+
+    /// Add axum routes (webhooks, custom endpoints) next to Ferrix's own; they must not overlap `/api/*`, `/_/*` or
+    /// `/metrics`. Repeated calls add up.
+    pub fn routes(mut self, routes: axum::Router) -> Self {
+        self.web.routes = Some(match self.web.routes.take() {
+            Some(existing) => existing.merge(routes),
+            None => routes,
+        });
+        self
+    }
+
     pub fn new() -> Self {
         Ferrix::default()
     }
@@ -205,8 +245,15 @@ impl Ferrix {
             Some(Command::Functions) => print_functions(),
             Some(Command::Codegen(args)) => codegen(&args.out),
             Some(Command::Admin(cmd)) => admin(cmd, self.auth),
-            Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler),
-            None => serve(cli.serve, self.auth, self.storage, self.scheduler),
+            Some(Command::Backup(args)) => crate::ops::cli::run_backup(args, self.storage),
+            Some(Command::Restore(args)) => crate::ops::cli::run_restore(args, self.storage),
+            Some(Command::Export(args)) => crate::ops::cli::run_export(args, self.storage),
+            Some(Command::Import(args)) => crate::ops::cli::run_import(
+                args,
+                AppOptions { auth: self.auth, storage: self.storage, scheduler: self.scheduler, ..Default::default() },
+            ),
+            Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler, self.web),
+            None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web),
         }
     }
 }
@@ -267,7 +314,7 @@ fn read_password() -> crate::Result<String> {
 
 /// The builder's auth config with the command line's options applied on top.
 fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
-    let public_url = args.public_url.clone().or_else(|| auth.public_url.clone()).unwrap_or_else(|| {
+    let public_url = args.public_url.clone().or_else(|| auth.public_url.clone()).or_else(|| args.ops.public_url()).unwrap_or_else(|| {
         let addr = if args.http.ip().is_unspecified() {
             SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), args.http.port())
         } else {
@@ -312,6 +359,7 @@ fn serve(
     auth: AuthConfig,
     storage: StorageConfig,
     scheduler: SchedulerOptions,
+    web: crate::ops::WebOptions,
 ) -> crate::Result<()> {
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
@@ -329,7 +377,7 @@ fn serve(
         let auth = auth_config(&args, auth);
         let storage = storage_config(&args, storage)?;
         let public_url = auth.public_url.clone().unwrap_or_default();
-        let options = AppOptions {
+        let mut options = AppOptions {
             dev: args.dev,
             mutation_timeout: args.mutation_timeout,
             skip_schema_check: args.skip_schema_check,
@@ -338,15 +386,23 @@ fn serve(
             scheduler,
             ..Default::default()
         };
+        args.ops.apply(&mut options);
+        let listen = args.ops.listen(args.http, &args.dir)?;
+        // Held while serving: `restore` refuses to run under a server.
+        let _lock = crate::ops::DirLock::acquire(&args.dir)?;
         let app = App::open(&args.dir, options).await?;
         app.start_scheduler().await?;
-        let listener = tokio::net::TcpListener::bind(args.http).await?;
+        let server = crate::ops::tls::start(crate::ops::web::router(app.clone(), &web), &listen).await?;
+        let scheme = if server.https { "https" } else { "http" };
         tracing::info!(
-            "ferrix listening on http://{} (data: {}, dev: {})",
-            listener.local_addr()?,
+            "ferrix listening on {scheme}://{} (data: {}, dev: {})",
+            server.addr,
             args.dir.display(),
             args.dev
         );
+        if let Some(redirect) = server.redirect_addr {
+            tracing::info!("redirecting http://{redirect} to https");
+        }
         if let Some(token) = app.auth().create_setup_token(&app).await? {
             // Printed to the console rather than logged: a one-time secret, valid until used or until restart.
             println!(
@@ -355,11 +411,12 @@ fn serve(
                 public_url.trim_end_matches('/')
             );
         }
-        crate::server::serve_with_shutdown(listener, app, async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
-        .await
+        server
+            .run_until(async {
+                crate::ops::tls::shutdown_signal().await;
+                tracing::info!("shutting down");
+            })
+            .await
     })
 }
 

@@ -11,6 +11,7 @@ mod dashboard;
 mod hardening;
 mod macros;
 mod model;
+mod ops;
 mod pagination;
 mod query_engine;
 mod readsets;

@@ -57,10 +57,18 @@ pub mod fns {
     /// The items of `group` and the number of items, taking at least `ms` milliseconds: it sleeps between its two
     /// reads (which still see one snapshot). It reads the whole table, so every commit invalidates it.
     #[query]
-    pub async fn slow_group(ctx: &QueryCtx, group: i64, ms: u32) -> Result<(Vec<Doc<Item>>, usize)> {
+    pub async fn slow_group(ctx: &QueryCtx, group: i64, ms: u32) -> Result<GroupAndTotal> {
         let docs = ctx.db.query::<Item>().with_index(Item::by_group_score, |r| r.eq(Item::group, group)).collect().await?;
         tokio::time::sleep(std::time::Duration::from_millis(ms.into())).await;
-        Ok((docs, ctx.db.query::<Item>().collect().await?.len()))
+        Ok(GroupAndTotal { docs, total: ctx.db.query::<Item>().collect().await?.len() as u32 })
+    }
+
+    #[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
+    #[serde(crate = "::ferrix::__private::serde")]
+    #[ts(crate = "::ferrix::__private::ts_rs")]
+    pub struct GroupAndTotal {
+        pub docs: Vec<Doc<Item>>,
+        pub total: u32,
     }
 }
 
@@ -157,7 +165,9 @@ impl Q {
                 v.truncate(3);
                 to_json(v)
             }
-            Q::Slow(g, _) => json!([to_json(by_group_score(docs.iter().filter(|d| d.group == *g).collect())), docs.len()]),
+            Q::Slow(g, _) => {
+                json!({ "docs": to_json(by_group_score(docs.iter().filter(|d| d.group == *g).collect())), "total": docs.len() })
+            }
             Q::FindName(name) => {
                 let found: Vec<_> = docs.iter().filter(|d| &d.name == name).collect();
                 match found.as_slice() {

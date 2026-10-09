@@ -20,7 +20,7 @@ function assertType<T extends true>(): T | undefined {
 
 export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: Id<"notes">): Promise<void> {
   // Tables and documents.
-  assertType<Equals<TableNames, "items" | "notes" | "tasks" | "todos">>();
+  assertType<Equals<TableNames, "items" | "lossy" | "notes" | "tasks" | "todos">>();
   assertType<Equals<DataModel["tasks"]["priority"], Priority>>();
   assertType<Equals<Priority, "low" | "high">>();
   const doc = {} as Doc<"tasks">;

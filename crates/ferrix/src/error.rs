@@ -64,6 +64,30 @@ impl std::fmt::Display for FunctionNotFound {
 }
 impl std::error::Error for FunctionNotFound {}
 
+/// A mutation ran longer than `AppOptions::mutation_timeout` and was rolled back. A server error: clients see its
+/// message only in `--dev`; the execution log always has it.
+///
+/// The timeout can only fire while the mutation is suspended at an `.await`: synchronous code (a busy loop, a
+/// blocking call) inside a mutation is never preempted and keeps holding the writer lock until it yields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationTimeout {
+    pub path: String,
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Display for MutationTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mutation `{}` timed out after {:?} and was rolled back (limit: AppOptions::mutation_timeout, \
+             `--mutation-timeout` on the command line)",
+            self.path, self.timeout
+        )
+    }
+}
+
+impl std::error::Error for MutationTimeout {}
+
 /// How an error is classified at the client boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {

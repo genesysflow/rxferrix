@@ -141,6 +141,7 @@ pub struct TableDef {
     pub name: &'static str,
     pub indexes: Vec<IndexDef>,
     pub ts: fn() -> String,
+    pub validate: fn(&serde_json::Value) -> std::result::Result<(), String>,
 }
 impl PartialEq for TableDef {
     fn eq(&self, other: &Self) -> bool {
@@ -393,5 +394,11 @@ pub mod __private {
 
     pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String {
         T::inline(&ts_rs::Config::default())
+    }
+
+    pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
+        <crate::Doc<T> as serde::Deserialize>::deserialize(doc)
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 }

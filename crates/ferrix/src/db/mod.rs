@@ -15,9 +15,11 @@
 //! for the duration of synchronous SQLite calls, never across an `.await`.
 
 pub mod catalog;
+pub mod dedup;
 pub mod pagination;
 pub mod query;
 pub mod readset;
+pub mod schema_check;
 pub mod storage;
 
 use std::path::{Path, PathBuf};
@@ -44,15 +46,38 @@ pub struct Database {
     write_log: Arc<WriteLog>,
 }
 
+/// Options for [`Database::open_with`].
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+    /// Number of reader connections.
+    pub readers: usize,
+    /// Skip validating existing documents against changed table types (see [`schema_check`]).
+    pub skip_schema_check: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false }
+    }
+}
+
 impl Database {
     /// Open `<dir>/data.db`, creating it if needed, and reconcile the catalog with `tables`.
     pub fn open(dir: &Path, tables: &[TableDef], readers: usize) -> anyhow::Result<Database> {
+        Self::open_with(dir, tables, &OpenOptions { readers, ..Default::default() })
+    }
+
+    /// Like [`Database::open`]. Refuses to open if existing documents don't match changed table types, unless
+    /// `options.skip_schema_check` (see [`schema_check`]).
+    pub fn open_with(dir: &Path, tables: &[TableDef], options: &OpenOptions) -> anyhow::Result<Database> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
+        dedup::ensure_schema(&writer)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
+        schema_check::run(&writer, &catalog, tables, options.skip_schema_check)?;
         let ts = storage::read_meta_u64(&writer, storage::META_TS)?;
-        let readers = readers.max(1);
+        let readers = options.readers.max(1);
         Ok(Database {
             writer: Arc::new(tokio::sync::Mutex::new(writer)),
             readers: Arc::new(ReaderPool { path, conns: Mutex::new(Vec::new()), permits: Arc::new(Semaphore::new(readers)) }),
@@ -255,15 +280,22 @@ impl WriteTxn {
         self.with_state(|s| Ok(s.now)).unwrap_or(0.0)
     }
 
-    /// Commit. Returns the new ts, or the current ts if nothing was written (then ts is not bumped).
-    pub(crate) fn commit(&self) -> anyhow::Result<u64> {
+    /// Commit, running `before_commit(conn, commit_ts)` inside the transaction right before `COMMIT` (used to record
+    /// the mutation's response for idempotency atomically with its writes). Returns the new ts, or the current ts
+    /// if no document was written (then ts is not bumped).
+    pub(crate) fn commit_with(
+        &self,
+        before_commit: impl FnOnce(&Connection, u64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<u64> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut state = state.context("the mutation's transaction has already finished")?;
         if state.writes.is_empty() {
+            before_commit(&state.conn, state.prev_ts)?;
             state.conn.execute_batch("COMMIT")?;
             return Ok(state.prev_ts);
         }
         let ts = state.prev_ts + 1;
+        before_commit(&state.conn, ts)?;
         storage::write_meta(&state.conn, storage::META_TS, (ts as i64).into())?;
         storage::write_meta(&state.conn, storage::META_TIME, state.now.into())?;
         storage::write_meta(&state.conn, storage::META_LAST_CREATION_TIME, state.last_creation_time.into())?;
@@ -276,6 +308,16 @@ impl WriteTxn {
     /// Roll back (also happens implicitly on drop).
     pub(crate) fn rollback(&self) {
         drop(self.state.lock().unwrap_or_else(|e| e.into_inner()).take());
+    }
+
+    /// Roll back, then run `f` in autocommit mode while still holding the writer lock.
+    pub(crate) fn rollback_then(&self, f: impl FnOnce(&Connection) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let state = state.context("the mutation's transaction has already finished")?;
+        if !state.conn.is_autocommit() {
+            state.conn.execute_batch("ROLLBACK")?;
+        }
+        f(&state.conn)
     }
 }
 
@@ -336,20 +378,37 @@ impl WriteState {
         Ok(())
     }
 
-    /// Insert a document from user fields; adds `_id` and `_creationTime`.
-    pub(crate) fn insert(&mut self, table: &TableInfo, mut fields: Map<String, Value>) -> anyhow::Result<DocId> {
+    /// Insert a document from user fields; adds `_id` and `_creationTime`. `validate` sees the complete document
+    /// (system fields included) before anything is written.
+    pub(crate) fn insert(
+        &mut self,
+        table: &TableInfo,
+        mut fields: Map<String, Value>,
+        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<DocId> {
         reject_system_fields(&fields)?;
         let id = DocId::new_random(table.number);
         anyhow::ensure!(storage::get_document(&self.conn, &id.0)?.is_none(), "id collision");
         fields.insert(ID_FIELD.into(), Value::String(id.encode()));
+        let last_creation_time = self.last_creation_time;
         let ct = self.next_creation_time();
         fields.insert(CREATION_TIME_FIELD.into(), serde_json::Number::from_f64(ct).context("bad time")?.into());
+        if let Err(e) = validate(&fields) {
+            self.last_creation_time = last_creation_time;
+            return Err(e);
+        }
         self.write(table, id, None, Some(&fields))?;
         Ok(id)
     }
 
-    /// Replace all user fields of a document, keeping its system fields.
-    pub(crate) fn replace(&mut self, table: &TableInfo, id: DocId, mut fields: Map<String, Value>) -> anyhow::Result<()> {
+    /// Replace all user fields of a document, keeping its system fields. `validate` sees the complete new document.
+    pub(crate) fn replace(
+        &mut self,
+        table: &TableInfo,
+        id: DocId,
+        mut fields: Map<String, Value>,
+        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         reject_system_fields(&fields)?;
         let old = self.load(table, id)?;
         for sys in [ID_FIELD, CREATION_TIME_FIELD] {
@@ -357,6 +416,7 @@ impl WriteState {
                 fields.insert(sys.into(), v.clone());
             }
         }
+        validate(&fields)?;
         self.write(table, id, Some(&old), Some(&fields))
     }
 

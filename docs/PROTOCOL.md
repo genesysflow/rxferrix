@@ -32,7 +32,8 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
     { "type": "Remove", "queryId": 3 }
 ] }
 
-// requestId is chosen by the client, is unique per sessionId, and never repeats.
+// requestId is chosen by the client, is unique per sessionId, and never repeats, except when the client resends
+// an unanswered mutation after a reconnect: the server then replays the recorded response (guarantee 7).
 { "type": "Mutation", "requestId": 0, "udfPath": "todos:add", "args": { "text": "hi" } }
 { "type": "Action",   "requestId": 1, "udfPath": "ai:summarize", "args": {} }
 
@@ -87,7 +88,20 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
    succeed, a `QueryUpdated` follows.
 6. A **user error** (`UserError` in Rust) puts `errorData = { "code": string, "data": any }` and
    `errorMessage = message`. Any other error gives `errorData = null`. In `--dev` the message is the real error text;
-   otherwise it is `"Server Error"`.
+   otherwise it is `"Server Error"`. A mutation that exceeds the server's mutation timeout (default 5s) is rolled
+   back and fails with such a server error.
+7. **Mutations are idempotent per `(sessionId, requestId)`.** The server records each mutation's response (the
+   result and commit ts, or the error) in the same transaction as the mutation's writes, keyed by the socket's
+   `Connect.sessionId` and the message's `requestId`, for about 10 minutes. A `Mutation` with a key already recorded
+   (on any socket) is not run again: the server answers with the recorded response, so `result`, `ts` and the error
+   are identical to the first answer (`logLines` are empty). Concurrent duplicates wait for the first and then get
+   its response. A replayed `ts` may be older than the socket's current version; guarantee 4 still holds. Without a
+   `Connect`, mutations are not deduplicated.
+8. **`logLines`** (on `QueryUpdated`, `QueryFailed`, `MutationResponse`, `ActionResponse` and the HTTP responses)
+   are the log lines the function emitted while it ran, formatted as `"[LEVEL] message key=value ..."`, including
+   those of functions an action called. They are sent **only in `--dev`**; otherwise they are always `[]` (the server
+   still keeps them in its execution log). A query rerun whose result didn't change sends nothing, so its new log
+   lines aren't sent either.
 
 ## Clarifications (resolved while building the client)
 
@@ -109,9 +123,9 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 
 - **On reconnect**, the client creates a fresh server state (versions start at 0). It sends `Connect`, then
   `Authenticate` if it has a token, then one `ModifyQuerySet` adding every live query (new queryIds are fine), then
-  re-sends every mutation that does not yet have a `MutationResponse`. (Phase 0 has no dedup. Phase 2 deduplicates
-  by `(sessionId, requestId)`.) Actions in flight when the socket drops are rejected with a "connection lost" error,
-  because actions are not idempotent.
+  re-sends every mutation that does not yet have a `MutationResponse`, with its original `requestId` (see guarantee
+  7: the server runs each `(sessionId, requestId)` at most once). Actions in flight when the socket drops are
+  rejected with a "connection lost" error, because actions are not idempotent.
 - **Resolving a mutation**: a mutation's promise resolves only once BOTH its `MutationResponse(success, ts=M)` has
   arrived AND the client has applied a Transition with `endVersion.ts >= M`. Its optimistic update is dropped at
   that same moment. On failure, the promise rejects and the optimistic update is dropped immediately.
@@ -127,3 +141,4 @@ optional `Authorization: Bearer <token>`.
 - Response 4xx/5xx (error): `{ "status": "error", "errorMessage": "…", "errorData": null | {code, data}, "logLines": [] }`.
   Status codes: 400 for a user error or bad args, 404 for an unknown function, 500 for anything else.
 - Mutation responses also include `"ts": number`.
+- `logLines` as in guarantee 8 (only in `--dev`). HTTP mutations are not deduplicated.

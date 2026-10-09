@@ -115,10 +115,15 @@ struct HttpCall {
     args: Value,
 }
 
-fn error_response(error: &ClientError) -> Response {
+fn error_response(error: &ClientError, log_lines: Vec<String>) -> Response {
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = json!({ "status": "error", "errorMessage": error.message, "errorData": error.data, "logLines": [] });
+    let body =
+        json!({ "status": "error", "errorMessage": error.message, "errorData": error.data, "logLines": log_lines });
     (status, axum::Json(body)).into_response()
+}
+
+fn client_log_lines(app: &App, lines: Vec<String>) -> Vec<String> {
+    crate::log::for_client(app.options().dev, lines)
 }
 
 fn parse_call(body: &[u8]) -> Result<HttpCall, Box<Response>> {
@@ -128,7 +133,7 @@ fn parse_call(body: &[u8]) -> Result<HttpCall, Box<Response>> {
             message: format!("Invalid request body: {e}"),
             data: None,
         };
-        Box::new(error_response(&error))
+        Box::new(error_response(&error, Vec::new()))
     })?;
     if call.args.is_null() {
         call.args = json!({});
@@ -142,9 +147,11 @@ async fn http_query(State(app): State<App>, body: Bytes) -> Response {
         Err(r) => return *r,
     };
     // Phase 0: the Authorization header is accepted but ignored.
-    match app.run_query(&call.path, call.args, &Identity::default()).await.result {
-        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": [] })).into_response(),
-        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev)),
+    let run = app.run_query(&call.path, call.args, &Identity::default()).await;
+    let log_lines = client_log_lines(&app, run.log_lines);
+    match run.result {
+        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": log_lines })).into_response(),
+        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }
 
@@ -153,11 +160,13 @@ async fn http_mutation(State(app): State<App>, body: Bytes) -> Response {
         Ok(c) => c,
         Err(r) => return *r,
     };
-    match app.run_mutation(&call.path, call.args, &Identity::default()).await {
+    let run = app.execute_mutation(&call.path, call.args, &Identity::default(), None).await;
+    let log_lines = client_log_lines(&app, run.log_lines);
+    match run.result {
         Ok((value, ts)) => {
-            axum::Json(json!({ "status": "success", "value": value, "ts": ts, "logLines": [] })).into_response()
+            axum::Json(json!({ "status": "success", "value": value, "ts": ts, "logLines": log_lines })).into_response()
         }
-        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev)),
+        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }
 
@@ -166,8 +175,10 @@ async fn http_action(State(app): State<App>, body: Bytes) -> Response {
         Ok(c) => c,
         Err(r) => return *r,
     };
-    match app.run_action(&call.path, call.args, &Identity::default()).await {
-        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": [] })).into_response(),
-        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev)),
+    let run = app.execute_action(&call.path, call.args, &Identity::default()).await;
+    let log_lines = client_log_lines(&app, run.log_lines);
+    match run.result {
+        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": log_lines })).into_response(),
+        Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }

@@ -5,6 +5,7 @@ mod common;
 mod catalog;
 mod codegen;
 mod contract;
+mod hardening;
 mod macros;
 mod model;
 mod pagination;

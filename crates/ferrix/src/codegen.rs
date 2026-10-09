@@ -140,7 +140,7 @@ pub(crate) fn collect_type<T: TS + ?Sized + 'static>() {
 }
 
 /// Run `f` with a dependency-collection session on this thread; returns its result and the collected declarations.
-fn with_session<R>(f: impl FnOnce() -> R) -> crate::Result<(R, Vec<TypeDecl>)> {
+pub(crate) fn with_session<R>(f: impl FnOnce() -> R) -> crate::Result<(R, Vec<TypeDecl>)> {
     struct Reset(Option<Collector>);
     impl Drop for Reset {
         fn drop(&mut self) {

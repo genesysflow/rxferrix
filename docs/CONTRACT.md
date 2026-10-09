@@ -323,3 +323,19 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
   (match on the last path segment: `QueryCtx` / `MutationCtx` / `ActionCtx`), `self` params, non-identifier
   patterns, generics, and a missing return type.
 - Mutations use `Handler::Mutation` + `impl MutationFunction`; actions use `Handler::Action` + `impl ActionFunction`.
+
+---
+
+## 4. Built-in (system) tables and functions
+
+ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping). They are defined **inside the
+`ferrix` crate with the same macros** (`extern crate self as ferrix;` makes `::ferrix::` paths resolve there).
+
+- **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
+  in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
+  of `DataModel`.
+- **System functions** get paths under `_system/` (`function_path` maps crate `ferrix` to `_system`), e.g.
+  `ferrix::auth::api::sign_in` → `"_system/auth/api:sign_in"`. Use `__private::is_system_path(path)` to test for
+  them. Codegen leaves them out of the app's `api`. Who may call a public system function from a client (anyone, a
+  signed-in user, or only an admin) is decided by the function itself (e.g. `ctx.auth.require_admin()`), not by the
+  path.

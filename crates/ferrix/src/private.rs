@@ -104,9 +104,26 @@ impl std::fmt::Debug for FunctionDef {
 
 /// `"todo_server::todos"` + `"list"` → `"todos:list"`; `"todo_server"` + `"list"` → `"list"`;
 /// `"a::b::c"` + `"f"` → `"b/c:f"`. The first segment (the crate name) is dropped.
+///
+/// Functions defined inside the `ferrix` crate itself (auth, dashboard, ...) are namespaced under `_system`:
+/// `"ferrix::auth::api"` + `"sign_in"` → `"_system/auth/api:sign_in"`. User crates can't produce `_`-prefixed module
+/// names, so these never collide with app functions.
 pub fn function_path(module_path: &str, name: &str) -> String {
-    let modules: Vec<&str> = module_path.split("::").skip(1).collect();
+    let mut segments = module_path.split("::");
+    let krate = segments.next().unwrap_or_default();
+    let mut modules: Vec<&str> = segments.collect();
+    if krate == "ferrix" {
+        modules.insert(0, SYSTEM_PREFIX);
+    }
     if modules.is_empty() { name.to_string() } else { format!("{}:{name}", modules.join("/")) }
+}
+
+/// Path prefix (first module segment) of ferrix's built-in functions.
+pub const SYSTEM_PREFIX: &str = "_system";
+
+/// True for paths of ferrix's built-in functions (see [`function_path`]).
+pub fn is_system_path(path: &str) -> bool {
+    path.split(['/', ':']).next() == Some(SYSTEM_PREFIX)
 }
 
 /// Deserialize args; on failure the error message starts with `"Invalid args for <name>: "`.
@@ -160,5 +177,46 @@ mod tests {
         #[derive(serde::Deserialize, Debug)]
         struct Empty {}
         decode_args::<Empty>("f", serde_json::Value::Null).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod system_path_tests {
+    use super::*;
+
+    #[test]
+    fn paths_of_app_and_system_functions() {
+        assert_eq!(function_path("app::todos", "list"), "todos:list");
+        assert_eq!(function_path("app", "list"), "list");
+        assert_eq!(function_path("app::a::b", "f"), "a/b:f");
+        assert_eq!(function_path("ferrix::auth::api", "sign_in"), "_system/auth/api:sign_in");
+        assert_eq!(function_path("ferrix", "ping"), "_system:ping");
+        assert!(is_system_path("_system/auth/api:sign_in"));
+        assert!(is_system_path("_system:ping"));
+        assert!(!is_system_path("todos:list"));
+        assert!(!is_system_path("_systemx:list"));
+    }
+
+    /// The macros work inside the ferrix crate (via `extern crate self as ferrix`), may use `_` table names here,
+    /// and produce `_system` paths.
+    mod system_smoke {
+        use crate::prelude::*;
+
+        #[table(name = "_smoke")]
+        pub struct Smoke {
+            pub n: i64,
+        }
+
+        #[internal_query]
+        pub async fn ping(_ctx: &QueryCtx) -> Result<String> {
+            Ok("pong".into())
+        }
+
+        #[test]
+        fn system_items_register() {
+            use crate::{FunctionRef, Table};
+            assert_eq!(Smoke::NAME, "_smoke");
+            assert_eq!(ping::path(), "_system/private/system_path_tests/system_smoke:ping");
+        }
     }
 }

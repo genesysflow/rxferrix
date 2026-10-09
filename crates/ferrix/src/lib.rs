@@ -10,6 +10,9 @@
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
 
+// The macros emit `::ferrix::...` paths; this lets ferrix define its own system tables and functions with them.
+extern crate self as ferrix;
+
 pub mod cli;
 pub mod codegen;
 pub mod db;

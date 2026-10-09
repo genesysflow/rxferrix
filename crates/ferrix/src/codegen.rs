@@ -160,13 +160,17 @@ pub fn generate(registry: &Registry, tables: &[TableDef]) -> crate::Result<Gener
     let ((functions, tables), types) = with_session(|| {
         let functions: Vec<FunctionInfo> = registry
             .defs()
-            .filter(|(_, def)| def.visibility == Visibility::Public)
+            .filter(|(path, def)| def.visibility == Visibility::Public && !crate::private::is_system_path(path))
             .map(|(path, def)| {
                 let (args_ts, output_ts) = (def.ts)();
                 FunctionInfo { path: path.to_string(), kind: def.handler.kind(), visibility: def.visibility, args_ts, output_ts }
             })
             .collect();
-        let tables: Vec<TableTs> = tables.iter().map(|t| TableTs { name: t.name.to_string(), ts: (t.ts)() }).collect();
+        let tables: Vec<TableTs> = tables
+            .iter()
+            .filter(|t| !t.name.starts_with('_')) // system tables are internal to ferrix
+            .map(|t| TableTs { name: t.name.to_string(), ts: (t.ts)() })
+            .collect();
         (functions, tables)
     })?;
     render(&functions, &tables, &types)

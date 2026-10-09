@@ -25,6 +25,12 @@ struct TableArgs {
     name: Option<syn::LitStr>,
 }
 
+/// True while expanding inside the `ferrix` crate itself, which may define `_`-prefixed system tables.
+/// Cargo sets `CARGO_CRATE_NAME` for every rustc invocation, so proc macros can read it.
+fn is_ferrix_crate() -> bool {
+    std::env::var("CARGO_CRATE_NAME").is_ok_and(|name| name == "ferrix")
+}
+
 fn parse_table_args(attr: TokenStream) -> syn::Result<TableArgs> {
     let mut args = TableArgs { name: None };
     let parser = syn::meta::parser(|meta| {
@@ -35,6 +41,12 @@ fn parse_table_args(attr: TokenStream) -> syn::Result<TableArgs> {
             let lit: syn::LitStr = meta.value()?.parse()?;
             if lit.value().is_empty() {
                 return Err(syn::Error::new(lit.span(), "table name cannot be empty"));
+            }
+            if lit.value().starts_with('_') && !is_ferrix_crate() {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "table names starting with `_` are reserved for ferrix's built-in system tables",
+                ));
             }
             args.name = Some(lit);
             Ok(())

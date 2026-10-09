@@ -355,3 +355,62 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser, Debug)]
+    struct T {
+        #[command(flatten)]
+        ops: OpsServeArgs,
+    }
+
+    fn parse(args: &[&str]) -> Result<OpsServeArgs, clap::Error> {
+        T::try_parse_from(std::iter::once("app").chain(args.iter().copied())).map(|t| t.ops)
+    }
+
+    #[test]
+    fn serve_flags() {
+        let http: SocketAddr = "127.0.0.1:8090".parse().unwrap();
+        let dir = Path::new("data");
+        // Defaults: plain HTTP, no metrics, no scheduled backups.
+        let ops = parse(&[]).unwrap();
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::Http(a) if a == http));
+        let mut options = AppOptions::default();
+        ops.apply(&mut options);
+        assert!(!options.ops.metrics.enabled && options.scheduler.crons.is_empty() && ops.public_url().is_none());
+
+        let ops = parse(&["--metrics", "--metrics-token", "t", "--backup-every", "6h", "--backup-keep", "3", "--backup-to", "s3://b/p"])
+            .unwrap();
+        let mut options = AppOptions::default();
+        ops.apply(&mut options);
+        assert!(options.ops.metrics.enabled && options.ops.metrics.token.as_deref() == Some("t"));
+        assert_eq!(options.ops.backup_target.as_deref(), Some("s3://b/p"));
+        assert_eq!(options.scheduler.crons.iter().map(|c| c.name()).collect::<Vec<_>>(), [backup::CRON_NAME]);
+
+        // --https: ACME on :443, redirect from :80, cache in <dir>/acme, public URL.
+        let ops = parse(&["--https", "Example.com,www.example.com", "--acme-email", "a@b.c", "--acme-staging"]).unwrap();
+        let Listen::Acme { https, redirect, acme } = ops.listen(http, dir).unwrap() else { panic!("acme") };
+        assert_eq!(https, "0.0.0.0:443".parse().unwrap());
+        assert_eq!(redirect, Some("0.0.0.0:80".parse().unwrap()));
+        assert_eq!(acme.domains, ["example.com", "www.example.com"]);
+        assert!(acme.staging && acme.cache_dir == dir.join("acme") && acme.emails == ["a@b.c"]);
+        assert_eq!(ops.public_url().as_deref(), Some("https://example.com"));
+        let ops = parse(&["--https", "example.com", "--https-addr", "0.0.0.0:8443", "--http-redirect", "off"]).unwrap();
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::Acme { redirect: None, .. }));
+        assert_eq!(ops.public_url().as_deref(), Some("https://example.com:8443"));
+
+        // Certificate files: both needed, not with --https; no redirect unless asked.
+        let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: None, .. }));
+        let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--http-redirect", "127.0.0.1:8080"]).unwrap();
+        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: Some(_), .. }));
+        assert!(parse(&["--tls-cert", "c.pem"]).is_err());
+        assert!(parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--https", "example.com"]).is_err());
+        assert!(parse(&["--https", "example.com", "--http-redirect", "nope"]).unwrap().listen(http, dir).is_err());
+        assert!(parse(&["--backup-every", "soon"]).is_err());
+    }
+}

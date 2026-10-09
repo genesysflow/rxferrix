@@ -6,6 +6,8 @@
 //! - [`db`]: SQLite storage, catalog, snapshots, the write transaction, the query engine and read sets.
 //! - [`writelog`]: recent commits, used to invalidate subscriptions.
 //! - [`runtime`]: function registry, contexts and [`App`].
+//! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
+//!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
@@ -19,8 +21,10 @@ pub mod cli;
 pub mod codegen;
 pub mod db;
 pub mod error;
+pub mod exec_log;
 pub mod id;
 pub mod keys;
+pub mod log;
 pub mod runtime;
 pub mod schema;
 pub mod server;
@@ -38,8 +42,12 @@ pub mod __private {
 
 pub use cli::Ferrix;
 pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, mutation, query, table};
+pub use db::pagination::{PaginationOpts, PaginationResult};
+pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb};
-pub use error::{Error, Result, UserError};
+pub use error::{Error, MutationTimeout, Result, UserError};
+pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs};
+pub use private::FunctionKind;
 pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, MutationCtx, QueryCtx, Registry, registry};
 pub use schema::{Doc, Field, Index, IndexDef, Order, Table, TableDef};
@@ -62,9 +70,13 @@ pub trait MutationFunction: FunctionRef {}
 pub trait ActionFunction: FunctionRef {}
 
 /// `use ferrix::prelude::*;`
+///
+/// Logging is not glob-exported (a glob-imported `log` module or `info!` macro would be ambiguous with the `log`
+/// crate): add `use ferrix::log;` and write `log::info!(...)`. See [`log`](crate::log).
 pub mod prelude {
     pub use crate::{
         ActionCtx, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
         internal_action, internal_mutation, internal_query, json, mutation, query, table,
     };
+    pub use crate::{PaginationOpts, PaginationResult};
 }

@@ -154,10 +154,39 @@ struct Ws {
 
 impl Ws {
     async fn connect(addr: SocketAddr) -> Ws {
+        Self::connect_session(addr, &format!("s-{}", rand_suffix())).await
+    }
+
+    async fn connect_session(addr: SocketAddr, session_id: &str) -> Ws {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
         let mut ws = Ws { stream };
-        ws.send(json!({ "type": "Connect", "sessionId": "s", "connectionCount": 0, "lastCloseReason": null })).await;
+        ws.send(json!({ "type": "Connect", "sessionId": session_id, "connectionCount": 0, "lastCloseReason": null }))
+            .await;
         ws
+    }
+
+    /// Authenticate (identity version `base` → `base + 1`) and wait for the confirming Transition.
+    async fn authenticate(&mut self, base: u64, token: Option<&str>) {
+        self.send(json!({ "type": "Authenticate", "baseVersion": base, "token": token })).await;
+        loop {
+            let t = self.recv().await;
+            if t["type"] == "Transition" && t["endVersion"]["identity"] == base + 1 {
+                return;
+            }
+            assert_ne!(t["type"], "AuthError", "{t}");
+        }
+    }
+
+    /// Send a mutation and return its MutationResponse.
+    async fn mutate(&mut self, request_id: u64, path: &str, args: Value) -> Value {
+        self.send(json!({ "type": "Mutation", "requestId": request_id, "udfPath": path, "args": args })).await;
+        loop {
+            let v = self.recv().await;
+            if v["type"] == "MutationResponse" {
+                assert_eq!(v["requestId"], request_id);
+                return v;
+            }
+        }
     }
 
     async fn send(&mut self, v: Value) {
@@ -436,6 +465,50 @@ async fn websocket_authenticate_reruns_identity_dependent_queries() {
     after.send(json!({ "type": "Authenticate", "baseVersion": 0, "token": access })).await;
     assert_eq!(after.recv_type("AuthError").await["error"], "session has ended");
     after.expect_closed().await;
+}
+
+/// Mutation dedup is keyed by `(identity, sessionId, requestId)`: a replay only ever returns a response recorded for
+/// the same identity.
+#[tokio::test]
+async fn mutation_dedup_never_crosses_identities() {
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let http = Http::new(addr);
+    let alice = token(&http.sign_up("alice@example.com", "correct horse").await, "accessToken");
+    let mallory = token(&http.sign_up("mallory@example.com", "correct horse").await, "accessToken");
+    let add = app::add_note::path();
+
+    // Alice runs request 0 of session "shared"; resending it (a reconnect) replays the same response.
+    let mut a = Ws::connect_session(addr, "shared").await;
+    a.authenticate(0, Some(&alice)).await;
+    let first = a.mutate(0, &add, json!({ "text": "alice's secret" })).await;
+    assert_eq!(first["success"], true, "{first}");
+    let mut a2 = Ws::connect_session(addr, "shared").await;
+    a2.authenticate(0, Some(&alice)).await;
+    let replay = a2.mutate(0, &add, json!({ "text": "alice's secret" })).await;
+    assert_eq!(replay["result"], first["result"], "same identity: replayed");
+
+    // Mallory (and an anonymous socket) reusing Alice's session id and request id run their own mutation instead.
+    let mut m = Ws::connect_session(addr, "shared").await;
+    m.authenticate(0, Some(&mallory)).await;
+    let theirs = m.mutate(0, &add, json!({ "text": "mallory's" })).await;
+    assert_eq!(theirs["success"], true, "{theirs}");
+    assert_ne!(theirs["result"], first["result"], "another identity must not get Alice's response");
+    let mut anon = Ws::connect_session(addr, "shared").await;
+    let anon_resp = anon.mutate(0, &add, json!({ "text": "anon" })).await;
+    assert_eq!((anon_resp["success"].clone(), anon_resp["errorData"]["code"].clone()), (json!(false), json!("unauthenticated")));
+
+    let (_, notes) = http.call("query", &app::my_notes::path(), json!({}), Some(&alice)).await;
+    assert_eq!(notes["value"], json!(["alice's secret"]), "Alice's mutation ran exactly once");
+    let (_, notes) = http.call("query", &app::my_notes::path(), json!({}), Some(&mallory)).await;
+    assert_eq!(notes["value"], json!(["mallory's"]));
+}
+
+fn rand_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

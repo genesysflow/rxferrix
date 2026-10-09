@@ -24,6 +24,14 @@ import type {
   TransitionMessage,
 } from "./protocol.js";
 import type { QueryState } from "./query_state.js";
+import {
+  PaginatedQueryImpl,
+  type PaginatedQuery,
+  type PaginatedQueryArgs,
+  type PaginatedQueryItem,
+  type PaginatedQueryOptions,
+  type PaginatedQueryReference,
+} from "./paginated_query.js";
 import { RemoteQuerySet, TransitionVersionMismatch } from "./remote_query_set.js";
 import { RequestManager, type SettledMutation } from "./request_manager.js";
 import { WebSocketManager } from "./web_socket_manager.js";
@@ -259,6 +267,23 @@ export class FerrixClient {
       unsubscribe = watch.onUpdate(check);
       check();
     });
+  }
+
+  /**
+   * Creates a reactive paginated query over a query that takes `paginationOpts` and returns a `PaginationResult`
+   * (see `paginated_query.ts`). Pages are subscribed while the returned object has subscribers.
+   *
+   * ```ts
+   * const messages = client.paginatedQuery(api.messages.list, { channel }, { initialNumItems: 20 });
+   * messages.subscribe(() => render(messages.getCurrent()));   // { results, status, loadMore, ... }
+   * ```
+   */
+  paginatedQuery<Q extends PaginatedQueryReference>(
+    ref: Q,
+    args: PaginatedQueryArgs<Q>,
+    options: PaginatedQueryOptions,
+  ): PaginatedQuery<PaginatedQueryItem<Q>> {
+    return new PaginatedQueryImpl<PaginatedQueryItem<Q>>(this, ref, args as Record<string, unknown>, options);
   }
 
   private subscribe(

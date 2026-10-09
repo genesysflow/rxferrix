@@ -37,6 +37,7 @@ async fn reconcile_and_backfill() {
             IndexDef { name: "by_score", fields: vec!["score"] },
         ],
         ts: || ferrix::__private::ts_inline::<items::Item>(),
+        validate: ferrix::__private::validate_doc::<items::Item>,
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&items_v2), 2).unwrap();
     let t = db.catalog().table("items").unwrap();

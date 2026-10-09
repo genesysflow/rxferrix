@@ -39,6 +39,22 @@ impl Identity {
     pub fn is_anonymous(&self) -> bool {
         self.user_id.is_none() && self.admin_id.is_none()
     }
+
+    /// Who this is, for logs: `user:<id>`, `admin:<id>`, or `None` when anonymous. Identities never hold tokens;
+    /// this also leaves out the session id.
+    pub fn log_summary(&self) -> Option<String> {
+        match (&self.user_id, &self.admin_id) {
+            (Some(u), _) => Some(format!("user:{u}")),
+            (None, Some(a)) => Some(format!("admin:{a}")),
+            (None, None) => None,
+        }
+    }
+
+    /// A key that separates callers for per-identity state such as mutation dedup: `"user:<id>"`,
+    /// `"admin:<id>"` or `"anonymous"`.
+    pub fn principal_key(&self) -> String {
+        self.log_summary().unwrap_or_else(|| "anonymous".to_string())
+    }
 }
 
 /// Authentication info available to functions as `ctx.auth`.

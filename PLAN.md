@@ -259,7 +259,7 @@ Why use generic tables instead of one SQLite table per user table:
 - **Reads (queries).** A pool of N read-only connections. A query starts `BEGIN`, reads `_meta.ts` first (which pins the WAL snapshot and tells us the snapshot timestamp), runs, and ends the transaction. Results are therefore always consistent at a single `ts`.
 - **Writes (mutations).** **One writer connection** behind a `tokio::sync::Mutex`. A mutation takes the lock, runs `BEGIN IMMEDIATE`, executes the user's async handler (reads see its own writes), and on success bumps `ts`, writes `_meta.ts`, commits, and appends a `CommitEntry` to the in-memory write log.
   - This gives **serializable isolation for free**, with no OCC conflicts or retries, which is the right tradeoff at this scale.
-  - `MutationCtx` exposes no network access, so mutations stay short. A per-mutation timeout (default 1s) is checked at await points.
+  - `MutationCtx` exposes no network access, so mutations stay short. A per-mutation timeout (`AppOptions::mutation_timeout`, `--mutation-timeout`, default 5s) is checked at await points; synchronous code cannot be preempted.
   - Upgrade path: the read-set machinery in §4.5 is exactly what OCC needs. If writer contention ever matters, mutations can run on snapshots and be validated at commit.
 - **`CommitEntry { ts, writes: Vec<IndexWrite { index_id, old_key: Option<Bytes>, new_key: Option<Bytes> }>, tables_touched }`.** The writer already computes these keys for index maintenance, so they come at no extra cost.
 - **Actions** have no transaction. They call `ctx.run_query` and `ctx.run_mutation`, each of which is its own transaction.
@@ -312,8 +312,8 @@ The protocol is small: JSON frames over one WebSocket per client.
 Guarantees the protocol must provide:
 - **No tearing.** All of a client's query results move together from one `ts` to the next inside a single `Transition`, so two components can never show inconsistent states.
 - **Read-your-writes.** The client resolves the `useMutation` promise and drops the optimistic update only after it has received a `Transition` with `endVersion.ts >= mutation.ts`.
-- **Reconnect.** The client resends the full query set and any unacknowledged mutations. The server deduplicates mutations by `(sessionId, requestId)`, kept in `_mutation_dedup` for about 10 minutes, so retries are idempotent.
-- **Dev logs.** In `--dev`, `logLines` from `ctx.log!()` and `tracing` events inside a function are forwarded to the browser console.
+- **Reconnect.** The client resends the full query set and any unacknowledged mutations. The server deduplicates mutations by `(sessionId, requestId)`, recorded in the raw SQLite table `_mutation_dedup` (in the same transaction as the mutation) for about 10 minutes, so retries are idempotent.
+- **Dev logs.** In `--dev`, `logLines` (the `tracing` events emitted while a function runs, written with `ferrix::log::info!` & co.) are forwarded to the browser console.
 
 **HTTP fallback.** `POST /api/query | /api/mutation | /api/action` with `{ path, args }` and a bearer token. This serves SSR, scripts, other services, and tests. `#[http_action]` or a plain axum router handles webhooks.
 
@@ -327,7 +327,7 @@ Guarantees the protocol must provide:
   5. Emit a typed **function reference type** (a braced struct with the same name, type namespace only), so `ctx.run_query::<crate::messages::list>((channel,))` is type-checked.
 - `#[internal_query]`, `#[internal_mutation]`, and `#[internal_action]` cannot be called from clients. They can be called from other functions, the scheduler, cron, and the dashboard.
 - **Errors**: `UserError { code, message, data }` reaches the client with its data intact, as a typed `FerrixError` in TS. Any other error becomes `"Server Error"` in production and shows the full message in `--dev`.
-- **Execution log**: every execution is written asynchronously to `aux.db._logs` with function, kind, duration, outcome, log lines, and identity. A separate DB file keeps logging off the writer lock.
+- **Execution log**: every execution (nested `ctx.run_*` calls included) is written asynchronously to `aux.db._logs` with function, kind, duration, outcome, error, log lines, truncated args, and identity. A separate DB file keeps logging off the writer lock. Writes go through a bounded channel to a batching background thread (entries are dropped and counted rather than blocking a function); retention defaults to 7 days or 200k rows. The dashboard reads it through `App::logs()` (`query`, `subscribe` for a live tail, `stats`). See docs/CONTRACT.md §1.4.
 
 ### 4.8 Codegen
 
@@ -351,20 +351,20 @@ The dev loop: `cargo watch -x 'run -- serve --dev'` rebuilds and restarts, codeg
   - An **optimistic update layer**: a stack of updates replayed over server state, each removed once its mutation's ts is observed.
   - **Auth**: `client.setAuth(fetchToken)`, which refreshes tokens before expiry and re-sends `Authenticate`.
 - API: `client.watchQuery(ref, args) → { onUpdate(cb), localQueryResult() }`, `client.mutation(ref, args, { optimisticUpdate })`, `client.action(ref, args)`, `client.query(ref, args)` (one-shot), and `client.connectionState()`.
-- Paginated queries: `client.paginatedQuery(ref, args, { initialNumItems })`. The server-side `.paginate(opts)` returns `{ page, isDone, continueCursor }`. Reactive pagination **pins each page's end cursor** after the first load so pages don't shift as items are inserted.
+- Paginated queries: `client.paginatedQuery(ref, args, { initialNumItems })` → `{ subscribe(cb), getCurrent() }` with `{ results, status, isLoading, error, loadMore(n) }`. The server-side `.paginate(opts)` returns `{ page, isDone, continueCursor }`. Once a page is followed by another, the client **re-subscribes it with `endCursor` pinned** to where the next page starts (keeping the old result until the pinned one arrives), so pages don't shift as items are inserted or deleted. Pinning happens on the client, so the protocol needs nothing special.
 
 ### 5.2 `@ferrix/react`
 - `<FerrixProvider client={…}>`
 - `useQuery(ref, args | "skip")` returns `T | undefined` and throws on error to an ErrorBoundary. `useQueryWithStatus` returns `{ data, error, isLoading }` for callers who prefer that shape. Both are built on `useSyncExternalStore`.
 - `useMutation(ref)` returns an async function with `.withOptimisticUpdate(fn)`.
 - `useAction(ref)`
-- `usePaginatedQuery(ref, args, { initialNumItems })` returns `{ results, status, loadMore(n) }`.
+- `usePaginatedQuery(ref, args | "skip", { initialNumItems })` returns `{ results, status, isLoading, loadMore(n) }` and throws a failed page's error to an ErrorBoundary.
 - `useFerrixAuth()` returns `{ isLoading, isAuthenticated, user }`; `useAuthActions()` returns `{ signIn, signOut }`.
 
 ### 5.3 `@ferrix/svelte` (Svelte 5 runes)
 - `setupFerrix(url)` puts the client in context.
 - `useQuery(ref, () => args | "skip")` returns a reactive object `{ data, error, isLoading }`. It is implemented with `createSubscriber` from `svelte/reactivity`, and the args thunk is tracked so the subscription switches when args change.
-- `useMutation(ref)` (with `.withOptimisticUpdate`), `useAction(ref)`, `usePaginatedQuery(...)`, `useAuth()`.
+- `useMutation(ref)` (with `.withOptimisticUpdate`), `useAction(ref)`, `usePaginatedQuery(ref, () => args | "skip", { initialNumItems })` (a reactive `{ results, status, isLoading, error, loadMore }`; changing args starts over), `useAuth()`.
 - The dashboard is written in Svelte, so these bindings get used for real from the first day.
 
 ---
@@ -486,25 +486,27 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 ### Phase 1 — Core engine (L) — mostly done
 - [x] Full value model in the key encoding, with proptests. (There is no `Bytes` type yet; values are plain JSON.)
 - [x] `#[table]` with typed field and index handles, catalog reconciliation, and index backfill.
-- [ ] Validating existing documents against a changed schema at startup; `#[migration]`.
-- [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`. **`paginate` is still to do.**
-- [x] Mutations: `insert`, `patch`, `replace`, `delete`. (`patch` is not schema-validated yet.)
+- [x] Validating existing documents against a changed schema at startup (only tables whose schema fingerprint changed; `--skip-schema-check` escape hatch).
+- [ ] `#[migration]`.
+- [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
+- [x] Mutations: `insert`, `patch`, `replace`, `delete`. Every write is validated against the table type (`patch` checks the merged document; `insert`/`replace` check that the stored JSON round-trips).
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
 - [x] `TestApp` harness.
-- [ ] A mutation timeout (a user `sleep` in a mutation currently holds the writer lock).
+- [x] A mutation timeout (`AppOptions::mutation_timeout`, `--mutation-timeout`, default 5s; enforced at await points only).
 
 ### Phase 2 — Sync and reactivity, done properly (L) — mostly done
 - [x] Per-connection sync worker: one consistent snapshot per refresh, write-log catch-up, coalescing, concurrent reruns.
 - [ ] **Deduplicating identical subscriptions across connections** (each socket reruns its own queries today), plus an interval-tree invalidation index.
 - [x] The full protocol: versions, atomic transitions, mutation `ts`, read-your-writes, reconnect and resubscribe.
-- [ ] Mutation idempotency on reconnect, keyed by `(sessionId, requestId)`. The client already reuses requestIds.
+- [x] Mutation idempotency on reconnect, keyed by `(sessionId, requestId)` and recorded in the mutation's own transaction.
 - [x] HTTP API fallback.
 - [x] Model-based reactivity test suite.
-- [ ] Execution logging to `aux.db`, and forwarding dev log lines (`logLines` is always empty today).
+- [x] Execution logging to `aux.db` (`App::logs()`: query, live tail, per-function stats), and forwarding log lines (`logLines`) to clients in `--dev`.
 
 ### Phase 3 — Clients and codegen (L) — mostly done
 - [x] `ferrix codegen --out` producing `api.ts`, `dataModel.ts` and `index.ts`; auto codegen in `serve --dev --codegen-out` (or `FERRIX_CODEGEN_OUT`).
-- [x] `@ferrix/client` core with optimistic updates. **`paginatedQuery` / `usePaginatedQuery` are still to do.**
+- [x] `@ferrix/client` core with optimistic updates.
+- [x] Reactive pagination: `client.paginatedQuery` (pins each page's `endCursor` once a next page follows it), `usePaginatedQuery` for React and Svelte, and the `insertAtTop` optimistic helper.
 - [x] `@ferrix/react` and `@ferrix/svelte`.
 - [x] `examples/todo` (Svelte), with Playwright e2e scripts. `examples/chat-react` is still to do.
 - **Milestone reached: usable for a real (unauthenticated) app.**

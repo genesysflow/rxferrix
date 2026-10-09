@@ -17,6 +17,7 @@
 import { makeFunctionReference, type Id } from "./api.js";
 import type { FerrixClient } from "./client.js";
 import { FerrixError } from "./errors.js";
+import type { ErrorData } from "./protocol.js";
 
 /** Where tokens are persisted. `localStorage` satisfies it; async implementations (e.g. secure storage) work too. */
 export interface AuthStorage {
@@ -183,7 +184,7 @@ const SIGNED_OUT_STATE: AuthState = Object.freeze({
 
 /** An error from an auth endpoint (`FerrixError` with the server's `code`, e.g. `"invalid_credentials"`). */
 function errorFrom(status: number, body: unknown): FerrixError {
-  const b = (body ?? {}) as { errorMessage?: string; errorData?: { code?: string; data?: unknown } | null };
+  const b = (body ?? {}) as { errorMessage?: string; errorData?: ErrorData | null };
   if (typeof b.errorMessage === "string") return FerrixError.fromServer(b.errorMessage, b.errorData ?? null);
   return new FerrixError(`Auth request failed with HTTP ${status}`, { code: "http_error", data: { status } });
 }

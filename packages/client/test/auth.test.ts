@@ -7,7 +7,7 @@ const KEY = `ferrix.auth:${URL_BASE}`;
 
 /** A JWT-shaped token whose payload carries `exp` (the client schedules refreshes from it). */
 function jwt(name: string, expSeconds: number): string {
-  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
   return `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: name, exp: expSeconds })}.sig`;
 }
 
@@ -44,9 +44,12 @@ function authError(status: number, code: string, message = code) {
   return { status, body: { status: "error", errorMessage: message, errorData: { code, data: null } } };
 }
 
+/** `setImmediate` is not faked, so waiting on it lets real async work (Response bodies) progress. */
+const setImmediateReal = (globalThis as unknown as { setImmediate(cb: () => void): void }).setImmediate;
+
 /** Lets promise chains that include real async work (Response bodies) finish. */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
+  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediateReal(r));
 }
 
 let server: FakeServer;

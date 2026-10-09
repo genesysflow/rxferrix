@@ -361,6 +361,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     name: #table_name,
                     indexes: ::std::vec![#(#index_def_exprs),*],
                     ts: || ::ferrix::__private::ts_inline::<#ident>(),
+                    validate: ::ferrix::__private::validate_doc::<#ident>,
                 }
             }
         }

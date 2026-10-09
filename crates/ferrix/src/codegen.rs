@@ -138,8 +138,15 @@ pub(crate) fn collect_dependencies<T: TS + ?Sized + 'static>() {
     SESSION.with(|s| *s.borrow_mut() = Some(collector));
 }
 
+/// Like [`collect_dependencies`], but also records `T` itself (which must have a declaration).
+pub(crate) fn collect_type<T: TS + ?Sized + 'static>() {
+    let Some(mut collector) = SESSION.with(|s| s.borrow_mut().take()) else { return };
+    collector.visit::<T>();
+    SESSION.with(|s| *s.borrow_mut() = Some(collector));
+}
+
 /// Run `f` with a dependency-collection session on this thread; returns its result and the collected declarations.
-fn with_session<R>(f: impl FnOnce() -> R) -> crate::Result<(R, Vec<TypeDecl>)> {
+pub(crate) fn with_session<R>(f: impl FnOnce() -> R) -> crate::Result<(R, Vec<TypeDecl>)> {
     struct Reset(Option<Collector>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -644,6 +651,20 @@ mod tests {
             assert_eq!(ts, "{ page: Page<Status>, }");
             assert_eq!(names(&decls), ["Page", "Status"]);
             assert_eq!(decls[0].decl, "export type Page<T> = { items: Array<T>, };");
+        }
+
+        #[test]
+        fn top_level_generic_user_types_are_named_and_declared() {
+            // e.g. `PaginationResult<Doc<..>>` outputs: referred to by name, with the generic declaration emitted.
+            let (ts, decls) = with_session(ts_inline::<Page<Inner>>).unwrap();
+            assert_eq!(ts, "Page<Inner>");
+            assert_eq!(names(&decls), ["Inner", "Page", "Status"]);
+            assert_eq!(decls[1].decl, "export type Page<T> = { items: Array<T>, };");
+            let (ts, decls) = with_session(ts_inline::<Page<String>>).unwrap();
+            assert_eq!(ts, "Page<string>");
+            assert_eq!(names(&decls), ["Page"]);
+            // Outside a session: just the name.
+            assert_eq!(ts_inline::<Page<Status>>(), "Page<Status>");
         }
 
         #[test]

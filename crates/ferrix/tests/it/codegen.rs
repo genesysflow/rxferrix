@@ -93,6 +93,20 @@ pub mod tasks {
         Ok(out)
     }
 
+    /// Tasks by priority, one page at a time.
+    #[query]
+    pub async fn page(
+        ctx: &QueryCtx,
+        priority: Option<Priority>,
+        pagination_opts: PaginationOpts,
+    ) -> Result<PaginationResult<Doc<Task>>> {
+        let q = match priority {
+            Some(p) => ctx.db.query::<Task>().with_index(Task::by_priority, |q| q.eq(Task::priority, p)),
+            None => ctx.db.query::<Task>(),
+        };
+        q.order(Order::Desc).paginate(pagination_opts).await
+    }
+
     #[mutation]
     pub async fn add(
         ctx: &MutationCtx,
@@ -152,6 +166,20 @@ fn generates_from_the_real_registry() {
     assert!(dm.contains("/**\n * How urgent a task is.\n */\nexport type Priority = \"low\" | \"high\";\n"), "{dm}");
     assert!(dm.contains("export type Color = \"Red\" | \"Green\" | { \"Custom\": { hex: string, } };\n"), "{dm}");
     assert!(dm.contains("export type Label = { name: string, color: Color, };\n"), "{dm}");
+    // Pagination types: declared once, `PaginationResult` generically (it is referred to by name, see below).
+    let opts_decl = dm.find("export type PaginationOpts = {").expect("PaginationOpts declared");
+    let opts_decl = &dm[opts_decl..opts_decl + dm[opts_decl..].find("};").unwrap()];
+    for field in ["numItems: number,", "cursor: string | null,", "endCursor?: string | null,"] {
+        assert!(opts_decl.contains(field), "{field} in {opts_decl}");
+    }
+    let result_decl = dm.find("export type PaginationResult<T> = {").expect("PaginationResult declared generically");
+    let result_decl = &dm[result_decl..result_decl + dm[result_decl..].find("};").unwrap()];
+    for field in ["page: Array<T>,", "isDone: boolean,", "continueCursor: string,"] {
+        assert!(result_decl.contains(field), "{field} in {result_decl}");
+    }
+    for t in ["PaginationOpts", "PaginationResult"] {
+        assert_eq!(dm.matches(&format!("export type {t}")).count(), 1, "{t} declared once");
+    }
     // A top-level output type is inlined (like every arg/output type), so `Stats` itself needs no declaration, but
     // the named types inside it do.
     assert!(!dm.contains("type Stats"), "{dm}");
@@ -166,12 +194,18 @@ fn generates_from_the_real_registry() {
 
     // api.ts
     assert!(api.contains("import { makeFunctionReference } from \"@ferrix/client\";\n"));
-    assert!(api.contains("import type { Color, Doc, Id, Label, Priority, ScanSpec } from \"./dataModel\";\n"), "{api}");
+    assert!(
+        api.contains(
+            "import type { Color, Doc, Id, Label, PaginationOpts, PaginationResult, Priority, ScanSpec } from \"./dataModel\";\n"
+        ),
+        "{api}"
+    );
     let expect = [
         "  codegen: {\n    tasks: {\n",
         "      add: makeFunctionReference<\"mutation\", { title: string, priority: Priority, labels: Array<Label>, parent?: Id<\"tasks\"> | null, }, Id<\"tasks\">>(\"mutation\", \"codegen/tasks:add\"),\n",
         "      labels: makeFunctionReference<\"query\", Record<string, never>, { [key in string]: Array<{ name: string, color: Color, }> }>(\"query\", \"codegen/tasks:labels\"),\n",
         "      list: makeFunctionReference<\"query\", { priority?: Priority | null, }, Array<Doc<\"tasks\">>>(\"query\", \"codegen/tasks:list\"),\n",
+        "      page: makeFunctionReference<\"query\", { priority?: Priority | null, paginationOpts: PaginationOpts, }, PaginationResult<Doc<\"tasks\">>>(\"query\", \"codegen/tasks:page\"),\n",
         "      ping: makeFunctionReference<\"action\", Record<string, never>, string>(\"action\", \"codegen/tasks:ping\"),\n",
         "      stats: makeFunctionReference<\"query\", Record<string, never>, { byPriority: { [key in string]: Priority }, total: number, topLabel: Label | null, }>(\"query\", \"codegen/tasks:stats\"),\n",
         "  common: {\n",

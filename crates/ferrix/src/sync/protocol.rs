@@ -72,10 +72,11 @@ pub struct StateVersion {
     pub ts: u64,
 }
 
+/// `log_lines` are the function's captured log lines; the server fills them only in `--dev`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateModification {
-    QueryUpdated { query_id: QueryId, value: Value },
-    QueryFailed { query_id: QueryId, error: ClientError },
+    QueryUpdated { query_id: QueryId, value: Value, log_lines: Vec<String> },
+    QueryFailed { query_id: QueryId, error: ClientError, log_lines: Vec<String> },
     QueryRemoved { query_id: QueryId },
 }
 
@@ -90,12 +91,12 @@ impl StateModification {
 
     fn to_json(&self) -> Value {
         match self {
-            StateModification::QueryUpdated { query_id, value } => {
-                json!({ "type": "QueryUpdated", "queryId": query_id, "value": value, "logLines": [] })
+            StateModification::QueryUpdated { query_id, value, log_lines } => {
+                json!({ "type": "QueryUpdated", "queryId": query_id, "value": value, "logLines": log_lines })
             }
-            StateModification::QueryFailed { query_id, error } => json!({
+            StateModification::QueryFailed { query_id, error, log_lines } => json!({
                 "type": "QueryFailed", "queryId": query_id, "errorMessage": error.message,
-                "errorData": error.data, "logLines": []
+                "errorData": error.data, "logLines": log_lines
             }),
             StateModification::QueryRemoved { query_id } => json!({ "type": "QueryRemoved", "queryId": query_id }),
         }
@@ -106,9 +107,9 @@ impl StateModification {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
     Transition { start_version: StateVersion, end_version: StateVersion, modifications: Vec<StateModification> },
-    /// `Ok((result, commit ts))` or the error.
-    MutationResponse { request_id: RequestId, result: Result<(Value, u64), ClientError> },
-    ActionResponse { request_id: RequestId, result: Result<Value, ClientError> },
+    /// `Ok((result, commit ts))` or the error. `log_lines` only in `--dev`.
+    MutationResponse { request_id: RequestId, result: Result<(Value, u64), ClientError>, log_lines: Vec<String> },
+    ActionResponse { request_id: RequestId, result: Result<Value, ClientError>, log_lines: Vec<String> },
     FatalError { error: String },
     AuthError { error: String },
     Ping,
@@ -125,20 +126,21 @@ impl ServerMessage {
                 "endVersion": end_version,
                 "modifications": modifications.iter().map(StateModification::to_json).collect::<Vec<_>>(),
             }),
-            ServerMessage::MutationResponse { request_id, result: Ok((value, ts)) } => json!({
+            ServerMessage::MutationResponse { request_id, result: Ok((value, ts)), log_lines } => json!({
                 "type": "MutationResponse", "requestId": request_id, "success": true, "result": value, "ts": ts,
-                "logLines": []
+                "logLines": log_lines
             }),
-            ServerMessage::MutationResponse { request_id, result: Err(e) } => json!({
+            ServerMessage::MutationResponse { request_id, result: Err(e), log_lines } => json!({
                 "type": "MutationResponse", "requestId": request_id, "success": false, "errorMessage": e.message,
-                "errorData": e.data, "logLines": []
+                "errorData": e.data, "logLines": log_lines
             }),
-            ServerMessage::ActionResponse { request_id, result: Ok(value) } => json!({
-                "type": "ActionResponse", "requestId": request_id, "success": true, "result": value, "logLines": []
+            ServerMessage::ActionResponse { request_id, result: Ok(value), log_lines } => json!({
+                "type": "ActionResponse", "requestId": request_id, "success": true, "result": value,
+                "logLines": log_lines
             }),
-            ServerMessage::ActionResponse { request_id, result: Err(e) } => json!({
+            ServerMessage::ActionResponse { request_id, result: Err(e), log_lines } => json!({
                 "type": "ActionResponse", "requestId": request_id, "success": false, "errorMessage": e.message,
-                "errorData": e.data, "logLines": []
+                "errorData": e.data, "logLines": log_lines
             }),
             ServerMessage::FatalError { error } => json!({ "type": "FatalError", "error": error }),
             ServerMessage::AuthError { error } => json!({ "type": "AuthError", "error": error }),
@@ -186,8 +188,11 @@ mod tests {
 
     #[test]
     fn server_message_shapes() {
-        let v = ServerMessage::MutationResponse { request_id: 1, result: Ok((Value::Null, 5)) }.to_json();
+        let v = ServerMessage::MutationResponse { request_id: 1, result: Ok((Value::Null, 5)), log_lines: vec![] }
+            .to_json();
         assert_eq!(v, json!({"type":"MutationResponse","requestId":1,"success":true,"result":null,"ts":5,"logLines":[]}));
+        let m = StateModification::QueryUpdated { query_id: 2, value: json!(1), log_lines: vec!["[INFO] x".into()] };
+        assert_eq!(m.to_json()["logLines"], json!(["[INFO] x"]));
         let t = ServerMessage::Transition {
             start_version: StateVersion::default(),
             end_version: StateVersion { query_set: 1, identity: 0, ts: 42 },

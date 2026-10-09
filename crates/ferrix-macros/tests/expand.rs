@@ -257,6 +257,24 @@ fn tables_are_registered() {
 }
 
 #[test]
+fn table_validate_deserializes_a_doc() {
+    let validate = todos::Todo::table_def().validate;
+    let id = "00000001000000000000000000000000";
+    let good = json!({ "_id": id, "_creationTime": 1.5, "text": "t", "done": false, "createdBy": null, "prio": 3 });
+    assert_eq!(validate(&good), Ok(()));
+    // Missing system fields, a missing user field, a wrong type.
+    let mut no_id = good.clone();
+    no_id.as_object_mut().unwrap().remove("_id");
+    assert!(validate(&no_id).unwrap_err().contains("_id"));
+    let mut no_done = good.clone();
+    no_done.as_object_mut().unwrap().remove("done");
+    assert!(validate(&no_done).unwrap_err().contains("done"));
+    let mut bad_prio = good.clone();
+    bad_prio["prio"] = json!(300);
+    assert!(validate(&bad_prio).is_err());
+}
+
+#[test]
 fn table_handles() {
     use todos::Todo;
     let f: ferrix::Field<Todo, Option<String>> = Todo::created_by;

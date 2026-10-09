@@ -41,7 +41,7 @@ where
     let txn = app.db().begin_write().await?;
     match f(MutationDb::new(txn.clone())).await {
         Ok(v) => {
-            txn.commit()?;
+            txn.commit_with(|_, _| Ok(()))?;
             Ok(v)
         }
         Err(e) => {

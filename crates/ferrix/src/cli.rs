@@ -3,8 +3,10 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::auth::{AuthConfig, SmtpConfig};
 use crate::runtime::{App, AppOptions, registry};
@@ -94,6 +96,30 @@ struct ServeArgs {
     /// Take client IPs (for rate limiting) from the last X-Forwarded-For entry. Only behind a reverse proxy.
     #[arg(long, env = "FERRIX_TRUST_PROXY")]
     trust_proxy: bool,
+    /// Roll back mutations still running after this long, e.g. `5s`, `500ms`, `2m` (a bare number is seconds).
+    /// Only enforced at `.await` points.
+    #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
+    mutation_timeout: Duration,
+    /// Start even if existing documents may not match changed table types (they are not validated).
+    #[arg(long)]
+    skip_schema_check: bool,
+}
+
+/// `"500ms"`, `"5s"`, `"2m"`, or a bare number of seconds.
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    let (num, unit) = match s.find(|c: char| !(c.is_ascii_digit() || c == '.')) {
+        Some(i) => (&s[..i], s[i..].trim()),
+        None => (s, "s"),
+    };
+    let n: f64 = num.parse().map_err(|_| format!("invalid duration `{s}` (examples: 500ms, 5s, 2m)"))?;
+    let secs = match unit {
+        "ms" => n / 1000.0,
+        "s" => n,
+        "m" => n * 60.0,
+        _ => return Err(format!("invalid duration unit in `{s}` (use ms, s or m)")),
+    };
+    Duration::try_from_secs_f64(secs).map_err(|e| format!("invalid duration `{s}`: {e}"))
 }
 
 /// Entry point for application binaries: `fn main() -> ferrix::Result<()> { Ferrix::new().run() }`.
@@ -213,11 +239,10 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
 }
 
 fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into()),
-        )
-        .try_init();
+    // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
+    let stdout_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
     if args.dev {
         let out = args.codegen_out.clone().or_else(|| std::env::var_os(CODEGEN_OUT_ENV).map(PathBuf::from));
         if let Some(out) = out.filter(|o| !o.as_os_str().is_empty()) {
@@ -229,7 +254,14 @@ fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
     rt.block_on(async move {
         let auth = auth_config(&args, auth);
         let public_url = auth.public_url.clone().unwrap_or_default();
-        let app = App::open(&args.dir, AppOptions { dev: args.dev, auth, ..Default::default() }).await?;
+        let options = AppOptions {
+            dev: args.dev,
+            mutation_timeout: args.mutation_timeout,
+            skip_schema_check: args.skip_schema_check,
+            auth,
+            ..Default::default()
+        };
+        let app = App::open(&args.dir, options).await?;
         let listener = tokio::net::TcpListener::bind(args.http).await?;
         tracing::info!(
             "ferrix listening on http://{} (data: {}, dev: {})",
@@ -305,5 +337,20 @@ mod tests {
         assert_eq!(cli.serve.codegen_out.as_deref(), Some(Path::new("gen")));
         assert!(parse(&["serve", "--codegen-out", "gen"]).is_err());
         assert!(parse(&["--codegen-out", "gen"]).is_err());
+    }
+
+    #[test]
+    fn mutation_timeout_and_schema_check_flags() {
+        let cli = parse(&[]).unwrap();
+        assert_eq!(cli.serve.mutation_timeout, crate::runtime::DEFAULT_MUTATION_TIMEOUT);
+        assert!(!cli.serve.skip_schema_check);
+        let cli = parse(&["serve", "--mutation-timeout", "250ms", "--skip-schema-check"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Serve(ref a))
+            if a.mutation_timeout == Duration::from_millis(250) && a.skip_schema_check));
+        assert_eq!(parse_duration("2").unwrap(), Duration::from_secs(2));
+        assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
+        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
+        assert!(parse_duration("5h").is_err() && parse_duration("x").is_err() && parse_duration("-1s").is_err());
+        assert!(parse(&["--mutation-timeout", "soon"]).is_err());
     }
 }

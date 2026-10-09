@@ -1,6 +1,7 @@
 //! End to end over a real socket: tokio-tungstenite clients against a server on 127.0.0.1:0, plus the HTTP API.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrix::AppOptions;
@@ -22,10 +23,16 @@ struct Ws {
 }
 
 impl Ws {
+    /// Connect with a fresh sessionId (sessions key mutation deduplication).
     async fn connect(addr: SocketAddr) -> Ws {
+        static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
+        Self::connect_session(addr, &format!("s{}", NEXT_SESSION.fetch_add(1, Ordering::Relaxed))).await
+    }
+
+    async fn connect_session(addr: SocketAddr, session_id: &str) -> Ws {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
         let mut ws = Ws { stream, version: json!({ "querySet": 0, "identity": 0, "ts": 0 }) };
-        ws.send(json!({ "type": "Connect", "sessionId": "s", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" })).await;
+        ws.send(json!({ "type": "Connect", "sessionId": session_id, "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" })).await;
         ws
     }
 
@@ -374,4 +381,111 @@ async fn http_fallback_endpoints() {
     // Malformed body: 400.
     let (status, body) = http(addr, "POST", "/api/query", None).await;
     assert_eq!((status, body["status"].clone()), (400, json!("error")));
+}
+
+/// The client resends unacknowledged mutations after a reconnect with the same (sessionId, requestId): the
+/// mutation must run once, and every copy gets the same response.
+#[tokio::test]
+async fn duplicate_mutations_are_applied_once() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let count = || async { http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await.1 };
+
+    // Sequential: the second socket is the "reconnected" client resending request 5.
+    let mut a = Ws::connect_session(addr, "same-session").await;
+    let (first, _) = a.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_eq!(first["success"], true);
+    let mut b = Ws::connect_session(addr, "same-session").await;
+    let (again, _) = b.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_eq!(again, first, "identical response: same id and same commit ts");
+    assert_eq!(texts(&count().await["value"]), vec!["once"], "a single insert");
+
+    // Concurrent duplicates on two sockets: the second waits for the writer lock, then finds the first's response.
+    let mut c = Ws::connect_session(addr, "concurrent").await;
+    let mut d = Ws::connect_session(addr, "concurrent").await;
+    let msg = json!({ "type": "Mutation", "requestId": 0, "udfPath": todos::add::path(), "args": { "text": "race" } });
+    c.send(msg.clone()).await;
+    d.send(msg).await;
+    let mut responses = Vec::new();
+    for ws in [&mut c, &mut d] {
+        loop {
+            let v = ws.recv().await;
+            if v["type"] == "MutationResponse" {
+                responses.push(v);
+                break;
+            }
+        }
+    }
+    assert_eq!(responses[0], responses[1]);
+    assert_eq!(texts(&count().await["value"]).iter().filter(|t| *t == "race").count(), 1);
+
+    // Same requestId in another session, or another requestId in the same session: a new mutation.
+    let mut e = Ws::connect_session(addr, "other-session").await;
+    let (other, _) = e.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_ne!(other["result"], first["result"]);
+    let (next, _) = b.mutate(6, &todos::add::path(), json!({ "text": "next" }), &mut Vec::new()).await;
+    assert_eq!(next["success"], true);
+    assert_eq!(texts(&count().await["value"]).len(), 4);
+
+    // Failures are replayed too (the mutation is not retried).
+    let (failed, _) = a.mutate(7, &todos::add::path(), json!({ "text": "" }), &mut Vec::new()).await;
+    let (failed_again, _) = b.mutate(7, &todos::add::path(), json!({ "text": "" }), &mut Vec::new()).await;
+    assert_eq!(failed["errorData"]["code"], "empty");
+    assert_eq!(failed_again, failed);
+}
+
+#[tokio::test]
+async fn log_lines_reach_clients_only_in_dev() {
+    use crate::hardening::fns;
+
+    for dev in [true, false] {
+        let t = TestApp::with_options(AppOptions { dev, ..Default::default() }).await.unwrap();
+        let addr = t.serve().await.unwrap();
+        let expect = |lines: Value| if dev { lines } else { json!([]) };
+        let mut a = Ws::connect(addr).await;
+
+        let first = a.subscribe(0, 0, &fns::logged_query::path(), json!({ "n": 3 })).await;
+        assert_eq!(first["modifications"][0]["logLines"], expect(json!(["[INFO] querying n=3", "[DEBUG] details"])));
+        let failed = a.subscribe(1, 1, &todos::server_error::path(), json!({})).await;
+        assert_eq!(failed["modifications"][0]["type"], "QueryFailed");
+        assert_eq!(failed["modifications"][0]["logLines"], json!([]));
+
+        let (resp, _) = a.mutate(0, &fns::logged_add::path(), json!({ "text": "x" }), &mut Vec::new()).await;
+        assert_eq!(resp["logLines"], expect(json!(["[INFO] adding x"])));
+        let (resp, _) = a.mutate(1, &fns::logged_fail::path(), json!({}), &mut Vec::new()).await;
+        assert_eq!((resp["success"].clone(), resp["logLines"].clone()), (json!(false), expect(json!(["[WARN] about to fail"]))));
+
+        a.send(json!({ "type": "Action", "requestId": 2, "udfPath": fns::logged_action::path(), "args": { "text": "y" } }))
+            .await;
+        let resp = loop {
+            let v = a.recv().await;
+            if v["type"] == "ActionResponse" {
+                break v;
+            }
+        };
+        assert_eq!(resp["result"], 7);
+        assert_eq!(
+            resp["logLines"],
+            expect(json!(["[WARN] action start", "[INFO] adding y", "[INFO] querying n=7", "[DEBUG] details", "[ERROR] action end code=42"]))
+        );
+
+        // HTTP.
+        let (_, body) = http(addr, "POST", "/api/query", Some(json!({ "path": fns::logged_query::path(), "args": { "n": 1 } }))).await;
+        assert_eq!(body["logLines"], expect(json!(["[INFO] querying n=1", "[DEBUG] details"])));
+        let (_, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": fns::logged_fail::path(), "args": {} }))).await;
+        assert_eq!(body["logLines"], expect(json!(["[WARN] about to fail"])));
+        let (_, body) = http(addr, "POST", "/api/action", Some(json!({ "path": fns::logged_action::path(), "args": { "text": "z" } }))).await;
+        assert_eq!(body["logLines"].as_array().unwrap().len(), if dev { 5 } else { 0 });
+
+        // Whatever the mode, the execution log keeps them.
+        t.app().logs().flush().await.unwrap();
+        let logged = t
+            .app()
+            .logs()
+            .query(ferrix::LogFilter { path_prefix: Some(fns::logged_fail::path()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(logged.len(), 2);
+        assert!(logged.iter().all(|e| e.log_lines == vec!["[WARN] about to fail".to_string()]));
+    }
 }

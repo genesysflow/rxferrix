@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::db::catalog::{Catalog, IndexInfo, TableInfo};
+use crate::db::pagination::{PaginationOpts, PaginationResult};
 use crate::db::readset::{KeyRange, ReadSet};
 use crate::db::{Snapshot, WriteTxn, check_table, storage};
 use crate::id::Id;
@@ -20,7 +21,7 @@ use crate::keys;
 use crate::schema::{BY_CREATION_TIME, Doc, Field, Index, Order, Table};
 
 /// Rows fetched per SQL round trip when scanning.
-const SCAN_BATCH: usize = 256;
+pub(super) const SCAN_BATCH: usize = 256;
 
 #[derive(Clone)]
 pub(crate) enum Source {
@@ -46,14 +47,14 @@ impl QueryDb {
         self.read_set.clone()
     }
 
-    fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
+    pub(super) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
         match &self.source {
             Source::Snapshot(s) => s.with_conn(f),
             Source::Write(t) => t.with_state(|s| f(s.conn())),
         }
     }
 
-    fn record(&self, index_id: crate::db::catalog::IndexId, range: KeyRange) {
+    pub(super) fn record(&self, index_id: crate::db::catalog::IndexId, range: KeyRange) {
         self.read_set.lock().unwrap_or_else(|e| e.into_inner()).record(index_id, range);
     }
 
@@ -84,7 +85,7 @@ impl QueryDb {
     }
 }
 
-fn parse_doc<T: Table>(json: &str) -> anyhow::Result<Doc<T>> {
+pub(super) fn parse_doc<T: Table>(json: &str) -> anyhow::Result<Doc<T>> {
     serde_json::from_str(json).with_context(|| format!("document does not match table `{}`", T::NAME))
 }
 
@@ -101,6 +102,15 @@ impl Deref for MutationDb {
     }
 }
 
+/// The document about to be written must deserialize as `Doc<T>`.
+fn check_doc<T: Table>(doc: &Map<String, Value>, what: &str) -> anyhow::Result<()> {
+    use serde::Deserialize as _;
+    Doc::<T>::deserialize(doc).map(drop).with_context(|| {
+        let id = doc.get(crate::schema::ID_FIELD).and_then(Value::as_str).unwrap_or("?");
+        format!("{what} document {id} does not match table `{}`; nothing was written", T::NAME)
+    })
+}
+
 fn to_fields<T: Table>(value: &T) -> anyhow::Result<Map<String, Value>> {
     match serde_json::to_value(value)? {
         Value::Object(m) => Ok(m),
@@ -113,33 +123,31 @@ impl MutationDb {
         MutationDb { reads: QueryDb::new(Source::Write(txn.clone()), txn.catalog.clone()), txn }
     }
 
+    /// Insert a document. The stored JSON must round-trip: it is checked to deserialize back as `Doc<T>` (a
+    /// `Serialize` impl that doesn't match its `Deserialize`, e.g. `#[serde(skip_serializing)]` on a required
+    /// field, is rejected here rather than breaking every later read).
     pub async fn insert<T: Table>(&self, value: T) -> crate::Result<Id<T>> {
         let table = self.table::<T>()?.clone();
         let fields = to_fields(&value)?;
-        let id = self.txn.with_state(|s| s.insert(&table, fields))?;
+        let id = self.txn.with_state(|s| s.insert(&table, fields, |doc| check_doc::<T>(doc, "inserted")))?;
         Ok(Id::from_doc_id(id))
     }
 
+    /// Replace a document's user fields (system fields are kept). Round-trip checked like [`MutationDb::insert`].
     pub async fn replace<T: Table>(&self, id: Id<T>, value: T) -> crate::Result<()> {
         let table = self.table::<T>()?.clone();
         self.check_id(&table, id)?;
         let fields = to_fields(&value)?;
-        self.txn.with_state(|s| s.replace(&table, id.doc_id(), fields))
+        self.txn.with_state(|s| s.replace(&table, id.doc_id(), fields, |doc| check_doc::<T>(doc, "replaced")))
     }
 
-    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. The result
-    /// must still deserialize as `T`.
+    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. The merged
+    /// document must still deserialize as `Doc<T>`; otherwise the patch is rejected and nothing is written.
     pub async fn patch<T: Table>(&self, id: Id<T>, patch: Value) -> crate::Result<()> {
         let table = self.table::<T>()?.clone();
         self.check_id(&table, id)?;
         let Value::Object(patch) = patch else { bail!("patch must be a JSON object") };
-        self.txn.with_state(|s| {
-            s.patch(&table, id.doc_id(), patch, |merged| {
-                serde_json::from_value::<Doc<T>>(Value::Object(merged.clone()))
-                    .map(drop)
-                    .with_context(|| format!("patched document does not match table `{}`", T::NAME))
-            })
-        })
+        self.txn.with_state(|s| s.patch(&table, id.doc_id(), patch, |merged| check_doc::<T>(merged, "patched")))
     }
 
     pub async fn delete<T: Table>(&self, id: Id<T>) -> crate::Result<()> {
@@ -270,11 +278,11 @@ type Filter<'a, T> = Box<dyn Fn(&Doc<T>) -> bool + Send + Sync + 'a>;
 
 /// A query over one index of table `T`.
 pub struct Query<'a, T> {
-    db: &'a QueryDb,
+    pub(super) db: &'a QueryDb,
     index: &'static str,
     range: IndexRange<T>,
-    order: Order,
-    filter: Option<Filter<'a, T>>,
+    pub(super) order: Order,
+    pub(super) filter: Option<Filter<'a, T>>,
 }
 
 impl<'a, T: Table> Query<'a, T> {
@@ -316,9 +324,26 @@ impl<'a, T: Table> Query<'a, T> {
         Ok(docs.pop())
     }
 
-    async fn run(self, limit: Option<usize>) -> crate::Result<Vec<Doc<T>>> {
-        let db = self.db;
-        let table = db.table::<T>()?;
+    /// One page of results, with a cursor to continue from. See [`PaginationOpts`] for the semantics.
+    ///
+    /// ```ignore
+    /// #[query]
+    /// pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOpts)
+    ///     -> Result<PaginationResult<Doc<Message>>> {
+    ///     ctx.db.query::<Message>()
+    ///         .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
+    ///         .order(Order::Desc)
+    ///         .paginate(pagination_opts)
+    ///         .await
+    /// }
+    /// ```
+    pub async fn paginate(self, opts: PaginationOpts) -> crate::Result<PaginationResult<Doc<T>>> {
+        crate::db::pagination::paginate(self, opts).await
+    }
+
+    /// The scanned index and the key range of the query's constraints on it.
+    pub(super) fn resolve(&self) -> anyhow::Result<(&'a IndexInfo, KeyRange)> {
+        let table: &'a Arc<TableInfo> = self.db.table::<T>()?;
         let index = table
             .index(self.index)
             .with_context(|| format!("index `{}` not found on table `{}`", self.index, table.name))?;
@@ -326,6 +351,12 @@ impl<'a, T: Table> Query<'a, T> {
             bail!("index `by_id` cannot be scanned; use db.get(id)");
         }
         let range = self.range.to_key_range(&table.name, index)?;
+        Ok((index, range))
+    }
+
+    async fn run(self, limit: Option<usize>) -> crate::Result<Vec<Doc<T>>> {
+        let db = self.db;
+        let (index, range) = self.resolve()?;
         let mut out = Vec::new();
         if limit == Some(0) {
             return Ok(out);

@@ -38,6 +38,19 @@ export {
   type User,
 } from "./auth.js";
 export type { OptimisticLocalStore, OptimisticUpdate } from "./optimistic_updates.js";
+export {
+  insertAtTop,
+  getAllPages,
+  type PaginationOpts,
+  type PaginationResult,
+  type PaginationStatus,
+  type PaginatedQuery,
+  type PaginatedQueryResult,
+  type PaginatedQueryOptions,
+  type PaginatedQueryReference,
+  type PaginatedQueryItem,
+  type PaginatedQueryArgs,
+} from "./paginated_query.js";
 export { LOADING, type QueryState } from "./query_state.js";
 export { canonicalJSON, queryToken, jsonEqual, type QueryToken } from "./canonical.js";
 export { CLIENT_VERSION, type StateVersion, type ClientMessage, type ServerMessage, type ErrorData } from "./protocol.js";

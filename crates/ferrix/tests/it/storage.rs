@@ -868,6 +868,9 @@ async fn private_mode_serves_signed_urls_only() {
     let url = s.abs(&files.page[0].url);
     assert!(url.contains("&sig="), "{url}");
     assert_eq!(s.get_url(&url, &[]).await.status(), 200);
+    let res = s.get_url(&s.abs(&files.page[0].download_url), &[]).await;
+    assert_eq!(res.status(), 200);
+    assert!(res.headers()["content-disposition"].to_str().unwrap().starts_with("attachment;"));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

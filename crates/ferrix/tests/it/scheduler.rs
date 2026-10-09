@@ -281,6 +281,14 @@ mod app {
         ctx.scheduler.with_retries(3).run_after::<stubborn>(Duration::ZERO, ()).await
     }
 
+    /// Waits for a cancellation (which never comes outside a scheduled job), reporting `is_canceled()` first.
+    #[action]
+    pub async fn wait_for_cancel(ctx: &ActionCtx) -> Result<bool> {
+        assert!(!ctx.is_canceled());
+        ctx.canceled().await;
+        Ok(ctx.is_canceled())
+    }
+
     /// Cancels a job from an action, with a reason.
     #[action]
     pub async fn act_cancel(ctx: &ActionCtx, id: Id<ScheduledJob>, reason: String) -> Result<()> {
@@ -883,7 +891,7 @@ async fn an_uncooperative_action_is_aborted_after_the_grace_period() {
 async fn is_canceled_is_false_outside_scheduled_jobs() {
     // Called directly, an action is never canceled: `canceled()` never resolves.
     let t = TestApp::new().await.unwrap();
-    let call = t.action::<cooperative>(());
+    let call = t.action::<wait_for_cancel>(());
     assert!(tokio::time::timeout(Duration::from_millis(200), call).await.is_err(), "still waiting");
 }
 

@@ -7,9 +7,9 @@
 //! - **Reconcile**: a cron whose schedule, time zone, function or args changed gets a fresh `nextRun`; rows of crons
 //!   that are no longer declared are deleted (their already enqueued jobs stay).
 //! - **Time zones** ([`CronSpec::timezone`]): expressions are evaluated in local time of an IANA zone, see
-//!   [`next_in_zone`] for daylight saving time.
+//!   `next_in_zone` for daylight saving time.
 //! - **System crons** (names starting with `_`, reserved) are declared by ferrix itself, e.g. `_storage_sweep`, the
-//!   storage orphan sweep ([`system_crons`]). They are ordinary `_crons` rows and jobs; the dashboard marks them.
+//!   storage orphan sweep (`system_crons`). They are ordinary `_crons` rows and jobs; the dashboard marks them.
 
 use std::str::FromStr;
 use std::time::Duration;

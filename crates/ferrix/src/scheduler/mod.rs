@@ -5,7 +5,10 @@
 //! - [`runner`]: the background runner (`App::start_scheduler`, started by `ferrix serve`) and
 //!   `App::run_due_jobs` for tests. Its module docs describe the delivery guarantees: **mutations run exactly
 //!   once, actions at most once**.
-//! - [`cron`]: crons declared with `Ferrix::cron` / `Ferrix::interval` ([`CronSpec`]).
+//! - [`cron`]: crons declared with `Ferrix::cron` / `Ferrix::cron_tz` / `Ferrix::interval` ([`CronSpec`]), time zones,
+//!   and ferrix's own system crons (`_storage_sweep`).
+//! - [`cancellation`]: canceling running actions (`ActionCtx::is_canceled` / `canceled`, the abort after
+//!   `SchedulerOptions::cancel_grace`).
 //!
 //! The functions below are system functions (paths `_system/scheduler:<name>`): two internal mutations that
 //! `ctx.scheduler` uses from actions (`schedule`, `cancel`), and the admin-only functions behind the dashboard's

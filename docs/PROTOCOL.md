@@ -259,20 +259,47 @@ credential, and `createdBy` is whoever generated the URL.
 Errors use the auth endpoints' shape (`{ "status": "error", "errorMessage", "errorData": { "code", "data" } }`) and
 `Cache-Control: no-store`. A failed upload doesn't use the URL up; it can be retried until it expires.
 
-### `GET /api/storage/{id}` (and `HEAD`)
+### `GET /api/storage/{id}[?exp=<s>&sig=<sig>][&thumb=WxH[&fit=contain|cover]][&download=1]` (and `HEAD`)
 
 `ctx.storage.get_url(id)` returns this URL (absolute when the server has a public URL). Anyone holding it can read the
 file: ids carry 96 random bits, so URLs are unguessable capabilities, and they never change.
 
+**Signed URLs.** `ctx.storage.get_signed_url(id, ttl)` returns the URL with `exp` (expiry, seconds since the epoch)
+and `sig` (base64url HMAC-SHA256 of `<id>\n<exp>` with a server key). Other parameters (`thumb`, `fit`, `download`)
+can be appended; the signature covers the file and the expiry only. A response to a signed URL is cached at most
+until it expires (`max-age` ≤ the time left). With **private storage** (`--storage-private`), a request without a
+signature is refused, so signed URLs are the only way to read files.
+
+- **403** `signature_required` (private storage, no `exp`/`sig`; also for unknown ids), `invalid_signature`
+  (malformed, tampered with, or for another file; also when only one of `exp`/`sig` is given), `url_expired`.
+  Checked before anything else.
 - **200** the content, streamed, with `Content-Type` (as uploaded, else `application/octet-stream`),
   `Content-Length`, `ETag: "<sha256>"`, `Accept-Ranges: bytes`, `Cache-Control: private, max-age=2592000, immutable`
   (a file's content never changes), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
   `Content-Disposition`.
 - **304** when `If-None-Match` lists the ETag (or `*`).
 - **206** for a single `Range: bytes=a-b | a- | -n`, with `Content-Range: bytes a-b/size`. `If-Range` with another
-  ETag, malformed ranges and multiple ranges get the whole file (200).
-- **416** for an unsatisfiable range, with `Content-Range: bytes */size`.
+  ETag, and malformed `Range` headers (one malformed range-spec invalidates the header), get the whole file (200).
+- **206 `multipart/byteranges`** for several ranges (RFC 9110 §14.6): `Content-Type: multipart/byteranges;
+  boundary=<32 hex chars>` and an exact `Content-Length`; each part is `--<boundary>\r\nContent-Type:
+  <type>\r\nContent-Range: bytes a-b/size\r\n\r\n<bytes>\r\n`, and the body ends with `--<boundary>--\r\n`.
+  Unsatisfiable ranges in the set are dropped; overlapping and adjacent ranges are coalesced, and parts come in
+  ascending order (whatever the request's order). If one range is left after that, the response is a plain single
+  `206`. More than 16 ranges: the header is ignored (200 with the whole file).
+- **416** when no range is satisfiable, with `Content-Range: bytes */size`.
 - **404** `not_found` for unknown or deleted files and ids of other tables.
+
+**Thumbnails** (`thumb=WxH`, `fit=contain` (default) or `cover`): for files whose type is `image/jpeg`, `image/png`,
+`image/webp` or `image/gif` (the first frame). `contain` fits the image inside `W×H` keeping its aspect ratio and never
+scales up; `cover` fills exactly `W×H` (scaled, center cropped). `W` and `H` go from 1 to 1024 unless the server
+allows only a list of sizes (`StorageConfig::thumbnail_sizes`). The response is a PNG when the image has
+transparency, otherwise a JPEG, with `Content-Type` accordingly, `ETag: "<sha256>.t1.<W>x<H>.<fit>"` (one per
+variant; `If-None-Match` → 304), `Content-Disposition: inline`, `Accept-Ranges: none` (ranges are ignored), and the
+same caching and security headers. Generated once, then cached on the server; deleting the file deletes them.
+- **400** `invalid_thumbnail`: a malformed `thumb` or `fit`, or a size that isn't allowed (the message lists them).
+- **415** `unsupported_image`: not one of the four types (by content type, then by the bytes).
+- **422** `image_too_large`: more than 40 megapixels (refused from the image header, before decoding: decompression
+  bombs cost nothing), or a file over 32 MiB; `invalid_image`: the bytes can't be decoded.
 
 **Content-Disposition and active content.** Images (png, jpeg, gif, webp, avif, bmp, ico), audio, video,
 `text/plain`, `text/csv`, `application/json` and `application/pdf` are `inline`; everything else, in particular

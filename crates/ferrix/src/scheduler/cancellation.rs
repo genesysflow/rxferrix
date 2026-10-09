@@ -5,7 +5,7 @@
 //! - The action sees it through [`ActionCtx::is_canceled`] and [`ActionCtx::canceled`] (a future to `select!` on) and
 //!   can stop cleanly.
 //! - If it hasn't returned `SchedulerOptions::cancel_grace` (5s) after the cancel, its future is dropped at its next
-//!   `.await` ([`abortable`]): the action, and any nested `ctx.run_action` / `ctx.run_mutation` it is awaiting, stops
+//!   `.await` (`abortable`): the action, and any nested `ctx.run_action` / `ctx.run_mutation` it is awaiting, stops
 //!   there. A nested mutation that is in flight at that moment is rolled back (its transaction never commits); the
 //!   ones that already committed **stay committed**: an action is not a transaction. Code that runs without awaiting
 //!   (a CPU-bound loop) can't be interrupted; it is dropped at its next `.await`.

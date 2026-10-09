@@ -8,7 +8,7 @@
 //! - [`runtime`]: function registry, contexts and [`App`].
 //! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
 //!   `aux.db` ([`App::logs`]).
-//! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
+//! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
 //! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`), the job runner, crons and `_scheduled_jobs`.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
 //! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).

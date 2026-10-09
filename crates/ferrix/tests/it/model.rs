@@ -34,7 +34,7 @@ use crate::common::items::{self, Item};
 type Dump = Vec<Doc<Item>>;
 type QResult = Result<Value, String>;
 
-const CLIENTS: usize = 4;
+const CLIENTS: usize = 6;
 const CLIENT_STEPS: usize = 150;
 const WRITERS: usize = 2;
 const WRITER_STEPS: usize = 80;
@@ -55,6 +55,17 @@ enum Q {
 
 impl Q {
     fn random(rng: &mut StdRng) -> Q {
+        // Clients share the server's query executions: often pick from a small pool every client draws from, so
+        // several clients hold identical (and overlapping) query sets.
+        if rng.random_bool(0.4) {
+            return match rng.random_range(0..5) {
+                0 => Q::CountAll,
+                1 => Q::InGroup(0),
+                2 => Q::Top(1, 2),
+                3 => Q::Newest(3),
+                _ => Q::Filtered(10),
+            };
+        }
         let g = rng.random_range(0..GROUPS);
         match rng.random_range(0..7) {
             0 => Q::InGroup(g),
@@ -189,6 +200,8 @@ struct Client {
     next_query_id: u64,
     next_request_id: u64,
     query_set_version: u64,
+    /// Identity version of the last Authenticate sent (the identity stays anonymous; this exercises re-keying).
+    identity_version: u64,
     outstanding_mutations: BTreeSet<u64>,
     /// Commit ts of mutation responses still waiting for a covering Transition.
     uncovered: Vec<u64>,
@@ -214,6 +227,7 @@ impl Client {
             next_query_id: 1000 * id as u64 + 7,
             next_request_id: 0,
             query_set_version: 0,
+            identity_version: 0,
             outstanding_mutations: BTreeSet::new(),
             uncovered: Vec::new(),
             log: ClientLog {
@@ -269,6 +283,11 @@ impl Client {
                 let victim = *self.live.iter().nth(rng.random_range(0..self.live.len())).unwrap();
                 self.modify(vec![QuerySetModification::Remove { query_id: victim }]).await;
             }
+            11 => {
+                let base = self.identity_version;
+                self.identity_version += 1;
+                self.send(ClientMessage::Authenticate { base_version: base, token: None }).await;
+            }
             _ => {
                 let (udf_path, args) = random_mutation(rng);
                 let request_id = self.next_request_id;
@@ -285,6 +304,7 @@ impl Client {
                 assert_eq!(start_version, self.version, "client {}: startVersion must equal current version", self.id);
                 assert!(end_version.ts >= start_version.ts, "ts went backwards");
                 assert!(end_version.query_set >= start_version.query_set);
+                assert!(end_version.identity >= start_version.identity && end_version.identity <= self.identity_version);
                 for m in modifications {
                     match m {
                         StateModification::QueryUpdated { query_id, value, .. } => {
@@ -369,6 +389,8 @@ async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_don
     c.until("covering transitions", |c| c.uncovered.is_empty()).await;
     let qs = c.query_set_version;
     c.until("last query set", move |c| c.version.query_set == qs).await;
+    let identity = c.identity_version;
+    c.until("last identity", move |c| c.version.identity == identity).await;
     steps_done.send(()).await.unwrap();
 
     // Keep processing until every writer is done.
@@ -434,12 +456,18 @@ async fn model_based_reactivity() {
     for _ in 0..CLIENTS {
         steps_rx.recv().await.unwrap();
     }
+    // Identical subscriptions across clients share one execution.
+    let stats = app.subscription_stats();
+    assert!(stats.shared_queries < stats.subscriptions, "overlapping query sets were deduplicated: {stats:?}");
     quiesce_tx.send(true).unwrap();
 
     let mut logs = Vec::new();
     for c in clients {
         logs.push(c.await.unwrap());
     }
+    // Every client has disconnected: nothing is left behind.
+    crate::shared::assert_manager_empty(&app).await;
+    println!("subscription manager while all clients were live: {stats:?}; finally {:?}", app.subscription_stats());
 
     // Every state a client ever held must equal the model at that Transition's ts.
     let final_ts = app.db().write_log().latest();

@@ -1,8 +1,8 @@
 //! The in-memory write log: recent commits and the keys they wrote.
 //!
-//! The sync worker uses it to decide which subscriptions a range of commits can affect. Entries are appended by the
-//! writer right after `COMMIT` while it still holds the writer lock, so they arrive in ts order with no gaps. A reader
-//! snapshot may observe a ts slightly before its entry is appended; [`WriteLog::wait_for`] closes that window.
+//! The subscription manager uses it to decide which subscriptions a range of commits can affect. Entries are appended
+//! by the writer right after `COMMIT` while it still holds the writer lock, so they arrive in ts order with no gaps. A
+//! reader snapshot may observe a ts slightly before its entry is appended; [`WriteLog::wait_for`] closes that window.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

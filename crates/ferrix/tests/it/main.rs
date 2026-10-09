@@ -3,6 +3,7 @@
 mod common;
 
 mod auth;
+mod bench;
 mod catalog;
 mod codegen;
 mod contract;
@@ -16,4 +17,5 @@ mod readsets;
 mod storage;
 mod scheduler;
 mod search;
+mod shared;
 mod websocket;

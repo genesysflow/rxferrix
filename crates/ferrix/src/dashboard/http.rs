@@ -186,6 +186,7 @@ async fn stats(
                 "registeredFunctions": app.registry().list().len(),
                 "sockets": metrics.sockets(),
                 "subscriptions": metrics.subscriptions(),
+                "sharedQueries": metrics.shared_queries(),
                 "droppedLogEntries": app.logs().dropped(),
                 "files": files,
             },

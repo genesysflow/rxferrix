@@ -517,12 +517,21 @@ async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
     let first = tokio::spawn(async move { app.run_due_jobs().await });
     tokio::time::timeout(Duration::from_secs(5), CRON_HANG_STARTED.notified()).await.expect("cron job started");
 
-    // Three more runs come due while the first is still in progress: all skipped.
+    // Three more runs come due while the first is still in progress: all skipped. Each skip moves the cron's next run;
+    // wait for that change itself, not for a fixed delay or a comparison with "now" (the clock follows real time, so
+    // on a loaded machine "now" can pass a one-second cron's next run at any point).
+    let mut last_due = 0.0;
     for _ in 0..3 {
+        let before = cron_rows(&t).await[0]["nextRun"].as_f64().unwrap();
         t.app().db().clock().advance(Duration::from_secs(1));
+        last_due = t.app().db().clock().now_ms();
         let app = t.app().clone();
         let again = tokio::spawn(async move { app.run_due_jobs().await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while cron_rows(&t).await[0]["nextRun"].as_f64().unwrap() == before {
+            assert!(tokio::time::Instant::now() < deadline, "the due cron run was never skipped");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert!(!again.is_finished(), "waits for the running action");
         again.abort();
     }
@@ -530,7 +539,9 @@ async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
     assert_eq!(jobs.len(), 1, "no pile-up: {jobs:?}");
     assert_eq!(jobs[0].state, JobState::InProgress);
     let row = cron_rows(&t).await.remove(0);
-    assert!(row["nextRun"].as_f64().unwrap() > t.app().db().clock().now_ms(), "skipped runs still advance nextRun");
+    // Compared with when the last run came due, not with "now": the clock follows real time, and this cron fires every
+    // second, so on a loaded machine "now" can pass the next run before this line.
+    assert!(row["nextRun"].as_f64().unwrap() > last_due, "skipped runs still advance nextRun");
 
     CRON_HANG_RELEASE.notify_one();
     assert_eq!(first.await.unwrap().unwrap(), 1);

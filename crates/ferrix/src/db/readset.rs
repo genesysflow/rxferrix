@@ -65,8 +65,8 @@ impl ReadSet {
 
     /// Does `commit` invalidate this read set?
     pub fn overlaps(&self, commit: &CommitEntry) -> bool {
-        // Linear scan; fine for the expected number of subscriptions per connection. An interval map per index
-        // would make this logarithmic.
+        // Linear scan over this one read set. The subscription manager finds the affected queries among all of them
+        // with an interval index instead (`sync::interval`), which is tested against this.
         commit.writes.iter().any(|(index_id, key)| self.contains(*index_id, key))
     }
 

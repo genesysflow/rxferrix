@@ -83,7 +83,12 @@ impl Database {
         let readers = options.readers.max(1);
         Ok(Database {
             writer: Arc::new(tokio::sync::Mutex::new(writer)),
-            readers: Arc::new(ReaderPool { path, conns: Mutex::new(Vec::new()), permits: Arc::new(Semaphore::new(readers)) }),
+            readers: Arc::new(ReaderPool {
+                path,
+                conns: Mutex::new(Vec::new()),
+                permits: Arc::new(Semaphore::new(readers)),
+                max: readers,
+            }),
             catalog: Arc::new(catalog),
             write_log: Arc::new(WriteLog::new(ts)),
             clock: Clock::default(),
@@ -106,6 +111,21 @@ impl Database {
     /// Open a read snapshot at the latest committed ts.
     pub async fn snapshot(&self) -> anyhow::Result<Arc<Snapshot>> {
         let permit = self.readers.permits.clone().acquire_owned().await?;
+        self.open_snapshot(permit)
+    }
+
+    /// Like [`snapshot`](Self::snapshot), but `None` instead of waiting when every reader is busy.
+    pub fn try_snapshot(&self) -> Option<anyhow::Result<Arc<Snapshot>>> {
+        let permit = self.readers.permits.clone().try_acquire_owned().ok()?;
+        Some(self.open_snapshot(permit))
+    }
+
+    /// Number of read-only connections (snapshots that can be open at once).
+    pub fn readers(&self) -> usize {
+        self.readers.max
+    }
+
+    fn open_snapshot(&self, permit: OwnedSemaphorePermit) -> anyhow::Result<Arc<Snapshot>> {
         let conn = match self.readers.conns.lock().unwrap().pop() {
             Some(c) => c,
             None => storage::open_reader(&self.readers.path)?,
@@ -243,6 +263,7 @@ struct ReaderPool {
     path: PathBuf,
     conns: Mutex<Vec<Connection>>,
     permits: Arc<Semaphore>,
+    max: usize,
 }
 
 /// A consistent read-only view of the database at commit `ts`. Ends the read transaction when dropped.

@@ -53,6 +53,13 @@ pub mod fns {
         }
         Ok(format!("{}:{n}", ctx.auth.user_id().map(|u| u.to_string()).unwrap_or_else(|| "anon".into())))
     }
+
+    /// How many todos there are, taking at least `ms` milliseconds (it depends on every commit).
+    #[query]
+    pub async fn slow_count(ctx: &QueryCtx, ms: u32) -> Result<usize> {
+        tokio::time::sleep(std::time::Duration::from_millis(ms.into())).await;
+        Ok(ctx.db.query::<Todo>().collect().await?.len())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -524,4 +531,79 @@ async fn slow_consumer_is_coalesced_and_does_not_stall_others() {
     assert_eq!(slow.value(1), json!(COMMITS));
     assert!(slow.transitions < COMMITS, "updates were coalesced: {} transitions for {COMMITS} commits", slow.transitions);
     println!("slow consumer: {} transitions for {COMMITS} commits; fast consumer worst latency {worst:?}", slow.transitions);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Slow queries
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A query that takes long to run holds up neither the next generation nor the connections that don't watch it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_query_does_not_hold_up_others() {
+    const SLOW_MS: u32 = 1500;
+    let t = TestApp::new().await.unwrap();
+    let app = t.app().clone();
+    let mut slow = Client::new(&app).await;
+    assert_eq!(slow.subscribe(1, &fns::slow_count::path(), json!({ "ms": SLOW_MS })).await, Ok(json!(0)));
+    let mut fast = Client::new(&app).await;
+    assert_eq!(fast.subscribe(1, &fns::everyone::path(), json!({})).await, Ok(json!(0)));
+
+    // Each commit starts a rerun of the slow query; the fast one still follows every commit promptly.
+    let started = std::time::Instant::now();
+    for i in 1..=5 {
+        let (_, ts) = t.mutation_ts::<todos::add>((format!("t{i}"),)).await.unwrap();
+        fast.until(|c| c.version.ts >= ts).await;
+        assert_eq!(fast.value(1), json!(i));
+    }
+    let fast_done = started.elapsed();
+    assert!(fast_done < Duration::from_millis(SLOW_MS as u64 / 2), "the fast query waited for the slow one: {fast_done:?}");
+
+    // The slow subscriber catches up, with a result valid at the ts it is sent at.
+    let final_ts = app.db().write_log().latest();
+    slow.until(|c| c.version.ts >= final_ts).await;
+    assert_eq!(slow.value(1), json!(5));
+}
+
+/// A connection watching two slow queries that commits keep invalidating while they run (so their runs never finish
+/// at the same ts on their own) still gets consistent updates while the commits go on: all three of its queries count
+/// the same table, so every Transition must show one number three times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connection_with_misaligned_slow_queries_still_gets_updates() {
+    let t = TestApp::new().await.unwrap();
+    let app = t.app().clone();
+    let mut c = Client::new(&app).await;
+    c.subscribe(1, &fns::slow_count::path(), json!({ "ms": 25 })).await.unwrap();
+    c.subscribe(2, &fns::slow_count::path(), json!({ "ms": 60 })).await.unwrap();
+    c.subscribe(3, &fns::everyone::path(), json!({})).await.unwrap();
+    let start_ts = c.version.ts;
+
+    let writer = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+            while std::time::Instant::now() < deadline {
+                app.run_mutation(&todos::add::path(), json!({ "text": "x" }), &Identity::default()).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+        })
+    };
+    let mut during = 0;
+    while !writer.is_finished() {
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(50), c.recv()).await
+            && matches!(msg, ServerMessage::Transition { .. })
+        {
+            assert_eq!(c.value(1), c.value(3), "torn transition at ts {}", c.version.ts);
+            assert_eq!(c.value(2), c.value(3), "torn transition at ts {}", c.version.ts);
+            during += 1;
+        }
+    }
+    writer.await.unwrap();
+    assert!(during >= 5, "only {during} transitions while commits went on (from ts {start_ts} to {})", c.version.ts);
+    let final_ts = app.db().write_log().latest();
+    c.until(|c| c.version.ts >= final_ts).await;
+    let n = app.run_query(&fns::everyone::path(), json!({}), &Identity::default()).await.result.unwrap();
+    assert_eq!((c.value(1), c.value(2), c.value(3)), (n.clone(), n.clone(), n));
+    let stats = app.subscription_stats();
+    assert!(stats.stale_runs > 0, "{stats:?}");
+    println!("{during} transitions during the commits; {stats:?}");
 }

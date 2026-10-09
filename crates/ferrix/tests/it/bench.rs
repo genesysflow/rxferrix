@@ -6,8 +6,10 @@
 //!
 //! N clients (in-process sync workers) each subscribe to M queries; a writer commits K mutations per second for S
 //! seconds, each changing one of the M queries. Reported: query executions per commit and commit-to-client latency
-//! (from the mutation's return to the client receiving a Transition at or after its ts). Two scenarios: every client
-//! watches the same M queries ("shared"), and every client watches its own M queries ("distinct": no sharing possible).
+//! (from the mutation's return to the client receiving a Transition at or after its ts). Scenarios: every client
+//! watches the same M queries ("shared"); every client watches its own M queries ("distinct": no sharing possible);
+//! and "mixed": like "shared", plus `BENCH_SLOW_CLIENTS` (20) more clients that each watch one shared slow query
+//! (`BENCH_SLOW_MS`, 20 ms of blocking work, invalidated by every commit), reported separately.
 //! Tunables: `BENCH_CLIENTS` (100), `BENCH_QUERIES` (10), `BENCH_RATE` (200), `BENCH_SECS` (5).
 //!
 //! Uses only APIs that predate the shared subscription manager, so the same file measures the per-connection workers.
@@ -40,6 +42,14 @@ pub mod fns {
         Ok(ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await?.len())
     }
 
+    /// Takes `ms` milliseconds of blocking work (like a heavy scan), then counts every item.
+    #[query]
+    pub async fn bench_slow(ctx: &QueryCtx, ms: u32) -> Result<usize> {
+        super::EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(ms.into()));
+        Ok(ctx.db.query::<Item>().collect().await?.len())
+    }
+
     #[mutation]
     pub async fn bench_insert(ctx: &MutationCtx, group: i64) -> Result<()> {
         ctx.db.insert(Item { group, score: 0, name: String::new() }).await.map(drop)
@@ -57,8 +67,33 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-async fn scenario(name: &str, shared: bool) {
-    let (clients, queries, rate, secs) = (env("BENCH_CLIENTS", 100), env("BENCH_QUERIES", 10), env("BENCH_RATE", 200), env("BENCH_SECS", 5));
+fn report(name: &str, receipts: &[Vec<(u64, Instant)>], commits: &[(u64, Instant)]) -> String {
+    let mut latencies = Vec::new();
+    let mut missing = 0;
+    for r in receipts {
+        for (ts, at) in commits {
+            let i = r.partition_point(|(t, _)| t < ts);
+            match r.get(i) {
+                Some((_, got)) => latencies.push(got.saturating_duration_since(*at)),
+                None => missing += 1,
+            }
+        }
+    }
+    latencies.sort();
+    let mean = latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32;
+    format!(
+        "{name}latency p50 {:?} p99 {:?} max {:?} mean {mean:?}{}",
+        percentile(&latencies, 0.5),
+        percentile(&latencies, 0.99),
+        latencies.last().copied().unwrap_or_default(),
+        if missing > 0 { format!(" ({missing} commit/client pairs never covered)") } else { String::new() },
+    )
+}
+
+async fn scenario(name: &str, shared: bool, slow_clients: u64) {
+    let (fast_clients, queries, rate, secs) = (env("BENCH_CLIENTS", 100), env("BENCH_QUERIES", 10), env("BENCH_RATE", 200), env("BENCH_SECS", 5));
+    let clients = fast_clients + slow_clients;
+    let slow_ms = env("BENCH_SLOW_MS", 20);
     let t = TestApp::with_options(ferrix::AppOptions { dev: false, ..Default::default() }).await.unwrap();
     let app = t.app().clone();
 
@@ -69,13 +104,17 @@ async fn scenario(name: &str, shared: bool) {
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(clients as usize);
     for c in 0..clients {
         let (tx, mut rx) = worker::spawn(app.clone());
-        let mods = (0..queries)
-            .map(|g| QuerySetModification::Add {
-                query_id: g,
-                udf_path: fns::bench_group::path(),
-                args: json!({ "group": g, "salt": if shared { 0 } else { c } }),
-            })
-            .collect();
+        let mods = if c >= fast_clients {
+            vec![QuerySetModification::Add { query_id: 0, udf_path: fns::bench_slow::path(), args: json!({ "ms": slow_ms }) }]
+        } else {
+            (0..queries)
+                .map(|g| QuerySetModification::Add {
+                    query_id: g,
+                    udf_path: fns::bench_group::path(),
+                    args: json!({ "group": g, "salt": if shared { 0 } else { c } }),
+                })
+                .collect()
+        };
         tx.send(Inbound::Message(ClientMessage::ModifyQuerySet { base_version: 0, new_version: 1, modifications: mods }))
             .await
             .unwrap();
@@ -129,35 +168,71 @@ async fn scenario(name: &str, shared: bool) {
     }
 
     let receipts = receipts.lock().unwrap();
-    let mut latencies = Vec::new();
-    let mut missing = 0;
-    for r in receipts.iter() {
-        for (ts, at) in &commits {
-            let i = r.partition_point(|(t, _)| t < ts);
-            match r.get(i) {
-                Some((_, got)) => latencies.push(got.saturating_duration_since(*at)),
-                None => missing += 1,
-            }
-        }
-    }
-    latencies.sort();
-    let mean = latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32;
+    let (fast, slow) = receipts.split_at(fast_clients as usize);
+    let slow = if slow.is_empty() { String::new() } else { format!("; slow clients ({slow_clients}): {}", report("", slow, &commits)) };
     println!(
-        "[{name}] {clients} clients x {queries} queries, {total} commits in {:.2}s ({:.0}/s): setup {setup_executions} \
-         executions; {executions} executions = {:.2} per commit; latency p50 {:?} p99 {:?} max {:?} mean {mean:?}{}",
+        "[{name}] {fast_clients} clients x {queries} queries, {total} commits in {:.2}s ({:.0}/s): setup {setup_executions} \
+         executions; {executions} executions = {:.2} per commit; {}{slow}",
         elapsed.as_secs_f64(),
         total as f64 / elapsed.as_secs_f64(),
         executions as f64 / total as f64,
-        percentile(&latencies, 0.5),
-        percentile(&latencies, 0.99),
-        latencies.last().copied().unwrap_or_default(),
-        if missing > 0 { format!(" ({missing} commit/client pairs never covered)") } else { String::new() },
+        report("", fast, &commits),
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_subscriptions() {
-    scenario("shared", true).await;
-    scenario("distinct", false).await;
+    scenario("shared", true, 0).await;
+    scenario("distinct", false, 0).await;
+    scenario("mixed", true, env("BENCH_SLOW_CLIENTS", 20)).await;
+}
+
+/// Read scaling: P tasks each run the same kind of query (100 documents per run) in a loop, each through its own
+/// snapshot (reader connection). Reports total queries per second and the mean time per query; with no contention
+/// the time per query stays flat as P grows.
+///
+/// ```sh
+/// cargo test --release -p ferrix --test it bench_parallel_reads -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_parallel_reads() {
+    let secs = env("BENCH_SECS", 2) as f64 / 2.0;
+    let t = TestApp::with_options(ferrix::AppOptions { dev: false, readers: 8, ..Default::default() }).await.unwrap();
+    let app = t.app().clone();
+    for i in 0..1000 {
+        app.run_mutation(&fns::bench_insert::path(), json!({ "group": i % 10 }), &Identity::default()).await.unwrap();
+    }
+    for parallel in [1usize, 2, 4, 6, 8] {
+        let stop = Instant::now() + Duration::from_secs_f64(secs);
+        let tasks: Vec<_> = (0..parallel)
+            .map(|p| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let (mut n, mut busy) = (0u64, Duration::ZERO);
+                    while Instant::now() < stop {
+                        let args = json!({ "group": (n as usize + p) % 10, "salt": 0 });
+                        let t0 = Instant::now();
+                        let run = app.run_query(&fns::bench_group::path(), args, &Identity::default()).await;
+                        busy += t0.elapsed();
+                        assert_eq!(run.result.unwrap(), json!(100));
+                        n += 1;
+                    }
+                    (n, busy)
+                })
+            })
+            .collect();
+        let (mut total, mut busy) = (0u64, Duration::ZERO);
+        for task in tasks {
+            let (n, b) = task.await.unwrap();
+            total += n;
+            busy += b;
+        }
+        println!(
+            "[parallel reads] {parallel} at once: {:.0} queries/s, {:.1} µs per query",
+            total as f64 / secs,
+            busy.as_secs_f64() * 1e6 / total.max(1) as f64
+        );
+    }
 }

@@ -14,6 +14,11 @@
 //! - after a MutationResponse at ts M, a Transition with ts >= M arrives (whichever order they come in);
 //! - after quiescence, without any prompting, every client's results equal the model at the final ts; a final
 //!   ModifyQuerySet then answers at exactly the final ts.
+//!
+//! Some queries are artificially slow (`fns::slow_group` sleeps between its reads and depends on every commit), so
+//! their reruns overlap later commits and generations: runs finish already invalidated, results are sent at the ts of
+//! an older run, and clients holding several of them become starving and get their queries parked (the test checks
+//! that these paths ran).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,8 +44,25 @@ const CLIENT_STEPS: usize = 150;
 const WRITERS: usize = 2;
 const WRITER_STEPS: usize = 80;
 const GROUPS: i64 = 4;
+/// Durations (ms) of the slow queries.
+const SLOW_MS: [u32; 4] = [1, 4, 12, 30];
 
 static NAMES: AtomicU64 = AtomicU64::new(0);
+
+pub mod fns {
+    use ferrix::prelude::*;
+
+    use crate::common::items::Item;
+
+    /// The items of `group` and the number of items, taking at least `ms` milliseconds: it sleeps between its two
+    /// reads (which still see one snapshot). It reads the whole table, so every commit invalidates it.
+    #[query]
+    pub async fn slow_group(ctx: &QueryCtx, group: i64, ms: u32) -> Result<(Vec<Doc<Item>>, usize)> {
+        let docs = ctx.db.query::<Item>().with_index(Item::by_group_score, |r| r.eq(Item::group, group)).collect().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(ms.into())).await;
+        Ok((docs, ctx.db.query::<Item>().collect().await?.len()))
+    }
+}
 
 #[derive(Clone, Debug)]
 enum Q {
@@ -51,12 +73,16 @@ enum Q {
     ValueRange(i64, i64, i64),
     Filtered(i64),
     FindName(String),
+    Slow(i64, u32),
 }
 
 impl Q {
     fn random(rng: &mut StdRng) -> Q {
         // Clients share the server's query executions: often pick from a small pool every client draws from, so
         // several clients hold identical (and overlapping) query sets.
+        if rng.random_bool(0.12) {
+            return Q::Slow(rng.random_range(0..2), SLOW_MS[rng.random_range(0..SLOW_MS.len())]);
+        }
         if rng.random_bool(0.4) {
             return match rng.random_range(0..5) {
                 0 => Q::CountAll,
@@ -93,6 +119,7 @@ impl Q {
             Q::ValueRange(g, lo, hi) => (items::value_range::path(), json!({ "group": g, "lo": lo, "hi": hi })),
             Q::Filtered(min) => (items::filtered::path(), json!({ "min": min })),
             Q::FindName(name) => (items::find_name::path(), json!({ "name": name })),
+            Q::Slow(g, ms) => (fns::slow_group::path(), json!({ "group": g, "ms": ms })),
         }
     }
 
@@ -130,6 +157,7 @@ impl Q {
                 v.truncate(3);
                 to_json(v)
             }
+            Q::Slow(g, _) => json!([to_json(by_group_score(docs.iter().filter(|d| d.group == *g).collect())), docs.len()]),
             Q::FindName(name) => {
                 let found: Vec<_> = docs.iter().filter(|d| &d.name == name).collect();
                 match found.as_slice() {
@@ -377,6 +405,9 @@ async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_don
         client_version: Some("test".into()),
     })
     .await;
+    // Start with two slow queries of different durations (later steps may remove them).
+    let slow = [c.add_mod(Q::Slow(id as i64 % 2, SLOW_MS[3])), c.add_mod(Q::Slow((id as i64 + 1) % 2, SLOW_MS[id % 3]))];
+    c.modify(slow.into()).await;
     for _ in 0..CLIENT_STEPS {
         c.step(&mut rng).await;
         c.drain();
@@ -496,5 +527,8 @@ async fn model_based_reactivity() {
     assert!(final_ts > (WRITERS * WRITER_STEPS / 2) as u64, "enough commits happened");
     assert!(response_first > 0, "the response-before-transition order was exercised");
     assert!(transitions > CLIENTS * 20);
+    // The slow queries made runs overlap commits.
+    let stats = app.subscription_stats();
+    assert!(stats.stale_runs > 0, "no run finished invalidated: {stats:?}");
     assert_eq!(t.app().db().verify_indexes().await.unwrap(), Vec::<String>::new());
 }

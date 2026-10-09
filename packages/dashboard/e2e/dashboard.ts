@@ -39,11 +39,13 @@ function freePort(): number {
 
 interface Server {
   base: string;
+  port: number;
   output: () => string;
+  /** Resolves with the exit code. */
+  exited: Promise<number>;
 }
 
-async function startServer(dir: string, extraArgs: (base: string) => string[] = () => []): Promise<Server> {
-  const port = freePort();
+async function startServer(dir: string, extraArgs: (base: string) => string[] = () => [], port = freePort()): Promise<Server> {
   const base = `http://127.0.0.1:${port}`;
   const proc = Bun.spawn([bin, "serve", "--dir", dir, "--http", `127.0.0.1:${port}`, ...extraArgs(base)], {
     stdout: "pipe",
@@ -59,7 +61,7 @@ async function startServer(dir: string, extraArgs: (base: string) => string[] = 
   }
   for (let i = 0; i < 200; i++) {
     try {
-      if ((await fetch(`${base}/api/health`)).ok) return { base, output: () => out };
+      if ((await fetch(`${base}/api/health`)).ok) return { base, port, output: () => out, exited: proc.exited };
     } catch {}
     await Bun.sleep(50);
   }
@@ -83,6 +85,8 @@ async function call(base: string, kind: string, path: string, args: unknown, tok
 
 /** How many failed HTTP responses (4xx) the next steps provoke on purpose. */
 let expectedHttpErrors = 0;
+/** Console errors expected while a server restarts on purpose (refused connections, the ended session). */
+let tolerated: RegExp | null = null;
 
 /** The page of the step that runs, for a screenshot when it fails (`FAILURE_SCREENSHOT=<path>`). */
 let lastPage: Page | null = null;
@@ -114,6 +118,7 @@ async function newPage(browser: Browser): Promise<Page> {
   page.on("pageerror", (e) => failures.push(`page error: ${e.message}`));
   page.on("console", (m) => {
     if (m.type() !== "error") return;
+    if (tolerated?.test(m.text())) return;
     // A request the test makes fail on purpose (the browser logs every failed response).
     if (expectedHttpErrors > 0 && /^Failed to load resource: the server responded with a status of 4\d\d/.test(m.text())) {
       expectedHttpErrors--;
@@ -513,10 +518,22 @@ try {
     }
     await page.getByLabel("Export format").selectOption("csv");
     const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Export", exact: true }).click()]);
-    const header = readFileSync((await csv.path())!, "utf8").split("\r\n")[0];
+    const csvText = readFileSync((await csv.path())!, "utf8");
+    const header = csvText.split("\r\n")[0];
     if (header !== "_id,_creationTime,completedAt,done,image,text") throw new Error(`csv header: ${header}`);
 
+    // The CSV export goes back in (upsert: same ids, same values): the format follows the file name.
     await page.getByLabel("Table", { exact: true }).selectOption("todos");
+    await page.getByLabel("Mode", { exact: true }).selectOption("upsert");
+    await page.getByLabel("File", { exact: true }).setInputFiles({ name: "todos.csv", mimeType: "text/csv", buffer: Buffer.from(csvText) });
+    if ((await page.getByLabel("Format", { exact: true }).inputValue()) !== "csv") throw new Error("CSV not picked from the name");
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    const rows = csvText.trim().split("\r\n").length - 1;
+    await page.getByTestId("import-result").getByText(`${rows} document${rows === 1 ? "" : "s"} imported into`).waitFor({ timeout: 10_000 });
+    await page.getByTestId("import-result").getByText(`${rows} replaced`).waitFor();
+    const after = await call(base, "query", "todos:list", {});
+    if (!JSON.stringify(after.body).includes("audited live")) throw new Error(`todos after the CSV import: ${JSON.stringify(after.body)}`);
+    await page.getByLabel("Mode", { exact: true }).selectOption("insert");
     await page.getByLabel("File", { exact: true }).setInputFiles({
       name: "bad.jsonl",
       mimeType: "application/x-ndjson",
@@ -758,6 +775,72 @@ try {
     await nav(page, "Data").click();
     await page.getByTestId("document-grid").waitFor();
     await shot(page, "data-dark");
+  });
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Staged restore on a server of its own (it restarts): a corrupt upload is refused, a stored backup is checked and
+  // staged, canceled, staged again, then "Restart now": the server exits with --restart-exit-code, comes back (here
+  // started again by the test, as a supervisor would) with the backup's data.
+  await step("staged restore: refuse, stage, cancel, restart", async () => {
+    const rdir = tempDir();
+    const made = Bun.spawnSync([bin, "admin", "create", EMAIL, "--password", PASSWORD, "--dir", rdir]);
+    if (made.exitCode !== 0) throw new Error(`admin create failed: ${made.stderr.toString()}`);
+    const rs = await startServer(rdir, () => ["--restart-exit-code", "75"]);
+    const token = await adminToken(rs.base);
+    const auth = { authorization: `Bearer ${token}` };
+    await call(rs.base, "mutation", "todos:add", { text: "in the backup" });
+    const backup = (await fetch(`${rs.base}/api/admin/backups`, { method: "POST", headers: auth }).then((r) => r.json())) as { name: string };
+    await call(rs.base, "mutation", "todos:add", { text: "after the backup" });
+
+    const p = await newPage(browser!);
+    await signIn(p, rs.base);
+    await nav(p, "Backups").click();
+    await p.getByRole("heading", { name: "Backups and data" }).waitFor();
+    // A corrupt archive from this computer: refused with the reason, nothing staged.
+    expectedHttpErrors++;
+    await p.getByLabel("Restore an archive from this computer:").setInputFiles({
+      name: "ferrix-broken.tar.zst",
+      mimeType: "application/zstd",
+      buffer: Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3, 4, 5]),
+    });
+    await p.getByTestId("restore-error").getByText(/Not restored: This backup can't be restored/).waitFor({ timeout: 20_000 });
+    if (await p.getByTestId("pending-restore").count()) throw new Error("a corrupt archive was staged");
+
+    // The stored backup: checked, staged, shown as pending; the data is unchanged meanwhile.
+    const row = p.getByTestId("backups").locator("tbody tr").filter({ hasText: backup.name });
+    await row.getByRole("button", { name: "Restore" }).click();
+    const banner = p.getByTestId("pending-restore");
+    await banner.getByText(/Restore pending:/).waitFor({ timeout: 30_000 });
+    await banner.getByText(backup.name).waitFor();
+    await shot(p, "restore-pending");
+    if ((await row.getByRole("button", { name: "Restore" }).isEnabled())) throw new Error("Restore stays enabled while one is pending");
+    // Cancel, then stage again.
+    await banner.getByRole("button", { name: "Cancel restore" }).click();
+    await banner.waitFor({ state: "detached" });
+    await row.getByRole("button", { name: "Restore" }).click();
+    await banner.getByText(/Restore pending:/).waitFor({ timeout: 30_000 });
+
+    // Restart now: the server exits with 75; the supervisor (the test) starts it again on the same port. Meanwhile
+    // the page sees refused connections, then its session (not in the backup) is refused.
+    tolerated = /ERR_CONNECTION_REFUSED|ERR_EMPTY_RESPONSE|WebSocket|status of 40[13]/;
+    await banner.getByRole("button", { name: "Restart now" }).click();
+    await p.getByTestId("restarting").waitFor();
+    const code = await Promise.race([rs.exited, Bun.sleep(30_000).then(() => -1)]);
+    if (code !== 75) throw new Error(`exit code ${code}, expected 75:\n${rs.output()}`);
+    const again = await startServer(rdir, () => ["--restart-exit-code", "75"], rs.port);
+    const list = await call(again.base, "query", "todos:list", {});
+    const texts = (list.body.value as { text: string }[]).map((t) => t.text);
+    if (!texts.includes("in the backup") || texts.includes("after the backup")) throw new Error(`after the restore: ${texts}`);
+    // The page reloads by itself once the server answers again; the restored database has the admin (made before
+    // the backup) but not this browser's session (made after it): sign in again.
+    await p.getByLabel("Email").waitFor({ timeout: 30_000 });
+    await signIn(p, again.base);
+    await nav(p, "Backups").click();
+    await p.getByRole("heading", { name: "Backups and data" }).waitFor();
+    await p.getByTestId("backups").waitFor();
+    if (await p.getByTestId("pending-restore").count()) throw new Error("still pending after the restart");
+    tolerated = null;
+    await p.close();
   });
 
   // ---------------------------------------------------------------------------------------------------------------

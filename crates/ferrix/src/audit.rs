@@ -116,7 +116,8 @@ pub(crate) fn diff(before: &Value, after: &Value) -> (Value, Value) {
 /// Append an entry in `db`'s transaction (so it commits or rolls back with the write it describes).
 pub(crate) async fn record(db: &MutationDb, admin: Option<Id<Admin>>, rec: Record) -> Result<()> {
     let admin_email = match admin {
-        Some(a) => db.get(a).await?.map(|a| a.value.email),
+        // A stale or foreign admin id (e.g. a hand-built identity) just has no email.
+        Some(a) => db.get(a).await.ok().flatten().map(|a| a.value.email),
         None => None,
     };
     db.insert(AuditEntry {

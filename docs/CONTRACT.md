@@ -390,7 +390,7 @@ filtered by `RUST_LOG`.
 also uses the `log` crate or `#[macro_use] extern crate log`, so the prelude leaves them out and the explicit
 `use ferrix::log;` (which shadows the `log` crate cleanly in that file) is the one import to add.
 
-Capture uses a tracing layer, `ferrix::log::layer()`, plus a task-local buffer. `ferrix serve` installs stdout output
+Capture uses a tracing layer, `ferrix::log::layer()`, plus a task-local buffer. `ferrix serve` installs stdout output (`--log-format json|pretty|compact`, §4.4)
 and the layer, each with its own filter. If no global subscriber is set when an `App` opens, ferrix installs one
 with just the layer. An app that installs its own subscriber should add `ferrix::log::layer()` to it, and do so
 before opening the `App`.
@@ -521,18 +521,32 @@ pub struct TimePoint {                     // only buckets with executions
 ### 1.5 Auth configuration and services
 
 ```rust
-use ferrix::auth::{AuthConfig, GitHub, Google, Oidc, SmtpConfig};
+use ferrix::auth::{Apple, AuthConfig, Discord, GitHub, Google, Oidc, SmtpConfig};
 fn main() -> ferrix::Result<()> {
     ferrix::Ferrix::new()
         .auth(AuthConfig::password()                // email + password (verification and reset included)
             .magic_link()                           // magic link + 6-digit code by email
             .oauth(GitHub::from_env())              // FERRIX_AUTH_GITHUB_CLIENT_ID / _SECRET (skipped with a warning if unset)
             .oauth(Google::from_env())              // FERRIX_AUTH_GOOGLE_CLIENT_ID / _SECRET
+            .oauth(Discord::from_env())             // FERRIX_AUTH_DISCORD_CLIENT_ID / _SECRET
+            .oauth(Apple::from_env())               // FERRIX_AUTH_APPLE_{CLIENT_ID,TEAM_ID,KEY_ID,PRIVATE_KEY[_FILE]}
             .oauth(Oidc::new("corp", "https://idp.example.com", "client-id", "secret"))   // discovery
             .redirect_url("https://app.example.com")) // allowlist for OAuth redirects and email links
         .run()
 }
 ```
+OAuth presets (`ferrix::auth`): `GitHub`, `Google`, `Discord::new(client_id, secret)` (`identify email`; the
+`/users/@me` profile; the email is kept only when Discord marks it `verified`), `Apple::new(services_id, team_id,
+key_id, p8_pem)` and `Oidc::new(id, issuer, client_id, secret)`; each is an `OAuthProvider` (`.id(..)`,
+`.scopes(..)`, and `.base_url(..)` to point Discord or Apple at a mock or proxy). Sign in with Apple: the client
+secret is an ES256 JWT (`iss` team id, `sub` services id, `aud` `https://appleid.apple.com`, `kid` key id) signed
+with the `.p8` key, cached and replaced 10 minutes before its 1-hour expiry; the authorization request adds
+`response_mode=form_post` and a `nonce`; the callback is a `POST` (the state cookie is then `SameSite=None; Secure`
+when the public URL is https); the profile is the token endpoint's ID token, verified with the external-JWT code
+(Apple's JWKS at `/auth/keys`, RS256 only, `iss`, `aud` = services id, `exp`, `nonce`); the name comes from the
+`user` form field of the first sign-in (later sign-ins keep it; its email is ignored). A provider whose Apple key
+doesn't parse is logged at startup and refuses sign-ins.
+
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
 `session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
@@ -1665,7 +1679,7 @@ need the server's configuration and keys), so the dashboard calls them with `use
 
 **`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
 per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
-holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets as a JSON map by provider id, or the
+holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, or the
 SMTP password), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
 from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
 key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
@@ -1675,14 +1689,15 @@ until the secret is entered again.
 | Path `_system/settings:…` | Kind | Args → result |
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
-| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `oidc` (the latter needs an https `issuer`, http only for loopback or in `--dev`); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
 ```ts
-type OAuthKind = "github" | "google" | "oidc";
+type OAuthKind = "github" | "google" | "discord" | "apple" | "oidc";
 type SettingsView = {
   oauth: { id: string; kind: OAuthKind; issuer: string | null; clientId: string; clientSecret: "••••" | null;
-           enabled: boolean; scopes: string[] | null; locked: boolean }[];    // locked: a provider with this id is configured in code
+           enabled: boolean; scopes: string[] | null; teamId: string | null; keyId: string | null; /* Apple */
+           locked: boolean }[];    // locked: a provider with this id is configured in code
   smtp: { url: string /* no password */; from: string; password: "••••" | null } | null;
   redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
   sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
@@ -1692,7 +1707,8 @@ type SettingsView = {
 };
 type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
                             clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
-                            enabled: boolean; scopes?: string[] | null };
+                            enabled: boolean; scopes?: string[] | null;
+                            teamId?: string | null; keyId?: string | null /* Apple only, required there */ };
 type SmtpInput = { url: string /* a password in the URL is moved out of it */; from: string;
                    password?: string | null /* omitted, null or "••••": keep; "": none */ };
 ```
@@ -1709,7 +1725,9 @@ action, targetTable, targetId, before, after, details, at }` with indexes `by_at
 `replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
 for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
 `details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
-`open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1). Secrets are masked by the §4.1 rule.
+`open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1), `restore_stage` / `restore_cancel` /
+`restore_restart` (staged restores, §4.2; `details`: the backup, its ts, `secretIgnored`, or the exit code). Secrets are
+masked by the §4.1 rule.
 
 Each entry is written in the same transaction as the write it describes. The table is a system table, so the
 dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
@@ -1729,12 +1747,17 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 
 | Endpoint | Response |
 |---|---|
-| `GET /api/admin/backups` | `{ target, backups: BackupInfo[] }`, newest first. `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
+| `GET /api/admin/backups` | `{ target, backups: BackupInfo[], pendingRestore: PendingRestore \| null, restart: { available, exitCode } }`, newest first (`pendingRestore` and `restart` as for `GET /api/admin/restore`). `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
 | `POST /api/admin/backups` | Body (optional) `{ includeAux?, includeFiles? }` → 201 `BackupInfo` once the archive is stored. Runs while the server serves (writes are not blocked); one backup at a time per process (a second request waits). `includeSecret: true` → 400 `invalid_request` (`auth_secret.key` is only ever included by the CLI). 500 `server_error` with the reason (e.g. S3 credentials) on failure. |
 | `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `ferrix-….tar.zst`. |
 | `DELETE /api/admin/backups/{name}` | `{ deleted: true }`; 404 `not_found`; 400 `invalid_name`. |
+| `POST /api/admin/backups/{name}/restore` | Stage that backup of the target for a restore at the next start (§4.4 "Staged restores") → `{ pendingRestore, restart }` once it passed every check. 400 `invalid_backup` with the reason (nothing is staged); 409 `restore_pending` if one is staged already; 404 `not_found`; 400 `invalid_name`. Audited (`restore_stage`). |
+| `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
+| `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error }`; `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
+| `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
+| `POST /api/admin/restore/restart` | 202 `{ restarting: true, exitCode }`, then a graceful shutdown and exit with `--restart-exit-code`, for the supervisor (systemd, Docker) to start the server again, which applies the restore. 400 `restart_unavailable` without `--restart-exit-code`; 409 `no_pending_restore`; 400 `invalid_backup` when the staged restore has an `error`. Audited (`restore_restart`). |
 | `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
-| `POST /api/admin/import/{table}?mode=insert\|upsert\|replace` | Body: JSONL (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
+| `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/ferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
@@ -1786,7 +1809,27 @@ scheduled ones beyond `keep`; manual archives are never rotated.
 binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
 `data.db`(`-wal`, `-shm`), `aux.db`, persisted HNSW indexes (`vector_index_<id>.hnsw`) and, if restored,
 `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the restored files put in place; blobs are added to the
-storage directory.
+storage directory. A database with a trigger or a view (ferrix creates neither) is refused. While a restore is staged
+(below), `restore` refuses (`restore --cancel` cancels the staged one, offline).
+
+**Staged restores** (`crate::ops::restore`; the endpoints in §4.2, the dashboard's Backups page). Restoring under a
+running server would replace a database it has open, so a restore from the dashboard is split in two. *Staging*, while
+the server runs: the archive is extracted into a temporary directory in the data directory and checked exactly like
+`ferrix restore` (manifest, `integrity_check`, no triggers or views, opened with the binary's tables, `verify_indexes`;
+never `--skip-verify`); a failing archive is refused with the reason and leaves nothing behind. A passing one is
+renamed to `<dir>/restore-staged/`, the SHA-256 of its databases recorded, and `<dir>/pending-restore.json` (the
+`PendingRestore` of §4.2 plus those checksums) written last, atomically. `auth_secret.key` is never staged, even when
+the archive has it. One restore can be staged at a time. *Applying*, when `serve` starts next, after it takes
+`ferrix.lock` and before it opens the database: the staged databases are checked against the recorded checksums
+(a file already moved by an interrupted run is checked where it is); then the current `data.db` (with `-wal`, `-shm`),
+`aux.db` (when the backup has one) and persisted HNSW indexes go to `<dir>/pre-restore-<staged time>/`, the staged
+files take their place and blobs are added to local storage; the marker is removed, then the staging directory.
+Each step only moves what is still to be moved, so a crash halfway is completed by the next start. Staged files that
+don't match their checksums are not applied: the server starts on its current data and the marker keeps the `error`
+until the restore is canceled. *Restart*: `serve --restart-exit-code N` (`FERRIX_RESTART_EXIT_CODE`, 1–255) lets an
+admin request `POST /api/admin/restore/restart`: `serve` shuts down gracefully (as on SIGTERM) and exits with `N`
+for the supervisor to start it again (`deploy/ferrix.service` sets 75 with `RestartForceExitStatus=75`; with Docker,
+`--restart unless-stopped`). Without the flag nothing restarts by itself: the restore waits for the next start.
 
 A backup holds the whole database, system tables included (`_users`, `_settings`, `_audit_log`, ...); secrets in
 `_settings` are encrypted with a key derived from `auth_secret.key`, so they are readable after a restore only with
@@ -1797,21 +1840,50 @@ they are rebuilt from the restored database at startup.
 `--tables` may name system tables), `files/<storage id>` for exported `_storage` documents, and `manifest.json`:
 `{ format: "ferrix-export", version: 1, documentFormat, exportedAt, ts, ferrixVersion, tables: [{ name, number,
 documents, file }], catalog: { <table>: <number> }, files, missingFiles }`. **Import** (`ferrix import`, offline;
-or the HTTP endpoint above) reads JSONL: an export directory (ids of tables whose number differs in the target are
-rewritten everywhere in the imported documents using `catalog`, and `files/` are stored), a directory of
-`<table>.jsonl`, or one file (`--table`). The CLI may write system tables; validation, batching and modes as above.
+or the HTTP endpoint above) reads JSONL or CSV: an export directory (its `documentFormat`; ids of tables whose number
+differs in the target are rewritten everywhere in the imported documents using `catalog`, and `files/` are stored), a
+directory of `<table>.jsonl` / `<table>.csv`, or one file (`--table`); `--format jsonl|csv` (default: from the
+extension, `.csv` is CSV). The CLI may write system tables; validation, batching and modes as above.
+
+**CSV import** (`crate::ops::csv`) reads what the CSV export writes: RFC 4180 (quoted fields with commas, doubled
+quotes and line breaks; CRLF or LF; a BOM and blank lines are skipped), a header row of unique column names with
+`_id` / `_creationTime` optional (missing: a new id, the import time). The export writes strings as is, `null` and
+missing fields as empty cells and other values as JSON, so a cell is typed with the table's shape, read from the TS
+type of its Rust type (`TableDef::ts`) per top-level field: a field that can only be a string (`string`, `Id<…>`,
+string literals) takes the cell as is (empty: `null` if nullable, else `""`); a field that can't be a string parses
+the cell as JSON (empty: `null`); for anything else (unions, named `#[object]` types, `any`) a cell that is valid JSON
+of a kind the field allows is parsed, otherwise it is a string. If the document then fails the table's validation,
+the other reading of each ambiguous cell is tried, field by field. Lossy by construction: a nullable string's `""`
+comes back as `null`. Errors name the CSV line a record starts on.
+
+**TLS certificate files** (`--tls-cert`/`--tls-key`) are re-read every `--tls-reload-every` (default `30s`, `0`: never);
+a changed pair that loads replaces the certificate for new handshakes (the rustls config is swapped atomically; open
+connections keep theirs), a pair that doesn't (a half-written renewal, a mismatched key) is ignored with one error in
+the log per change.
+
+**Logs**: `serve --log-format json|pretty|compact` (`FERRIX_LOG_FORMAT`; default `pretty` on a terminal, `json`
+otherwise) formats the server's `tracing` output on stdout. `json` writes one object per line: `timestamp` (RFC 3339),
+`level`, `target`, `fields` (`message` and the event's key-values), `span` and `spans` (the current span and every
+enclosing one, with their fields). `RUST_LOG` filters every format; function log lines are captured the same way
+(`ferrix::log::layer`, §1.4).
 
 ```rust
 // crate::ops (selected)
-pub struct OpsOptions { pub metrics: MetricsOptions /* enabled, token */, pub backup_target: Option<String> } // AppOptions::ops
+pub struct OpsOptions { pub metrics: MetricsOptions /* enabled, token */, pub backup_target: Option<String>,
+                        pub restart: restore::RestartHandle /* --restart-exit-code */ }        // AppOptions::ops
 backup::create(&app, &BackupSpec { include_aux, include_files, include_secret }, &BackupTarget, scheduled) -> Result<BackupInfo>;
 backup::restore(archive: &Path, dir: &Path, &RestoreOptions { storage_dir, skip_verify }) -> Result<RestoreReport>;
+backup::prepare(archive, staging, skip_verify) -> Result<Manifest>;   // extract + check, no data dir touched
+backup::apply_staged(staging, dir, manifest, storage_dir, previous) -> Result<RestoreReport>;   // offline, repeatable
+restore::{stage(dir, archive, label, staged_by) -> Result<PendingRestore>, pending(dir), cancel(dir) -> Result<bool>,
+          apply_pending(dir, storage_dir) -> Result<Option<RestoreReport>>};   // serve calls apply_pending at startup
+RestartHandle::{new(exit_code), exit_code(), request() -> bool, requested().await, is_requested()};
 BackupTarget::{parse(location, data_dir), for_app(&app), list(), open(name), download(name, dest), delete(name), rotate(keep)};
 export::export_to_dir(data_dir, Option<BlobStore>, out, &ExportOptions { tables, format, include_files }) -> Result<ExportManifest>;
-export::import_path(&app, path, table: Option<&str>, &ImportOptions { mode, batch_size, allow_system_tables }) -> Result<ImportReport>;
+export::import_path(&app, path, table: Option<&str>, &ImportOptions { mode, batch_size, allow_system_tables, format }) -> Result<ImportReport>;
 DirLock::acquire(dir) -> Result<DirLock>;     // <dir>/ferrix.lock
 web::router(app, &WebOptions { static_files, routes }) -> axum::Router;   // what `serve` serves
-tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertFiles { https, redirect, cert, key }}) -> Result<RunningServer>;
+tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertFiles { https, redirect, cert, key, reload_every }}) -> Result<RunningServer>;
 ```
 
 **Builder**: `Ferrix::static_dir(dir)`, `Ferrix::embed_static::<A: rust_embed::RustEmbed>()` (derive with

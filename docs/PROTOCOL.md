@@ -228,8 +228,17 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens`. Ends all other sessions of the user and marks the email verified. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
 | `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
-| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`; sets the HttpOnly SameSite=Lax cookie `ferrix_oauth_state`). |
+| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `ferrix_oauth_state`, `SameSite=Lax`, or `SameSite=None; Secure` for Apple behind an https public URL). |
 | `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, or `#ferrix_error=<code>&ferrix_error_description=…`. |
+| `POST /api/auth/oauth/{provider}/callback` | form `code, state, user?` (from Apple) | Apple only (`response_mode=form_post`; 405 for other providers): as the `GET`, answered with 303. `user` (the name) comes on the first sign-in only. |
+
+OAuth presets: `github`, `google`, `discord` (`identify email`; its email only if Discord verified it), `apple` (`name
+email`; the profile is the ID token, verified against Apple's JWKS with `iss`, `aud`, `exp` and the flow's `nonce`;
+the client secret is an ES256 JWT signed with the app's `.p8` key, generated and rotated by the server), and any OIDC
+issuer. The state cookie must equal the callback's `state` (constant-time) and name a pending flow of that provider
+(10 minutes, used once), whichever method the callback uses; Apple's cross-site `POST` is why its cookie is
+`SameSite=None` (it binds the flow, it doesn't authenticate anything, so a third party posting with it attached can't
+complete a sign-in: it doesn't know the value).
 | `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
 | `GET /api/auth/admin/setup` | | `{ needsSetup }` |
 | `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
@@ -259,8 +268,14 @@ Operations endpoints, with the same admin bearer auth (docs/CONTRACT.md §4.2, �
 - `GET /api/admin/backups`, `POST /api/admin/backups` (`{ includeAux?, includeFiles? }`),
   `GET /api/admin/backups/{name}` (download), `DELETE /api/admin/backups/{name}`.
 - `GET /api/admin/export/{table}?format=jsonl|csv`: one table, streamed from a consistent snapshot.
-- `POST /api/admin/import/{table}?mode=insert|upsert|replace`: a JSONL body, validated, then written in batches
-  through the normal write path (subscriptions update as each batch commits).
+- `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv`: a JSONL or CSV body (CSV as
+  exported, cells typed with the table's shape), validated, then written in batches through the normal write path
+  (subscriptions update as each batch commits).
+- Staged restores: `POST /api/admin/backups/{name}/restore` or `POST /api/admin/restore?name=<file>` (the archive as
+  the body) check a backup completely and stage it; it replaces the database at the next start of the server.
+  `GET /api/admin/restore` (also part of `GET /api/admin/backups`) shows it, `DELETE /api/admin/restore` cancels it,
+  `POST /api/admin/restore/restart` (only with `--restart-exit-code`) shuts the server down gracefully for its
+  supervisor to restart it. Open sockets are closed by the shutdown; clients reconnect as after any restart.
 
 `GET /metrics` (Prometheus text) exists only when the server runs with `--metrics`; with `--metrics-token` it needs
 `Authorization: Bearer <token>` (a fixed token, not an access token).

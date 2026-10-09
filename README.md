@@ -6,8 +6,9 @@ WebSocket and get updated results automatically whenever a write affects them.
 
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
-Phase 9 (operations) is built: data migrations (`#[migration]`), backups, export and import, metrics, TLS, frontend
-serving and release builds (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
+Phase 9 (operations) is built: data migrations (`#[migration]`), backups and restores (also from the dashboard),
+JSONL/CSV export and import, metrics, JSON logs, TLS (with certificate reload), frontend serving, release builds and a
+CI workflow for the binary and the Docker image (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
 example found (index order, codegen names, `#[object]`, dev mode, storage URLs in dev; see
 [Things to know](#things-to-know)).
 
@@ -127,6 +128,14 @@ on every use. Signing out, revoking a session from the dashboard, deleting a use
 ends the sockets of that session **at once** (`AuthError`, then the client continues signed out), not when the access
 token expires. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
 one-time `/_/setup#token=…` link; `admin create <email>` works too.
+
+OAuth presets: `GitHub`, `Google`, `Discord` (only a Discord-verified email is used) and `Apple` (Sign in with Apple),
+plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`FERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …) and can also
+be set up in the dashboard's Settings. For Apple, give the Services ID, team id, key id and the `.p8` private key
+(`FERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): ferrix signs and rotates the short-lived client secret
+itself, accepts Apple's `form_post` callback (register `https://<public url>/api/auth/oauth/apple/callback`; the
+public URL must be https), verifies the ID token against Apple's keys, and keeps the name Apple sends on the first
+sign-in only. The key is a secret: keep it out of source control (the dashboard stores it encrypted).
 
 **Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): ferrix verifies their JWTs
 against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
@@ -349,11 +358,13 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   scheduled jobs live, by state, with cancel (running actions too), run now and retry.
 - **Migrations**: every `#[migration]` with live progress, errors linking to the failing document, the schema check,
   run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
-- **Backups**: create (optionally with `aux.db` and files), download and delete backups; the target and the
-  `--backup-every` schedule; export a table (JSONL/CSV) and import JSONL (insert, upsert or replace).
-- **Settings**: OAuth providers, SMTP (with a test email), redirect URLs, sign-ups, token lifetimes and CORS origins,
-  applied without a restart. Fields fixed by the code, a flag or the environment are read-only; secrets can be
-  replaced but are never shown.
+- **Backups**: create (optionally with `aux.db` and files), download, delete and **restore** backups (a stored one
+  or an archive from your computer: checked completely, then applied at the next start; cancel, or "Restart now"
+  under systemd/Docker); the target and the `--backup-every` schedule; export a table (JSONL/CSV) and import JSONL or
+  CSV (insert, upsert or replace).
+- **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
+  sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
+  environment are read-only; secrets can be replaced but are never shown.
 - **Audit log**: every dashboard write, settings change, impersonation and function run, live, filterable by
   administrator, action, table, document and time, with field-level diffs.
 - **Overview**: commit ts, commits/s, connections, shared queries and reruns, the scheduler queue, database sizes,
@@ -410,20 +421,38 @@ cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not in
 `PACKAGE=my-server WEB=web scripts/release.sh`.
 
 **systemd.** [`deploy/ferrix.service`](deploy/ferrix.service) runs the binary as a dynamic unprivileged user with
-its data in `/var/lib/ferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM.
+its data in `/var/lib/ferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM, and restarts
+on the dashboard's "Restart now" (exit code 75, `FERRIX_RESTART_EXIT_CODE`).
 
 **Docker.** The [`Dockerfile`](Dockerfile) runs `scripts/release.sh` and copies the binary into a `FROM scratch`
-image with CA certificates, running as an unprivileged user with the data in the `/data` volume:
+image with CA certificates, running as an unprivileged user with the data in the `/data` volume. To build the image
+locally you need a Docker daemon you can use (on Linux: membership in the `docker` group, or rootless Docker/Podman;
+`podman build` works with the same file) and network access for the base images, Zig and the crates; the first build
+takes several minutes (later ones reuse the BuildKit caches). The build context includes `.cargo/config.toml`, which
+sets the bundled SQLite's flags: don't pass `LIBSQLITE3_FLAGS` to the build.
 
 ```sh
 docker build -t todo-server .                     # --build-arg PACKAGE=my-server --build-arg WEB=web for yours
 docker run -p 8090:8090 -v todo-data:/data todo-server
+docker run -p 8090:8090 -v todo-data:/data -e FERRIX_RESTART_EXIT_CODE=75 --restart unless-stopped todo-server
+                                                  # lets "Restart now" apply a restore staged in the dashboard
+docker run --rm todo-server functions             # any CLI command
 ```
+
+**CI.** [`.github/workflows/release.yml`](.github/workflows/release.yml) runs every gate of [Tests](#tests) (end-to-end
+tests included, in Chromium), then builds the static musl binary with `scripts/release.sh` (an artifact; attached to
+the GitHub release for `v*` tags) and the Docker image, which it smoke-tests (`functions`, `/api/health` with a
+volume) and pushes to `ghcr.io/<owner>/todo-server` for `v*` tags.
+
+**Logs.** `serve` writes JSON lines when stdout isn't a terminal (systemd, Docker): `timestamp`, `level`, `target`,
+`fields` and the span context, one object per line, for Loki, Vector or `jq`. `--log-format pretty|compact|json` (or
+`FERRIX_LOG_FORMAT`) chooses explicitly; `RUST_LOG` filters as usual.
 
 **TLS.** Either terminate TLS in a reverse proxy (pass `--public-url https://…`), or let the server do it:
 `serve --https example.com --acme-email you@example.com` gets and renews Let's Encrypt certificates (TLS-ALPN-01 on
 port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port 80 to HTTPS. `--tls-cert cert.pem
---tls-key key.pem` uses your own certificate. Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
+--tls-key key.pem` uses your own certificate, re-read every 30 s (`--tls-reload-every`): renewed files are picked up
+without a restart or dropped connections, and a bad pair keeps the current certificate (logged). Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
 (default `0.0.0.0:80` with `--https`; `off`).
 
 **Backups.** `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
@@ -437,6 +466,16 @@ create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md 
 SQLite integrity, schema, indexes) and only then swaps the database, keeping the old files in
 `<dir>/pre-restore-<time>/`.
 
+**Restoring from the dashboard** (Backups, "Restore", or an archive uploaded from your computer) never swaps the
+database under the running server. The backup is checked there and then, exactly like `restore` does; a bad archive is
+refused with the reason. A good one is *staged* in `<dir>/restore-staged/` with a `pending-restore.json` marker, and
+the next start of `serve` applies it before opening the database (the current files go to `pre-restore-<time>/`).
+Until then the dashboard shows it as pending and can cancel it (or `todo-server restore --cancel` offline). With
+`serve --restart-exit-code 75` (set in `deploy/ferrix.service`; for Docker add a restart policy), the dashboard also
+offers "Restart now": a graceful shutdown and an exit with that code, for systemd or Docker to start the server again.
+Without it, restart the server yourself. A staged restore never restores `auth_secret.key` (only `restore` does), and
+it replaces everything else, administrators and sessions included: whoever is signed in may have to sign in again.
+
 **Litestream.** `data.db` is a normal SQLite database in WAL mode, so [Litestream](https://litestream.io) can
 replicate it continuously next to the server (`litestream replicate fx_data/data.db s3://bucket/data.db`); restore
 with `litestream restore` into an empty data directory before starting the server. Replicate `data.db` only (`aux.db`
@@ -444,10 +483,13 @@ is the execution log), and keep `auth_secret.key` and local file blobs (`storage
 files in S3 with `--storage s3://…`). Archive backups and Litestream can be used together.
 
 **Export and import.** `todo-server export [--tables a,b] [--format jsonl|csv] [--out dir]` writes tables from one
-consistent snapshot (CSV is export-only); `todo-server import <dir|file.jsonl> [--mode insert|upsert|replace]` loads
-JSONL through the normal write path in batches (validated, indexed, ids and creation times kept), offline. Admins can
-stream one table with `GET /api/admin/export/{table}?format=csv` and import into a running server with
-`POST /api/admin/import/{table}`.
+consistent snapshot; `todo-server import <dir|file.jsonl|file.csv> [--format jsonl|csv] [--mode
+insert|upsert|replace]` loads JSONL or CSV through the normal write path in batches (validated, indexed, ids and
+creation times kept), offline. CSV is read as the export writes it (a header row, RFC 4180), and each cell is typed
+with the table's Rust type: `42` is a number in a number field and text in a `String` field, JSON cells become arrays
+and objects, an empty cell is `null` (or `""` for a non-optional string). Admins can stream one table with
+`GET /api/admin/export/{table}?format=csv` and import into a running server with
+`POST /api/admin/import/{table}?format=csv`.
 
 **Metrics.** `serve --metrics [--metrics-token T]` exposes Prometheus metrics at `/metrics`: requests by route and
 status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,

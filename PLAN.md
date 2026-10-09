@@ -474,10 +474,12 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   `VACUUM INTO` snapshot plus, on request, `aux.db`, local file blobs and `auth_secret.key`, kept in `<dir>/backups`,
   any directory or S3 (`--backup-to`); scheduled with `--backup-every/--backup-keep` as the cron `ferrix-backup`;
   `restore` is offline behind `<dir>/ferrix.lock` and validates before swapping. `export` writes JSONL/CSV from one
-  snapshot, `import` loads JSONL through the write path. `/metrics` is off unless `--metrics`. `--https <domain>` uses
-  `rustls-acme` (TLS-ALPN-01, cache in `<dir>/acme`), `--tls-cert/--tls-key` takes files. `scripts/release.sh` builds
-  the static musl binary with cargo-zigbuild; `Dockerfile` (`FROM scratch`), `deploy/ferrix.service`. JSON logs and
-  `_settings` are not done.)
+  snapshot, `import` loads JSONL or CSV through the write path; a restore can be staged from the dashboard and is
+  applied at the next start. `/metrics` is off unless `--metrics`. `--https <domain>` uses
+  `rustls-acme` (TLS-ALPN-01, cache in `<dir>/acme`), `--tls-cert/--tls-key` takes files (reloaded when they
+  change). `scripts/release.sh` builds the static musl binary with cargo-zigbuild; `Dockerfile` (`FROM scratch`),
+  `deploy/ferrix.service`, built in CI by `.github/workflows/release.yml`. Logs are JSON lines off a terminal
+  (`--log-format`); `_settings` holds the runtime auth settings.)
 
 ---
 
@@ -573,12 +575,16 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   (`GET /api/admin/stats/timeseries`, `Logs::timeseries`), and the Settings, Audit log, Migrations and Backups pages;
   grouped navigation, a Ctrl+K command palette, Alt+1…0. Covered by `packages/dashboard/e2e/dashboard.ts`.
 
-### Phase 5 — Auth (M) — mostly done
+### Phase 5 — Auth (M) — done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
   tokens and reuse detection, SMTP (`lettre`; printed to the log in `--dev`), rate limits, `ctx.auth` (docs/PROTOCOL.md
   "Auth", docs/CONTRACT.md §1.2 and §1.5).
-- [x] OAuth with PKCE: GitHub and Google presets, generic OIDC via discovery (tested against a mock provider only;
-  Discord and Apple presets are still to do).
+- [x] OAuth with PKCE: GitHub and Google presets, generic OIDC via discovery (tested against a mock provider only).
+- [x] Discord and Sign in with Apple presets (`Discord::from_env()`, `Apple::from_env()`, also as `_settings` kinds
+  with the Apple `.p8` key encrypted at rest): Discord's verified email only; Apple's ES256 client secret (generated,
+  cached, rotated), `form_post` callback (`POST`, state cookie `SameSite=None; Secure` on https), the ID token verified
+  with the JWKS code (iss, aud, exp, nonce), the name of the first sign-in (docs/CONTRACT.md §1.5; mock-provider tests
+  in `tests/it/oauth_presets.rs`).
 - [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
   React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
 - [x] The dashboard Users page (users, linked providers, sessions, revoke, delete; "act as user" in the runner).
@@ -702,7 +708,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
   (README "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
 
-### Phase 9 — Operations polish (M)
+### Phase 9 — Operations polish (M) — done (except incremental backups)
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
   `auth_secret.key` only with `--include-secret`), `ferrix backup`, scheduled backups with rotation to a directory or
   S3 (`--backup-every/--backup-keep/--backup-to`, the cron `ferrix-backup`), an offline `ferrix restore` that refuses
@@ -722,9 +728,17 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   (not `status`) takes the data directory lock like `import`.
 - [x] Dashboard UI for backups (create, download, delete; target and schedule), export/import, and the live counters
   of `--metrics` on the Overview (commits/s, queue depth, shared queries, reruns; served by `/api/admin/stats`).
-- [ ] JSON logs.
-- [ ] Not yet: incremental/streaming backups (use Litestream), restoring from the dashboard, CSV import, hot reload of
-  `--tls-cert` files, building the Docker image in CI (not built here: no Docker daemon was available).
+- [x] JSON logs: `--log-format json|pretty|compact` (`FERRIX_LOG_FORMAT`; JSON lines by default off a terminal), with
+  the function log capture unchanged (docs/CONTRACT.md §4.4).
+- [x] Restoring from the dashboard: staged restores (validated like `ferrix restore` while the server runs, applied at
+  the next start before the database opens, crash-safe and checksummed, cancelable), `--restart-exit-code` for a
+  supervised "Restart now" (docs/CONTRACT.md §4.2, §4.4).
+- [x] CSV import (`ferrix import --format csv`, `format=csv` on the admin endpoint, the dashboard), cells typed with
+  the table's shape; round-trips the CSV export.
+- [x] Hot reload of `--tls-cert`/`--tls-key` (`--tls-reload-every`, atomic swap, a bad pair keeps the current one).
+- [x] CI: `.github/workflows/release.yml` (gates, the musl release, the Docker image build and smoke test, pushes on
+  tags). Not run here (no usable Docker daemon); the YAML is validated.
+- [ ] Not yet: incremental/streaming backups (use Litestream).
 - [x] An interval-tree invalidation index (done in Phase 2).
 
 ---

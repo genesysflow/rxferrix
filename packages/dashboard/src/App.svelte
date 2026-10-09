@@ -1,0 +1,266 @@
+<script lang="ts">
+  import { FerrixClient, getAuth } from "@ferrix/client";
+  import { setupFerrix, useAuth, useConnectionState, useQuery } from "@ferrix/svelte";
+  import { dashboard, type TableSummary } from "./lib/api.js";
+  import { setDashboard } from "./lib/context.js";
+  import { href, link, router, type Page } from "./lib/router.svelte.js";
+  import { theme } from "./lib/theme.svelte.js";
+  import Data from "./pages/Data.svelte";
+  import Functions from "./pages/Functions.svelte";
+  import Login from "./pages/Login.svelte";
+  import Logs from "./pages/Logs.svelte";
+  import Overview from "./pages/Overview.svelte";
+  import Setup from "./pages/Setup.svelte";
+  import Users from "./pages/Users.svelte";
+
+  // Same origin: the dashboard is served by the ferrix server at /_/.
+  const client = new FerrixClient(location.origin, { unsavedChangesWarning: false });
+  setupFerrix(client);
+  // Its own storage key, so an app served from the same origin keeps its user session separate.
+  const ferrixAuth = getAuth(client, { storageKey: `ferrix.dashboard.auth:${location.origin}` });
+  const auth = useAuth();
+  const connection = useConnectionState();
+  const isAdmin = $derived(auth.isAuthenticated && auth.isAdmin);
+  const tables = useQuery(dashboard.tables, () => (isAdmin ? {} : "skip"));
+  const me = useQuery(dashboard.me, () => (isAdmin ? {} : "skip"));
+
+  let toasts = $state<{ id: number; message: string; kind: "info" | "error" }[]>([]);
+  let nextToast = 0;
+
+  setDashboard({
+    auth: ferrixAuth,
+    get tables() {
+      return tables.data;
+    },
+    tableByNumber(n: number): TableSummary | undefined {
+      return tables.data?.find((t) => t.number === n);
+    },
+    toast(message, kind = "info") {
+      const id = nextToast++;
+      toasts = [...toasts, { id, message, kind }];
+      setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), kind === "error" ? 8000 : 3500);
+    },
+  });
+
+  const nav: { page: Page; label: string; icon: string }[] = [
+    { page: "overview", label: "Overview", icon: "◎" },
+    { page: "data", label: "Data", icon: "▦" },
+    { page: "functions", label: "Functions", icon: "ƒ" },
+    { page: "logs", label: "Logs", icon: "≡" },
+    { page: "users", label: "Users", icon: "◍" },
+  ];
+
+  const route = $derived(router.route);
+  const live = $derived(connection.current.isWebSocketConnected);
+
+  function onkeydown(e: KeyboardEvent) {
+    // Alt+1…5 switches pages.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-5]$/.test(e.key) && isAdmin) {
+      e.preventDefault();
+      router.navigate(href(nav[Number(e.key) - 1]!.page));
+    }
+  }
+
+  async function signOut() {
+    await ferrixAuth.signOut();
+    router.navigate(href("overview"));
+  }
+</script>
+
+<svelte:window {onkeydown} />
+
+{#if route.page === "setup"}
+  <Setup />
+{:else if auth.isLoading}
+  <div class="splash muted">Connecting…</div>
+{:else if !auth.isAuthenticated}
+  <Login />
+{:else if !auth.isAdmin}
+  <div class="splash">
+    <p>This session is not an administrator session.</p>
+    <button onclick={signOut}>Sign out</button>
+  </div>
+{:else}
+  <div class="shell">
+    <nav class="sidebar" aria-label="Dashboard">
+      <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> ferrix</a>
+      <ul>
+        {#each nav as item, i (item.page)}
+          <li>
+            <a
+              href={href(item.page)}
+              onclick={link}
+              class:active={route.page === item.page}
+              aria-current={route.page === item.page ? "page" : undefined}
+              title={`${item.label} (Alt+${i + 1})`}
+            >
+              <span class="icon" aria-hidden="true">{item.icon}</span>{item.label}
+            </a>
+          </li>
+        {/each}
+      </ul>
+      <div class="foot">
+        <div class="conn" title={live ? "Connected: views update live" : "Reconnecting…"}>
+          <span class="dot" class:on={live}></span>{live ? "live" : "offline"}
+        </div>
+        <div class="who mono" title="Signed in administrator">{me.data?.email ?? ""}</div>
+        <div class="row">
+          <button class="small" onclick={() => theme.cycle()} title="Theme: light, dark or system">
+            {theme.current === "system" ? "◐ system" : theme.current === "dark" ? "☾ dark" : "☀ light"}
+          </button>
+          <button class="small" onclick={signOut}>Sign out</button>
+        </div>
+      </div>
+    </nav>
+    <main>
+      {#if route.page === "data"}
+        <Data {route} />
+      {:else if route.page === "functions"}
+        <Functions {route} />
+      {:else if route.page === "logs"}
+        <Logs />
+      {:else if route.page === "users"}
+        <Users />
+      {:else}
+        <Overview />
+      {/if}
+    </main>
+  </div>
+{/if}
+
+<div class="toasts" aria-live="polite">
+  {#each toasts as t (t.id)}
+    <div class="toast" class:error={t.kind === "error"} role={t.kind === "error" ? "alert" : "status"}>{t.message}</div>
+  {/each}
+</div>
+
+<style>
+  .splash {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .shell {
+    display: grid;
+    grid-template-columns: 196px 1fr;
+    height: 100%;
+  }
+  main {
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    padding: 12px 10px;
+    gap: 12px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text);
+    padding: 4px 6px 8px;
+    text-decoration: none;
+  }
+  .logo {
+    display: inline-grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: white;
+    font-size: 13px;
+  }
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  ul a {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: var(--radius);
+    color: var(--text);
+    text-decoration: none;
+  }
+  ul a:hover {
+    background: var(--panel-2);
+  }
+  ul a.active {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .icon {
+    width: 16px;
+    text-align: center;
+    color: var(--muted);
+  }
+  a.active .icon {
+    color: inherit;
+  }
+  .foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12.5px;
+  }
+  .conn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .dot.on {
+    background: var(--ok);
+  }
+  .who {
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .toasts {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 100;
+  }
+  .toast {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    border-radius: 8px;
+    padding: 8px 14px;
+    max-width: 420px;
+  }
+  .toast.error {
+    border-color: var(--err);
+    color: var(--err);
+  }
+</style>

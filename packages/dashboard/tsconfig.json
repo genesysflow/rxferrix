@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["svelte", "vite/client"],
+    "paths": {
+      "@ferrix/client": ["../client/src/index.ts"],
+      "@ferrix/client/testing": ["../client/src/testing.ts"],
+      "@ferrix/svelte": ["../svelte/src/lib/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts", "svelte.config.js"]
+}

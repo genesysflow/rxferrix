@@ -9,7 +9,9 @@
   "scripts": {
     "build": "bun run --filter @ferrix/client build && bun run --filter @ferrix/react build && bun run --filter @ferrix/svelte build",
     "typecheck": "bun run --filter @ferrix/client build && bun run --filter '*' typecheck",
-    "test": "bun run --filter '*' test"
+    "test": "bun run --filter '*' test",
+    "build:dashboard": "bun run --filter @ferrix/dashboard build",
+    "check:dashboard": "bun run --filter @ferrix/dashboard check:dist"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

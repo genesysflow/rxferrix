@@ -302,20 +302,17 @@ pub async fn clear_typing(db: &MutationDb, channel: Id<Channel>, user: Id<User>)
 }
 
 /// Posts `count` numbered sample messages to a channel (for trying infinite scroll): #1 is the oldest, #count the
-/// newest. One action, several mutations of up to 50 messages each.
+/// newest. They are inserted in one transaction: clients see them arrive at once, as one block of history (in
+/// batches, each batch would land on top of the newest page, which a client that already loaded older pages keeps
+/// pinned, so it would grow to hold them all).
 #[action]
 pub async fn seed(ctx: &ActionCtx, channel: Id<Channel>, count: u32) -> Result<u32> {
     ctx.auth.require_user()?;
     if count == 0 || count > 1000 {
         return Err(user_error("bad_count", "Seed between 1 and 1000 messages"));
     }
-    let mut done = 0;
-    while done < count {
-        let batch = (count - done).min(50);
-        ctx.run_mutation::<insert_seed>((channel, done, batch, count)).await?;
-        done += batch;
-    }
-    Ok(done)
+    ctx.run_mutation::<insert_seed>((channel, 0, count, count)).await?;
+    Ok(count)
 }
 
 /// Inserts sample messages `start + 1 ..= start + n` of `total`, in order.

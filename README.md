@@ -4,8 +4,9 @@ A single-binary reactive backend in Rust, deployed as one file.
 You write typed `#[query]` / `#[mutation]` / `#[action]` functions in Rust. Clients subscribe with `useQuery` over a
 WebSocket and get updated results automatically whenever a write affects them.
 
-Status: Phases 0–5 (core, sync, clients, the admin dashboard and auth) are mostly done (see [PLAN.md](PLAN.md) §10).
-File storage (Phase 7) is built too; the scheduler and search are not built yet.
+Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
+and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
+Phase 9 (operations: backups, migrations, release builds) is next.
 
 ## Layout
 

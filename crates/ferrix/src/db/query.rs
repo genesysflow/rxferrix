@@ -328,13 +328,13 @@ impl RangeOps {
 
     /// Turn the constraints into a byte range over the index keys.
     fn to_key_range(&self, table: &str, index: &IndexInfo) -> anyhow::Result<KeyRange> {
-        let ctx = || format!("invalid range for index `{}` of table `{table}` (fields {:?})", index.name, index.fields);
+        let ctx = || format!("invalid range for index `{}` of table `{table}` (fields {:?})", index.name, index.key_fields);
         let mut prefix = Vec::new();
         let mut pos = 0;
         let mut ops = self.0.iter().peekable();
         // Equality prefix.
         while let Some(op) = ops.next_if(|op| op.kind == OpKind::Eq) {
-            let Some(expected) = index.fields.get(pos) else {
+            let Some(expected) = index.key_fields.get(pos) else {
                 bail!("{}: too many fields; `eq({})` has no index field left", ctx(), op.field);
             };
             if op.field != expected.as_str() {
@@ -348,7 +348,7 @@ impl RangeOps {
         let mut lower: Option<(OpKind, Vec<u8>)> = None;
         let mut upper: Option<(OpKind, Vec<u8>)> = None;
         for op in ops {
-            let Some(expected) = index.fields.get(pos) else {
+            let Some(expected) = index.key_fields.get(pos) else {
                 bail!("{}: `{}({})` has no index field left", ctx(), op.kind.name(), op.field);
             };
             if op.kind == OpKind::Eq {
@@ -382,8 +382,12 @@ impl RangeOps {
     }
 }
 
-/// Constraints on an index: equality on a prefix of its fields, then at most one lower and one upper bound on the
-/// next field. Checked when the query runs.
+/// Constraints on an index: equality on a prefix of its key fields, then at most one lower and one upper bound on
+/// the next one. Checked when the query runs.
+///
+/// The key fields are the declared fields followed by `_creationTime` (every index ends in `_creationTime, _id`), so
+/// after an equality on every declared field the creation time can be bounded too:
+/// `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
 pub struct IndexRange<T> {
     ops: RangeOps,
     _p: PhantomData<fn() -> T>,

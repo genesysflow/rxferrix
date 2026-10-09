@@ -8,5 +8,5 @@ index name `by_creation_time` is reserved for a built-in index
 unknown field `nope` in index `by_missing`; struct `T` has no such field
 field `x` appears twice in index `by_dup`
 an index needs at least one field
-system field `_creation_time` cannot be listed in an index (every index implicitly ends with `_id`; use `by_creation_time` to order by creation time)
+system field `_creation_time` cannot be listed in an index (every index implicitly ends with `_creationTime, _id`; bound `_creation_time` in the range instead)
 index name `x` conflicts with the field handle `T::x`

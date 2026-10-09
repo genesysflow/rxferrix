@@ -12,6 +12,7 @@ mod codegen;
 mod contract;
 mod dashboard;
 mod hardening;
+mod index_order;
 mod jwt;
 mod macros;
 mod migrations;

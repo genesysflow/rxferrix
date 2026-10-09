@@ -111,6 +111,7 @@ async fn invalid_ranges_are_clear_errors() {
         (3, "index `nope` not found"),
         (4, "by_id"),
         (5, "too many fields"),
+        (6, "expected `_creationTime` at position 2, got `eq(name)`"),
     ];
     for (kind, needle) in expectations {
         let err = t.query::<items::bad_range>((kind,)).await.unwrap_err();

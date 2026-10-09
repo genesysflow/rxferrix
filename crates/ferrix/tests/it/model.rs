@@ -99,7 +99,10 @@ impl Q {
     /// The reference semantics, written independently of the query engine.
     fn eval(&self, docs: &[Doc<Item>]) -> QResult {
         fn by_group_score(mut v: Vec<&Doc<Item>>) -> Vec<&Doc<Item>> {
-            v.sort_by_key(|d| (d.group, d.score, d.id));
+            // Index keys end in `_creationTime, _id`.
+            v.sort_by(|a, b| {
+                (a.group, a.score).cmp(&(b.group, b.score)).then(a.creation_time.total_cmp(&b.creation_time)).then(a.id.cmp(&b.id))
+            });
             v
         }
         fn by_creation(mut v: Vec<&Doc<Item>>) -> Vec<&Doc<Item>> {

@@ -5,7 +5,7 @@ You write typed `#[query]` / `#[mutation]` / `#[action]` functions in Rust. Clie
 WebSocket and get updated results automatically whenever a write affects them.
 
 Status: Phases 0–5 (core, sync, clients, the admin dashboard and auth) are mostly done (see [PLAN.md](PLAN.md) §10).
-The scheduler, files and search are not built yet.
+File storage (Phase 7) is built too; the scheduler and search are not built yet.
 
 ## Layout
 
@@ -88,6 +88,40 @@ on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). W
 one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
 ("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
 
+## File storage
+
+Files live in `<data dir>/storage/` by default, or in an S3-compatible bucket (`--storage s3://bucket/prefix`, with
+the standard `AWS_*` variables for credentials, region and endpoint, e.g. R2 or MinIO). Uploads take three steps:
+
+```rust
+use ferrix::storage::StoredFile;
+
+#[mutation]
+pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
+    ctx.storage.generate_upload_url().await        // signed, single-use, valid for an hour
+}
+
+#[mutation]
+pub async fn set_avatar(ctx: &MutationCtx, file: Id<StoredFile>) -> Result<()> { /* store the id in a document */ }
+
+#[query]
+pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
+    ctx.storage.get_url(file).await                // "/api/storage/<id>", live: null once the file is deleted
+}
+```
+
+```ts
+const url = await client.mutation(api.files.generate_upload_url, {});
+const storageId = await uploadFile(url, file, { onProgress: ({ loaded, total }) => (progress = loaded / total) });
+await client.mutation(api.files.set_avatar, { file: storageId });
+```
+
+`GET /api/storage/<id>` serves files with ETags, range requests and headers that keep uploads from running script on
+your origin. Mutations can also `delete` files (transactionally) and read their metadata; actions can `store` and
+`get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability URLs:
+anyone with the URL can read the file. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6 and
+[docs/PROTOCOL.md](docs/PROTOCOL.md) ("File storage"). The todo example attaches images to todos.
+
 ## Dashboard
 
 Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an
@@ -102,6 +136,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   result, log lines and duration.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
 - **Users**: users, linked providers, sessions (revoke), delete.
+- **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
+  `Id<"_storage">` values in the data grid link here.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every

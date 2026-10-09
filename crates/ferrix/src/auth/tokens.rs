@@ -5,7 +5,8 @@
 //! data browser) never contain it. Two independent keys are derived from it with BLAKE3's KDF mode:
 //! - the HS256 key that signs access tokens;
 //! - the key of the keyed hash ("pepper") applied to refresh tokens, link tokens and numeric codes before they are
-//!   stored, so a leaked database alone does not allow brute-forcing 6-digit codes or matching tokens.
+//!   stored, so a leaked database alone does not allow brute-forcing 6-digit codes or matching tokens;
+//! - the HMAC key that signs file upload URLs (`crate::storage`).
 //!
 //! Deleting the file signs everyone out: every access token and every stored token hash becomes invalid.
 //!
@@ -33,6 +34,7 @@ const JWT_HEADER: &str = r#"{"alg":"HS256","typ":"JWT"}"#;
 pub struct Keys {
     jwt: [u8; 32],
     hash: [u8; 32],
+    storage: [u8; 32],
 }
 
 impl Keys {
@@ -66,7 +68,13 @@ impl Keys {
         Keys {
             jwt: blake3::derive_key("ferrix auth v1 access token HS256 key", secret),
             hash: blake3::derive_key("ferrix auth v1 stored token hash key", secret),
+            storage: blake3::derive_key("ferrix storage v1 upload url HMAC key", secret),
         }
+    }
+
+    /// The HMAC-SHA256 key that signs file upload URLs (`crate::storage`).
+    pub(crate) fn storage_key(&self) -> &[u8; 32] {
+        &self.storage
     }
 
     /// The keyed hash under which a token or code is stored (hex).

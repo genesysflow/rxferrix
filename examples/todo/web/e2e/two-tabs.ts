@@ -62,8 +62,29 @@ try {
   );
   console.log(`remaining: ${expected}`);
 
-  // Delete in A, gone in B.
+  // Attach an image in A (upload URL + uploadFile + set_image): the thumbnail shows up in B.
   await a.getByRole("button", { name: "all" }).click();
+  const pixel = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  await a.getByLabel(`Attach an image to ${item}`).setInputFiles({ name: "pixel.png", mimeType: "image/png", buffer: pixel });
+  await timed("attach in A -> image in B", () =>
+    b.locator("li", { hasText: item }).locator("img.thumb").waitFor({ timeout: 3000 }),
+  );
+  // ...and is served by /api/storage/<id>.
+  await b.waitForFunction(
+    (text) =>
+      [...document.querySelectorAll("li")].some(
+        (li) =>
+          li.textContent?.includes(text) &&
+          [...li.querySelectorAll<HTMLImageElement>("img.thumb")].some((i) => i.complete && i.naturalWidth === 1),
+      ),
+    item,
+    { timeout: 3000 },
+  );
+
+  // Delete in A, gone in B.
   await a.locator("li", { hasText: item }).getByRole("button", { name: "Delete" }).click();
   await timed("delete in A -> gone in B", () =>
     b.locator("li", { hasText: item }).waitFor({ state: "detached", timeout: 2000 }),

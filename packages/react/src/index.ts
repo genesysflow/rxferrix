@@ -38,4 +38,7 @@ export {
   type PaginationStatus,
   insertAtTop,
   getAllPages,
+  uploadFile,
+  type UploadFileOptions,
+  type UploadProgress,
 } from "@ferrix/client";

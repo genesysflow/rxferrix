@@ -20,7 +20,15 @@ function assertType<T extends true>(): T | undefined {
 
 export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: Id<"notes">): Promise<void> {
   // Tables and documents.
-  assertType<Equals<TableNames, "dash_items" | "items" | "lossy" | "notes" | "private_notes" | "tasks" | "todos">>();
+  assertType<
+    Equals<TableNames, "attachments" | "dash_items" | "items" | "lossy" | "notes" | "private_notes" | "tasks" | "todos">
+  >();
+  // ... and the built-in `_storage` table (file storage).
+  assertType<Equals<DataModel["attachments"]["file"], Id<"_storage">>>();
+  const file = {} as Doc<"_storage">;
+  assertType<Equals<typeof file.size, number>>();
+  assertType<Equals<typeof file.contentType, string | null>>();
+  assertType<Equals<ArgsOf<typeof api.storage.app.url_of>, { file: Id<"_storage"> }>>();
   // App tables may reference the built-in `_users` table (auth); its documents carry no secrets.
   assertType<Equals<DataModel["private_notes"]["owner"], Id<"_users">>>();
   const user = {} as Doc<"_users">;

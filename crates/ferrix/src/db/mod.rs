@@ -193,6 +193,7 @@ impl Database {
             state: Mutex::new(Some(state)),
             catalog: self.catalog.clone(),
             write_log: self.write_log.clone(),
+            on_commit: Mutex::new(Vec::new()),
         }))
     }
 }
@@ -247,6 +248,8 @@ pub struct WriteTxn {
     state: Mutex<Option<WriteState>>,
     pub(crate) catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
+    /// Run after a successful `COMMIT`, dropped on rollback (see [`WriteTxn::on_commit`]).
+    on_commit: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(crate) struct WriteState {
@@ -280,6 +283,20 @@ impl WriteTxn {
         self.with_state(|s| Ok(s.now)).unwrap_or(0.0)
     }
 
+    /// Run `f` once this transaction has committed (never if it rolls back). Used for side effects outside the
+    /// database that must follow the commit, e.g. deleting a stored file's blob. `f` runs synchronously right after
+    /// `COMMIT`, so it should only hand work off (e.g. `tokio::spawn`).
+    pub(crate) fn on_commit(&self, f: impl FnOnce() + Send + 'static) {
+        self.on_commit.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
+    }
+
+    fn run_on_commit(&self) {
+        let hooks = std::mem::take(&mut *self.on_commit.lock().unwrap_or_else(|e| e.into_inner()));
+        for hook in hooks {
+            hook();
+        }
+    }
+
     /// Commit, running `before_commit(conn, commit_ts)` inside the transaction right before `COMMIT` (used to record
     /// the mutation's response for idempotency atomically with its writes). Returns the new ts, or the current ts
     /// if no document was written (then ts is not bumped).
@@ -292,6 +309,7 @@ impl WriteTxn {
         if state.writes.is_empty() {
             before_commit(&state.conn, state.prev_ts)?;
             state.conn.execute_batch("COMMIT")?;
+            self.run_on_commit();
             return Ok(state.prev_ts);
         }
         let ts = state.prev_ts + 1;
@@ -302,6 +320,8 @@ impl WriteTxn {
         state.conn.execute_batch("COMMIT")?;
         // Still holding the writer lock (inside `state.conn`), so log entries are appended in ts order.
         self.write_log.append(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
+        drop(state);
+        self.run_on_commit();
         Ok(ts)
     }
 
@@ -383,11 +403,23 @@ impl WriteState {
     pub(crate) fn insert(
         &mut self,
         table: &TableInfo,
+        fields: Map<String, Value>,
+        validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<DocId> {
+        self.insert_with_id(table, DocId::new_random(table.number), fields, validate)
+    }
+
+    /// [`WriteState::insert`] with an id chosen by the caller (e.g. a stored file whose id names its blob, which is
+    /// written before the document). The id must belong to `table` and not exist yet.
+    pub(crate) fn insert_with_id(
+        &mut self,
+        table: &TableInfo,
+        id: DocId,
         mut fields: Map<String, Value>,
         validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
     ) -> anyhow::Result<DocId> {
         reject_system_fields(&fields)?;
-        let id = DocId::new_random(table.number);
+        check_table(table, id)?;
         anyhow::ensure!(storage::get_document(&self.conn, &id.0)?.is_none(), "id collision");
         fields.insert(ID_FIELD.into(), Value::String(id.encode()));
         let last_creation_time = self.last_creation_time;

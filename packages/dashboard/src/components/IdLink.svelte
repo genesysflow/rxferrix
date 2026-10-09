@@ -14,7 +14,7 @@
 {#if table}
   <a
     class="id mono"
-    href={href("data", [table.name], { doc: id })}
+    href={table.name === "_storage" ? href("files", [], { file: id }) : href("data", [table.name], { doc: id })}
     title={`Open ${table.name} ${id}`}
     onclick={(e) => {
       e.stopPropagation();

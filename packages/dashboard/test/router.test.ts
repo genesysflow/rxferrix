@@ -9,6 +9,10 @@ describe("router", () => {
     expect(r.rest).toEqual(["todos"]);
     expect(r.params.get("doc")).toBe("abc");
     expect(parseRoute("/_/setup", "").page).toBe("setup");
+    const files = parseRoute("/_/files", "?file=abc");
+    expect(files.page).toBe("files");
+    expect(files.params.get("file")).toBe("abc");
+    expect(href("files", [], { file: "abc" })).toBe("/_/files?file=abc");
     expect(parseRoute("/_/nonsense", "").page).toBe("overview");
   });
 

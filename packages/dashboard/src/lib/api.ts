@@ -1,6 +1,6 @@
 /**
  * Hand-written references to the admin-only system functions (`_system/dashboard:*`, defined in
- * crates/ferrix/src/dashboard/mod.rs) and the types they return. Codegen leaves system functions out of app APIs.
+ * crates/ferrix/src/dashboard/mod.rs, and `_system/storage:*`) and the types they return. Codegen leaves system functions out of app APIs.
  */
 import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@ferrix/client";
 
@@ -119,6 +119,33 @@ export const dashboard = {
   revokeSession: m<{ session: string }, null>("revoke_session"),
   deleteUser: m<{ user: string }, DeletedUser>("delete_user"),
   me: q<Record<string, never>, { _id: string; email: string } | null>("me"),
+} as const;
+
+/** A stored file (`FileSummary` in crates/ferrix/src/storage/mod.rs). */
+export interface FileSummary {
+  _id: string;
+  _creationTime: number;
+  sha256: string;
+  size: number;
+  contentType: string | null;
+  createdBy: string | null;
+  filename: string | null;
+  /** The serving URL (`ctx.storage.get_url`), absolute when the server has a public URL. */
+  url: string;
+}
+
+/** The Files page's admin-only system functions (`_system/storage:*`, crates/ferrix/src/storage/mod.rs). */
+export const storage = {
+  files: makeFunctionReference<"query", { paginationOpts: PaginationOpts }, PaginationResult<FileSummary>>(
+    "query",
+    "_system/storage:files",
+  ),
+  file: makeFunctionReference<"query", { id: string }, FileSummary | null>("query", "_system/storage:file"),
+  deleteFile: makeFunctionReference<"mutation", { id: string }, null>("mutation", "_system/storage:delete_file"),
+  generateUploadUrl: makeFunctionReference<"mutation", Record<string, never>, string>(
+    "mutation",
+    "_system/storage:generate_upload_url",
+  ),
 } as const;
 
 /** One execution from the execution log (`LogEntry` in Rust). */

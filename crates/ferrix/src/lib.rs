@@ -10,6 +10,7 @@
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
+//! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).
 //! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
@@ -30,6 +31,7 @@ pub mod log;
 pub mod runtime;
 pub mod schema;
 pub mod server;
+pub mod storage;
 pub mod sync;
 pub mod testing;
 pub mod writelog;

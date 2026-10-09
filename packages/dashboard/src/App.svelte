@@ -6,6 +6,7 @@
   import { href, link, router, type Page } from "./lib/router.svelte.js";
   import { theme } from "./lib/theme.svelte.js";
   import Data from "./pages/Data.svelte";
+  import Files from "./pages/Files.svelte";
   import Functions from "./pages/Functions.svelte";
   import Login from "./pages/Login.svelte";
   import Logs from "./pages/Logs.svelte";
@@ -48,14 +49,15 @@
     { page: "functions", label: "Functions", icon: "ƒ" },
     { page: "logs", label: "Logs", icon: "≡" },
     { page: "users", label: "Users", icon: "◍" },
+    { page: "files", label: "Files", icon: "▤" },
   ];
 
   const route = $derived(router.route);
   const live = $derived(connection.current.isWebSocketConnected);
 
   function onkeydown(e: KeyboardEvent) {
-    // Alt+1…5 switches pages.
-    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-5]$/.test(e.key) && isAdmin) {
+    // Alt+1…6 switches pages.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-6]$/.test(e.key) && isAdmin) {
       e.preventDefault();
       router.navigate(href(nav[Number(e.key) - 1]!.page));
     }
@@ -121,6 +123,8 @@
         <Logs />
       {:else if route.page === "users"}
         <Users />
+      {:else if route.page === "files"}
+        <Files {route} />
       {:else}
         <Overview />
       {/if}

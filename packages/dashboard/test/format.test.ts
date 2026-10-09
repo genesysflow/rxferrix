@@ -8,6 +8,8 @@ import {
   parseFilterValue,
   parseJson,
   prettyArgs,
+  previewKind,
+  sameOriginPath,
 } from "../src/lib/format.js";
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -74,5 +76,24 @@ describe("formatting", () => {
     expect(prettyArgs('{"a":1}')).toBe('{\n  "a": 1\n}');
     expect(prettyArgs('{"a":"trunc')).toBe('{"a":"trunc');
     expect(parseJson("{").ok).toBe(false);
+  });
+});
+
+describe("files", () => {
+  it("picks a preview kind from the content type", () => {
+    expect(previewKind("image/png")).toBe("image");
+    expect(previewKind("image/svg+xml")).toBe("image");
+    expect(previewKind("VIDEO/mp4")).toBe("video");
+    expect(previewKind("audio/ogg")).toBe("audio");
+    expect(previewKind("text/plain; charset=utf-8")).toBe("text");
+    expect(previewKind("application/json")).toBe("text");
+    expect(previewKind("application/ld+json")).toBe("text");
+    expect(previewKind("application/pdf")).toBe(null);
+    expect(previewKind(null)).toBe(null);
+  });
+
+  it("makes server URLs same-origin", () => {
+    expect(sameOriginPath("http://127.0.0.1:8090/api/storage/upload?token=a.b")).toBe("/api/storage/upload?token=a.b");
+    expect(sameOriginPath("/api/storage/abc")).toBe("/api/storage/abc");
   });
 });

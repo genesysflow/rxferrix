@@ -9,9 +9,12 @@ export const api = {
     add: makeFunctionReference<"mutation", { text: string, }, Id<"todos">>("mutation", "todos:add"),
     add_samples: makeFunctionReference<"action", { count: number, }, number>("action", "todos:add_samples"),
     clear_completed: makeFunctionReference<"mutation", Record<string, never>, number>("mutation", "todos:clear_completed"),
+    generate_upload_url: makeFunctionReference<"mutation", Record<string, never>, string>("mutation", "todos:generate_upload_url"),
+    image_url: makeFunctionReference<"query", { image: Id<"_storage">, }, string | null>("query", "todos:image_url"),
     list: makeFunctionReference<"query", { done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:list"),
     remaining: makeFunctionReference<"query", Record<string, never>, number>("query", "todos:remaining"),
     remove: makeFunctionReference<"mutation", { id: Id<"todos">, }, null>("mutation", "todos:remove"),
     set_done: makeFunctionReference<"mutation", { id: Id<"todos">, done: boolean, }, null>("mutation", "todos:set_done"),
+    set_image: makeFunctionReference<"mutation", { id: Id<"todos">, image?: Id<"_storage"> | null, }, null>("mutation", "todos:set_image"),
   },
 } as const;

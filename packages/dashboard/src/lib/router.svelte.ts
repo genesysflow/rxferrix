@@ -2,11 +2,11 @@
  * A tiny path router under `/_/` (the server answers every `/_/…` path with index.html).
  *
  * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs`, `/_/users`,
- * `/_/setup#token=…`.
+ * `/_/files[?file=<id>]`, `/_/setup#token=…`.
  */
 export const BASE = "/_/";
 
-export type Page = "overview" | "data" | "functions" | "logs" | "users" | "setup";
+export type Page = "overview" | "data" | "functions" | "logs" | "users" | "files" | "setup";
 
 export interface Route {
   page: Page;
@@ -18,7 +18,7 @@ export interface Route {
 export function parseRoute(pathname: string, search: string): Route {
   const path = pathname.startsWith(BASE) ? pathname.slice(BASE.length) : pathname.replace(/^\/+/, "");
   const [first = "", ...rest] = path.split("/").filter(Boolean).map(decodeURIComponent);
-  const pages: Page[] = ["data", "functions", "logs", "users", "setup"];
+  const pages: Page[] = ["data", "functions", "logs", "users", "files", "setup"];
   const page = (pages as string[]).includes(first) ? (first as Page) : "overview";
   return { page, rest, params: new URLSearchParams(search) };
 }

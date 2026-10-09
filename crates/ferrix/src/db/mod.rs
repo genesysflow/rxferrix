@@ -46,6 +46,8 @@ pub struct Database {
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
     clock: Clock,
+    /// HNSW vector indexes (in-memory graphs following the write log).
+    ann: search::ann::AnnIndexes,
 }
 
 /// Options for [`Database::open_with`].
@@ -81,6 +83,8 @@ impl Database {
         schema_check::run(&writer, &catalog, tables, options.skip_schema_check)?;
         let ts = storage::read_meta_u64(&writer, storage::META_TS)?;
         let readers = options.readers.max(1);
+        let write_log = Arc::new(WriteLog::new(ts));
+        let ann = search::ann::AnnIndexes::open(dir, &catalog, write_log.clone());
         Ok(Database {
             writer: Arc::new(tokio::sync::Mutex::new(writer)),
             readers: Arc::new(ReaderPool {
@@ -90,9 +94,15 @@ impl Database {
                 max: readers,
             }),
             catalog: Arc::new(catalog),
-            write_log: Arc::new(WriteLog::new(ts)),
+            write_log,
             clock: Clock::default(),
+            ann,
         })
+    }
+
+    /// The HNSW vector indexes ([`search::ann`]).
+    pub fn ann(&self) -> &search::ann::AnnIndexes {
+        &self.ann
     }
 
     /// The clock that write transactions (`MutationCtx::now`) and the scheduler read. Tests can move it forward.
@@ -190,6 +200,7 @@ impl Database {
                 problems.push(format!("{orphans} index entries belong to no index"));
             }
             problems.extend(search::verify(conn, &catalog)?);
+            problems.extend(self.ann.verify(conn, snapshot.ts)?);
             Ok(problems)
         })
     }

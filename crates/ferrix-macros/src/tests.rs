@@ -188,6 +188,45 @@ fn table_search_and_vector_indexes() {
 }
 
 #[test]
+fn table_search_tokenizers_and_vector_kinds() {
+    insta::assert_snapshot!(table(
+        quote!(),
+        quote! {
+            #[search_index(s_porter, search = body, tokenizer = "porter", language = "english")]
+            #[search_index(s_porter_keep, search = body, tokenizer = "porter", diacritics = "keep")]
+            #[search_index(s_trigram, search = body, filter = [channel], tokenizer = "trigram")]
+            #[search_index(s_plain, search = title, tokenizer = "unicode61", diacritics = "remove")]
+            #[vector_index(v_hnsw, field = embedding, dims = 4, kind = "hnsw")]
+            #[vector_index(v_exact, field = embedding, dims = 4, filter = [channel], kind = "exact")]
+            struct Doc { channel: String, body: String, title: Option<String>, embedding: Vec<f32> }
+        }
+    ));
+}
+
+#[test]
+fn table_search_tokenizer_errors() {
+    insta::assert_snapshot!(
+        "table_err_search_tokenizers",
+        table_err(
+            quote!(),
+            quote! {
+                #[search_index(s1, search = text, tokenizer = "snowball")]
+                #[search_index(s2, search = text, language = "english")]
+                #[search_index(s3, search = text, tokenizer = "porter", language = "french")]
+                #[search_index(s4, search = text, diacritics = "strip")]
+                #[search_index(s5, search = text, tokenizer = "trigram", tokenizer = "porter", language = "english")]
+                #[search_index(s6, search = text, tokenizer = porter)]
+                #[search_index(s7, search = text, kind = "hnsw")]
+                #[vector_index(v1, field = emb, dims = 2, kind = "ivf")]
+                #[vector_index(v2, field = emb, dims = 2, tokenizer = "porter")]
+                #[vector_index(v3, field = emb, dims = 2, kind = "hnsw", kind = "exact")]
+                struct T { text: String, emb: Vec<f32> }
+            }
+        )
+    );
+}
+
+#[test]
 fn table_search_index_errors() {
     insta::assert_snapshot!(
         "table_err_search_indexes",

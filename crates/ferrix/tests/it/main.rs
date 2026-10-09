@@ -17,5 +17,6 @@ mod readsets;
 mod storage;
 mod scheduler;
 mod search;
+mod search_pages;
 mod shared;
 mod websocket;

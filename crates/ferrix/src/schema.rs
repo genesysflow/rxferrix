@@ -60,6 +60,61 @@ pub struct SearchIndexDef {
     pub name: &'static str,
     pub search_field: &'static str,
     pub filter_fields: Vec<&'static str>,
+    /// How the text is split into terms (`#[search_index(.., tokenizer = "porter")]`). Changing it rebuilds the index.
+    pub tokenizer: Tokenizer,
+}
+
+/// The FTS5 tokenizer of a search index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenizerKind {
+    /// Words (Unicode letters and digits), case-insensitive. The default.
+    Unicode61,
+    /// Words reduced to their English stem (Porter): "running" matches "run".
+    Porter,
+    /// Every 3-character sequence: matches substrings anywhere in a word ("ell" matches "hello").
+    Trigram,
+}
+
+/// A search index's tokenizer: its kind, the stemming language (`Porter` only) and whether diacritics are folded
+/// (`café` = `cafe`, the default) or kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Tokenizer {
+    pub kind: TokenizerKind,
+    /// `Some("english")` for `Porter` (the only language FTS5's stemmer supports), `None` otherwise.
+    pub language: Option<&'static str>,
+    pub remove_diacritics: bool,
+}
+
+impl Tokenizer {
+    /// Languages accepted by [`Tokenizer::porter`].
+    pub const LANGUAGES: &'static [&'static str] = &["english"];
+
+    /// `tokenizer = "unicode61"` (the default).
+    pub const fn unicode61() -> Self {
+        Tokenizer { kind: TokenizerKind::Unicode61, language: None, remove_diacritics: true }
+    }
+
+    /// `tokenizer = "porter", language = "english"`.
+    pub const fn porter(language: &'static str) -> Self {
+        Tokenizer { kind: TokenizerKind::Porter, language: Some(language), remove_diacritics: true }
+    }
+
+    /// `tokenizer = "trigram"`.
+    pub const fn trigram() -> Self {
+        Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true }
+    }
+
+    /// `diacritics = "keep"`: `café` and `cafe` are different terms.
+    pub const fn keep_diacritics(self) -> Self {
+        Tokenizer { remove_diacritics: false, ..self }
+    }
+}
+
+impl Default for Tokenizer {
+    fn default() -> Self {
+        Tokenizer::unicode61()
+    }
 }
 
 /// A vector index over a `Vec<f32>` (or `Option<Vec<f32>>`) field of exactly `dimensions` elements, plus fields
@@ -70,6 +125,20 @@ pub struct VectorIndexDef {
     pub vector_field: &'static str,
     pub dimensions: usize,
     pub filter_fields: Vec<&'static str>,
+    /// Exact (sqlite-vec brute force, the default) or approximate (an HNSW graph on top of it).
+    pub kind: VectorIndexKind,
+}
+
+/// How a vector index answers nearest-neighbour searches (`#[vector_index(.., kind = "hnsw")]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorIndexKind {
+    /// sqlite-vec `vec0`: an exact brute-force scan. Fine up to roughly 100k vectors.
+    #[default]
+    Exact,
+    /// An in-memory HNSW graph (approximate, much faster on large sets), kept consistent with the committed `vec0`
+    /// table, which stays the source of truth (docs/CONTRACT.md §1.8).
+    Hnsw,
 }
 
 /// A user-defined index: a name and the JSON names of the indexed fields.

@@ -183,8 +183,9 @@ pub mod hostile {
 
     #[table]
     #[index(by_a = [a])]
-    #[search_index(search_b, search = b, filter = [a])]
-    #[vector_index(by_v, field = v, dims = 2, filter = [a, b])]
+    #[search_index(search_b, search = b, filter = [a], tokenizer = "porter", language = "english", diacritics = "keep")]
+    #[search_index(search_b_sub, search = b, tokenizer = "trigram")]
+    #[vector_index(by_v, field = v, dims = 2, filter = [a, b], kind = "hnsw")]
     pub struct Shadowed {
         pub a: u32,
         pub b: String,
@@ -284,13 +285,35 @@ fn table_validate_deserializes_a_doc() {
 
 #[test]
 fn search_and_vector_indexes() {
-    use ferrix::{SearchIndexDef, VectorIndexDef};
+    use ferrix::{SearchIndexDef, Tokenizer, TokenizerKind, VectorIndexDef, VectorIndexKind};
     use hostile::Shadowed;
     let def = Shadowed::table_def();
-    assert_eq!(def.search_indexes, vec![SearchIndexDef { name: "search_b", search_field: "b", filter_fields: vec!["a"] }]);
+    assert_eq!(
+        def.search_indexes,
+        vec![
+            SearchIndexDef {
+                name: "search_b",
+                search_field: "b",
+                filter_fields: vec!["a"],
+                tokenizer: Tokenizer { kind: TokenizerKind::Porter, language: Some("english"), remove_diacritics: false },
+            },
+            SearchIndexDef {
+                name: "search_b_sub",
+                search_field: "b",
+                filter_fields: vec![],
+                tokenizer: Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true },
+            },
+        ]
+    );
     assert_eq!(
         def.vector_indexes,
-        vec![VectorIndexDef { name: "by_v", vector_field: "v", dimensions: 2, filter_fields: vec!["a", "b"] }]
+        vec![VectorIndexDef {
+            name: "by_v",
+            vector_field: "v",
+            dimensions: 2,
+            filter_fields: vec!["a", "b"],
+            kind: VectorIndexKind::Hnsw,
+        }]
     );
     let s: ferrix::SearchIndex<Shadowed> = Shadowed::search_b;
     assert_eq!(s.name(), "search_b");

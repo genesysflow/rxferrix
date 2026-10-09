@@ -30,18 +30,38 @@
 //! indexes whose definition changed (fields, dimensions, tokenizer version) are dropped, recreated and backfilled,
 //! and indexes removed from code are dropped with their storage.
 //!
-//! ## Reactivity
+//! ## Reactivity: per-filter-value keys
 //!
-//! A search query records two kinds of reads:
-//! - the full key range of the search index's (synthetic) id, `[b"", ∞)`, and
-//! - a point read on `by_id` for every document it examined.
+//! A search index's id is a synthetic index id whose key space is laid out so that a search with an `eq` filter
+//! reads only the keys of documents with that filter value:
+//!
+//! ```text
+//! key = [filter column i: 1 byte][memcomparable encoding of the document's value of filter field i][doc id: 16 bytes]
+//! ```
 //!
 //! Every write that changes a document's entry in a search index (its text or a filter value; inserting or deleting
-//! an indexed document always does) adds `(search_index_id, doc_id bytes)` to the commit entry's writes, which the
-//! full-range read always contains. Any change to the set of matches or to bm25 statistics therefore invalidates the
-//! query, and the by_id points catch changes to the other fields of the documents it returned. This needs no change
-//! to the read-set or write-log types: a search index is just one more index id with a coarse range.
+//! an indexed document always does) adds, for the old entry and for the new one, one such key per filter field to
+//! the commit entry's writes (an index without filter fields writes `[doc id]`). A search query records:
+//! - with at least one `eq` filter: the prefix range `[i][enc(v)]` of the `eq` with the lowest filter column `i` (any
+//!   one of them is enough: a document matching all filters has a key under each prefix); writes to documents whose
+//!   old and new values of field `i` both differ from `v` fall outside it;
+//! - without filters: the full range `[b"", ∞)`, which contains every key of the index;
+//! - and a point read on `by_id` for every document it examined (changes to its other fields).
+//!
+//! This is exact because the ranking of a document depends only on that document and the query (see [`score`]):
+//! documents outside the filter can neither enter the results nor move the documents inside it. The encoding of a
+//! value is self-delimiting, so the prefix of one value never contains the keys of another, and the interval index
+//! of the subscription manager stabs each written key like any index key. No change to the read-set or write-log
+//! types is needed.
+//!
+//! Vector indexes are not reactive (vector search is for actions only). An HNSW vector index additionally writes
+//! `(vector index id, doc id)` for every changed entry, which is how its in-memory graph catches up with commits
+//! ([`ann`]).
 
+pub mod ann;
+pub mod hnsw;
+pub mod paginate;
+pub mod score;
 pub mod text;
 pub mod vector;
 
@@ -56,10 +76,22 @@ use crate::db::catalog::{Catalog, IndexId, TableInfo};
 use crate::db::storage;
 use crate::id::DocId;
 use crate::keys;
-use crate::schema::{BY_CREATION_TIME, BY_ID, CREATION_TIME_FIELD, ID_FIELD, TableDef};
+use crate::schema::{
+    BY_CREATION_TIME, BY_ID, CREATION_TIME_FIELD, ID_FIELD, TableDef, Tokenizer, TokenizerKind, VectorIndexKind,
+};
 
-pub use text::{MAX_SEARCH_RESULTS, SearchFilter, SearchQuery};
+pub use text::{MAX_SEARCH_RESULTS, RawSearchQuery, SearchFilter, SearchQuery};
 pub use vector::{MAX_VECTOR_RESULTS, VectorFilter, VectorSearchOpts};
+
+/// Register the SQLite extensions search needs (sqlite-vec and the `ferrix_score` FTS5 function) for every
+/// connection opened afterwards in this process. Idempotent.
+pub fn register_extensions() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        vector::register_sqlite_vec();
+        score::register_auto_extension();
+    });
+}
 
 /// Ids of search and vector indexes start here (the upper half of the `IndexId` space).
 pub const SPECIAL_INDEX_BASE: IndexId = 1 << 31;
@@ -79,8 +111,67 @@ const DDL: &str = "CREATE TABLE IF NOT EXISTS _search_indexes (index_id INTEGER 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SpecialIndexKind {
-    Search { search_field: String, filter_fields: Vec<String>, version: u32 },
-    Vector { vector_field: String, dimensions: usize, filter_fields: Vec<String>, version: u32 },
+    Search {
+        search_field: String,
+        filter_fields: Vec<String>,
+        version: u32,
+        /// Missing in definitions stored before tokenizers were configurable: the default.
+        #[serde(default)]
+        tokenizer: TokenizerConfig,
+    },
+    Vector {
+        vector_field: String,
+        dimensions: usize,
+        filter_fields: Vec<String>,
+        version: u32,
+        /// Exact (`vec0` only) or HNSW (`vec0` plus an in-memory graph). Missing in older definitions: exact.
+        #[serde(default)]
+        method: VectorIndexKind,
+    },
+}
+
+/// A search index's tokenizer as stored in its definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizerConfig {
+    pub kind: TokenizerKind,
+    #[serde(default)]
+    pub language: Option<String>,
+    pub remove_diacritics: bool,
+}
+
+impl Default for TokenizerConfig {
+    fn default() -> Self {
+        TokenizerConfig::from(Tokenizer::default())
+    }
+}
+
+impl From<Tokenizer> for TokenizerConfig {
+    fn from(t: Tokenizer) -> Self {
+        TokenizerConfig { kind: t.kind, language: t.language.map(str::to_string), remove_diacritics: t.remove_diacritics }
+    }
+}
+
+impl TokenizerConfig {
+    /// The FTS5 `tokenize` option.
+    pub fn fts5(&self) -> String {
+        match self.kind {
+            TokenizerKind::Unicode61 => format!("unicode61 remove_diacritics {}", if self.remove_diacritics { 2 } else { 0 }),
+            TokenizerKind::Porter => {
+                format!("porter unicode61 remove_diacritics {}", if self.remove_diacritics { 2 } else { 0 })
+            }
+            TokenizerKind::Trigram => format!("trigram remove_diacritics {}", u8::from(self.remove_diacritics)),
+        }
+    }
+
+    /// `"unicode61"`, `"porter"` or `"trigram"`.
+    pub fn name(&self) -> &'static str {
+        match self.kind {
+            TokenizerKind::Unicode61 => "unicode61",
+            TokenizerKind::Porter => "porter",
+            TokenizerKind::Trigram => "trigram",
+        }
+    }
 }
 
 /// A search or vector index of a table, as stored in the catalog.
@@ -111,6 +202,19 @@ impl SearchIndexInfo {
             SpecialIndexKind::Search { search_field, .. } => search_field,
             SpecialIndexKind::Vector { vector_field, .. } => vector_field,
         }
+    }
+
+    /// The tokenizer of a search index (`None` for vector indexes).
+    pub fn tokenizer(&self) -> Option<&TokenizerConfig> {
+        match &self.kind {
+            SpecialIndexKind::Search { tokenizer, .. } => Some(tokenizer),
+            SpecialIndexKind::Vector { .. } => None,
+        }
+    }
+
+    /// Is this a vector index with an HNSW graph?
+    pub fn is_hnsw(&self) -> bool {
+        matches!(self.kind, SpecialIndexKind::Vector { method: VectorIndexKind::Hnsw, .. })
     }
 
     fn number(&self) -> u32 {
@@ -144,6 +248,12 @@ pub struct SearchIndexSummary {
     pub filter_fields: Vec<String>,
     /// Vector indexes only.
     pub dimensions: Option<usize>,
+    /// Search indexes only: `"unicode61"`, `"porter"` or `"trigram"`.
+    pub tokenizer: Option<String>,
+    /// Search indexes only: whether diacritics are folded (`café` = `cafe`).
+    pub remove_diacritics: Option<bool>,
+    /// Vector indexes only: `"exact"` or `"hnsw"`.
+    pub method: Option<String>,
 }
 
 /// The search and vector indexes of a table, sorted by name.
@@ -158,6 +268,13 @@ pub fn summaries(table: &TableInfo) -> Vec<SearchIndexSummary> {
             filter_fields: i.filter_fields().to_vec(),
             dimensions: match i.kind {
                 SpecialIndexKind::Vector { dimensions, .. } => Some(dimensions),
+                SpecialIndexKind::Search { .. } => None,
+            },
+            tokenizer: i.tokenizer().map(|t| t.name().to_string()),
+            remove_diacritics: i.tokenizer().map(|t| t.remove_diacritics),
+            method: match i.kind {
+                SpecialIndexKind::Vector { method: VectorIndexKind::Exact, .. } => Some("exact".to_string()),
+                SpecialIndexKind::Vector { method: VectorIndexKind::Hnsw, .. } => Some("hnsw".to_string()),
                 SpecialIndexKind::Search { .. } => None,
             },
         })
@@ -177,6 +294,7 @@ fn desired(def: &TableDef) -> Vec<(String, SpecialIndexKind)> {
                 search_field: s.search_field.to_string(),
                 filter_fields: strings(&s.filter_fields),
                 version: TEXT_VERSION,
+                tokenizer: TokenizerConfig::from(s.tokenizer),
             };
             (s.name.to_string(), kind)
         })
@@ -187,6 +305,7 @@ fn desired(def: &TableDef) -> Vec<(String, SpecialIndexKind)> {
             dimensions: v.dimensions,
             filter_fields: strings(&v.filter_fields),
             version: VECTOR_VERSION,
+            method: v.kind,
         };
         (v.name.to_string(), kind)
     }));
@@ -217,6 +336,19 @@ pub(crate) fn validate_def(def: &TableDef) -> anyhow::Result<()> {
         }
         if s.search_field.is_empty() || is_system(s.search_field) {
             bail!("table `{}`: search index `{}` has an invalid search field `{}`", def.name, s.name, s.search_field);
+        }
+        match (s.tokenizer.kind, s.tokenizer.language) {
+            (TokenizerKind::Porter, Some(l)) if Tokenizer::LANGUAGES.contains(&l) => {}
+            (TokenizerKind::Porter, l) => bail!(
+                "table `{}`: search index `{}`: unsupported stemming language {l:?} (supported: {:?})",
+                def.name,
+                s.name,
+                Tokenizer::LANGUAGES
+            ),
+            (_, Some(_)) => {
+                bail!("table `{}`: search index `{}`: a language only applies to the porter tokenizer", def.name, s.name)
+            }
+            (_, None) => {}
         }
         check_filters(s.name, s.search_field, &s.filter_fields)?;
     }
@@ -264,6 +396,17 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
         if existing.is_some_and(|c| &c.kind == kind) {
             continue;
         }
+        // Switching a vector index between exact and HNSW keeps its vec0 table (the graph is built from it).
+        if let Some(old) = existing
+            && same_storage(&old.kind, kind)
+        {
+            tracing::info!(table = def.name, index = %name, "vector index method changed");
+            conn.execute(
+                "UPDATE _search_indexes SET definition = ?1 WHERE index_id = ?2",
+                params![serde_json::to_string(kind)?, old.id],
+            )?;
+            continue;
+        }
         let id = match existing {
             Some(old) => {
                 tracing::info!(table = def.name, index = %name, "search index definition changed; rebuilding");
@@ -298,15 +441,32 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
     Ok(())
 }
 
+/// Do two definitions share the same storage, i.e. differ only in the vector search method?
+fn same_storage(a: &SpecialIndexKind, b: &SpecialIndexKind) -> bool {
+    match (a, b) {
+        (SpecialIndexKind::Vector { .. }, SpecialIndexKind::Vector { method, .. }) => {
+            let mut a = a.clone();
+            if let SpecialIndexKind::Vector { method: m, .. } = &mut a {
+                *m = *method;
+            }
+            &a == b
+        }
+        _ => false,
+    }
+}
+
 fn create_storage(conn: &Connection, info: &SearchIndexInfo) -> anyhow::Result<()> {
     let filters: Vec<String> = (0..info.filter_fields().len()).map(|i| format!("f{i}")).collect();
     match &info.kind {
-        SpecialIndexKind::Search { .. } => {
+        SpecialIndexKind::Search { tokenizer, .. } => {
             let cols: String = filters.iter().map(|f| format!(", {f} UNINDEXED")).collect();
+            // Prefix indexes speed up the last term's prefix match; trigram queries are substring matches instead.
+            let prefix = if tokenizer.kind == TokenizerKind::Trigram { "" } else { ", prefix = '2 3'" };
             conn.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE {} USING fts5(t{cols}, tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3');
+                "CREATE VIRTUAL TABLE {} USING fts5(t{cols}, tokenize = '{}'{prefix});
                  CREATE TABLE {} (rowid INTEGER PRIMARY KEY, doc_id BLOB NOT NULL UNIQUE);",
                 info.storage_table(),
+                tokenizer.fts5(),
                 info.docs_table()
             ))?;
         }
@@ -360,6 +520,27 @@ pub(crate) fn encode_filter_value(v: Option<&Value>) -> String {
     let mut out = Vec::new();
     keys::encode_opt(v, &mut out);
     data_encoding::HEXLOWER.encode(&out)
+}
+
+/// The start of the synthetic keys of documents whose filter column `col` holds the value with this hex encoding:
+/// `[col][encoded value]` (see "Reactivity" in the module docs).
+pub(crate) fn filter_key_prefix(col: usize, hex: &str) -> Vec<u8> {
+    let mut key = vec![col as u8];
+    key.extend(data_encoding::HEXLOWER.decode(hex.as_bytes()).expect("filter values are stored as lowercase hex"));
+    key
+}
+
+/// The synthetic keys a write of document `id` with this search entry adds to the commit (see "Reactivity").
+fn search_keys(entry: &Entry, id: &DocId, out: &mut Vec<Vec<u8>>) {
+    let Entry::Text { filters, .. } = entry else { return };
+    if filters.is_empty() {
+        out.push(id.0.to_vec());
+    }
+    for (col, hex) in filters.iter().enumerate() {
+        let mut key = filter_key_prefix(col, hex);
+        key.extend_from_slice(&id.0);
+        out.push(key);
+    }
 }
 
 /// One document's entry in a search or vector index.
@@ -491,7 +672,8 @@ impl<'a> SpecialWrites<'a> {
         Ok(SpecialWrites { changes })
     }
 
-    /// Update the FTS / vec0 tables and record `(search_index_id, doc id)` for every changed search entry.
+    /// Update the FTS / vec0 tables and record the synthetic keys of every changed search entry (the old entry's and
+    /// the new one's, see "Reactivity"), and `(index id, doc id)` for every changed HNSW vector entry.
     pub(crate) fn apply(self, conn: &Connection, id: DocId, writes: &mut Vec<(IndexId, Vec<u8>)>) -> anyhow::Result<()> {
         for (info, old, new) in self.changes {
             if old.is_some() {
@@ -500,8 +682,16 @@ impl<'a> SpecialWrites<'a> {
             if let Some(entry) = &new {
                 entry.insert(conn, info, &id)?;
             }
-            if !info.is_vector() {
+            if info.is_hnsw() {
                 writes.push((info.id, id.0.to_vec()));
+            } else if !info.is_vector() {
+                let mut keys = Vec::new();
+                for entry in old.iter().chain(&new) {
+                    search_keys(entry, &id, &mut keys);
+                }
+                keys.sort();
+                keys.dedup();
+                writes.extend(keys.into_iter().map(|k| (info.id, k)));
             }
         }
         Ok(())
@@ -614,7 +804,13 @@ mod tests {
             name: "vt",
             indexes: vec![],
             search_indexes: vec![],
-            vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "e", dimensions, filter_fields: vec![] }],
+            vector_indexes: vec![VectorIndexDef {
+                name: "v",
+                vector_field: "e",
+                dimensions,
+                filter_fields: vec![],
+                kind: Default::default(),
+            }],
             ts: || "{ }".into(),
             validate: |_| Ok(()),
         }

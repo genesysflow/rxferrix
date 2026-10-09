@@ -32,14 +32,15 @@ impl ::ferrix::Table for Message {
             ],
             search_indexes: ::std::vec![
                 ::ferrix::SearchIndexDef { name : "search_body", search_field : "body",
-                filter_fields : ::std::vec!["channel", "author"] },
-                ::ferrix::SearchIndexDef { name : "search_title", search_field : "title",
-                filter_fields : ::std::vec![] }
+                filter_fields : ::std::vec!["channel", "author"], tokenizer :
+                ::ferrix::Tokenizer::unicode61(), }, ::ferrix::SearchIndexDef { name :
+                "search_title", search_field : "title", filter_fields : ::std::vec![],
+                tokenizer : ::ferrix::Tokenizer::unicode61(), }
             ],
             vector_indexes: ::std::vec![
                 ::ferrix::VectorIndexDef { name : "by_embedding", vector_field :
                 "embedding", dimensions : 1536usize, filter_fields :
-                ::std::vec!["channel"], }
+                ::std::vec!["channel"], kind : ::ferrix::VectorIndexKind::Exact, }
             ],
             ts: || ::ferrix::__private::ts_inline::<Message>(),
             validate: ::ferrix::__private::validate_doc::<Message>,

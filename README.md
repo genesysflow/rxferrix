@@ -184,8 +184,8 @@ reactive like any other query (docs/CONTRACT.md §1.8).
 
 ```rust
 #[table(name = "messages")]
-#[search_index(search_body, search = body, filter = [channel])]
-#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+#[search_index(search_body, search = body, filter = [channel], tokenizer = "porter")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 
 #[query]   // most relevant first; the last word is a prefix ("hello wor" matches "hello world")
@@ -204,10 +204,29 @@ pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>) -> Result<Vec<Id<Mess
 ```
 
 User text is split into words that are always matched literally (never parsed as FTS5 syntax); empty text matches
-nothing; a query returns at most 1024 documents. A search subscription reruns after any write that changes the text or
-a filter field of the table's documents. Rough numbers (release build, a laptop): 50k documents of 12 words: a
-one-word query takes 0.35 ms, a broad two-letter prefix matching every document 80 ms; 50k vectors of 384 dimensions:
-a k=10 query takes about 18 ms (7 ms with a filter keeping 1 in 10). The todo example has a search box.
+nothing; a query returns at most 1024 documents. Relevance is BM25 per document (term frequency and length, no
+corpus statistics), so a document's rank depends only on itself and the query. That makes two things exact:
+
+- **Pagination**: `.paginate(pagination_opts)` instead of `.take(n)` returns the usual `PaginationResult`, so
+  `usePaginatedQuery` works as for index queries. Pages never duplicate or skip a match; when documents change, only
+  those documents move.
+- **Invalidation per filter value**: a search with `.eq(Message::channel, c)` reruns only after writes to messages
+  whose channel is (or was) `c`; an unfiltered search reruns after any write to the index.
+
+Tokenizers: `tokenizer = "porter"` (English stemming: "run" finds "running"), `tokenizer = "trigram"` (substring
+search: "ell" finds "hello"), default `"unicode61"`; `diacritics = "keep"` stops folding `café` into `cafe`. Changing
+the tokenizer rebuilds the index at startup.
+
+Vector indexes are exact by default (sqlite-vec). For large sets, `kind = "hnsw"` adds an in-memory HNSW graph
+(approximate, recall@10 ≈ 0.95 on embedding-like data) that follows commits through the write log, so a search sees
+everything committed before it; filters are applied after the graph search with oversampling (exactly, when few
+documents match), deletes become tombstones that a background rebuild drops, and graphs of 10k+ vectors are saved
+next to `data.db` and validated against the table at startup. `VectorSearchOpts::exact()` bypasses the graph.
+
+Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.35 ms, a broad two-letter
+prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
+HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
+`_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).
 
 ## Migrations
 

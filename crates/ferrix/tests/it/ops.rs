@@ -197,10 +197,12 @@ async fn restore_is_refused_while_locked_and_validates_before_swapping() {
         assert_eq!(texts, ["keep me a", "keep me b"]);
     }
 
-    // Unlocked and valid: restored, and the previous files are kept aside.
+    // Unlocked and valid: restored, and the previous files (persisted vector indexes included) are kept aside.
+    std::fs::write(dest.path().join("vector_index_99.hnsw"), b"stale").unwrap();
     let report = backup::restore(&archive, dest.path(), &RestoreOptions::default()).await.unwrap();
     let previous = report.previous.unwrap();
-    assert!(previous.join("data.db").exists());
+    assert!(previous.join("data.db").exists() && previous.join("vector_index_99.hnsw").exists());
+    assert!(!dest.path().join("vector_index_99.hnsw").exists());
     let app = App::open(dest.path(), AppOptions::default()).await.unwrap();
     let texts: Vec<String> = app.query::<all_pairs>(()).await.unwrap().into_iter().map(|p| p.value.text).collect();
     assert_eq!(texts, ["one a", "one b"]);

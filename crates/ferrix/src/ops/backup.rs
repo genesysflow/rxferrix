@@ -633,12 +633,31 @@ async fn verify(staging: &Path) -> crate::Result<()> {
     if !problems.is_empty() {
         bail!("the backup's indexes are inconsistent: {}", problems.join("; "));
     }
-    // Fold anything left in the WAL back into data.db before it moves.
-    let conn = Connection::open(staging.join("data.db"))?;
-    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-    conn.pragma_update(None, "journal_mode", "DELETE")?;
-    drop(conn);
-    Ok(())
+    // Fold anything left in the WAL back into data.db before it moves. The vector index thread of the dropped database
+    // (`db::search::ann`) may hold its reader for a moment longer, and leaving WAL mode needs every other connection
+    // gone (SQLite doesn't wait for that): retry for a while.
+    let path = staging.join("data.db");
+    tokio::task::spawn_blocking(move || -> crate::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let attempt = (|| -> rusqlite::Result<()> {
+                let conn = Connection::open(&path)?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+                conn.pragma_update(None, "journal_mode", "DELETE")
+            })();
+            match attempt {
+                Ok(()) => return Ok(()),
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => return Err(e).context("closing the restored database's WAL"),
+            }
+        }
+    })
+    .await?
 }
 
 /// Restore `archive` into the data directory `dir` (offline). See the module docs.
@@ -653,23 +672,34 @@ pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> cr
     // WAL mode again, as ferrix opens it (the next open would switch anyway).
     {
         let conn = Connection::open(staging.path().join("data.db"))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        conn.pragma_update(None, "journal_mode", "WAL").context("switching the restored database to WAL")?;
     }
 
     // Move the current files aside, then the restored ones in.
     let has = |name: &str| manifest.files.iter().any(|f| f.path == name);
     let mut moved_aside = Vec::new();
-    let mut aside_names: Vec<&str> =
-        vec!["data.db", "data.db-wal", "data.db-shm", "data.db-journal", "aux.db", "aux.db-wal", "aux.db-shm", "aux.db-journal"];
+    let mut aside_names: Vec<String> =
+        ["data.db", "data.db-wal", "data.db-shm", "data.db-journal", "aux.db", "aux.db-wal", "aux.db-shm", "aux.db-journal"]
+            .map(String::from)
+            .into();
     if has(SECRET_FILE) {
-        aside_names.push(SECRET_FILE);
+        aside_names.push(SECRET_FILE.into());
+    }
+    // Persisted HNSW vector indexes (`vector_index_<id>.hnsw`) describe the old database: rebuilt from the restored
+    // one at startup.
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("vector_index_") && name.ends_with(".hnsw") {
+            aside_names.push(name);
+        }
     }
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
     for name in aside_names {
-        let path = dir.join(name);
+        let path = dir.join(&name);
         if path.exists() {
             std::fs::create_dir_all(&previous)?;
-            std::fs::rename(&path, previous.join(name)).with_context(|| format!("moving {} aside", path.display()))?;
+            std::fs::rename(&path, previous.join(&name)).with_context(|| format!("moving {} aside", path.display()))?;
             moved_aside.push(name);
         }
     }

@@ -9,6 +9,7 @@
 //! |---|---|---|
 //! | `tables` | query | Every table (system tables included): document count, indexes, TS type, secret fields. |
 //! | `documents` | query | An untyped, paginated, live scan of a table by name, with an index, eq/range filters and order. |
+//! | `search_documents` | query | An untyped, paginated, live full-text search of a table through one of its search indexes. |
 //! | `document` | query | One document by id (any table), with its table name. |
 //! | `insert_document`, `patch_document`, `replace_document`, `delete_documents` | mutation | Untyped writes, validated with `TableDef::validate`. |
 //! | `functions` | query | The function registry, internal and system functions included. |
@@ -240,6 +241,49 @@ pub async fn documents(
         .paginate(pagination_opts)
         .await
         .map_err(input_error("invalid_query"))?;
+    Ok(page.map(|doc| secrets::mask(&info.name, doc)))
+}
+
+/// An equality filter on a filter field of a search index.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct SearchFilterValue {
+    pub field: String,
+    pub value: Value,
+}
+
+/// A page of `table`'s documents (secrets masked) matching `text` in its full-text search index `index`, most
+/// relevant first, optionally restricted to documents whose filter fields equal `filters`. Same matching, cursors and
+/// read sets as `SearchQuery::paginate` (docs/CONTRACT.md §1.8), so a subscribed page updates live and
+/// `usePaginatedQuery` works. Errors: `unknown_table`, `invalid_query` (unknown or vector index, a field that is not a
+/// filter field, a bad cursor), `index_not_allowed` (an index over a secret field).
+#[query]
+pub async fn search_documents(
+    ctx: &QueryCtx,
+    table: String,
+    index: String,
+    text: String,
+    filters: Option<Vec<SearchFilterValue>>,
+    pagination_opts: PaginationOpts,
+) -> Result<PaginationResult<Value>> {
+    ctx.auth.require_admin()?;
+    let info = ctx.db.catalog().table(&table).map_err(input_error("unknown_table"))?.clone();
+    let Some(search) = info.search_indexes.iter().find(|i| i.name == index) else {
+        return Err(user_error("invalid_query", format!("Table `{table}` has no search index `{index}`")));
+    };
+    if search.is_vector() {
+        return Err(user_error("invalid_query", format!("`{index}` is a vector index, not a full-text search index")));
+    }
+    let fields = std::iter::once(search.field()).chain(search.filter_fields().iter().map(String::as_str));
+    if fields.into_iter().any(|f| secrets::is_secret_field(&info.name, f)) {
+        return Err(user_error("index_not_allowed", format!("Index `{index}` can't be used to search `{table}`")));
+    }
+    let mut query = ctx.db.search_table(&table, &index).search(search.field(), text);
+    for f in filters.unwrap_or_default() {
+        query = query.eq(&f.field, f.value);
+    }
+    let page = query.paginate(pagination_opts).await.map_err(input_error("invalid_query"))?;
     Ok(page.map(|doc| secrets::mask(&info.name, doc)))
 }
 

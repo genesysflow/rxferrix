@@ -490,7 +490,8 @@ async fn search_read_sets() {
     // A matching insert invalidates the query...
     let (_, ts) = t.mutation_ts::<msgs::add>(("c".to_string(), Some("apple tart".to_string()))).await.unwrap();
     assert!(rs.overlaps(&commit_at(&t, ts)));
-    // ...as does any change of the search field (even of a non-matching document: coarse, but bm25 depends on it),
+    // ...as does any change of the search field (even of a non-matching document: without filters, the query reads
+    // every entry of the index),
     let (_, ts) = t.mutation_ts::<msgs::set_body>((b, Some("banana split".to_string()))).await.unwrap();
     assert!(rs.overlaps(&commit_at(&t, ts)));
     // or of a filter field.
@@ -512,6 +513,131 @@ async fn search_read_sets() {
     // Empty text reads nothing.
     let rs = read_set(&t, json!({ "text": "  " })).await;
     assert!(rs.is_empty());
+}
+
+/// Per-filter-value read sets: a search with `eq(channel, c)` depends only on documents whose channel is (or was) `c`.
+#[tokio::test]
+async fn filtered_search_read_sets_ignore_other_values() {
+    let t = TestApp::new().await.unwrap();
+    let a = t.mutation::<msgs::add>(("c".to_string(), Some("apple pie".to_string()))).await.unwrap();
+    let d = t.mutation::<msgs::add>(("d".to_string(), Some("apple strudel".to_string()))).await.unwrap();
+    let search_id = t.app().db().catalog().table("search_messages").unwrap().search_indexes[0].id;
+    let in_c = json!({ "text": "apple", "channel": "c" });
+    let rs = read_set(&t, in_c.clone()).await;
+    // The search reads the prefix of channel "c" (filter column 0), not the whole index.
+    let range = rs.ranges().find(|(id, _)| *id == search_id).unwrap().1.clone();
+    assert_eq!(range.start[0], 0, "{range:?}");
+    assert!(range.end.is_some() && !range.start.is_empty(), "{range:?}");
+    let invalidates = |ts: u64| rs.overlaps(&commit_at(&t, ts));
+
+    // Writes in another channel, matching or not, change nothing for "c".
+    let (_, ts) = t.mutation_ts::<msgs::add>(("d".to_string(), Some("apple crumble".to_string()))).await.unwrap();
+    assert!(!invalidates(ts));
+    let (_, ts) = t.mutation_ts::<msgs::set_body>((d, Some("apple apple apple".to_string()))).await.unwrap();
+    assert!(!invalidates(ts));
+    let (_, ts) = t.mutation_ts::<msgs::pin>((d,)).await.unwrap();
+    assert!(!invalidates(ts));
+    let (_, ts) = t.mutation_ts::<msgs::remove>((d,)).await.unwrap();
+    assert!(!invalidates(ts));
+    // A channel-"d" query is invalidated by those writes (control).
+    let rs_d = read_set(&t, json!({ "text": "apple", "channel": "d" })).await;
+    let (_, ts) = t.mutation_ts::<msgs::add>(("d".to_string(), Some("apple jam".to_string()))).await.unwrap();
+    assert!(rs_d.overlaps(&commit_at(&t, ts)));
+
+    // Writes in "c" invalidate it: an insert, a text change of any document in "c", a delete...
+    let (_, ts) = t.mutation_ts::<msgs::add>(("c".to_string(), Some("pear".to_string()))).await.unwrap();
+    assert!(invalidates(ts));
+    let moved = t.mutation::<msgs::add>(("e".to_string(), Some("apple sauce".to_string()))).await.unwrap();
+    // ...a document moving into "c" (its new value) or out of it (its old value).
+    let (_, ts) = t.mutation_ts::<msgs::replace>((moved, "c".to_string(), "apple sauce".to_string())).await.unwrap();
+    assert!(invalidates(ts));
+    let rs = read_set(&t, in_c.clone()).await;
+    let (_, ts) = t.mutation_ts::<msgs::replace>((moved, "e".to_string(), "apple sauce".to_string())).await.unwrap();
+    assert!(rs.overlaps(&commit_at(&t, ts)));
+    // A non-indexed field of a returned document still invalidates through its by_id point.
+    let (_, ts) = t.mutation_ts::<msgs::set_note>((a, "n".to_string())).await.unwrap();
+    assert!(rs.overlaps(&commit_at(&t, ts)));
+
+    // Two filters: the read is the prefix of the lowest filter column (channel), so a pinned change in "d" is
+    // ignored too.
+    let rs = read_set(&t, json!({ "text": "apple", "channel": "c", "pinned": false })).await;
+    let other = t.mutation::<msgs::add>(("d".to_string(), Some("apple x".to_string()))).await.unwrap();
+    let (_, ts) = t.mutation_ts::<msgs::pin>((other,)).await.unwrap();
+    assert!(!rs.overlaps(&commit_at(&t, ts)));
+    let (_, ts) = t.mutation_ts::<msgs::pin>((a,)).await.unwrap();
+    assert!(rs.overlaps(&commit_at(&t, ts)));
+    // Only `pinned`: its own column's prefix.
+    let rs = read_set(&t, json!({ "text": "apple", "pinned": true })).await;
+    let (_, ts) = t.mutation_ts::<msgs::add>(("z".to_string(), Some("apple unpinned".to_string()))).await.unwrap();
+    assert!(!rs.overlaps(&commit_at(&t, ts)), "inserted unpinned");
+}
+
+/// Randomized check that per-filter-value invalidation is sound: after every random write, every search whose read
+/// set the commit does not touch must still return exactly what a fresh run returns (results and order).
+#[tokio::test]
+async fn filtered_invalidation_never_misses_a_change() {
+    let t = TestApp::new().await.unwrap();
+    let mut rng = StdRng::seed_from_u64(11);
+    let channels = ["c0", "c1", "c2"];
+    let words = ["alpha", "beta", "gamma", "delta", "alps"];
+    let body = |rng: &mut StdRng| {
+        let n = rng.random_range(1..6);
+        (0..n).map(|_| words[rng.random_range(0..words.len())]).collect::<Vec<_>>().join(" ")
+    };
+    let mut ids = Vec::new();
+    for _ in 0..30 {
+        let c = channels[rng.random_range(0..3)].to_string();
+        ids.push(t.mutation::<msgs::add>((c, Some(body(&mut rng)))).await.unwrap());
+    }
+    let queries: Vec<Value> = [
+        json!({ "text": "alp" }),
+        json!({ "text": "alpha", "channel": "c0" }),
+        json!({ "text": "beta gam", "channel": "c1" }),
+        json!({ "text": "delta", "channel": "c2", "limit": 2 }),
+        json!({ "text": "al", "pinned": true }),
+        json!({ "text": "alpha", "channel": "c0", "pinned": false, "limit": 3 }),
+    ]
+    .into();
+    async fn run(t: &TestApp, args: Value) -> (Value, ReadSet) {
+        let r = t.app().run_query(&msgs::search::path(), args, &Identity::default()).await;
+        (r.result.unwrap(), r.read_set)
+    }
+    let mut state = Vec::new();
+    for q in &queries {
+        state.push(run(&t, q.clone()).await);
+    }
+    let mut skipped = 0;
+    for step in 0..300 {
+        let id = ids[rng.random_range(0..ids.len())];
+        let ts = match rng.random_range(0..6) {
+            0 => t.mutation_ts::<msgs::set_body>((id, Some(body(&mut rng)))).await.unwrap().1,
+            1 => t.mutation_ts::<msgs::pin>((id,)).await.unwrap().1,
+            2 => {
+                let c = channels[rng.random_range(0..3)].to_string();
+                t.mutation_ts::<msgs::replace>((id, c, body(&mut rng))).await.unwrap().1
+            }
+            3 => t.mutation_ts::<msgs::set_note>((id, format!("n{step}"))).await.unwrap().1,
+            4 => t.mutation_ts::<msgs::set_body>((id, None)).await.unwrap().1,
+            _ => {
+                let c = channels[rng.random_range(0..3)].to_string();
+                let (new, ts) = t.mutation_ts::<msgs::add>((c, Some(body(&mut rng)))).await.unwrap();
+                ids.push(new);
+                ts
+            }
+        };
+        let commit = commit_at(&t, ts);
+        for (q, (result, rs)) in queries.iter().zip(state.iter_mut()) {
+            let fresh = run(&t, q.clone()).await;
+            if rs.overlaps(&commit) {
+                *result = fresh.0;
+                *rs = fresh.1;
+            } else {
+                skipped += 1;
+                assert_eq!(*result, fresh.0, "step {step}: {q} changed but was not invalidated");
+            }
+        }
+    }
+    assert!(skipped > 200, "filters should spare many reruns ({skipped})");
 }
 
 /// Minimal sync-protocol client: subscribe to one query and wait for its updates.
@@ -583,11 +709,13 @@ async fn dashboard_lists_search_and_vector_indexes() {
     let find = |name: &str| tables.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["searchIndexes"].clone();
     assert_eq!(
         find("search_messages"),
-        json!([{ "name": "search_body", "kind": "search", "field": "body", "filterFields": ["channel", "pinned"], "dimensions": null }])
+        json!([{ "name": "search_body", "kind": "search", "field": "body", "filterFields": ["channel", "pinned"],
+                 "dimensions": null, "tokenizer": "unicode61", "removeDiacritics": true, "method": null }])
     );
     assert_eq!(
         find("search_vectors"),
-        json!([{ "name": "by_embedding", "kind": "vector", "field": "embedding", "filterFields": ["category", "rank"], "dimensions": 8 }])
+        json!([{ "name": "by_embedding", "kind": "vector", "field": "embedding", "filterFields": ["category", "rank"],
+                 "dimensions": 8, "tokenizer": null, "removeDiacritics": null, "method": "exact" }])
     );
     assert_eq!(find("todos"), json!([]));
 }
@@ -620,8 +748,8 @@ async fn catalog_add_change_remove_across_restarts() {
 
     // Change the filter fields (rebuild in place, same id), and add a second index on `note` (backfilled).
     let changed = messages_def(vec![
-        SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"] },
-        SearchIndexDef { name: "search_note", search_field: "note", filter_fields: vec![] },
+        SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"], tokenizer: Default::default() },
+        SearchIndexDef { name: "search_note", search_field: "note", filter_fields: vec![], tokenizer: Default::default() },
     ]);
     let db = Database::open(dir.path(), std::slice::from_ref(&changed), 1).unwrap();
     let t = db.catalog().table("search_messages").unwrap().clone();
@@ -648,13 +776,13 @@ async fn catalog_add_change_remove_across_restarts() {
     // Invalid definitions are refused.
     drop(app);
     let dup = messages_def(vec![
-        SearchIndexDef { name: "by_channel", search_field: "body", filter_fields: vec![] },
+        SearchIndexDef { name: "by_channel", search_field: "body", filter_fields: vec![], tokenizer: Default::default() },
     ]);
     assert!(Database::open(dir.path(), &[dup], 1).is_err());
-    let sys = messages_def(vec![SearchIndexDef { name: "s", search_field: "_id", filter_fields: vec![] }]);
+    let sys = messages_def(vec![SearchIndexDef { name: "s", search_field: "_id", filter_fields: vec![], tokenizer: Default::default() }]);
     assert!(Database::open(dir.path(), &[sys], 1).is_err());
     let zero = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "x", dimensions: 0, filter_fields: vec![] }],
+        vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "x", dimensions: 0, filter_fields: vec![], kind: Default::default() }],
         ..original.clone()
     };
     assert!(Database::open(dir.path(), &[zero], 1).is_err());
@@ -774,7 +902,7 @@ async fn vector_index_catalog_changes() {
     }
     // Different dimensions: rebuilt; the existing 8-dim vectors don't fit and are skipped (with a warning).
     let four = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 4, filter_fields: vec![] }],
+        vector_indexes: vec![VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 4, filter_fields: vec![], kind: Default::default() }],
         ..Item::table_def()
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&four), 1).unwrap();
@@ -850,4 +978,113 @@ async fn perf() {
         }
         println!("vec0: knn k=10 ({label}): {:?} per query", start.elapsed() / 10);
     }
+}
+
+/// HNSW numbers at 200k × 384: build time (all cores), query latency and recall@10 against brute force, for random
+/// vectors (the worst case) and clustered ones (closer to real embeddings), save/load time, and the exact vec0 scan
+/// at the same size for comparison.
+/// `cargo test --release -p ferrix --test it search::perf_hnsw -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "benchmark; run with --ignored --nocapture (ideally --release)"]
+async fn perf_hnsw() {
+    use ferrix::db::search::hnsw::{Graph, Params, dot, normalized};
+    use std::time::Instant;
+    const N: usize = 200_000;
+    const DIMS: usize = 384;
+    const QUERIES: usize = 200;
+    let mut rng = StdRng::seed_from_u64(7);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let random = |rng: &mut StdRng, n: usize| -> Vec<Vec<f32>> {
+        (0..n).map(|_| (0..DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect()
+    };
+    let centers = random(&mut rng, 2000);
+    let clustered = |rng: &mut StdRng, n: usize| -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|_| {
+                let c = &centers[rng.random_range(0..centers.len())];
+                c.iter().map(|x| x + rng.random_range(-0.35f32..0.35)).collect()
+            })
+            .collect()
+    };
+    // 32 latent dimensions mapped linearly into 384, plus a little noise: a low intrinsic dimension, like real
+    // embeddings.
+    const LATENT: usize = 32;
+    let basis: Vec<Vec<f32>> = (0..LATENT).map(|_| (0..DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect();
+    let latent = |rng: &mut StdRng, n: usize| -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|_| {
+                let z: Vec<f32> = (0..LATENT).map(|_| rng.random_range(-1.0f32..1.0)).collect();
+                (0..DIMS).map(|d| z.iter().zip(&basis).map(|(z, b)| z * b[d]).sum::<f32>() + rng.random_range(-0.05f32..0.05)).collect()
+            })
+            .collect()
+    };
+    for label in ["random", "latent-32", "clustered"] {
+        let make = |rng: &mut StdRng, n| match label {
+            "random" => random(rng, n),
+            "latent-32" => latent(rng, n),
+            _ => clustered(rng, n),
+        };
+        let (data, queries) = (make(&mut rng, N), make(&mut rng, QUERIES));
+        let start = Instant::now();
+        let g = Graph::build(DIMS, Params::default(), 1, &data, threads);
+        println!("hnsw {label}: built {N} x {DIMS} in {:?} on {threads} threads", start.elapsed());
+        // Ground truth by brute force (normalized dot products).
+        let normed: Vec<Vec<f32>> = data.iter().map(|v| normalized(v)).collect();
+        let truth: Vec<Vec<u32>> = queries
+            .iter()
+            .map(|q| {
+                let q = normalized(q);
+                let mut all: Vec<(f32, u32)> = normed.iter().enumerate().map(|(i, v)| (-dot(&q, v), i as u32)).collect();
+                all.select_nth_unstable_by(10, |a, b| a.0.total_cmp(&b.0));
+                all[..10].iter().map(|(_, i)| *i).collect()
+            })
+            .collect();
+        let start = Instant::now();
+        for q in queries.iter().take(20) {
+            let q = normalized(q);
+            let best = normed.iter().map(|v| dot(&q, v)).fold(f32::MIN, f32::max);
+            std::hint::black_box(best);
+        }
+        println!("hnsw {label}: brute force (in memory, one thread): {:?} per query", start.elapsed() / 20);
+        for ef in [64, 96, 128, 256] {
+            let start = Instant::now();
+            let mut hits = 0;
+            for (q, t) in queries.iter().zip(&truth) {
+                let got = g.search(q, 10, ef, |_| true);
+                hits += got.iter().filter(|(_, n)| t.contains(n)).count();
+            }
+            let per = start.elapsed() / QUERIES as u32;
+            println!("hnsw {label}: k=10 ef={ef}: {per:?} per query, recall@10 {:.3}", hits as f64 / (QUERIES * 10) as f64);
+        }
+        let start = Instant::now();
+        let mut bytes = Vec::new();
+        g.write_to(&mut bytes).unwrap();
+        let saved = start.elapsed();
+        let start = Instant::now();
+        let back = Graph::read_from(&mut bytes.as_slice()).unwrap();
+        println!("hnsw {label}: serialized {} MB in {saved:?}, loaded in {:?}", bytes.len() / 1_000_000, start.elapsed());
+        assert_eq!(back.len(), N);
+    }
+
+    // The exact vec0 scan at the same size.
+    ferrix::db::search::vector::register_extension();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(&format!("CREATE VIRTUAL TABLE v USING vec0(doc_id text primary key, v float[{DIMS}] distance_metric=cosine)"))
+        .unwrap();
+    conn.execute_batch("BEGIN").unwrap();
+    {
+        let mut stmt = conn.prepare("INSERT INTO v (doc_id, v) VALUES (?1, ?2)").unwrap();
+        for i in 0..N {
+            let blob: Vec<u8> = (0..DIMS).flat_map(|_| rng.random_range(-1.0f32..1.0).to_le_bytes()).collect();
+            stmt.execute(rusqlite::params![format!("{i:026}"), blob]).unwrap();
+        }
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    let mut stmt = conn.prepare("SELECT doc_id FROM v WHERE v MATCH ?1 AND k = 10 ORDER BY distance").unwrap();
+    let start = Instant::now();
+    for _ in 0..5 {
+        let blob: Vec<u8> = (0..DIMS).flat_map(|_| rng.random_range(-1.0f32..1.0).to_le_bytes()).collect();
+        assert_eq!(stmt.query_map([blob], |_| Ok(())).unwrap().count(), 10);
+    }
+    println!("vec0 (exact): k=10 over {N} x {DIMS}: {:?} per query", start.elapsed() / 5);
 }

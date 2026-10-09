@@ -41,6 +41,8 @@ impl ::ferrix::FunctionRef for ia {
 #[cfg(feature = "x")]
 impl ::ferrix::ActionFunction for ia {}
 #[cfg(feature = "x")]
+impl ::ferrix::SchedulableFunction for ia {}
+#[cfg(feature = "x")]
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
 #[allow(non_upper_case_globals)]

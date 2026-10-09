@@ -41,6 +41,7 @@ impl ::ferrix::FunctionRef for add {
     }
 }
 impl ::ferrix::MutationFunction for add {}
+impl ::ferrix::SchedulableFunction for add {}
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
 #[allow(non_upper_case_globals)]

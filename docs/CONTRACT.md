@@ -127,9 +127,9 @@ pub enum Order { Asc, Desc }
 
 ```rust
 pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage,    /* private */ }
-pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, /* private */ }
-pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, /* private: runtime handle */ }
-// ctx.storage: file storage, see §1.6.
+pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, /* private */ }
+pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, /* private: runtime handle */ }
+// ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7.
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit.
 
 // ctx.auth: the caller, from a validated access token (WS `Authenticate` or HTTP `Authorization: Bearer`).
@@ -290,6 +290,9 @@ pub trait FunctionRef: Send + Sync + 'static {   // implemented on a type-namesp
 pub trait QueryFunction: FunctionRef {}
 pub trait MutationFunction: FunctionRef {}
 pub trait ActionFunction: FunctionRef {}
+/// What `ctx.scheduler` and crons accept (§1.7). The macros implement it for every mutation and action (internal ones
+/// included), never for queries, so scheduling a query is a compile error.
+pub trait SchedulableFunction: FunctionRef {}
 ```
 
 ### 1.4 Logging, the execution log, and runtime options
@@ -319,6 +322,7 @@ pub struct AppOptions {
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
+    pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons (§1.7)
     pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
 }
@@ -551,6 +555,101 @@ impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest s
   abort-incomplete-multipart-uploads lifecycle rule on S3 buckets.
 - `App::storage() -> &Arc<StorageService>`: `object_store()`, `blob_path(id)`, `file_url(id)`, `config()`,
   `sweep(&app)`.
+### 1.7 Scheduler and crons
+
+```rust
+use std::time::Duration;
+use ferrix::scheduler::ScheduledJob;   // the `_scheduled_jobs` table type
+
+#[mutation]
+pub async fn send(ctx: &MutationCtx, body: String) -> Result<Id<ScheduledJob>> {
+    let id = ctx.db.insert(Message { body }).await?;
+    ctx.scheduler.run_after::<moderate>(Duration::ZERO, (id,)).await          // any mutation or action, internal too
+}
+
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new()
+        .cron::<cleanup>("cleanup", "0 0 3 * * *", ())                       // 6 fields with seconds, UTC
+        .interval::<sync_feeds>("sync-feeds", Duration::from_secs(300), ())
+        .run()
+}
+```
+
+```rust
+pub struct Scheduler { /* private */ }   // ctx.scheduler in MutationCtx and ActionCtx; Send + Sync
+impl Scheduler {
+    pub async fn run_after<F: SchedulableFunction>(&self, delay: Duration, args: impl Into<F::Args>) -> Result<Id<ScheduledJob>>;
+    pub async fn run_at<F: SchedulableFunction>(&self, at_ms: f64, args: impl Into<F::Args>) -> Result<Id<ScheduledJob>>;
+    pub async fn cancel(&self, id: Id<ScheduledJob>) -> Result<()>;
+    pub fn with_retries(&self, retries: u32) -> ScheduleWith<'_>;   // .run_after::<F>(..) / .run_at::<F>(..); actions only
+}
+```
+- **In a mutation** the job row is written in the mutation's transaction: it exists only if the mutation commits.
+  `run_after` counts from `ctx.now()`. `cancel` is just as atomic.
+- **In an action** scheduling and canceling take effect immediately: they run the internal system mutations
+  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin }` and `_system/scheduler:cancel { id }`.
+- Args are serialized when scheduling (at most 1 MiB of JSON). `run_at` in the past means "as soon as possible".
+- `cancel`: a pending job becomes `canceled`; a finished job is left alone; an action in progress runs to completion
+  (no error either way). An unknown id is the user error `not_found`.
+- Scheduled functions run with **no identity** (`ctx.auth` is anonymous). The execution log names their caller
+  `scheduler` (filter `identity=scheduler`), including the functions they call.
+
+**Delivery guarantees** (`crate::scheduler::runner`).
+- **Mutations: exactly once.** The runner calls the mutation with a hook inside its write transaction: first it
+  re-reads the job and skips it unless still `pending`; after the handler succeeds it sets `success` (attempts,
+  times, result) right before the commit, so the job's writes and its completion commit together. A failing mutation
+  is rolled back and a separate transaction marks the job `failed` (no automatic retry). A crash before the commit
+  leaves the job `pending` with none of its writes, so it runs once after the restart.
+- **Actions: at most once.** The job is committed as `inProgress` (attempts + 1) before the action starts; the outcome
+  is recorded afterwards. At startup, jobs still `inProgress` become `failed` with the error `server restarted while
+  running`. With `with_retries(n)`, an action that *returns an error* goes back to `pending` up to `n` times, after
+  `retry_backoff` (1s) doubled per retry (at most 1h); an interrupted one is never retried.
+- **Ordering:** due jobs start in `(runAt, scheduledAt)` order (`scheduledAt` is the job's strictly increasing
+  `_creationTime`), so jobs due at the same time run in scheduling order. Mutation jobs run one at a time, in that
+  order (they serialize on the single writer anyway); actions run concurrently.
+- **Concurrency:** at most `SchedulerOptions::concurrency` (10) jobs run at once.
+- **Waking:** the background loop sleeps until the next job or cron is due (at most 60s) and wakes as soon as a commit
+  in the write log touches `_scheduled_jobs`.
+
+**Crons.** `Ferrix::cron::<F>(name, expr, args)` / `Ferrix::interval::<F>(name, every, args)` (or the same methods on
+`SchedulerOptions`; `CronSpec::cron` / `CronSpec::interval`). Expressions have 6 fields with seconds (`sec min hour
+day-of-month month day-of-week`, an optional 7th is the year; `cron` crate syntax), evaluated in UTC; an interval runs
+first `every` after startup. `App::open` fails on an invalid expression (or one with 5 fields), a duplicate or empty
+name, a zero interval, or args that don't serialize.
+- At startup the declared crons are **reconciled** into `_crons`: new ones are inserted with their next run, changed
+  ones (schedule, function or args) get a fresh next run, and rows of crons no longer declared are deleted (jobs
+  they already enqueued stay).
+- A due cron **enqueues an ordinary job** (origin `cron:<name>`, due now): one execution path for everything.
+- **Missed runs** (downtime, or a test clock jump) run **once**: the next run is computed from now, not from the missed
+  time.
+- **No pile-up:** while the job of the cron's previous run is still `pending` or `inProgress`, a due run is skipped
+  (logged as a warning); its next run still advances.
+
+**Retention.** Finished jobs (`success`, `failed`, `canceled`) are deleted `retention` (7 days; `None` keeps them)
+after they finished, by a built-in cleanup that runs at startup and every `cleanup_interval` (1h).
+`App::cleanup_scheduled_jobs()` runs it now.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::scheduler(opts) keeps declared crons
+    pub concurrency: usize,            // 10
+    pub retention: Option<Duration>,   // Some(7 days)
+    pub cleanup_interval: Duration,    // 1 hour
+    pub retry_backoff: Duration,       // 1 second
+    pub crons: Vec<CronSpec>,
+}
+impl App {
+    pub async fn start_scheduler(&self) -> Result<()>;      // `ferrix serve` calls it; idempotent
+    pub async fn run_due_jobs(&self) -> Result<usize>;      // run what is due now, until nothing is (tests)
+    pub async fn cleanup_scheduled_jobs(&self) -> Result<usize>;
+}
+// Database::clock(): Clock { now_ms(), advance(Duration), offset() }, the wall clock plus an offset that only grows.
+// Mutations' `now()` and the scheduler read it.
+```
+**Tests.** A `TestApp` runs the scheduler's startup work (recovery, cron reconcile) but no background loop, so tests
+are deterministic: `t.run_due_jobs()` runs what is due; `t.advance_time(d)` moves the clock forward and then runs
+what became due; `t.restart()` / `t.restart_with(options)` reopen the data dir (keeping the clock offset) like a
+restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a socket).
 
 ---
 
@@ -677,6 +776,7 @@ impl ::ferrix::FunctionRef for list {
     fn path() -> String { ::ferrix::__private::function_path(module_path!(), "list") }
 }
 impl ::ferrix::QueryFunction for list {}
+// (a mutation or action also gets `impl ::ferrix::SchedulableFunction for <name> {}` here)
 
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
@@ -702,6 +802,8 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
   (match on the last path segment: `QueryCtx` / `MutationCtx` / `ActionCtx`), `self` params, non-identifier
   patterns, generics, and a missing return type.
 - Mutations use `Handler::Mutation` + `impl MutationFunction`; actions use `Handler::Action` + `impl ActionFunction`.
+  Both also get `impl ::ferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
+  don't.
 
 ---
 
@@ -712,7 +814,8 @@ ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping)
 
 - **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
   in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
-  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`)
+  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`
+  and `_scheduled_jobs`, whose TS types inline their enums so no extra named types are declared)
   are declared in a separate `SystemDataModel`, and the generated `Id<T>` / `Doc<T>` accept
   `TableNames | keyof SystemDataModel`.
 - **System functions** get paths under `_system/` (`function_path` maps crate `ferrix` to `_system`), e.g.
@@ -770,6 +873,30 @@ field: `read_only_field`; `image` must be an http(s) URL). Users and sessions ar
 | `file` | query | `{ id }` → `FileSummary \| null`. `invalid_id` for a malformed id. |
 | `delete_file` | mutation | `{ id }` → `null` (`ctx.storage.delete`). `not_found` if missing. |
 | `generate_upload_url` | mutation | `{}` → an upload URL (the dashboard's upload button; `createdBy` = the admin). |
+### 4.1.2 Scheduler tables and system functions
+
+Defined in `crates/ferrix/src/scheduler` with the normal macros (§1.7).
+
+**`_scheduled_jobs`** (`ScheduledJob`): `{ path, kind: "mutation" | "action", args, runAt, state: "pending" |
+"inProgress" | "success" | "failed" | "canceled", attempts, maxAttempts, result: string | null (the return value as
+JSON text), error: string | null (both cut to 4 KiB), scheduledAt, startedAt, completedAt, origin: string | null (the
+scheduling function's path, "cron:<name>" or "dashboard") }`, with indexes `by_state_run_at = [state, runAt,
+scheduledAt]` and `by_completed_at = [completedAt]`. Mutation jobs never show `inProgress`.
+
+**`_crons`** (`Cron`): `{ name, schedule (the expression, or "every 5m"), path, args, lastRun, nextRun, lastJob }`,
+indexes `by_name` and `by_next_run`.
+
+| Path `_system/scheduler:…` | Kind | Args → result |
+|---|---|---|
+| `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin? }` → job id. `ctx.scheduler` in actions. |
+| `cancel` | internal mutation | `{ id }` → `"canceled" \| "alreadyFinished" \| "running"`. `ctx.scheduler.cancel` in actions. |
+| `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. |
+| `cancel_job` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished" \| "running"`. |
+| `run_job_now` | mutation (admin) | `{ id }` → the id of the job that will run: a pending job becomes due now (same id); a finished one is run again as a new job (same path and args, origin `dashboard`). `running` for an action in progress. |
+| `crons` | query (admin) | `{}` → `[{ _id, name, schedule, path, args, lastRun, nextRun, lastJob, lastJobState }]` by name. Live. |
+
+The admin functions start with `ctx.auth.require_admin()` like §4.1; `invalid_id` / `not_found` for bad ids. The
+dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`), its Scheduler page at `/_/scheduler`.
 
 ### 4.2 Admin HTTP endpoints
 

@@ -299,6 +299,7 @@ pub trait FunctionRef: Send + Sync + 'static {
 pub trait QueryFunction: FunctionRef {}
 pub trait MutationFunction: FunctionRef {}
 pub trait ActionFunction: FunctionRef {}
+pub trait SchedulableFunction: FunctionRef {}
 
 pub mod prelude {
     pub use crate::{

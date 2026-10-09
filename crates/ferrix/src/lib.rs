@@ -9,6 +9,7 @@
 //! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
+//! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`), the job runner, crons and `_scheduled_jobs`.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
 //! - [`storage`]: file storage (`_storage`, `ctx.storage`, upload and serving endpoints).
 //! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
@@ -29,6 +30,7 @@ pub mod id;
 pub mod keys;
 pub mod log;
 pub mod runtime;
+pub mod scheduler;
 pub mod schema;
 pub mod server;
 pub mod storage;
@@ -54,6 +56,7 @@ pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention,
 pub use private::FunctionKind;
 pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
+pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
 pub use schema::{Doc, Field, Index, IndexDef, Order, Table, TableDef};
 pub use server::{router, serve, serve_with_shutdown};
 pub use serde_json::json;
@@ -72,6 +75,22 @@ pub trait FunctionRef: Send + Sync + 'static {
 pub trait QueryFunction: FunctionRef {}
 pub trait MutationFunction: FunctionRef {}
 pub trait ActionFunction: FunctionRef {}
+/// A function that `ctx.scheduler` and crons can run: every mutation and action (internal ones included). The
+/// macros implement it next to `MutationFunction` / `ActionFunction`; queries don't have it, so scheduling one is a
+/// compile error:
+///
+/// ```compile_fail
+/// use ferrix::prelude::*;
+/// #[query]
+/// pub async fn list(_ctx: &QueryCtx) -> Result<u32> { Ok(0) }
+/// #[mutation]
+/// pub async fn later(ctx: &MutationCtx) -> Result<()> {
+///     ctx.scheduler.run_after::<list>(std::time::Duration::ZERO, ()).await?;   // error: `list: SchedulableFunction`
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+pub trait SchedulableFunction: FunctionRef {}
 
 /// `use ferrix::prelude::*;`
 ///

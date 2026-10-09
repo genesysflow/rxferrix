@@ -111,6 +111,7 @@ impl ::ferrix::FunctionRef for add {
     fn path() -> String { ::ferrix::__private::function_path(module_path!(), "add") }
 }
 impl ::ferrix::MutationFunction for add {}
+impl ::ferrix::SchedulableFunction for add {}
 
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
@@ -154,6 +155,7 @@ impl ::ferrix::FunctionRef for add_many {
     fn path() -> String { ::ferrix::__private::function_path(module_path!(), "add_many") }
 }
 impl ::ferrix::ActionFunction for add_many {}
+impl ::ferrix::SchedulableFunction for add_many {}
 
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]

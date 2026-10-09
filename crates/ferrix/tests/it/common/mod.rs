@@ -9,6 +9,15 @@
 pub mod items;
 pub mod todos;
 
+/// `impl SchedulableFunction` for mutations and actions, as the macros emit it.
+#[macro_export]
+macro_rules! schedulable_impl {
+    (QueryFunction, $name:ident) => {};
+    ($trait:ident, $name:ident) => {
+        impl ::ferrix::SchedulableFunction for $name {}
+    };
+}
+
 /// Same output as `#[query]` / `#[mutation]` / `#[action]` (§3.2), with the generated names passed explicitly
 /// (macro_rules can't concatenate identifiers).
 #[macro_export]
@@ -34,6 +43,7 @@ macro_rules! expand_fn {
             fn path() -> String { ::ferrix::__private::function_path(module_path!(), stringify!($name)) }
         }
         impl ::ferrix::$trait for $name {}
+        $crate::schedulable_impl!($trait, $name);
 
         #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
         #[linkme(crate = ::ferrix::__private::linkme)]

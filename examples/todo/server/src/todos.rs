@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use ferrix::log;
 use ferrix::prelude::*;
 use ferrix::storage::StoredFile;
+use ferrix::scheduler::ScheduledJob;
 
 /// One item on the list, with an optional image (a stored file).
 #[table(name = "todos")]
@@ -9,6 +12,9 @@ pub struct Todo {
     pub text: String,
     pub done: bool,
     pub image: Option<Id<StoredFile>>,
+    // When it was checked off (ms since the epoch); `purge_completed` deletes it a day later. (A plain comment: a
+    // doc comment would be copied into the generated TS.)
+    pub completed_at: Option<f64>,
 }
 
 /// All todos, newest first. Pass `done` to show only open or only completed ones.
@@ -35,12 +41,23 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
         return Err(UserError::new("empty_text", "A todo needs some text").into());
     }
     log::info!(len = text.len(), "adding a todo");
-    ctx.db.insert(Todo { text, done: false, image: None }).await
+    ctx.db.insert(Todo { text, done: false, image: None, completed_at: None }).await
+}
+
+/// Adds the todo after `delay_seconds` (a delayed reminder): schedules `add`, in this mutation's transaction.
+/// Returns the scheduled job, which `ctx.scheduler.cancel` (or the dashboard) can cancel.
+#[mutation]
+pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> Result<Id<ScheduledJob>> {
+    if text.trim().is_empty() {
+        return Err(UserError::new("empty_text", "A todo needs some text").into());
+    }
+    ctx.scheduler.run_after::<add>(Duration::from_secs(delay_seconds.into()), (text,)).await
 }
 
 #[mutation]
 pub async fn set_done(ctx: &MutationCtx, id: Id<Todo>, done: bool) -> Result<()> {
-    ctx.db.patch(id, json!({ "done": done })).await
+    let completed_at = done.then(|| ctx.now());
+    ctx.db.patch(id, json!({ "done": done, "completedAt": completed_at })).await
 }
 
 /// Deletes a todo and its image.
@@ -104,6 +121,21 @@ pub async fn clear_completed(ctx: &MutationCtx) -> Result<u32> {
         ctx.db.delete(todo.id).await?;
     }
     Ok(done.len() as u32)
+}
+
+/// Deletes todos completed more than a day ago. Runs hourly as a cron (see `main.rs`); internal, so clients can't
+/// call it.
+#[internal_mutation]
+pub async fn purge_completed(ctx: &MutationCtx) -> Result<u32> {
+    let cutoff = ctx.now() - 24.0 * 3600.0 * 1000.0;
+    let done = ctx.db.query::<Todo>().with_index(Todo::by_done, |q| q.eq(Todo::done, true)).collect().await?;
+    let mut purged = 0;
+    for todo in done.iter().filter(|t| t.completed_at.is_some_and(|at| at < cutoff)) {
+        ctx.db.delete(todo.id).await?;
+        purged += 1;
+    }
+    log::info!(purged, "purged completed todos");
+    Ok(purged)
 }
 
 /// Adds `count` sample todos, one mutation each (shows actions composing mutations).

@@ -4,9 +4,15 @@
 //! let t = TestApp::new().await?;
 //! let id = t.mutation::<add>(("hi".to_string(),)).await?;
 //! let todos = t.query::<list>((None,)).await?;
+//! t.advance_time(Duration::from_secs(60)).await?;   // runs the jobs and crons due within the next minute
 //! ```
+//!
+//! The scheduler does not run in the background in a `TestApp` (unless [`TestApp::start_scheduler`] is called):
+//! scheduled jobs run when the test calls [`TestApp::run_due_jobs`] or [`TestApp::advance_time`], so tests are
+//! deterministic.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::runtime::{App, AppOptions, Identity};
 use crate::{ActionFunction, MutationFunction, QueryFunction};
@@ -16,6 +22,7 @@ use crate::{ActionFunction, MutationFunction, QueryFunction};
 pub struct TestApp {
     app: App,
     dir: tempfile::TempDir,
+    options: AppOptions,
 }
 
 impl TestApp {
@@ -25,8 +32,48 @@ impl TestApp {
 
     pub async fn with_options(options: AppOptions) -> crate::Result<TestApp> {
         let dir = tempfile::tempdir()?;
-        let app = App::open(dir.path(), options).await?;
-        Ok(TestApp { app, dir })
+        let app = App::open(dir.path(), options.clone()).await?;
+        // The scheduler's startup work (crons are reconciled into `_crons`), without its background loop.
+        app.init_scheduler().await?;
+        Ok(TestApp { app, dir, options })
+    }
+
+    /// Simulate a restart: close this app and open a new one on the same data directory with the same options (the
+    /// test clock keeps its offset). Like a real restart, actions left in progress are marked failed and crons are
+    /// reconciled. Anything still holding the old `App` (e.g. a server from [`TestApp::serve`]) keeps it alive.
+    pub async fn restart(self) -> crate::Result<TestApp> {
+        let options = self.options.clone();
+        self.restart_with(options).await
+    }
+
+    /// [`TestApp::restart`] with different options, e.g. other crons (as after a redeploy).
+    pub async fn restart_with(self, options: AppOptions) -> crate::Result<TestApp> {
+        let TestApp { app, dir, .. } = self;
+        let offset = app.db().clock().offset();
+        drop(app);
+        let app = App::open(dir.path(), options.clone()).await?;
+        app.db().clock().advance(offset);
+        app.init_scheduler().await?;
+        Ok(TestApp { app, dir, options })
+    }
+
+    /// Run the scheduled jobs and crons that are due now, until none are (see [`App::run_due_jobs`]). Returns how
+    /// many jobs ran.
+    pub async fn run_due_jobs(&self) -> crate::Result<usize> {
+        self.app.run_due_jobs().await
+    }
+
+    /// Move the app's clock forward by `by` (as seen by `ctx.now()` in mutations, `run_after` and the scheduler),
+    /// then run whatever became due. Returns how many jobs ran.
+    pub async fn advance_time(&self, by: Duration) -> crate::Result<usize> {
+        self.app.db().clock().advance(by);
+        self.app.scheduler_state().notify();
+        self.run_due_jobs().await
+    }
+
+    /// Run the scheduler in the background, as `ferrix serve` does (e.g. for tests over a real socket).
+    pub async fn start_scheduler(&self) -> crate::Result<()> {
+        self.app.start_scheduler().await
     }
 
     /// A dev-mode app with this auth configuration.

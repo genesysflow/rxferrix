@@ -44,6 +44,7 @@ pub struct Database {
     readers: Arc<ReaderPool>,
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
+    clock: Clock,
 }
 
 /// Options for [`Database::open_with`].
@@ -83,7 +84,13 @@ impl Database {
             readers: Arc::new(ReaderPool { path, conns: Mutex::new(Vec::new()), permits: Arc::new(Semaphore::new(readers)) }),
             catalog: Arc::new(catalog),
             write_log: Arc::new(WriteLog::new(ts)),
+            clock: Clock::default(),
         })
+    }
+
+    /// The clock that write transactions (`MutationCtx::now`) and the scheduler read. Tests can move it forward.
+    pub fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     pub fn catalog(&self) -> &Arc<Catalog> {
@@ -187,7 +194,7 @@ impl Database {
                 return Err(e);
             }
         };
-        let now = wall_clock_ms().max(last_time);
+        let now = self.clock.now_ms().max(last_time);
         let state = WriteState { conn: guard, prev_ts, now, last_creation_time, writes: Vec::new() };
         Ok(Arc::new(WriteTxn {
             state: Mutex::new(Some(state)),
@@ -195,6 +202,30 @@ impl Database {
             write_log: self.write_log.clone(),
             on_commit: Mutex::new(Vec::new()),
         }))
+    }
+}
+
+/// The wall clock plus an offset that only ever grows. The offset is 0 in production; tests advance it
+/// (`TestApp::advance_time`) to make scheduled jobs and crons due without waiting.
+#[derive(Debug, Default)]
+pub struct Clock {
+    offset_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Clock {
+    /// Milliseconds since the epoch, as seen by mutations and the scheduler.
+    pub fn now_ms(&self) -> f64 {
+        wall_clock_ms() + self.offset().as_secs_f64() * 1000.0
+    }
+
+    /// Move this clock forward by `by`.
+    pub fn advance(&self, by: std::time::Duration) {
+        self.offset_ms.fetch_add(by.as_millis() as u64, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How far this clock is ahead of the wall clock.
+    pub fn offset(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.offset_ms.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 

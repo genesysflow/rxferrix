@@ -5,7 +5,9 @@
 // Starts the server on a free port with a temp data dir (after `admin create`), then in Chromium: signs in at /_/,
 // watches a todo inserted over the HTTP API appear live in the data grid, edits a document in the side panel, runs
 // todos:add from the function runner, sees executions arrive in the live logs tail, uploads files on the Files page
-// (picker and drag and drop, previews, delete), and checks that anonymous callers can't use the system functions. A second server with a fresh data dir checks the printed /_/setup#token=… flow.
+// (picker and drag and drop, previews, delete), checks the Scheduler page (the example's cron, a job from
+// todos:add_later appearing live, "Run now", "Cancel"), and checks that anonymous callers can't use the system
+// functions. A second server with a fresh data dir checks the printed /_/setup#token=… flow.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -272,6 +274,47 @@ try {
     await grid.getByText("hello.txt").waitFor({ state: "detached", timeout: 5000 });
     const gone = await fetch(`${base}/api/storage/${id}`);
     if (gone.status !== 404) throw new Error(`deleted file still served: ${gone.status}`);
+  });
+
+  // 6b. The Scheduler page: the example's cron, a job scheduled by todos:add_later appearing live, "Run now" and
+  // "Cancel".
+  await step("scheduler page: crons and live jobs, run now, cancel", async () => {
+    await nav(page, "Scheduler").click();
+    await page.getByRole("heading", { name: "Scheduler" }).waitFor();
+    const crons = page.getByTestId("crons");
+    await crons.getByText("purge-completed").waitFor();
+    await crons.getByText("0 0 * * * *").waitFor();
+    await crons.getByText("todos:purge_completed").waitFor();
+
+    const later = `reminder ${Date.now()}`;
+    const r = await call(base, "mutation", "todos:add_later", { text: later, delaySeconds: 3600 });
+    if (r.status !== 200) throw new Error(`todos:add_later failed: ${JSON.stringify(r.body)}`);
+    const jobId = r.body.value as string;
+    const jobs = page.getByTestId("jobs");
+    const row = jobs.locator("tbody tr").filter({ hasText: "todos:add" }).filter({ hasText: "pending" });
+    await row.first().waitFor({ timeout: 3000 });
+    await row.first().getByText("in 59m").or(row.first().getByText("in 1h")).first().waitFor();
+    await shot(page, "scheduler");
+    // Run it now: it runs in the background and turns into a success, live.
+    await row.first().getByRole("button", { name: "Run now" }).click();
+    const succeeded = jobs.locator("tbody tr").filter({ hasText: "todos:add" }).filter({ hasText: "success" }).first();
+    await succeeded.waitFor({ timeout: 5000 });
+    const list = await call(base, "query", "todos:list", {});
+    if (!(list.body.value as { text: string }[]).some((t) => t.text === later)) throw new Error("the scheduled todo is missing");
+    // The detail row shows the args.
+    await succeeded.click();
+    await jobs.getByText(later).first().waitFor();
+
+    // Cancel another one; the "Canceled" filter shows it.
+    const r2 = await call(base, "mutation", "todos:add_later", { text: "never", delaySeconds: 3600 });
+    await row.first().getByRole("button", { name: "Cancel" }).click();
+    await page.getByText("Job canceled").waitFor();
+    await page.getByRole("button", { name: "Canceled", exact: true }).click();
+    await jobs.locator("tbody tr").filter({ hasText: "canceled" }).first().waitFor();
+    if (new URL(page.url()).searchParams.get("state") !== "canceled") throw new Error("the filter is not in the URL");
+    const canceled = await call(base, "query", "_system/scheduler:jobs", { state: "canceled", paginationOpts: { numItems: 5, cursor: null } });
+    if (canceled.status !== 400 || canceled.body.errorData?.code !== "unauthenticated") throw new Error("scheduler functions are not admin-only");
+    if (!r2.body.value || jobId === r2.body.value) throw new Error("expected two distinct jobs");
   });
 
   // 7. Non-admins can't call the system functions.

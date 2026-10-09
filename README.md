@@ -121,6 +121,34 @@ your origin. Mutations can also `delete` files (transactionally) and read their 
 `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability URLs:
 anyone with the URL can read the file. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6 and
 [docs/PROTOCOL.md](docs/PROTOCOL.md) ("File storage"). The todo example attaches images to todos.
+## Scheduler and crons
+
+Mutations and actions can schedule other mutations and actions (internal ones too), and `main` can declare crons:
+
+```rust
+use std::time::Duration;
+use ferrix::scheduler::ScheduledJob;
+
+#[mutation]
+pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> Result<Id<ScheduledJob>> {
+    // Written in this mutation's transaction: scheduled only if it commits. Scheduling a query doesn't compile.
+    ctx.scheduler.run_after::<add>(Duration::from_secs(delay_seconds.into()), (text,)).await
+}
+
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new()
+        .cron::<purge_completed>("purge-completed", "0 0 * * * *", ())   // sec min hour day month weekday, UTC
+        .run()
+}
+```
+
+Also `run_at::<f>(ms, args)`, `cancel(id)`, `with_retries(n)` (actions), and `.interval::<f>(name, Duration, args)`.
+Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see them live). Scheduled mutations run
+**exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
+interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
+them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
+finished jobs are deleted after 7 days. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
+deterministically. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.7.
 
 ## Dashboard
 
@@ -138,6 +166,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 - **Users**: users, linked providers, sessions (revoke), delete.
 - **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
   `Id<"_storage">` values in the data grid link here.
+- **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
+  and retry.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every

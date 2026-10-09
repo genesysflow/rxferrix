@@ -73,6 +73,16 @@ export function formatAgo(ms: number, now = Date.now()): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+/** A time relative to `now`: `in 5m`, `12s ago`, `now`. */
+export function formatRelative(ms: number, now = Date.now()): string {
+  const d = Math.round((ms - now) / 1000);
+  if (d === 0) return "now";
+  const s = Math.abs(d);
+  const amount =
+    s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
+  return d > 0 ? `in ${amount}` : `${amount} ago`;
+}
+
 export function formatUptime(ms: number): string {
   const s = Math.floor(ms / 1000);
   const d = Math.floor(s / 86400);

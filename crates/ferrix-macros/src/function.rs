@@ -341,6 +341,14 @@ pub fn expand_function(
     let call_args = arg_idents.iter().map(|ident| quote!(#decoded_var.#ident));
     let variant = kind.handler_variant();
     let trait_ident = kind.trait_name();
+    // Mutations and actions can be scheduled (`ctx.scheduler.run_after::<f>(..)`, crons); queries can't.
+    let schedulable = match kind {
+        FnKind::Query => quote!(),
+        FnKind::Mutation | FnKind::Action => quote! {
+            #(#cfgs)*
+            impl ::ferrix::SchedulableFunction for #name {}
+        },
+    };
     let visibility = if internal {
         quote!(Internal)
     } else {
@@ -393,6 +401,7 @@ pub fn expand_function(
 
         #(#cfgs)*
         impl ::ferrix::#trait_ident for #name {}
+        #schedulable
 
         #(#cfgs)*
         #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]

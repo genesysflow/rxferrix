@@ -50,6 +50,8 @@ pub struct MutationCtx {
     pub auth: Auth,
     /// File storage: `generate_upload_url`, `get_url`, `get_metadata`, transactional `delete` (`crate::storage`).
     pub storage: crate::storage::MutationStorage,
+    /// Schedule functions to run later; jobs are written in this mutation's transaction (`crate::scheduler`).
+    pub scheduler: crate::scheduler::Scheduler,
     now: f64,
 }
 
@@ -65,6 +67,8 @@ pub struct ActionCtx {
     pub auth: Auth,
     /// File storage: everything `MutationCtx::storage` has, plus `store` and `get` (`crate::storage`).
     pub storage: crate::storage::ActionStorage,
+    /// Schedule functions to run later; takes effect immediately (`crate::scheduler`).
+    pub scheduler: crate::scheduler::Scheduler,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -172,6 +176,8 @@ pub struct AppOptions {
     pub log_retention: LogRetention,
     /// File storage backend and limits (`crate::storage`). Default: `<dir>/storage`, 100 MiB uploads.
     pub storage: crate::storage::StorageConfig,
+    /// Scheduled jobs and crons: concurrency, retention, declared crons (`crate::scheduler`).
+    pub scheduler: crate::scheduler::SchedulerOptions,
 }
 
 /// Default [`AppOptions::mutation_timeout`].
@@ -187,6 +193,7 @@ impl Default for AppOptions {
             skip_schema_check: false,
             log_retention: LogRetention::default(),
             storage: Default::default(),
+            scheduler: Default::default(),
         }
     }
 }
@@ -227,6 +234,7 @@ struct AppInner {
     metrics: Metrics,
     started_at: f64,
     storage: Arc<crate::storage::StorageService>,
+    scheduler: crate::scheduler::SchedulerState,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -285,6 +293,7 @@ impl App {
         let dir = dir.as_ref().to_path_buf();
         let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
+        let scheduler = crate::scheduler::SchedulerState::new(&options.scheduler)?;
         let open_options =
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
         let retention = options.log_retention.clone();
@@ -304,8 +313,20 @@ impl App {
             *auth.keys.storage_key(),
         )?;
         let storage = Arc::new(storage);
-        let app =
-            App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at, storage }) };
+        let app = App {
+            inner: Arc::new(AppInner {
+                db,
+                registry,
+                options,
+                auth,
+                logs,
+                dir: data_dir,
+                metrics,
+                started_at,
+                storage,
+                scheduler,
+            }),
+        };
         crate::storage::service::ensure_schema(&app).await?;
         crate::storage::service::spawn_sweeper(&app);
         Ok(app)
@@ -350,6 +371,11 @@ impl App {
 
     pub fn registry(&self) -> &'static Registry {
         self.inner.registry
+    }
+
+    /// The scheduler's in-memory state (the runner itself is in `crate::scheduler`).
+    pub(crate) fn scheduler_state(&self) -> &crate::scheduler::SchedulerState {
+        &self.inner.scheduler
     }
 
     /// Auth state and operations (token validation, sign-in, admins).
@@ -484,6 +510,20 @@ impl App {
         allow_internal: bool,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> MutationRun {
+        self.call_mutation_hooked(path, args, identity, allow_internal, idempotency_key, None).await
+    }
+
+    /// [`App::call_mutation`], with `hook` running inside the mutation's transaction (the scheduler records a job's
+    /// outcome atomically with the job's writes).
+    pub(crate) async fn call_mutation_hooked(
+        &self,
+        path: &str,
+        args: Value,
+        identity: &Identity,
+        allow_internal: bool,
+        idempotency_key: Option<&IdempotencyKey>,
+        hook: Option<&dyn MutationHook>,
+    ) -> MutationRun {
         let not_run = |e| MutationRun { result: Err(e), log_lines: Vec::new() };
         let def = match self.lookup(path, FunctionKind::Mutation, allow_internal) {
             Ok(d) => d,
@@ -510,17 +550,33 @@ impl App {
                 Err(e) => return not_run(e),
             }
         }
+        if let Some(hook) = hook
+            && let Err(e) = hook.before(&MutationDb::new(txn.clone())).await
+        {
+            txn.rollback();
+            return not_run(e);
+        }
         let storage =
             crate::storage::MutationStorage::new(MutationDb::new(txn.clone()), self.storage().clone(), identity.clone());
-        let ctx =
-            MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), storage, now: txn.now() };
+        let ctx = MutationCtx {
+            db: MutationDb::new(txn.clone()),
+            auth: Auth::new(identity.clone()),
+            storage,
+            scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path),
+            now: txn.now(),
+        };
         let timeout = self.options().mutation_timeout;
         let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
         let run = async {
-            let result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+            let mut result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
                 Ok(r) => r,
                 Err(_elapsed) => Err(MutationTimeout { path: path.to_string(), timeout }.into()),
             };
+            if let (Some(hook), Ok(value)) = (hook, &result)
+                && let Err(e) = hook.after(&MutationDb::new(txn.clone()), value).await
+            {
+                result = Err(e);
+            }
             match result {
                 Ok(value) => {
                     let ts = txn
@@ -562,12 +618,27 @@ impl App {
         };
         let Handler::Action(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let storage = crate::storage::ActionStorage::new(self.clone(), identity.clone());
-        let ctx = ActionCtx { auth: Auth::new(identity.clone()), storage, app: self.clone(), identity: identity.clone() };
+        let ctx = ActionCtx {
+            auth: Auth::new(identity.clone()),
+            storage,
+            scheduler: crate::scheduler::Scheduler::in_action(self.clone(), identity.clone(), path),
+            app: self.clone(),
+            identity: identity.clone(),
+        };
         let exec = Execution::start(path, FunctionKind::Action, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self.logs(), &result, &log_lines);
         ActionRun { result, log_lines }
     }
+}
+
+/// Code that runs inside a mutation's write transaction, around the user's handler (see
+/// [`App::call_mutation_hooked`]).
+pub(crate) trait MutationHook: Send + Sync {
+    /// Runs first. An error rolls the transaction back and the function is not run (nor logged).
+    fn before<'a>(&'a self, db: &'a MutationDb) -> futures::future::BoxFuture<'a, crate::Result<()>>;
+    /// Runs after the handler succeeded, right before the commit. An error fails (and rolls back) the mutation.
+    fn after<'a>(&'a self, db: &'a MutationDb, value: &'a Value) -> futures::future::BoxFuture<'a, crate::Result<()>>;
 }
 
 /// An execution being timed for the execution log.
@@ -611,10 +682,10 @@ impl Execution {
 }
 
 /// The execution log's summary of who called (`Identity::log_summary`: `user:<id>` / `admin:<id>`, never a token or
-/// session id); the anonymous identity logs as `None`.
+/// session id); the anonymous identity logs as `None`, or as `scheduler` inside a scheduled job.
 fn identity_summary(identity: &Identity) -> Option<String> {
     const MAX: usize = 256;
-    let mut s = identity.log_summary()?;
+    let mut s = identity.log_summary().or_else(crate::scheduler::log_caller)?;
     if s.len() > MAX {
         let mut cut = MAX;
         while !s.is_char_boundary(cut) {

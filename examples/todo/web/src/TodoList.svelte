@@ -22,6 +22,7 @@
       text: args.text.trim(),
       done: false,
       image: null,
+      completedAt: null,
     } as Doc<"todos">;
     store.setQuery(api.todos.list, {}, [temp, ...current]);
   });

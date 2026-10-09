@@ -13,6 +13,9 @@ describe("router", () => {
     expect(files.page).toBe("files");
     expect(files.params.get("file")).toBe("abc");
     expect(href("files", [], { file: "abc" })).toBe("/_/files?file=abc");
+    const s = parseRoute("/_/scheduler", "?state=failed");
+    expect(s.page).toBe("scheduler");
+    expect(s.params.get("state")).toBe("failed");
     expect(parseRoute("/_/nonsense", "").page).toBe("overview");
   });
 

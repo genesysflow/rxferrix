@@ -4,6 +4,7 @@ mod common;
 
 mod auth;
 mod bench;
+mod bytes;
 mod catalog;
 mod codegen;
 mod contract;

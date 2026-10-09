@@ -20,6 +20,7 @@
 extern crate self as ferrix;
 
 pub mod auth;
+pub mod bytes;
 pub mod cli;
 pub mod codegen;
 pub mod dashboard;
@@ -46,6 +47,7 @@ pub mod __private {
     pub use crate::private::*;
 }
 
+pub use bytes::Bytes;
 pub use cli::Ferrix;
 pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, mutation, query, table};
 pub use db::pagination::{PaginationOpts, PaginationResult};
@@ -101,7 +103,7 @@ pub trait SchedulableFunction: FunctionRef {}
 /// crate): add `use ferrix::log;` and write `log::info!(...)`. See [`log`](crate::log).
 pub mod prelude {
     pub use crate::{
-        ActionCtx, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
+        ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
         internal_action, internal_mutation, internal_query, json, mutation, query, table,
     };
     pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};

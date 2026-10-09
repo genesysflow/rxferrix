@@ -233,6 +233,23 @@ for the event stream, which clients read with `fetch()` rather than `EventSource
 dashboard's data views use the admin-only system functions `_system/dashboard:*` over this protocol. Both are
 specified in docs/CONTRACT.md §4.1 and §4.2.
 
+Operations endpoints, with the same admin bearer auth (docs/CONTRACT.md §4.2, §4.4):
+
+- `GET /api/admin/backups`, `POST /api/admin/backups` (`{ includeAux?, includeFiles? }`),
+  `GET /api/admin/backups/{name}` (download), `DELETE /api/admin/backups/{name}`.
+- `GET /api/admin/export/{table}?format=jsonl|csv`: one table, streamed from a consistent snapshot.
+- `POST /api/admin/import/{table}?mode=insert|upsert|replace`: a JSONL body, validated, then written in batches
+  through the normal write path (subscriptions update as each batch commits).
+
+`GET /metrics` (Prometheus text) exists only when the server runs with `--metrics`; with `--metrics-token` it needs
+`Authorization: Bearer <token>` (a fixed token, not an access token).
+
+## Serving the app
+
+Requests that match no Ferrix route (`/api/*`, `/_/*`, `/metrics`) or app route (`Ferrix::routes`) go to the app's
+static frontend when one is configured (`Ferrix::static_dir`, `Ferrix::embed_static`): the file, or `index.html` for
+client-side routes. Paths under `/api` and `/_` are never answered with static files. See docs/CONTRACT.md §4.4.
+
 ## File storage
 
 Files are uploaded through signed upload URLs and served by id. The Rust side (`ctx.storage`, the `_storage` table,

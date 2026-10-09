@@ -341,6 +341,7 @@ pub struct AppOptions {
     pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons (§1.7)
     pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
+    pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
@@ -1046,10 +1047,18 @@ dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`),
 The execution log and server stats live outside the reactive database, so they are plain HTTP. Every endpoint
 requires `Authorization: Bearer <access token>` with the `adm` claim: 401 `unauthenticated` without a token, 401
 `invalid_token` for an invalid, expired or revoked one, 403 `forbidden` for a user's token. Errors have the auth
-endpoints' shape; responses carry `Cache-Control: no-store`.
+endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export and import endpoints are defined in
+`crates/ferrix/src/ops/http.rs` (see §4.4 for what the archives and files contain).
 
 | Endpoint | Response |
 |---|---|
+| `GET /api/admin/backups` | `{ target, backups: BackupInfo[] }`, newest first. `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
+| `POST /api/admin/backups` | Body (optional) `{ includeAux?, includeFiles? }` → 201 `BackupInfo` once the archive is stored. Runs while the server serves (writes are not blocked); one backup at a time per process (a second request waits). `includeSecret: true` → 400 `invalid_request` (`auth_secret.key` is only ever included by the CLI). 500 `server_error` with the reason (e.g. S3 credentials) on failure. |
+| `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `ferrix-….tar.zst`. |
+| `DELETE /api/admin/backups/{name}` | `{ deleted: true }`; 404 `not_found`; 400 `invalid_name`. |
+| `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
+| `POST /api/admin/import/{table}?mode=insert\|upsert\|replace` | Body: JSONL (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
+| `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/ferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
@@ -1066,4 +1075,53 @@ With the cargo feature `dashboard` (default), `GET /_/` and `/_/{*path}` serve t
 everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<id>` and `/_/setup#token=…`), with a
 restrictive Content-Security-Policy and `X-Frame-Options: DENY`. Without the feature, only a minimal `/_/setup` page
 is served; the system functions and `/api/admin/*` exist either way.
+
+### 4.4 Operations: backups, export and import (`crate::ops`)
+
+**Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>.tar.zst`; scheduled ones `ferrix-auto-…`): a zstd-compressed
+tar of `data.db` (a `VACUUM INTO` snapshot: one read transaction, so a consistent copy at one commit ts that never
+blocks the writer), optionally `aux.db` (same), `storage/<storage id>` for the blob of every `_storage` document of
+the snapshot (local storage only), `auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`:
+`{ format: "ferrix-backup", version: 1, createdAt, ferrixVersion, ts, storage: "included" | "excluded" | "remote",
+missingBlobs, files: [{ path, bytes, sha256 }] }`.
+
+**Scheduled backups**: `serve --backup-every 6h --backup-keep 7 [--backup-to LOCATION] [--backup-with-aux]
+[--backup-with-files]` declares the interval cron `ferrix-backup` running the internal system action
+`_system/ops/backup:run_scheduled` with args `{ schedule: { to, keep, includeAux, includeFiles } }` (it shows on the
+Scheduler page like any cron; "run now" works). Each run stores a `ferrix-auto-*` archive and deletes the oldest
+scheduled ones beyond `keep`; manual archives are never rotated.
+
+**Restore** (`ferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/ferrix.lock` (held by `serve` and
+`import`, so it refuses while a server runs), extracts next to the data, checks entries against the manifest
+(unexpected, missing or altered entries are refused), runs `PRAGMA integrity_check`, opens the database with the
+binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
+`data.db`(`-wal`, `-shm`), `aux.db` and, if restored, `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the
+restored files put in place; blobs are added to the storage directory.
+
+**Export directories** (`ferrix export`): `<table>.jsonl` or `<table>.csv` per table (all app tables by default;
+`--tables` may name system tables), `files/<storage id>` for exported `_storage` documents, and `manifest.json`:
+`{ format: "ferrix-export", version: 1, documentFormat, exportedAt, ts, ferrixVersion, tables: [{ name, number,
+documents, file }], catalog: { <table>: <number> }, files, missingFiles }`. **Import** (`ferrix import`, offline;
+or the HTTP endpoint above) reads JSONL: an export directory (ids of tables whose number differs in the target are
+rewritten everywhere in the imported documents using `catalog`, and `files/` are stored), a directory of
+`<table>.jsonl`, or one file (`--table`). The CLI may write system tables; validation, batching and modes as above.
+
+```rust
+// crate::ops (selected)
+pub struct OpsOptions { pub metrics: MetricsOptions /* enabled, token */, pub backup_target: Option<String> } // AppOptions::ops
+backup::create(&app, &BackupSpec { include_aux, include_files, include_secret }, &BackupTarget, scheduled) -> Result<BackupInfo>;
+backup::restore(archive: &Path, dir: &Path, &RestoreOptions { storage_dir, skip_verify }) -> Result<RestoreReport>;
+BackupTarget::{parse(location, data_dir), for_app(&app), list(), open(name), download(name, dest), delete(name), rotate(keep)};
+export::export_to_dir(data_dir, Option<BlobStore>, out, &ExportOptions { tables, format, include_files }) -> Result<ExportManifest>;
+export::import_path(&app, path, table: Option<&str>, &ImportOptions { mode, batch_size, allow_system_tables }) -> Result<ImportReport>;
+DirLock::acquire(dir) -> Result<DirLock>;     // <dir>/ferrix.lock
+web::router(app, &WebOptions { static_files, routes }) -> axum::Router;   // what `serve` serves
+tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertFiles { https, redirect, cert, key }}) -> Result<RunningServer>;
+```
+
+**Builder**: `Ferrix::static_dir(dir)`, `Ferrix::embed_static::<A: rust_embed::RustEmbed>()` (derive with
+`#[derive(ferrix::rust_embed::Embed)] #[crate_path = "ferrix::rust_embed"]`) and `Ferrix::routes(axum::Router)`.
+Routing and caching rules are in `crates/ferrix/src/ops/web.rs`: Ferrix's routes and the app's routes first, static
+files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
+assets, precompressed `.br`/`.gz`, ETags.
 

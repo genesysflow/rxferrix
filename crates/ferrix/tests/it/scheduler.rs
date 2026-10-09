@@ -43,7 +43,8 @@ mod app {
         ctx.db.query::<ScheduledJob>().collect().await
     }
 
-    #[query]
+    /// Internal: codegen would otherwise emit `Doc<"_crons">`, a table apps can't reference.
+    #[internal_query]
     pub async fn all_crons(ctx: &QueryCtx) -> Result<Vec<Doc<ferrix::scheduler::Cron>>> {
         ctx.db.query::<ferrix::scheduler::Cron>().collect().await
     }

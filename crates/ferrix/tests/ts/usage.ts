@@ -20,7 +20,13 @@ function assertType<T extends true>(): T | undefined {
 
 export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: Id<"notes">): Promise<void> {
   // Tables and documents.
-  assertType<Equals<TableNames, "dash_items" | "items" | "lossy" | "notes" | "private_notes" | "tasks" | "todos">>();
+  assertType<Equals<TableNames, "dash_items" | "items" | "lossy" | "notes" | "private_notes" | "sched_notes" | "tasks" | "todos">>();
+  // Functions may return scheduled job ids (`ctx.scheduler.run_after`); the job documents type-check too.
+  const job = {} as Doc<"_scheduled_jobs">;
+  assertType<Equals<typeof job._id, Id<"_scheduled_jobs">>>();
+  assertType<Equals<typeof job.state, "pending" | "inProgress" | "success" | "failed" | "canceled">>();
+  // @ts-expect-error `_crons` is not exposed
+  void ({} as Id<"_crons">);
   // App tables may reference the built-in `_users` table (auth); its documents carry no secrets.
   assertType<Equals<DataModel["private_notes"]["owner"], Id<"_users">>>();
   const user = {} as Doc<"_users">;

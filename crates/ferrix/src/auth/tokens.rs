@@ -38,6 +38,7 @@ pub struct Keys {
 impl Keys {
     /// Load `<dir>/auth_secret.key`, creating it (0600) if missing.
     pub fn load_or_create(dir: &Path) -> crate::Result<Keys> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
         let path = dir.join(SECRET_FILE);
         let secret = match std::fs::read(&path) {
             Ok(bytes) => {
@@ -265,14 +266,15 @@ mod tests {
 
     #[test]
     fn secret_file_is_created_once_with_0600() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = Keys::load_or_create(dir.path()).unwrap();
-        let b = Keys::load_or_create(dir.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("not-yet-created");
+        let a = Keys::load_or_create(&dir).unwrap();
+        let b = Keys::load_or_create(&dir).unwrap();
         assert_eq!(a.hash_token("x"), b.hash_token("x"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.path().join(SECRET_FILE)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.join(SECRET_FILE)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }

@@ -10,7 +10,8 @@
 //! rows beyond `max_rows`, are deleted at startup and then every `trim_interval`.
 //!
 //! The dashboard reads it through [`App::logs`](crate::App::logs): [`Logs::query`] (filtered, newest first,
-//! paginated by id), [`Logs::subscribe`] (live tail) and [`Logs::stats`] (per-function calls, errors, p50/p95).
+//! paginated by id), [`Logs::subscribe`] (live tail), [`Logs::stats`] (per-function calls, errors, p50/p95) and
+//! [`Logs::timeseries`] (the same aggregates per time bucket, for the dashboard's charts).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -253,6 +254,39 @@ pub struct FunctionStats {
     pub p95_us: u64,
 }
 
+/// Most buckets one [`Logs::timeseries`] call may produce.
+pub const MAX_TIMESERIES_BUCKETS: i64 = 1500;
+
+/// What [`Logs::timeseries`] aggregates: executions of `path` (or of every non-system function when `None`) that
+/// started in `[since, until)`, in buckets of `bucket_ms`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeseriesSpec {
+    pub path: Option<String>,
+    /// ms since the epoch, inclusive. Rounded down to a multiple of `bucket_ms`, so buckets are aligned.
+    pub since: i64,
+    /// ms since the epoch, exclusive.
+    pub until: i64,
+    pub bucket_ms: i64,
+}
+
+/// One time bucket of [`Logs::timeseries`]: the executions that started in `[t, t + bucket)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimePoint {
+    /// The bucket's start, ms since the epoch.
+    pub t: i64,
+    pub calls: u64,
+    /// `user_errors + server_errors`.
+    pub errors: u64,
+    pub user_errors: u64,
+    pub server_errors: u64,
+    /// Median duration (nearest rank).
+    pub p50_us: u64,
+    /// 95th percentile duration (nearest rank).
+    pub p95_us: u64,
+    pub max_us: u64,
+}
+
 enum Msg {
     Entry(Box<LogEntry>),
     /// Reply once everything sent before this message is written.
@@ -378,6 +412,21 @@ impl Logs {
     /// (ms since the epoch), sorted by path.
     pub async fn stats(&self, since: i64) -> anyhow::Result<Vec<FunctionStats>> {
         self.with_reader(move |conn| stats(conn, since)).await
+    }
+
+    /// Calls, errors and p50/p95/max duration per time bucket (oldest first; only buckets with executions), for the
+    /// executions [`TimeseriesSpec`] selects. Fails if the spec is empty or inverted, or asks for more than
+    /// [`MAX_TIMESERIES_BUCKETS`] buckets.
+    pub async fn timeseries(&self, spec: TimeseriesSpec) -> anyhow::Result<Vec<TimePoint>> {
+        anyhow::ensure!(spec.bucket_ms > 0, "the bucket must be positive");
+        anyhow::ensure!(spec.until > spec.since, "`until` must be after `since`");
+        let buckets = bucket_count(spec.since, spec.until, spec.bucket_ms);
+        anyhow::ensure!(
+            buckets <= MAX_TIMESERIES_BUCKETS as i128,
+            "{buckets} buckets requested; at most {MAX_TIMESERIES_BUCKETS} (use a larger bucket or a shorter range)"
+        );
+        let since = spec.since.max(0).div_euclid(spec.bucket_ms) * spec.bucket_ms;
+        self.with_reader(move |conn| timeseries(conn, &TimeseriesSpec { since, ..spec })).await
     }
 }
 
@@ -578,6 +627,59 @@ fn stats(conn: &Connection, since: i64) -> anyhow::Result<Vec<FunctionStats>> {
         .collect())
 }
 
+/// How many buckets of `bucket_ms` (> 0) cover `[since, until)` once `since` is rounded down to a bucket boundary
+/// (in `i128`: no overflow for any inputs).
+pub fn bucket_count(since: i64, until: i64, bucket_ms: i64) -> i128 {
+    let (since, until, bucket) = (since as i128, until as i128, bucket_ms.max(1) as i128);
+    let start = since.div_euclid(bucket) * bucket;
+    (until - start + bucket - 1).div_euclid(bucket)
+}
+
+fn timeseries(conn: &Connection, spec: &TimeseriesSpec) -> anyhow::Result<Vec<TimePoint>> {
+    let mut sql = String::from("SELECT timestamp, outcome, duration_us FROM _logs WHERE timestamp >= ?1 AND timestamp < ?2");
+    let mut args: Vec<rusqlite::types::Value> = vec![spec.since.into(), spec.until.into()];
+    match &spec.path {
+        Some(path) => {
+            sql.push_str(" AND path = ?3");
+            args.push(path.clone().into());
+        }
+        None => sql.push_str(" AND NOT (path = '_system' OR substr(path, 1, 8) IN ('_system/', '_system:'))"),
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+    let mut buckets: std::collections::BTreeMap<i64, (TimePoint, Vec<u64>)> = std::collections::BTreeMap::new();
+    while let Some(r) = rows.next()? {
+        let timestamp: i64 = r.get(0)?;
+        let outcome = LogOutcome::parse(&r.get::<_, String>(1)?);
+        let duration = r.get::<_, i64>(2)?.max(0) as u64;
+        let t = spec.since + (timestamp - spec.since) / spec.bucket_ms * spec.bucket_ms;
+        let (point, durations) = buckets.entry(t).or_insert_with(|| {
+            (
+                TimePoint { t, calls: 0, errors: 0, user_errors: 0, server_errors: 0, p50_us: 0, p95_us: 0, max_us: 0 },
+                Vec::new(),
+            )
+        });
+        point.calls += 1;
+        match outcome {
+            LogOutcome::Success => {}
+            LogOutcome::UserError => point.user_errors += 1,
+            LogOutcome::ServerError => point.server_errors += 1,
+        }
+        durations.push(duration);
+    }
+    Ok(buckets
+        .into_values()
+        .map(|(mut p, mut d)| {
+            d.sort_unstable();
+            p.errors = p.user_errors + p.server_errors;
+            p.p50_us = percentile(&d, 0.50);
+            p.p95_us = percentile(&d, 0.95);
+            p.max_us = d.last().copied().unwrap_or(0);
+            p
+        })
+        .collect())
+}
+
 /// Nearest-rank percentile of sorted values (0 for none).
 fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
@@ -685,5 +787,60 @@ mod tests {
         assert!(json.get("durationUs").is_some() && json.get("logLines").is_some());
         let filter: LogFilter = serde_json::from_value(serde_json::json!({ "kind": "mutation", "limit": 5 })).unwrap();
         assert_eq!((filter.kind, filter.limit), (Some(FunctionKind::Mutation), Some(5)));
+    }
+
+    #[tokio::test]
+    async fn timeseries_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = Logs::open(&dir.path().join("aux.db"), LogRetention::default()).unwrap();
+        // Recent, aligned to 5 minutes so the buckets are predictable.
+        let base = (crate::db::wall_clock_ms() as i64 / 300_000 - 3) * 300_000;
+        let add = |d: u64, at: i64, outcome: LogOutcome| entry("todos:add", FunctionKind::Mutation, outcome, d, base + at);
+        // Bucket 0: 1..=20 µs (one user error); bucket 2: 100 and 300 µs (a server error); nothing in bucket 1.
+        for d in 1..=20 {
+            logs.record(add(d, 1000 + d as i64, if d == 7 { LogOutcome::UserError } else { LogOutcome::Success }));
+        }
+        logs.record(add(100, 2 * 60_000, LogOutcome::Success));
+        logs.record(add(300, 3 * 60_000 - 1, LogOutcome::ServerError));
+        // Other functions and out-of-range rows don't count.
+        logs.record(entry("todos:list", FunctionKind::Query, LogOutcome::Success, 5, base + 10));
+        logs.record(entry("_system/dashboard:tables", FunctionKind::Query, LogOutcome::Success, 5, base + 10));
+        logs.record(add(9, -1, LogOutcome::Success));
+        logs.record(add(9, 5 * 60_000, LogOutcome::Success));
+        logs.flush().await.unwrap();
+
+        let spec = TimeseriesSpec { path: Some("todos:add".into()), since: base, until: base + 5 * 60_000, bucket_ms: 60_000 };
+        let points = logs.timeseries(spec.clone()).await.unwrap();
+        assert_eq!(points.len(), 2, "{points:?}");
+        assert_eq!(
+            points[0],
+            TimePoint { t: base, calls: 20, errors: 1, user_errors: 1, server_errors: 0, p50_us: 10, p95_us: 19, max_us: 20 }
+        );
+        assert_eq!(
+            points[1],
+            TimePoint {
+                t: base + 2 * 60_000,
+                calls: 2,
+                errors: 1,
+                user_errors: 0,
+                server_errors: 1,
+                p50_us: 100,
+                p95_us: 300,
+                max_us: 300
+            }
+        );
+        // `since` is rounded down to the bucket: the same buckets from mid-minute.
+        let shifted = logs.timeseries(TimeseriesSpec { since: base + 30_000, ..spec.clone() }).await.unwrap();
+        assert_eq!(shifted, points);
+        // Every app function (system ones excluded) when no path is given.
+        let all = logs.timeseries(TimeseriesSpec { path: None, ..spec.clone() }).await.unwrap();
+        assert_eq!(all[0].calls, 21);
+        // One wide bucket.
+        let one = logs.timeseries(TimeseriesSpec { bucket_ms: 5 * 60_000, ..spec.clone() }).await.unwrap();
+        assert_eq!((one.len(), one[0].calls, one[0].errors), (1, 22, 2));
+        // Bad specs.
+        assert!(logs.timeseries(TimeseriesSpec { bucket_ms: 0, ..spec.clone() }).await.is_err());
+        assert!(logs.timeseries(TimeseriesSpec { until: base, ..spec.clone() }).await.is_err());
+        assert!(logs.timeseries(TimeseriesSpec { bucket_ms: 1, ..spec.clone() }).await.is_err(), "too many buckets");
     }
 }

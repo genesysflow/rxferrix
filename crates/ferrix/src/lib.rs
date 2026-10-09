@@ -56,12 +56,14 @@ pub mod __private {
 
 pub use bytes::Bytes;
 pub use cli::Ferrix;
-pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, migration, mutation, query, table};
+pub use ferrix_macros::{
+    action, internal_action, internal_mutation, internal_query, migration, mutation, object, query, table,
+};
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
 pub use error::{Error, MutationTimeout, Result, UserError};
-pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs};
+pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use private::FunctionKind;
 pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
@@ -114,7 +116,7 @@ pub trait SchedulableFunction: FunctionRef {}
 pub mod prelude {
     pub use crate::{
         ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
-        internal_action, internal_mutation, internal_query, json, migration, mutation, query, table,
+        internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table,
     };
     pub use crate::migrations::DocChange;
     pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};

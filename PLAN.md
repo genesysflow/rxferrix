@@ -238,7 +238,7 @@ CREATE TABLE documents (
 );
 CREATE TABLE index_entries (
   index_id   INTEGER NOT NULL,
-  key        BLOB NOT NULL,         -- memcomparable(index field values ++ doc id)
+  key        BLOB NOT NULL,         -- memcomparable(index field values ++ _creationTime) ++ doc id
   doc_id     BLOB NOT NULL,
   PRIMARY KEY (index_id, key)
 ) WITHOUT ROWID;
@@ -252,7 +252,7 @@ Why use generic tables instead of one SQLite table per user table:
 - Adding or removing an index needs no DDL, only a backfill.
 - There is one code path for every table, system tables included.
 
-**Memcomparable key encoding.** For each value, write a type-tag byte, then an order-preserving payload: sign-flipped big-endian for ints, IEEE-754 bit tricks for floats, and escaped, terminated bytes for strings, bytes, and arrays. Byte order then matches `Value` order exactly. The trailing doc ID makes keys unique. Every index implicitly ends in `_creation_time, _id`. Built-in indexes are `by_id` and `by_creation_time`.
+**Memcomparable key encoding.** For each value, write a type-tag byte, then an order-preserving payload: sign-flipped big-endian for ints, IEEE-754 bit tricks for floats, and escaped, terminated bytes for strings, bytes, and arrays. Byte order then matches `Value` order exactly. The trailing doc ID makes keys unique. Every index implicitly ends in `_creation_time, _id` (built in Phase 10, key encoding v3; `by_creation_time` is just `_creationTime, _id`), so equal declared fields are in creation order and `_creationTime` can be bounded after them. Built-in indexes are `by_id` and `by_creation_time`. The encoding version lives in `_meta.key_encoding`; opening an older database rebuilds the indexes whose layout changed.
 
 ### 4.4 Transactions and commit timestamps
 
@@ -384,6 +384,9 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 | **Files** | A storage browser with previews, size, content type, and references, plus upload and delete. |
 | **Scheduler** | Scheduled jobs (pending, in progress, success, failed) with cancel and retry. Crons with schedule, last run, and next run. |
 | **Settings** | SMTP, S3, CORS origins, token lifetimes, backups (download a snapshot, scheduled backups to S3), log retention. |
+| **Migrations** | Every `#[migration]` with live progress, errors (linked to the failing document), schema-check status; run, cancel, restart, dry runs with before/after examples. |
+| **Backups** | Backups (create, download, delete; target and schedule), per-table export (JSONL/CSV) and JSONL import. |
+| **Audit log** | Every audited admin action, live, filterable (admin, action, table, document, time), with field diffs. |
 | **Overview** | Live connections, active subscriptions, rerun rate, mutation latency, DB size. |
 
 ---
@@ -520,8 +523,8 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Validating existing documents against a changed schema at startup (only tables whose schema fingerprint changed; `--skip-schema-check` escape hatch).
 - [x] `#[migration]`: batched, resumable, exactly once per run, dry runs, `_migrations`, `ferrix migrate`,
   `serve --migrate`, admin system functions, and lenient startup for tables with pending migrations (CONTRACT §1.9).
-  Not yet: a dashboard Migrations page (the system functions exist), dependencies between migrations other than name
-  order.
+  The dashboard's Migrations page (live progress, run / cancel / restart, dry runs with examples). Not yet:
+  dependencies between migrations other than name order.
 - [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
 - [x] Mutations: `insert`, `patch`, `replace`, `delete`. Every write is validated against the table type (`patch` checks the merged document; `insert`/`replace` check that the stored JSON round-trips).
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
@@ -547,7 +550,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] `examples/todo` (Svelte), with Playwright e2e scripts. `examples/chat-react` is still to do.
 - **Milestone reached: usable for a real (unauthenticated) app.**
 
-### Phase 4 — Dashboard v1 (L) — mostly done
+### Phase 4 — Dashboard v1 (L) — done
 - [x] Admin auth (`_admins`, `admin create|reset-password`, `/api/auth/admin/signin`, `ctx.auth.require_admin()`) and
   the setup link (`/_/setup#token=…`, now the dashboard's setup page).
 - [x] Admin-only `_system/dashboard:*` functions (docs/CONTRACT.md §4.1): tables, untyped live paginated documents,
@@ -561,11 +564,14 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   live logs tail, users and sessions, overview. Built assets are committed; a test fails when they are stale.
 - [x] Audited dashboard writes: `_audit_log` written in each write's own transaction (generic writes,
   `revoke_session`, `delete_user`, settings, impersonation, `run_function`), `_system/audit:list` (live, filterable),
-  90-day retention (docs/CONTRACT.md §4.1.5). The dashboard page for it is still to build.
+  90-day retention (docs/CONTRACT.md §4.1.5), and the dashboard's Audit log page (live, filters, field diffs).
 - [x] Impersonation via a real session: `run_function` "as user" runs through a short-lived, audited session marked
-  `impersonatedBy`; `POST /api/admin/impersonate` mints one to open the app as a user (§4.2). No UI button yet.
-- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, per-function latency charts, and the UI for
-  settings, the audit log and impersonation.
+  `impersonatedBy`; `POST /api/admin/impersonate` mints one to open the app as a user (§4.2), from the Users page's
+  "Open app as user" (a new tab, with a warning and the expiry).
+- [x] Dashboard v2: a virtualized grid (10k+ rows, pages load as it scrolls, still live), a quick filter over loaded
+  rows, the search box (`search_documents`), JSONL/CSV export, per-function latency and calls/errors charts
+  (`GET /api/admin/stats/timeseries`, `Logs::timeseries`), and the Settings, Audit log, Migrations and Backups pages;
+  grouped navigation, a Ctrl+K command palette, Alt+1…0. Covered by `packages/dashboard/e2e/dashboard.ts`.
 
 ### Phase 5 — Auth (M) — mostly done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
@@ -579,7 +585,8 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Provider configuration in `_settings` (OAuth providers, SMTP, redirect allowlist, sign-ups, token lifetimes,
   CORS origins), secrets encrypted at rest (XChaCha20-Poly1305, key from `auth_secret.key`), applied without a
   restart, config wins over settings; admin-only `_system/settings:get|update|send_test_email` (docs/CONTRACT.md
-  §4.1.4). The dashboard Settings page is still to build.
+  §4.1.4), and the dashboard's Settings page (locked fields read-only, write-only secrets, inline validation, test
+  email).
 - [x] External JWTs via JWKS (`AuthConfig::jwt(JwtProvider)`: RS256/ES256/EdDSA, cached JWKS with rate-limited
   refetch on unknown `kid`, iss/aud/exp/nbf with leeway, subjects provisioned as `_users` + `_accounts`), on WS and
   HTTP Bearer (§1.5).
@@ -604,8 +611,9 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   `cancel_with_reason` and the dashboard's `cancel_job` work for actions in progress.
 - [x] Per-cron time zones (`cron_tz` / `CronSpec::timezone`, `chrono-tz`): spring-forward gaps run later by the gap,
   fall-back folds run a time of day once (every-hour expressions in both hours); `_crons.timezone`.
-- [x] "Run cron now": `_system/scheduler:run_cron_now { name, force? }` (admin; no pile-up unless forced). The
-  dashboard button itself is still to do (UI), as are showing `timezone` / `system` and canceling running jobs there.
+- [x] "Run cron now": `_system/scheduler:run_cron_now { name, force? }` (admin; no pile-up unless forced), with the
+  dashboard's "Run now" button (offering to force while the previous run is unfinished), time zone and system
+  columns, and cancel for running actions.
 
 ### Phase 7 — File storage (M) — done
 - [x] The `_storage` system table (`StoredFile`: sha256, size, content type, `createdBy`, original file name) and the
@@ -632,8 +640,8 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Multiple-range responses (`multipart/byteranges`, coalesced, at most 16 ranges).
 - [x] The orphan sweep runs as the system cron `_storage_sweep` (internal action `_system/storage:sweep_orphans`),
   replacing the ad-hoc background task.
-- [ ] Not yet: dashboard UI for private mode (the Download link appends `?download=1`; `downloadUrl` is provided),
-  thumbnails as previews on the Files page.
+- [x] Dashboard: downloads through `downloadUrl` and thumbnails added with `&` to signed URLs (private mode works),
+  `?thumb=96x96&fit=cover` previews in the Files list.
 
 ### Phase 8 — Search (M) — done
 - [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`
@@ -666,24 +674,33 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   `data.db` for ≥ 10k vectors and validated against the table at startup. Recall@10 ≥ 0.9 asserted against exact
   search; 200k × 384: built in 9–25 s on 16 threads, ~0.4 ms per query at recall ≈ 0.95 (embedding-like data).
 - [x] Backend for a dashboard search box: admin-only `_system/dashboard:search_documents` (docs/CONTRACT.md §4.1).
-- [ ] Not yet: the dashboard UI for search, stemmers for languages other than English, vector search in queries
-  (reactive), tunable HNSW parameters (`M`, `ef`) per index.
+- [x] The dashboard's search box (live, paginated; the index, tokenizer and filter fields shown) and tokenizer /
+  HNSW details in the schema view.
+- [ ] Not yet: stemmers for languages other than English, vector search in queries (reactive), tunable HNSW
+  parameters (`M`, `ef`) per index.
 
 ### Phase 10 — DX fixes found by `examples/chat-react` (M)
-- [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
-  existing indexes on upgrade. Today they end in the random `_id`.
-- [ ] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
-  render cleanly.
-- [ ] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
-  don't depend on serde/ts-rs directly.
-- [ ] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
-  is composable with a custom `Mailer`.
-- [ ] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
-  (non-throwing).
-- [ ] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
-- [ ] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
-- [ ] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
+- [x] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild
+  existing indexes on upgrade. Key encoding v3: a v2 database rebuilds its ordinary indexes on open (search and
+  vector indexes keep their layout); cursors hash the version, so old ones are rejected. `_creationTime` can be
+  bounded after an eq on every declared field; listing a system field in `#[index]` stays a compile error.
+- [x] Codegen names top-level output structs (`Array<MessageView>`, not an inlined object), and field doc comments
+  render cleanly (JSDoc on their own lines, one field per line). Only table types and args structs are inlined.
+- [x] A derive/attribute for non-table output types (serde + ts-rs + camelCase, via ferrix re-exports), so apps
+  don't depend on serde/ts-rs directly: `#[ferrix::object]`; `#[serde(flatten)] doc: Doc<T>` embeds a document
+  (TS `{ … } & Doc<"t">`).
+- [x] `ctx.is_dev()` / app-level dev flag; dev-only functions left out of the public `api`; the built-in dev mailer
+  is composable with a custom `Mailer`. (`#[query(dev_only)]` etc., refused outside `--dev`, generated into
+  `devApi`; `DevLogMailer` and `AuthConfig::dev_mailer`.)
+- [x] `@ferrix/react`: `useAuthActions().providers()`, re-export `AuthProviders`; `usePaginatedQueryWithStatus`
+  (non-throwing). Svelte: `useAuth().providers` (its paginated query already returned `error`).
+- [x] Storage URLs root-relative in `--dev` (so they go through a dev proxy) unless a public URL is set explicitly.
+- [x] `PaginationResult::map_async` / `try_map`; `Query::count()` over an index range; `TestApp::create_user`.
+  (Also `try_map_concurrent` and `TestApp::as_user`. The async maps take closures returning futures rather than
+  `AsyncFnMut`: the futures of borrowing async closures aren't provably `Send` yet.)
+- [x] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
+  (README "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
 
 ### Phase 9 — Operations polish (M)
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
@@ -703,7 +720,9 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   `Dockerfile` (`FROM scratch`), `.dockerignore`, `deploy/ferrix.service`.
 - [x] Migrations CLI (`ferrix migrate`, `migrate status`, `serve --migrate`; Phase 1's `#[migration]`). Running them
   (not `status`) takes the data directory lock like `import`.
-- [ ] Dashboard UI for backups, export/import and metrics (the endpoints exist); JSON logs.
+- [x] Dashboard UI for backups (create, download, delete; target and schedule), export/import, and the live counters
+  of `--metrics` on the Overview (commits/s, queue depth, shared queries, reruns; served by `/api/admin/stats`).
+- [ ] JSON logs.
 - [ ] Not yet: incremental/streaming backups (use Litestream), restoring from the dashboard, CSV import, hot reload of
   `--tls-cert` files, building the Docker image in CI (not built here: no Docker daemon was available).
 - [x] An interval-tree invalidation index (done in Phase 2).

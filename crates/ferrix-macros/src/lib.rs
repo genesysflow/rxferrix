@@ -1,4 +1,4 @@
-//! Procedural macros for ferrix: `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, the `internal_*`
+//! Procedural macros for ferrix: `#[table]`, `#[object]`, `#[query]`, `#[mutation]`, `#[action]`, the `internal_*`
 //! variants, and `#[migration]`.
 //!
 //! The expansions are specified normatively in `docs/CONTRACT.md` §3. Every path the expansions use is fully
@@ -14,6 +14,7 @@ use proc_macro::TokenStream;
 
 mod function;
 mod migration;
+mod object;
 mod search;
 mod table;
 mod util;
@@ -41,6 +42,27 @@ pub fn table(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(table::expand_table(attr.into(), item.into()))
 }
 
+/// A type used in function signatures that is not a table: a function's output (a "view" struct), an argument, or
+/// a type nested in either. See `docs/CONTRACT.md` §3.4.
+///
+/// Adds `Serialize`, `Deserialize` and `TS` (through ferrix's re-exported serde and ts-rs, so the app needs no
+/// direct dependency on them) and `rename_all = "camelCase"` (unless the type sets its own `#[serde(rename_all)]`).
+/// Works on structs and enums; `#[serde(..)]` attributes keep working (ts-rs follows them).
+///
+/// ```ignore
+/// #[ferrix::object]
+/// #[derive(Clone, Debug)]
+/// pub struct MessageView {
+///     #[serde(flatten)]
+///     pub message: Doc<Message>,      // `_id`, `_creationTime` and the table's fields, at the top level
+///     pub author_name: String,        // `authorName`
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
+    into_tokens(object::expand_object(attr.into(), item.into()))
+}
+
 /// Declares a data migration over one table, run in batches. See `docs/CONTRACT.md` §1.9 and §3.3.
 ///
 /// ```ignore
@@ -54,7 +76,8 @@ pub fn migration(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(migration::expand_migration(attr.into(), item.into()))
 }
 
-/// Declares a public query function. See `docs/CONTRACT.md` §3.2.
+/// Declares a public query function. See `docs/CONTRACT.md` §3.2. `#[query(dev_only)]`: refused unless the server
+/// runs with `--dev`, and generated into `devApi` instead of `api`.
 #[proc_macro_attribute]
 pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(expand_function(
@@ -65,7 +88,7 @@ pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
     ))
 }
 
-/// Declares a public mutation function. See `docs/CONTRACT.md` §3.2.
+/// Declares a public mutation function. See `docs/CONTRACT.md` §3.2. Takes `dev_only` like `#[query]`.
 #[proc_macro_attribute]
 pub fn mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(expand_function(
@@ -76,7 +99,7 @@ pub fn mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
     ))
 }
 
-/// Declares a public action function. See `docs/CONTRACT.md` §3.2.
+/// Declares a public action function. See `docs/CONTRACT.md` §3.2. Takes `dev_only` like `#[query]`.
 #[proc_macro_attribute]
 pub fn action(attr: TokenStream, item: TokenStream) -> TokenStream {
     into_tokens(expand_function(

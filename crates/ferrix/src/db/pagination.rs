@@ -11,8 +11,9 @@
 //! [version = 1][fingerprint: 8 bytes][kind: 0 = after key, 1 = end][key bytes (kind 0 only)]
 //! ```
 //!
-//! The fingerprint is a hash of the index id, the order and the range bounds, so a cursor handed to a query over a
-//! different index, range or order is rejected with a clear error instead of returning a wrong page.
+//! The fingerprint is a hash of the index id, the order, the range bounds and the key encoding version
+//! ([`keys::KEY_ENCODING_VERSION`]), so a cursor handed to a query over a different index, range or order, or one
+//! made before the index keys changed layout, is rejected with a clear error instead of returning a wrong page.
 //!
 //! ## Pages and pinning
 //!
@@ -93,6 +94,57 @@ impl<T> PaginationResult<T> {
     pub fn map<U>(self, f: impl FnMut(T) -> U) -> PaginationResult<U> {
         PaginationResult { page: self.page.into_iter().map(f).collect(), is_done: self.is_done, continue_cursor: self.continue_cursor }
     }
+
+    /// Transforms the documents with an async function, one after the other, keeping the cursors:
+    /// `page.map_async(|m| async move { describe(ctx, m).await }).await`.
+    ///
+    /// The closure returns a future (`|x| async move { .. }`, or a call of an `async fn`). It takes
+    /// `FnMut(T) -> impl Future` rather than an `AsyncFnMut`: the futures of async closures that borrow their
+    /// captures are not provably `Send` today, and function handlers must be. A cache shared across the page can
+    /// live behind a `std::sync::Mutex` (locked between awaits, never across one) or be filled before the call.
+    pub async fn map_async<U, Fut>(self, f: impl FnMut(T) -> Fut) -> PaginationResult<U>
+    where
+        Fut: Future<Output = U>,
+    {
+        let mut page = Vec::with_capacity(self.page.len());
+        for fut in self.page.into_iter().map(f) {
+            page.push(fut.await);
+        }
+        PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor }
+    }
+
+    /// [`PaginationResult::map_async`] with a fallible function: stops at the first error, which it returns.
+    ///
+    /// ```ignore
+    /// let page = query.paginate(opts).await?;
+    /// page.try_map(|message| view(ctx, &names, message)).await
+    /// ```
+    pub async fn try_map<U, E, Fut>(self, f: impl FnMut(T) -> Fut) -> Result<PaginationResult<U>, E>
+    where
+        Fut: Future<Output = Result<U, E>>,
+    {
+        let mut page = Vec::with_capacity(self.page.len());
+        for fut in self.page.into_iter().map(f) {
+            page.push(fut.await?);
+        }
+        Ok(PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor })
+    }
+
+    /// [`PaginationResult::try_map`] running up to `concurrency` futures at a time (at least one); the page keeps
+    /// its order, and the first error (in page order) is returned. In a query or mutation the reads still go
+    /// through one connection; this pays off when the futures wait on something else (an action's HTTP calls).
+    pub async fn try_map_concurrent<U, E, Fut>(
+        self,
+        concurrency: usize,
+        f: impl Fn(T) -> Fut,
+    ) -> Result<PaginationResult<U>, E>
+    where
+        Fut: Future<Output = Result<U, E>>,
+    {
+        use futures::{StreamExt, TryStreamExt};
+        let page = futures::stream::iter(self.page.into_iter().map(f)).buffered(concurrency.max(1)).try_collect().await?;
+        Ok(PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -115,8 +167,17 @@ enum Position {
 
 /// Identifies the (index, order, range) a cursor belongs to.
 fn fingerprint(index_id: IndexId, order: Order, range: &KeyRange) -> [u8; FINGERPRINT_LEN] {
+    fingerprint_for(Some(keys::KEY_ENCODING_VERSION), index_id, order, range)
+}
+
+/// [`fingerprint`] for a key encoding version; `None` is how cursors were fingerprinted up to v2 (no version).
+fn fingerprint_for(version: Option<u64>, index_id: IndexId, order: Order, range: &KeyRange) -> [u8; FINGERPRINT_LEN] {
     let mut h = blake3::Hasher::new();
     h.update(b"ferrix-cursor");
+    // Keys of another layout would name wrong positions within an unchanged range.
+    if let Some(version) = version {
+        h.update(&version.to_be_bytes());
+    }
     h.update(&index_id.to_be_bytes());
     h.update(&[matches!(order, Order::Desc) as u8]);
     h.update(&(range.start.len() as u64).to_be_bytes());
@@ -342,6 +403,12 @@ mod tests {
         ] {
             assert!(err(&s, &other).contains("does not belong to this query"));
         }
+        // A cursor from before the key layout changed (fingerprinted without a version): rejected, although its
+        // index, order and range are the same.
+        let legacy = encode_cursor(&fingerprint_for(None, 4, Order::Asc, &range()), &Position::After(vec![4]));
+        assert!(err(&legacy, &fp).contains("does not belong to this query"));
+        let v2 = encode_cursor(&fingerprint_for(Some(2), 4, Order::Asc, &range()), &Position::After(vec![4]));
+        assert!(err(&v2, &fp).contains("does not belong to this query"));
         // A key outside the range (forged): rejected.
         let s = encode_cursor(&fp, &Position::After(vec![9]));
         assert!(err(&s, &fp).contains("does not belong"));

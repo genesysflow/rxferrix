@@ -2,13 +2,20 @@
 //
 //   cargo build -p todo-server && bun e2e/dashboard.ts [todo-server binary] [screenshot dir]
 //
+// Screenshots are written as `<dir>/<SCREENSHOT_PREFIX ?? "dashboard-"><name>.png`.
+//
 // Starts the server on a free port with a temp data dir (after `admin create`), then in Chromium: signs in at /_/,
 // watches a todo inserted over the HTTP API appear live in the data grid, edits a document in the side panel, runs
 // todos:add from the function runner, sees executions arrive in the live logs tail, uploads files on the Files page
 // (picker and drag and drop, previews, delete), checks the Scheduler page (the example's cron, a job from
 // todos:add_later appearing live, "Run now", "Cancel"), and checks that anonymous callers can't use the system
-// functions. A second server with a fresh data dir checks the printed /_/setup#token=… flow.
-import { mkdtempSync, rmSync } from "node:fs";
+// functions. Then the operations pages: settings (a non-secret edit, the SMTP password round trip without ever
+// showing it, a field locked by a command-line flag, inline validation), the audit log, backups (create, download,
+// delete; the scheduled backup cron), export and import (2000 seeded todos), the virtualized grid scrolled to the
+// end, the search box, a migration (dry run, run), "Run now" on a cron, the latency charts, "open app as user" and
+// live session revocation, the command palette. A second server with private storage checks thumbnails and
+// downloads of signed URLs; a third, with a fresh data dir, the printed /_/setup#token=… flow.
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -16,6 +23,7 @@ import { chromium, type Browser, type Page } from "playwright-core";
 const here = decodeURIComponent(new URL(".", import.meta.url).pathname);
 const bin = resolve(process.argv[2] ?? join(here, "../../../target/debug/todo-server"));
 const shots = process.argv[3] ?? process.env.SCREENSHOT_DIR ?? null;
+const shotPrefix = process.env.SCREENSHOT_PREFIX ?? "dashboard-";
 const EMAIL = "admin@example.com";
 const PASSWORD = "correct horse battery";
 
@@ -34,10 +42,13 @@ interface Server {
   output: () => string;
 }
 
-async function startServer(dir: string): Promise<Server> {
+async function startServer(dir: string, extraArgs: (base: string) => string[] = () => []): Promise<Server> {
   const port = freePort();
   const base = `http://127.0.0.1:${port}`;
-  const proc = Bun.spawn([bin, "serve", "--dir", dir, "--http", `127.0.0.1:${port}`], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([bin, "serve", "--dir", dir, "--http", `127.0.0.1:${port}`, ...extraArgs(base)], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   cleanups.push(() => proc.kill());
   let out = "";
   for (const stream of [proc.stdout, proc.stderr]) {
@@ -70,28 +81,68 @@ async function call(base: string, kind: string, path: string, args: unknown, tok
   return { status: res.status, body: (await res.json()) as Record<string, any> };
 }
 
+/** How many failed HTTP responses (4xx) the next steps provoke on purpose. */
+let expectedHttpErrors = 0;
+
+/** The page of the step that runs, for a screenshot when it fails (`FAILURE_SCREENSHOT=<path>`). */
+let lastPage: Page | null = null;
+
 async function step<T>(label: string, f: () => Promise<T>): Promise<T> {
   const start = performance.now();
-  const out = await f();
+  let out: T;
+  try {
+    out = await f();
+  } catch (e) {
+    const path = process.env.FAILURE_SCREENSHOT;
+    if (path && lastPage && !lastPage.isClosed()) await lastPage.screenshot({ path }).catch(() => {});
+    throw e;
+  }
   console.log(`✓ ${label} (${(performance.now() - start).toFixed(0)}ms)`);
   return out;
 }
 
 async function shot(page: Page, name: string) {
   if (!shots) return;
-  const path = join(shots, `dashboard-${name}.png`);
+  const path = join(shots, `${shotPrefix}${name}.png`);
   await page.screenshot({ path });
   console.log(`  screenshot: ${path}`);
 }
 
 async function newPage(browser: Browser): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1360, height: 820 } });
+  lastPage = page;
   page.on("pageerror", (e) => failures.push(`page error: ${e.message}`));
   page.on("console", (m) => {
-    if (m.type() === "error") failures.push(`console error: ${m.text()}`);
+    if (m.type() !== "error") return;
+    // A request the test makes fail on purpose (the browser logs every failed response).
+    if (expectedHttpErrors > 0 && /^Failed to load resource: the server responded with a status of 4\d\d/.test(m.text())) {
+      expectedHttpErrors--;
+      return;
+    }
+    failures.push(`console error: ${m.text()}`);
   });
   page.on("dialog", (d) => void d.accept());
   return page;
+}
+
+/** An admin access token for HTTP calls made by the test itself. */
+async function adminToken(base: string): Promise<string> {
+  const res = await fetch(`${base}/api/auth/admin/signin`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
+  });
+  const body = (await res.json()) as { accessToken?: string };
+  if (!body.accessToken) throw new Error(`admin sign-in failed: ${JSON.stringify(body)}`);
+  return body.accessToken;
+}
+
+async function signIn(page: Page, base: string) {
+  await page.goto(`${base}/_/`);
+  await page.getByLabel("Email").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("heading", { name: "Overview" }).waitFor({ timeout: 10_000 });
 }
 
 /** A page link in the sidebar. */
@@ -106,8 +157,19 @@ try {
   const dir = tempDir();
   const created = Bun.spawnSync([bin, "admin", "create", EMAIL, "--password", PASSWORD, "--dir", dir]);
   if (created.exitCode !== 0) throw new Error(`admin create failed: ${created.stderr.toString()}`);
-  const server = await step("start todo-server", () => startServer(dir));
+  // The todo app has no sign-in: an app user to impersonate comes from an (offline) import into `_users`.
+  const usersFile = join(dir, "users.jsonl");
+  writeFileSync(usersFile, `${JSON.stringify({ email: "ada@example.com", emailVerified: true, name: "Ada", image: null })}\n`);
+  const imported = Bun.spawnSync([bin, "import", usersFile, "--table", "_users", "--dir", dir]);
+  if (imported.exitCode !== 0) throw new Error(`user import failed: ${imported.stderr.toString()}`);
+  // The redirect allowlist comes from the command line, so the Settings page shows it locked (`/api/health` stands
+  // in for an app page "open app as user" can land on: the server has no web app); the backup schedule declares the
+  // `ferrix-backup` cron.
+  const server = await step("start todo-server", () =>
+    startServer(dir, (b) => ["--auth-redirect-url", `${b}/,${b}/api/health`, "--backup-every", "1h", "--backup-keep", "3"]),
+  );
   const { base } = server;
+  const admin = await adminToken(base);
 
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium" });
   const page = await newPage(browser);
@@ -214,7 +276,7 @@ try {
     await page.getByText("Busiest functions").waitFor();
     await shot(page, "overview");
     await nav(page, "Users").click();
-    await page.getByText("No users yet").waitFor();
+    await page.getByRole("row").filter({ hasText: "ada@example.com" }).waitFor();
   });
 
   // 6. Files: upload through the picker and by drag and drop, preview, serve, delete.
@@ -249,9 +311,15 @@ try {
     await region.dispatchEvent("dragover", { dataTransfer });
     await region.dispatchEvent("drop", { dataTransfer });
     await grid.getByText("pixel.png").waitFor({ timeout: 5000 });
+    // The list shows a server-side thumbnail (`thumb=96x96&fit=cover`: the 1×1 pixel scaled to fill 96×96).
     await page.waitForFunction(() =>
-      [...document.querySelectorAll<HTMLImageElement>("[data-testid=files] img")].some((i) => i.complete && i.naturalWidth === 1),
+      [...document.querySelectorAll<HTMLImageElement>("[data-testid=files] img[data-testid=thumb]")].some(
+        (i) => i.complete && i.naturalWidth === 96 && i.src.includes("thumb=96x96"),
+      ),
     );
+    // Download links come from `downloadUrl`.
+    const href = await grid.getByRole("row").filter({ hasText: "pixel.png" }).getByRole("link", { name: "Download" }).getAttribute("href");
+    if (!href || !/^\/api\/storage\/\w+\?download=1$/.test(href)) throw new Error(`download link: ${href}`);
     await shot(page, "files");
     // An app document referencing a file (a todo's image): its Id<"_storage"> in the data grid opens the Files page.
     const upload = await call(base, "mutation", "todos:generate_upload_url", {});
@@ -315,6 +383,364 @@ try {
     const canceled = await call(base, "query", "_system/scheduler:jobs", { state: "canceled", paginationOpts: { numItems: 5, cursor: null } });
     if (canceled.status !== 400 || canceled.body.errorData?.code !== "unauthenticated") throw new Error("scheduler functions are not admin-only");
     if (!r2.body.value || jobId === r2.body.value) throw new Error("expected two distinct jobs");
+  });
+
+  // 6c. "Run now" on a cron; the time zone column; system crons grouped last.
+  await step("scheduler: run a cron now", async () => {
+    const crons = page.getByTestId("crons");
+    const cronRow = crons.locator("tbody tr").filter({ hasText: "purge-completed" });
+    await cronRow.getByText("UTC", { exact: true }).waitFor();
+    await crons.getByText("System crons").waitFor();
+    const names = await crons.locator("tbody tr td:first-child strong").allTextContents();
+    const sweep = names.indexOf("_storage_sweep");
+    if (sweep === -1 || sweep < names.indexOf("purge-completed") || sweep < names.indexOf("ferrix-backup")) {
+      throw new Error(`system crons are not last: ${names.join(", ")}`);
+    }
+    await cronRow.getByRole("button", { name: /Run now/ }).click();
+    await page.getByText("Started purge-completed").waitFor();
+    await cronRow.getByText("success", { exact: true }).waitFor({ timeout: 10_000 });
+    await shot(page, "scheduler-crons");
+  });
+
+  // 8. Settings: a field locked by the command line, inline validation, a non-secret edit, and the SMTP password
+  // round trip (stored, never shown, kept when other fields change).
+  const SECRET = `s3cret-${Date.now()}`;
+  const getSettings = async () => (await call(base, "action", "_system/settings:get", {}, admin)).body.value;
+  await step("settings: locked field, validation, edits, masked secret round trip", async () => {
+    await nav(page, "Settings").click();
+    await page.getByRole("heading", { name: "Settings" }).waitFor();
+    const locked = page.getByTestId("locked-note").filter({ hasText: "redirect allowlist" });
+    await locked.getByText(`${base}/`).waitFor();
+    if ((await page.locator("textarea[aria-label='Redirect URLs']").count()) > 0) throw new Error("the locked redirect URLs are editable");
+
+    await page.getByLabel("Access token lifetime (seconds)").fill("5");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByRole("alert").filter({ hasText: "from 30 to 86400" }).waitFor();
+    await page.getByLabel("Access token lifetime (seconds)").fill("");
+
+    await page.getByLabel("Session lifetime (seconds)").fill("7200");
+    await page.getByTestId("unsaved").waitFor();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByTestId("unsaved").waitFor({ state: "detached" });
+    const v1 = await getSettings();
+    if (v1.sessionTtlSecs !== 7200 || v1.effective.sessionTtlSecs !== 7200) throw new Error(`not saved: ${JSON.stringify(v1)}`);
+
+    await page.getByLabel("SMTP URL").fill("smtp://mailer@127.0.0.1:2525");
+    await page.getByLabel("From", { exact: true }).fill("Todo <noreply@example.com>");
+    await page.getByRole("button", { name: "Set smtp password" }).click();
+    await page.getByLabel("SMTP password", { exact: true }).fill(SECRET);
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByLabel("SMTP password (stored, hidden)").waitFor();
+    if ((await page.content()).includes(SECRET)) throw new Error("the secret is on the page");
+    const v2 = await getSettings();
+    if (v2.smtp?.password !== "••••" || v2.smtp?.url.includes(SECRET)) throw new Error(`smtp: ${JSON.stringify(v2.smtp)}`);
+    await shot(page, "settings");
+
+    // Another SMTP field changes; the stored password is kept (sent back as the mask).
+    await page.getByLabel("From", { exact: true }).fill("Todo App <noreply@example.com>");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByTestId("unsaved").waitFor({ state: "detached" });
+    const v3 = await getSettings();
+    if (v3.smtp?.from !== "Todo App <noreply@example.com>" || v3.smtp?.password !== "••••") {
+      throw new Error(`the password was not kept: ${JSON.stringify(v3.smtp)}`);
+    }
+    // The secret is nowhere the dashboard can read: not in _settings documents, not in the execution log.
+    const rows = await call(base, "query", "_system/dashboard:documents", { table: "_settings", paginationOpts: { numItems: 20, cursor: null } }, admin);
+    const logs = await fetch(`${base}/api/admin/logs?pathPrefix=_system/settings&limit=50`, { headers: { authorization: `Bearer ${admin}` } });
+    if (JSON.stringify(rows.body).includes(SECRET) || (await logs.text()).includes(SECRET)) throw new Error("the secret leaked");
+    if (!JSON.stringify(rows.body).includes("••••")) throw new Error("the encrypted column is not masked");
+  });
+
+  // 9. The audit log: the settings changes and the earlier document edit, live, with diffs and filters.
+  await step("audit log: entries, live updates, filters, diff", async () => {
+    await nav(page, "Audit log").click();
+    await page.getByRole("heading", { name: "Audit log" }).waitFor();
+    const audit = page.getByTestId("audit");
+    await audit.getByText("settings", { exact: true }).first().waitFor();
+    await audit.getByText("replace", { exact: true }).first().waitFor();
+    // A new write shows up live.
+    const list = await call(base, "query", "todos:list", {});
+    const todo = (list.body.value as { _id: string }[])[0]!;
+    const patched = await call(base, "mutation", "_system/dashboard:patch_document", { id: todo._id, patch: { text: "audited live" } }, admin);
+    if (patched.status !== 200) throw new Error(`patch failed: ${JSON.stringify(patched.body)}`);
+    const row = audit.locator("tbody tr").filter({ hasText: "patch" }).first();
+    await row.waitFor({ timeout: 5000 });
+    await row.locator("td").first().click();
+    await page.getByTestId("audit-diff").first().getByText("audited live").waitFor();
+    await shot(page, "audit");
+    // Filter by action: only settings changes, in the URL; the diff shows the password masked.
+    await page.getByLabel("Action", { exact: true }).selectOption("settings_update");
+    await page.waitForFunction(() => {
+      const cells = [...document.querySelectorAll("[data-testid=audit] tbody tr:not(.detail) td:nth-child(3)")];
+      return cells.length > 0 && cells.every((c) => c.textContent?.trim() === "settings");
+    });
+    if (new URL(page.url()).searchParams.get("action") !== "settings_update") throw new Error("the filter is not in the URL");
+    await audit.locator("tbody tr").first().locator("td").first().click();
+    await page.getByTestId("audit-diff").first().getByText("smtp", { exact: true }).waitFor();
+    if ((await page.content()).includes(SECRET)) throw new Error("the secret is in the audit view");
+    await page.getByRole("button", { name: "Clear filters" }).click();
+  });
+
+  // 10. Backups: the target and the schedule, create, download (a zstd archive), delete.
+  await step("backups: create, download, delete", async () => {
+    await nav(page, "Backups").click();
+    await page.getByRole("heading", { name: "Backups and data" }).waitFor();
+    await page.getByTestId("backup-target").getByText(/backups$/).waitFor();
+    await page.getByTestId("backup-schedule").getByText(/keeping the last 3/).waitFor();
+    await page.getByRole("button", { name: "Create backup" }).click();
+    const row = page.getByTestId("backups").locator("tbody tr").filter({ hasText: "manual" }).first();
+    await row.waitFor({ timeout: 30_000 });
+    const name = (await row.locator("td").first().textContent())!.trim();
+    await shot(page, "backups");
+    const [download] = await Promise.all([page.waitForEvent("download"), row.getByRole("button", { name: "Download" }).click()]);
+    const bytes = readFileSync((await download.path())!);
+    if (download.suggestedFilename() !== name) throw new Error(`download name ${download.suggestedFilename()} ≠ ${name}`);
+    if (bytes.length < 100 || bytes.readUInt32LE(0) !== 0xfd2fb528) throw new Error(`not a zstd archive (${bytes.length} bytes)`);
+    await row.getByRole("button", { name: "Delete" }).click();
+    await page.locator("[data-testid=backups] td", { hasText: name }).waitFor({ state: "detached" });
+    const listed = await fetch(`${base}/api/admin/backups`, { headers: { authorization: `Bearer ${admin}` } }).then((r) => r.json());
+    if ((listed as { backups: { name: string }[] }).backups.some((b) => b.name === name)) throw new Error("not deleted");
+  });
+
+  // 11. Export the todos table (JSONL and CSV); import JSONL: a bad file is refused whole, then 2000 seeded todos.
+  const SEED = 2000;
+  await step("export and import", async () => {
+    await page.getByLabel("Table to export").selectOption("todos");
+    const [jsonl] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Export", exact: true }).click()]);
+    const lines = readFileSync((await jsonl.path())!, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { text: string });
+    if (jsonl.suggestedFilename() !== "todos.jsonl" || !lines.some((t) => t.text === "audited live")) {
+      throw new Error(`export: ${jsonl.suggestedFilename()} ${lines.length} lines`);
+    }
+    await page.getByLabel("Export format").selectOption("csv");
+    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Export", exact: true }).click()]);
+    const header = readFileSync((await csv.path())!, "utf8").split("\r\n")[0];
+    if (header !== "_id,_creationTime,completedAt,done,image,text") throw new Error(`csv header: ${header}`);
+
+    await page.getByLabel("Table", { exact: true }).selectOption("todos");
+    await page.getByLabel("File", { exact: true }).setInputFiles({
+      name: "bad.jsonl",
+      mimeType: "application/x-ndjson",
+      buffer: Buffer.from('{"text":"fine","done":false}\n{"text":42,"done":false}\n'),
+    });
+    expectedHttpErrors++;
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await page.getByTestId("import-error").getByText(/Nothing was imported/).waitFor();
+    await page.getByTestId("import-error").getByText(/2:/).waitFor();
+
+    const seed = Array.from({ length: SEED }, (_, i) =>
+      JSON.stringify({ text: `seed ${String(i).padStart(4, "0")}`, done: false, image: null, completedAt: null }),
+    ).join("\n");
+    await page.getByLabel("File", { exact: true }).setInputFiles({ name: "seed.jsonl", mimeType: "application/x-ndjson", buffer: Buffer.from(seed) });
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await page.getByTestId("import-result").getByText(`${SEED} documents imported into`).waitFor({ timeout: 30_000 });
+    await shot(page, "import");
+  });
+
+  // 12. The virtualized grid: scroll through every row (pages load as it scrolls), few rows in the DOM, live updates,
+  // the quick filter, CSV export from the grid.
+  await step("virtualized grid over the seeded rows", async () => {
+    await nav(page, "Data").click();
+    await page.getByRole("link", { name: /^todos/ }).click();
+    const grid = page.getByTestId("document-grid");
+    await grid.waitFor();
+    const tables = await call(base, "query", "_system/dashboard:tables", {}, admin);
+    const total = (tables.body.value as { name: string; documents: number }[]).find((t) => t.name === "todos")!.documents;
+    if (total < SEED) throw new Error(`only ${total} todos`);
+    const scroller = grid.locator("xpath=..");
+    const status = page.getByTestId("grid-status");
+    const started = Date.now();
+    while (!((await status.textContent()) ?? "").includes("end of results")) {
+      if (Date.now() - started > 30_000) throw new Error(`stuck at: ${await status.textContent()}`);
+      await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
+      await Bun.sleep(100);
+    }
+    await status.getByText(`${total} shown · end of results`).waitFor();
+    await page.waitForFunction((n) => document.querySelector("[data-testid=document-grid] tbody tr[data-row]:last-child")?.getAttribute("data-row") === String(n - 1), total);
+    const rendered = await grid.locator("tbody tr[data-row]").count();
+    if (rendered > 120) throw new Error(`${rendered} rows in the DOM: not virtualized`);
+    // The middle, then back to the top, where a new todo appears live.
+    await scroller.evaluate((el) => (el.scrollTop = 32 * 1000));
+    await grid.locator('tbody tr[data-row="1000"]').waitFor();
+    await shot(page, "data-virtual");
+    // A write (which re-sends the table list) leaves the scroll position alone.
+    const marker = `while scrolled ${Date.now()}`;
+    await call(base, "mutation", "todos:add", { text: marker });
+    await page.getByTestId("document-grid").locator("tbody tr").first().waitFor();
+    await Bun.sleep(300);
+    const kept = await scroller.evaluate((el) => el.scrollTop);
+    if (Math.abs(kept - 32 * 1000) > 1) throw new Error(`the grid scrolled to ${kept} after a write`);
+    await scroller.evaluate((el) => (el.scrollTop = 0));
+    const fresh = `live while virtualized ${Date.now()}`;
+    await call(base, "mutation", "todos:add", { text: fresh });
+    await grid.getByText(fresh).waitFor({ timeout: 5000 });
+    // The quick filter matches loaded rows only, client-side.
+    await page.getByLabel("Filter loaded rows").fill("seed 1234");
+    await status.getByText(/^1 of \d+ loaded rows match/).waitFor();
+    await grid.getByText("seed 1234").waitFor();
+    await page.getByLabel("Filter loaded rows").fill("");
+    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "⇩ CSV" }).click()]);
+    const csvLines = readFileSync((await csv.path())!, "utf8").trim().split("\r\n");
+    if (csvLines.length !== total + 3) throw new Error(`grid CSV export has ${csvLines.length} lines, want ${total + 3}`); // header, two new todos
+  });
+
+  // 13. The search box (the todos' search index), with a filter field.
+  await step("search box", async () => {
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await page.getByTestId("search-info").getByText(/search_text · unicode61/).waitFor();
+    await page.getByLabel("Search documents").fill("seed 1999");
+    const grid = page.getByTestId("document-grid");
+    await grid.getByText("seed 1999").waitFor();
+    if ((await grid.locator("tbody tr[data-row]").count()) !== 1) throw new Error("expected exactly one result");
+    await page.getByTestId("grid-status").getByText("1 shown · end of results").waitFor();
+    await shot(page, "search");
+    await page.getByLabel("Search filter done").fill("true");
+    await page.getByText("No documents match this search").waitFor();
+    await page.getByLabel("Search filter done").fill("");
+    await page.getByRole("button", { name: "Browse", exact: true }).click();
+    await page.getByRole("button", { name: "Schema" }).click();
+    await page.getByTestId("search-indexes").getByText(/tokenizer unicode61/).waitFor();
+    await page.getByRole("button", { name: "Schema" }).click();
+  });
+
+  // 14. A migration: pending, a dry run with before/after examples, then a real run to done.
+  await step("migrations: dry run and run", async () => {
+    const padded = await call(
+      base,
+      "mutation",
+      "_system/dashboard:insert_document",
+      { table: "todos", document: { text: "  padded todo  ", done: false, image: null, completedAt: null } },
+      admin,
+    );
+    if (padded.status !== 200) throw new Error(`insert failed: ${JSON.stringify(padded.body)}`);
+    await nav(page, "Migrations").click();
+    await page.getByRole("heading", { name: "Migrations" }).waitFor();
+    const row = page.getByTestId("migrations").locator("tbody tr").filter({ hasText: "0001_trim_todo_text" });
+    await row.getByText("pending", { exact: true }).waitFor();
+    await row.getByRole("button", { name: "Dry run" }).click();
+    const report = page.getByTestId("dry-run-report");
+    await report.getByText("would complete").waitFor({ timeout: 15_000 });
+    await report.getByText(/^1$/).first().waitFor();
+    await report.getByText("padded todo").first().waitFor();
+    await shot(page, "migrations-dry-run");
+    await page.keyboard.press("Escape");
+    await report.waitFor({ state: "detached" });
+    await row.getByRole("button", { name: "Run", exact: true }).click();
+    await row.getByText("done", { exact: true }).waitFor({ timeout: 20_000 });
+    const bar = row.getByRole("progressbar");
+    if ((await bar.getAttribute("aria-valuenow")) !== (await bar.getAttribute("aria-valuemax"))) throw new Error("progress is not complete");
+    const doc = await call(base, "query", "_system/dashboard:document", { id: padded.body.value }, admin);
+    if (doc.body.value.document.text !== "padded todo") throw new Error(`not migrated: ${JSON.stringify(doc.body.value)}`);
+    await shot(page, "migrations");
+  });
+
+  // 15. Per-function latency charts from the execution log.
+  await step("function latency charts", async () => {
+    await nav(page, "Functions").click();
+    await page.getByRole("link", { name: /add$/ }).first().click();
+    await page.getByRole("heading", { name: "todos:add" }).waitFor();
+    await page.waitForFunction(() => (document.querySelector("[data-testid=chart-latency] path.series")?.getAttribute("d") ?? "").startsWith("M"));
+    await page.getByTestId("chart-volume").locator("rect.bar").first().waitFor();
+    const totals = (await page.getByTestId("activity-totals").textContent()) ?? "";
+    if (!/[1-9]\d* calls/.test(totals)) throw new Error(`totals: ${totals}`);
+    const svg = page.getByTestId("chart-latency").locator("svg");
+    const box = (await svg.boundingBox())!;
+    await svg.hover({ position: { x: box.width - 20, y: 60 } });
+    await page.getByTestId("chart-latency").getByRole("status").getByText(/calls/).waitFor();
+    await page.getByTestId("activity-totals").scrollIntoViewIfNeeded();
+    await shot(page, "functions-chart");
+  });
+
+  // 16. "Open app as user": the endpoint, then the button (a new tab at the app with the session in the fragment),
+  // the impersonation session listed and revoked live.
+  await step("open app as user, live session revocation", async () => {
+    const users = await call(base, "query", "_system/dashboard:users", { paginationOpts: { numItems: 10, cursor: null } }, admin);
+    const userId = (users.body.value.page as { _id: string; email: string }[]).find((u) => u.email === "ada@example.com")!._id;
+    const imp = await fetch(`${base}/api/admin/impersonate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${admin}` },
+      body: JSON.stringify({ user: userId, ttlSeconds: 300, redirectTo: `${base}/` }),
+    }).then((r) => r.json() as Promise<{ url: string; expiresAt: number; userId: string }>);
+    if (!imp.url?.startsWith(`${base}/#ferrix_access_token=`) || Math.abs(imp.expiresAt - (Date.now() + 300_000)) > 30_000) {
+      throw new Error(`impersonate: ${JSON.stringify({ ...imp, url: imp.url?.slice(0, 40) })}`);
+    }
+    await nav(page, "Users").click();
+    const row = page.getByRole("row").filter({ hasText: "ada@example.com" });
+    await row.getByRole("button", { name: "Open app as user" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByText("all of this user's rights").waitFor();
+    await dialog.getByRole("combobox", { name: "App URL" }).selectOption(`${base}/api/health`);
+    await shot(page, "impersonate");
+    const [tab] = await Promise.all([
+      page.context().waitForEvent("page"),
+      dialog.getByRole("button", { name: "Open app as user" }).click(),
+    ]);
+    const opened = () => tab.url().startsWith(`${base}/api/health#ferrix_access_token=`) && tab.url().includes(`ferrix_user_id=${userId}`);
+    for (let i = 0; i < 100 && !opened(); i++) await Bun.sleep(50);
+    if (!opened()) throw new Error(`the new tab is at ${tab.url().slice(0, 60)}`);
+    await tab.close();
+    await page.getByTestId("impersonation-banner").getByText("ada@example.com").waitFor();
+    // Both impersonation sessions are listed; revoking one removes it live.
+    await row.locator("td").first().click();
+    const sessions = page.getByTestId("sessions");
+    const imps = sessions.locator("tbody tr").filter({ hasText: "impersonated by you" });
+    await page.waitForFunction(() => document.querySelectorAll("[data-testid=sessions] tbody tr").length === 2);
+    if ((await imps.count()) !== 2) throw new Error(`${await imps.count()} impersonation sessions`);
+    await shot(page, "users");
+    await imps.first().getByRole("button", { name: "Revoke" }).click();
+    await page.waitForFunction(() => document.querySelectorAll("[data-testid=sessions] tbody tr").length === 1);
+  });
+
+  // 17. The overview's live counters and the command palette / shortcuts.
+  await step("overview live stats, command palette and shortcuts", async () => {
+    await nav(page, "Overview").click();
+    await page.getByTestId("stat-commits").waitFor();
+    await page.getByTestId("stat-queue").waitFor();
+    await shot(page, "overview");
+    await page.keyboard.press("Control+k");
+    await page.getByRole("combobox", { name: "Command" }).fill("audit");
+    await shot(page, "palette");
+    await page.keyboard.press("Enter");
+    await page.getByRole("heading", { name: "Audit log" }).waitFor();
+    await page.keyboard.press("Control+k");
+    await page.getByRole("combobox", { name: "Command" }).fill("todos");
+    await page.keyboard.press("Enter");
+    await page.getByRole("heading", { name: "todos" }).waitFor();
+    await page.keyboard.press("Alt+8");
+    await page.getByRole("heading", { name: "Migrations" }).waitFor();
+  });
+
+  // 18. Private storage: list thumbnails and downloads use the signed URLs the API returns.
+  await step("private storage: signed thumbnails and downloads", async () => {
+    const pdir = tempDir();
+    const made = Bun.spawnSync([bin, "admin", "create", EMAIL, "--password", PASSWORD, "--dir", pdir]);
+    if (made.exitCode !== 0) throw new Error(`admin create failed: ${made.stderr.toString()}`);
+    const ps = await startServer(pdir, () => ["--storage-private"]);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const upload = await call(ps.base, "mutation", "todos:generate_upload_url", {});
+    const stored = await fetch(upload.body.value as string, { method: "POST", headers: { "content-type": "image/png" }, body: png });
+    const { storageId } = (await stored.json()) as { storageId: string };
+    if ((await fetch(`${ps.base}/api/storage/${storageId}`)).status !== 403) throw new Error("private storage served an unsigned URL");
+    const p2 = await newPage(browser!);
+    await signIn(p2, ps.base);
+    await nav(p2, "Files").click();
+    const thumb = p2.locator("[data-testid=files] img[data-testid=thumb]").first();
+    await p2.waitForFunction(() => {
+      const i = document.querySelector<HTMLImageElement>("[data-testid=files] img[data-testid=thumb]");
+      return i !== null && i.complete && i.naturalWidth === 96;
+    });
+    const src = (await thumb.getAttribute("src"))!;
+    if (!/^\/api\/storage\/\w+\?exp=\d+&sig=[\w-]+&thumb=96x96&fit=cover$/.test(src)) throw new Error(`thumb src: ${src}`);
+    const href = (await p2.getByTestId("files").getByRole("link", { name: "Download" }).first().getAttribute("href"))!;
+    if (!/^\/api\/storage\/\w+\?exp=\d+&sig=[\w-]+&download=1$/.test(href)) throw new Error(`download href: ${href}`);
+    const res = await fetch(`${ps.base}${href}`);
+    if (res.status !== 200 || !res.headers.get("content-disposition")?.startsWith("attachment")) {
+      throw new Error(`signed download: ${res.status} ${res.headers.get("content-disposition")}`);
+    }
+    await shot(p2, "files-private");
+    await p2.close();
   });
 
   // 7. Non-admins can't call the system functions.

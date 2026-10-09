@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
-import { getAllPages, useMutation, usePaginatedQuery } from "@ferrix/react";
+import { getAllPages, useMutation, usePaginatedQueryWithStatus } from "@ferrix/react";
 import { api, type MessageView } from "../ferrix";
 import type { ChannelInfo, Profile } from "../lib";
+import { AccessError } from "./AccessError";
 import { MessageItem } from "./MessageItem";
 
 const PAGE = 30;
@@ -10,8 +11,13 @@ const GROUP_MS = 5 * 60_000;
 /** Start loading older messages this far before the top is reached. */
 const PRELOAD_PX = 300;
 
-export function MessageList({ channel, me }: { channel: ChannelInfo; me: Profile }) {
-  const { results, status, loadMore } = usePaginatedQuery(api.messages.list, { channel: channel._id }, { initialNumItems: PAGE });
+export function MessageList({ channel, me, onBack }: { channel: ChannelInfo; me: Profile; onBack: () => void }) {
+  // The non-throwing variant: an access error (e.g. `not_a_member` after being removed) is shown in place.
+  const { results, status, error, loadMore } = usePaginatedQueryWithStatus(
+    api.messages.list,
+    { channel: channel._id },
+    { initialNumItems: PAGE },
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
@@ -71,6 +77,7 @@ export function MessageList({ channel, me }: { channel: ChannelInfo; me: Profile
     [toggle, channel._id, me.name],
   );
 
+  if (error) return <AccessError error={error} onBack={onBack} />;
   return (
     <div className="messages" ref={scrollRef} data-testid="messages">
       {results.map((m, i) => {
@@ -80,7 +87,7 @@ export function MessageList({ channel, me }: { channel: ChannelInfo; me: Profile
           older.author === m.author &&
           older.kind === "message" &&
           m.kind === "message" &&
-          m.sentAt - older.sentAt < GROUP_MS;
+          m._creationTime - older._creationTime < GROUP_MS;
         return (
           <MessageItem
             key={m._id}

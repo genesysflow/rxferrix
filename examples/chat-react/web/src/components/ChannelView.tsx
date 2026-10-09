@@ -4,7 +4,6 @@ import { api, type Id } from "../ferrix";
 import { errorMessage, initials, type ChannelInfo, type Profile } from "../lib";
 import { AccessError } from "./AccessError";
 import { Composer } from "./Composer";
-import { ErrorBoundary } from "./ErrorBoundary";
 import { MessageList } from "./MessageList";
 import { SearchPanel } from "./SearchPanel";
 import { TypingIndicator } from "./TypingIndicator";
@@ -61,9 +60,7 @@ export function ChannelView({ channelId, me, onLeave }: Props) {
 
       <div className="channel-body">
         <div className="timeline">
-          <ErrorBoundary key={channelId} fallback={(error) => <AccessError error={error} onBack={onLeave} />}>
-            <MessageList channel={channel} me={me} />
-          </ErrorBoundary>
+          <MessageList key={channelId} channel={channel} me={me} onBack={onLeave} />
           {channel.isMember ? (
             <>
               <TypingIndicator channel={channelId} />

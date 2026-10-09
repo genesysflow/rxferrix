@@ -1,0 +1,22 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "object(quote!(), quote!\n{\n    #[doc = r\" A message as the app shows it.\"] #[derive(Clone, Debug)] pub\n    struct MessageView\n    {\n        #[serde(flatten)] pub message: Doc<Message>,\n        #[doc = r\" The author's display name.\"] pub author_name: String, pub\n        reactions: Vec<ReactionGroup>,\n    }\n})"
+---
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde")]
+#[ts(crate = "::ferrix::__private::ts_rs")]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+/// A message as the app shows it.
+#[derive(Clone, Debug)]
+pub struct MessageView {
+    #[serde(flatten)]
+    pub message: Doc<Message>,
+    /// The author's display name.
+    pub author_name: String,
+    pub reactions: Vec<ReactionGroup>,
+}

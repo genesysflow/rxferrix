@@ -172,6 +172,7 @@ pub mod ann {
     }
 
     #[derive(serde::Serialize, serde::Deserialize, ts_rs::TS, Clone, Copy, Debug, PartialEq)]
+    #[ts(rename = "PageHit")]
     pub struct Hit {
         pub id: Id<AnnItem>,
         pub score: f32,

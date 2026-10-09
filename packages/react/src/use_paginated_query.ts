@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   canonicalJSON,
+  type FerrixError,
   type PaginatedQuery,
   type PaginatedQueryArgs,
   type PaginatedQueryItem,
@@ -18,6 +19,12 @@ export interface UsePaginatedQueryResult<Item> {
   isLoading: boolean;
   /** Loads `numItems` more items; a no-op unless `status` is `"CanLoadMore"`. */
   loadMore: (numItems: number) => void;
+}
+
+/** The result of {@link usePaginatedQueryWithStatus}: {@link UsePaginatedQueryResult} plus the error. */
+export interface UsePaginatedQueryWithStatusResult<Item> extends UsePaginatedQueryResult<Item> {
+  /** The error of the first failed page, if any (then `isLoading` is false). */
+  error: FerrixError | undefined;
 }
 
 export interface UsePaginatedQueryOptions {
@@ -51,6 +58,27 @@ export function usePaginatedQuery<Q extends PaginatedQueryReference>(
   args: PaginatedQueryArgs<Q> | "skip",
   options: UsePaginatedQueryOptions,
 ): UsePaginatedQueryResult<PaginatedQueryItem<Q>> {
+  const { error, ...result } = usePaginatedQueryWithStatus(ref, args, options);
+  if (error !== undefined) throw error;
+  return result;
+}
+
+/**
+ * Like {@link usePaginatedQuery} but returns the error of a failed page as `error` instead of throwing it, so a
+ * component can show it in place (and keep the pages that did load in `results`).
+ *
+ * ```tsx
+ * const { results, status, error, loadMore } = usePaginatedQueryWithStatus(api.messages.list, { channel }, {
+ *   initialNumItems: 20,
+ * });
+ * if (error) return <AccessError error={error} />;
+ * ```
+ */
+export function usePaginatedQueryWithStatus<Q extends PaginatedQueryReference>(
+  ref: Q,
+  args: PaginatedQueryArgs<Q> | "skip",
+  options: UsePaginatedQueryOptions,
+): UsePaginatedQueryWithStatusResult<PaginatedQueryItem<Q>> {
   const client = useFerrix();
   const argsKey = args === "skip" ? null : canonicalJSON(args ?? {});
   const path = ref._path;
@@ -75,13 +103,13 @@ export function usePaginatedQuery<Q extends PaginatedQueryReference>(
     [query],
   );
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  if (current.error !== undefined) throw current.error;
 
   return useMemo(
     () => ({
       results: current.results,
       status: current.status,
       isLoading: current.isLoading,
+      error: current.error,
       loadMore: (numItems: number) => {
         current.loadMore(numItems);
       },

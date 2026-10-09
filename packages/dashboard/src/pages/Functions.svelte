@@ -5,6 +5,7 @@
   import { parseJson, pretty } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
+  import FunctionActivity from "../components/FunctionActivity.svelte";
   import JsonEditor from "../components/JsonEditor.svelte";
 
   let { route }: { route: Route } = $props();
@@ -167,6 +168,8 @@
             <a href={href("logs")} onclick={link} class="small">Open in logs →</a>
           </div>
         {/if}
+
+        <FunctionActivity path={selected.path} />
       </div>
     {/if}
   </section>

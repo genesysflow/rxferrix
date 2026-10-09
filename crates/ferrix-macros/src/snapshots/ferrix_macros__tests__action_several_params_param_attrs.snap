@@ -60,6 +60,7 @@ static __FERRIX_FN_add_many: ::ferrix::__private::FunctionDef = ::ferrix::__priv
     module_path: ::core::module_path!(),
     name: "add_many",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Action(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_add_many = ::ferrix::__private::decode_args(
             "add_many",
@@ -77,6 +78,6 @@ static __FERRIX_FN_add_many: ::ferrix::__private::FunctionDef = ::ferrix::__priv
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_add_many>(),
-        ::ferrix::__private::ts_inline::<()>(),
+        ::ferrix::__private::ts_output::<()>(),
     ),
 };

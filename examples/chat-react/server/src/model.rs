@@ -33,10 +33,10 @@ pub struct Member {
     pub last_read_at: f64,
 }
 
-// `sent_at` duplicates the creation time on purpose: an index key ends with the (random) `_id`, not with
-// `_creationTime`, so `[channel]` alone would not order a channel's messages by time.
+// Index keys end in `_creationTime, _id`, so `by_channel` lists a channel's messages in the order they were sent
+// (`Order::Desc`: newest first), and `_creation_time` can be bounded after the channel (unread counts).
 #[table(name = "messages")]
-#[index(by_channel_sent = [channel, sent_at])]
+#[index(by_channel = [channel])]
 #[search_index(search_body, search = body, filter = [channel])]
 pub struct Message {
     pub channel: Id<Channel>,
@@ -46,7 +46,6 @@ pub struct Message {
     pub edited: bool,
     // "message" or "reminder" (posted by the scheduler for `/remind`).
     pub kind: String,
-    pub sent_at: f64,
 }
 
 #[table(name = "reactions")]

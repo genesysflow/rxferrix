@@ -87,7 +87,9 @@ pub struct StorageConfig {
     /// `Cache-Control: private, max-age=<this>` on served files. Default 30 days.
     pub cache_max_age: Duration,
     /// Base URL for upload and file URLs (default: the auth public URL, `--public-url`; without one, URLs are
-    /// root-relative, e.g. `/api/storage/<id>`).
+    /// root-relative, e.g. `/api/storage/<id>`). An empty string makes them root-relative even when a public URL is
+    /// set; `ferrix serve --dev` does that unless a public URL was given explicitly, so files go through a dev
+    /// server's `/api` proxy.
     pub public_url: Option<String>,
     /// Uploads per client IP: burst and refill per minute. `None` disables the limit. Default 60 / 120 per minute.
     pub upload_rate_limit: Option<(u32, u32)>,

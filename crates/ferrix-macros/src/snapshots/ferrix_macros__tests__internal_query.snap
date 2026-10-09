@@ -41,6 +41,7 @@ static __FERRIX_FN_iq: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     module_path: ::core::module_path!(),
     name: "iq",
     visibility: ::ferrix::__private::Visibility::Internal,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Query(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_iq = ::ferrix::__private::decode_args(
             "iq",
@@ -51,6 +52,6 @@ static __FERRIX_FN_iq: ::ferrix::__private::FunctionDef = ::ferrix::__private::F
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_iq>(),
-        ::ferrix::__private::ts_inline::<()>(),
+        ::ferrix::__private::ts_output::<()>(),
     ),
 };

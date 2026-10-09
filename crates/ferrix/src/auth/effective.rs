@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::config::{AuthConfig, OAuthProvider, RedirectAllowlist, SmtpConfig};
-use super::email::{LogMailer, Mailer, SmtpMailer};
+use super::email::{DevLogMailer, Mailer, SmtpMailer};
 use crate::settings::model::{OAuthKind, StoredSettings};
 
 /// Bounds for token lifetimes set at runtime.
@@ -58,7 +58,7 @@ impl Effective {
         let mailer: Option<Arc<dyn Mailer>> = match (config_mailer, &stored.smtp) {
             (Some(m), _) => Some(m),
             (None, Some(smtp)) => Some(Arc::new(SmtpMailer::new(&smtp.config()?)?)),
-            (None, None) if dev => Some(Arc::new(LogMailer)),
+            (None, None) if dev => Some(config.dev_mailer.clone().unwrap_or_else(|| Arc::new(DevLogMailer))),
             (None, None) => None,
         };
         let mut oauth: BTreeMap<String, OAuthProvider> =

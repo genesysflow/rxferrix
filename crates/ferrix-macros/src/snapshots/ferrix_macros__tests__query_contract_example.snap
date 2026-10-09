@@ -52,6 +52,7 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
     module_path: ::core::module_path!(),
     name: "list",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Query(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_list = ::ferrix::__private::decode_args(
             "list",
@@ -67,6 +68,6 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_list>(),
-        ::ferrix::__private::ts_inline::<Vec<Doc<Todo>>>(),
+        ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>(),
     ),
 };

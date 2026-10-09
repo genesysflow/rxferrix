@@ -539,9 +539,7 @@ name = "chat-server"
 version = "0.1.0"
 dependencies = [
  "ferrix",
- "serde",
  "tokio",
- "ts-rs",
 ]
 
 [[package]]

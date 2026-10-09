@@ -187,7 +187,7 @@ impl Database {
                     for (id, json) in &docs {
                         let doc: Value = serde_json::from_str(json)?;
                         let obj = doc.as_object().context("document is not an object")?;
-                        expected.push((keys::index_key(obj, &index.fields, id), id.to_vec()));
+                        expected.push((keys::index_key(obj, &index.key_fields, id), id.to_vec()));
                     }
                     expected.sort();
                     let mut stmt =
@@ -495,8 +495,8 @@ impl WriteState {
         // Validated before anything is written (e.g. a vector of the wrong dimension).
         let special = search::SpecialWrites::prepare(table, old, new)?;
         for index in table.stored_indexes() {
-            let old_key = old.map(|d| keys::index_key(d, &index.fields, &id.0));
-            let new_key = new.map(|d| keys::index_key(d, &index.fields, &id.0));
+            let old_key = old.map(|d| keys::index_key(d, &index.key_fields, &id.0));
+            let new_key = new.map(|d| keys::index_key(d, &index.key_fields, &id.0));
             if old_key != new_key {
                 if let Some(k) = &old_key {
                     storage::delete_index_entry(&self.conn, index.id, k)?;

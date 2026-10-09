@@ -41,6 +41,7 @@ static __FERRIX_FN_count: ::ferrix::__private::FunctionDef = ::ferrix::__private
     module_path: ::core::module_path!(),
     name: "count",
     visibility: ::ferrix::__private::Visibility::Public,
+    dev_only: false,
     handler: ::ferrix::__private::Handler::Query(|__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
         let __ferrix_decoded: __ferrix_args_count = ::ferrix::__private::decode_args(
             "count",
@@ -51,6 +52,6 @@ static __FERRIX_FN_count: ::ferrix::__private::FunctionDef = ::ferrix::__private
     })),
     ts: || (
         ::ferrix::__private::ts_inline::<__ferrix_args_count>(),
-        ::ferrix::__private::ts_inline::<u64>(),
+        ::ferrix::__private::ts_output::<u64>(),
     ),
 };

@@ -1,13 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { getAuth, useAuthActions, useFerrix } from "@ferrix/react";
-// Not re-exported by @ferrix/react.
-import type { AuthProviders } from "@ferrix/client";
+import { useAuthActions, type AuthProviders } from "@ferrix/react";
 import { errorMessage } from "../lib";
 
 type Mode = "signin" | "signup" | "code";
 
 export function AuthScreen({ initialError }: { initialError: string | null }) {
-  const client = useFerrix();
   const auth = useAuthActions();
   const [mode, setMode] = useState<Mode>("signin");
   const [providers, setProviders] = useState<AuthProviders | null>(null);
@@ -21,9 +18,8 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
 
   useEffect(() => setError(initialError), [initialError]);
   useEffect(() => {
-    // `providers()` lives on FerrixAuth, not on useAuthActions().
-    getAuth(client).providers().then(setProviders, () => setProviders(null));
-  }, [client]);
+    auth.providers().then(setProviders, () => setProviders(null));
+  }, [auth]);
 
   const run = async (f: () => Promise<unknown>) => {
     setBusy(true);

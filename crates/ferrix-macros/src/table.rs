@@ -319,7 +319,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 }
                 None if fname == "_id" || fname == "_creation_time" => errors.error(
                     field,
-                    format_args!("system field `{fname}` cannot be listed in an index (every index implicitly ends with `_id`; use `by_creation_time` to order by creation time)"),
+                    format_args!("system field `{fname}` cannot be listed in an index (every index implicitly ends with `_creationTime, _id`; bound `_creation_time` in the range instead)"),
                 ),
                 None => errors.error(field, format_args!("unknown field `{fname}` in index `{name}`; struct `{}` has no such field", strukt.ident)),
             }

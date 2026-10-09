@@ -30,8 +30,12 @@ export interface UseAuthResult extends AuthState {
   resetPassword: FerrixAuth["resetPassword"];
   requestMagicLink: FerrixAuth["requestMagicLink"];
   verifyCode: FerrixAuth["verifyCode"];
+  verifyMagicLink: FerrixAuth["verifyMagicLink"];
   requestEmailVerification: FerrixAuth["requestEmailVerification"];
   verifyEmail: FerrixAuth["verifyEmail"];
+  /** The sign-in methods the server offers (`GET /api/auth/providers`), e.g. to show an OAuth button. */
+  providers: FerrixAuth["providers"];
+  getAccessToken: FerrixAuth["getAccessToken"];
 }
 
 export function useAuth(options: { client?: FerrixClient } = {}): UseAuthResult {
@@ -66,8 +70,11 @@ export function useAuth(options: { client?: FerrixClient } = {}): UseAuthResult 
     resetPassword: auth.resetPassword.bind(auth),
     requestMagicLink: auth.requestMagicLink.bind(auth),
     verifyCode: auth.verifyCode.bind(auth),
+    verifyMagicLink: auth.verifyMagicLink.bind(auth),
     requestEmailVerification: auth.requestEmailVerification.bind(auth),
     verifyEmail: auth.verifyEmail.bind(auth),
+    providers: auth.providers.bind(auth),
+    getAccessToken: auth.getAccessToken.bind(auth),
   };
 }
 

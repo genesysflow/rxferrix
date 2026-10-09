@@ -10,7 +10,7 @@ error: JSON field name `_x` is reserved: names starting with `_` are system fiel
 7 | pub struct Todo { pub _id: String, #[serde(rename = "_x")] pub x: u32 }
   |                                                                ^
 
-error: system field `_creation_time` cannot be listed in an index (every index implicitly ends with `_id`; use `by_creation_time` to order by creation time)
+error: system field `_creation_time` cannot be listed in an index (every index implicitly ends with `_creationTime, _id`; bound `_creation_time` in the range instead)
  --> tests/ui/table_reserved_fields.rs:6:18
   |
 6 | #[index(by_ct = [_creation_time])]

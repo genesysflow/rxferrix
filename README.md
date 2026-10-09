@@ -7,16 +7,18 @@ WebSocket and get updated results automatically whenever a write affects them.
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
 Phase 9 (operations) is built: data migrations (`#[migration]`), backups, export and import, metrics, TLS, frontend
-serving and release builds (see [Deploying](#deploying)).
+serving and release builds (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
+example found (index order, codegen names, `#[object]`, dev mode, storage URLs in dev; see
+[Things to know](#things-to-know)).
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `crates/ferrix` | The runtime: SQLite storage, query engine, read sets, write log, sync worker, axum server, CLI, codegen, `TestApp`. |
-| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
+| `crates/ferrix-macros` | `#[table]`, `#[object]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
-| `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery`, `useMutation`, `useAction`. |
+| `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery(WithStatus)`, `usePaginatedQuery(WithStatus)`, `useMutation`, `useAction`, auth hooks. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
@@ -51,6 +53,40 @@ fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 
 Functions call each other through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`.
+
+**Indexes end in `_creationTime, _id`**: documents with equal indexed fields are in creation order, so
+`with_index(Message::by_channel, |q| q.eq(Message::channel, c)).order(Order::Desc)` is newest first, and the creation
+time can be bounded after the declared fields: `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
+`.count()` counts an index range without reading the documents.
+
+**Types that aren't tables** (a function's output "view" struct, an enum argument) use `#[object]`: it derives
+serde and ts-rs through ferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in
+`dataModel.ts` by name (`Array<MessageView>`), with field doc comments as JSDoc. A document can be embedded whole:
+
+```rust
+#[object]
+pub struct MessageView {
+    #[serde(flatten)]
+    pub message: Doc<Message>,       // _id, _creationTime and the message's fields, at the top level
+    pub author_name: String,         // TS: { authorName: string } & Doc<"messages">
+}
+
+#[query]
+pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: PaginationOpts)
+    -> Result<PaginationResult<MessageView>> {
+    let page = ctx.db.query::<Message>()
+        .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
+        .order(Order::Desc)
+        .paginate(pagination_opts)
+        .await?;
+    page.try_map(|message| view(ctx, message)).await      // also map_async, try_map_concurrent
+}
+```
+
+**Dev mode.** `ctx.is_dev()` tells whether the server runs with `--dev`. `#[action(dev_only)]` (also queries and
+mutations) marks a function for development (seeding, reading a dev inbox): the server refuses it outside `--dev`,
+and codegen puts it in `devApi` instead of `api`. In `--dev` without SMTP, auth emails are printed to the log by
+`DevLogMailer`; `AuthConfig::dev_mailer(m)` replaces it (and can forward to it).
 
 ## Auth
 
@@ -143,7 +179,9 @@ await client.mutation(api.files.set_avatar, { file: storageId });
 ```
 
 `GET /api/storage/<id>` serves files with ETags, range requests (several ranges as `multipart/byteranges`) and
-headers that keep uploads from running script on your origin. Add `?thumb=200x200` (and `&fit=cover`) to an image's
+headers that keep uploads from running script on your origin. In `--dev`, file and upload URLs are root-relative
+(`/api/storage/...`) unless a public URL is set explicitly (`--public-url`), so they go through a dev server's
+`/api` proxy (Vite) like every other request. Add `?thumb=200x200` (and `&fit=cover`) to an image's
 URL for a thumbnail (JPEG, PNG, WebP, GIF; generated once and cached; oversized images are refused from their header,
 before decoding). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
 and `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability
@@ -277,8 +315,9 @@ todo-server serve --migrate            # or: start, then run them in the backgro
 While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
 table is *migrating*, writes may leave a document invalid only if it already was, and reads of not-yet-migrated
 documents fail. When its last migration finishes, the table is validated again in the same transaction; if anything
-is still invalid, the next start refuses. The dashboard backend has admin functions for it
-(`_system/migrations:{list, status, run, cancel}`). Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.9.
+is still invalid, the next start refuses. The dashboard's Migrations page shows their live progress and runs, cancels,
+restarts and dry-runs them (`_system/migrations:{list, status, run, cancel}`). Details:
+[docs/CONTRACT.md](docs/CONTRACT.md) §1.9. The todo example has one (`0001_trim_todo_text`).
 
 ## Binary data
 
@@ -292,26 +331,39 @@ Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), em
 administrator with the `/_/setup#token=…` link that `serve` prints on first start, or with
 `todo-server admin create you@example.com`, then sign in.
 
-- **Data**: every table (system tables grouped below), with a live, paginated document grid, filters on index
-  fields, a side panel with a JSON editor (insert, edit, delete; validated against the table's Rust type), and
-  clickable ids that open the referenced document. Secrets (password and token hashes) are never shown, and system
-  tables are read-only except the `name`, `image` and `emailVerified` of users.
-- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user* (through a
-  real, short-lived, audited session), showing the result, log lines and duration.
+- **Data**: every table (system tables grouped below), with a live, virtualized document grid (smooth at 10k+ rows;
+  pages load as you scroll), filters on index fields, a search box for tables with a search index (live, most
+  relevant first), a quick filter over the loaded rows, JSONL/CSV export, a side panel with a JSON editor (insert,
+  edit, delete; validated against the table's Rust type), and clickable ids that open the referenced document. The
+  schema view lists indexes, tokenizers and vector index kinds. Secrets (password and token hashes) are never shown,
+  and system tables are read-only except the `name`, `image` and `emailVerified` of users.
+- **Functions**: every function with its TS signature, a runner (JSON args, optionally *as a user* through a real,
+  short-lived, audited session), and latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
+  the execution log.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
-- **Users**: users, linked providers, sessions (revoke), delete.
-- **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
-  `Id<"_storage">` values in the data grid link here.
-- **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
-  and retry.
-- **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
+- **Users**: users, linked providers, sessions (revoked live; impersonation sessions marked), delete, and "open app as
+  user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.
+- **Files**: stored files with thumbnails and previews (images, video, audio, text), download, delete, and upload by
+  drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
+- **Scheduler**: crons with their schedule, time zone, last and next run, and "run now" (system crons last);
+  scheduled jobs live, by state, with cancel (running actions too), run now and retry.
+- **Migrations**: every `#[migration]` with live progress, errors linking to the failing document, the schema check,
+  run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
+- **Backups**: create (optionally with `aux.db` and files), download and delete backups; the target and the
+  `--backup-every` schedule; export a table (JSONL/CSV) and import JSONL (insert, upsert or replace).
+- **Settings**: OAuth providers, SMTP (with a test email), redirect URLs, sign-ups, token lifetimes and CORS origins,
+  applied without a restart. Fields fixed by the code, a flag or the environment are read-only; secrets can be
+  replaced but are never shown.
+- **Audit log**: every dashboard write, settings change, impersonation and function run, live, filterable by
+  administrator, action, table, document and time, with field-level diffs.
+- **Overview**: commit ts, commits/s, connections, shared queries and reruns, the scheduler queue, database sizes,
+  busiest and failing functions.
 
-Runtime settings, the audit log and "open the app as this user" already have their admin-only backend
-(`_system/settings:*`, `_system/audit:list`, `POST /api/admin/impersonate`; docs/CONTRACT.md §4.1.4, §4.1.5, §4.2);
-their pages are still to come.
+Ctrl+K (⌘K) opens a command palette (pages, tables, theme, sign out); Alt+1…9 and Alt+0 open the pages in sidebar
+order.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every
-view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The built assets are committed, so
+view is live, plus `/api/admin/*` for logs, stats, backups, export/import and impersonation (docs/CONTRACT.md §4). The built assets are committed, so
 `cargo build` needs no JS toolchain; after changing `packages/dashboard` (or the client packages it bundles), run
 `bun run build:dashboard` and commit `crates/ferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
 work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` proxied to :8090. Build without it with
@@ -391,6 +443,27 @@ stream one table with `GET /api/admin/export/{table}?format=csv` and import into
 status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,
 scheduler queue depth and dropped log entries.
 
+## Things to know
+
+- **Optimistic updates are replayed** on top of every server change until the mutation's result arrives. Create ids
+  and timestamps outside the update closure (once per call), not inside it:
+  ```ts
+  const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();
+  send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: id, _creationTime: now, …args } }));
+  ```
+- **Scheduled functions (and crons) run without an identity**, whoever scheduled them: pass the user as an argument to
+  an internal function, e.g. `ctx.scheduler.run_after::<deliver_reminder>(delay, (channel, user, text))`.
+- **`ctx.now()` in a query is the snapshot's time, not a reactive clock.** A query reruns when its data changes, not
+  when time passes. For expiry, store the state and flip it with a scheduled mutation (`run_at`); format "5 minutes
+  ago" in the client.
+- **Invalidation is coarse**: any write to a document reruns the queries that read it, even when nothing changed.
+  Skip no-op writes, keep fast-changing fields (presence, typing, counters) in small tables of their own, read narrow
+  ranges (`eq` prefixes, `_creationTime` bounds, `take(n)`), and count with `.count()`.
+- **Tests** (`ferrix::testing::TestApp`, in dev mode): `t.create_user("ann@example.com", Some("password"))` makes a
+  user, `t.as_user(id).query::<list>(args)` calls as them, `t.advance_time(d)` runs due jobs.
+
+More in [docs/CONTRACT.md](docs/CONTRACT.md) §1.10.
+
 ## Running the example
 
 Prerequisites: Rust via mise (`mise.toml`) and bun.
@@ -421,4 +494,4 @@ bun e2e/reconnect.ts ../../../target/debug/todo-server <data dir>  # Vite runnin
 ```
 
 `bun e2e/dashboard.ts [binary] [screenshot dir]` takes the todo-server binary (default `target/debug/todo-server`)
-and optionally saves screenshots of each page.
+and optionally saves screenshots of each page (named `$SCREENSHOT_PREFIX<page>.png`, default prefix `dashboard-`).

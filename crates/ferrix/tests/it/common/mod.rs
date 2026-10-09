@@ -51,13 +51,14 @@ macro_rules! expand_fn {
             module_path: module_path!(),
             name: stringify!($name),
             visibility: ::ferrix::__private::Visibility::$vis,
+            dev_only: false,
             handler: ::ferrix::__private::Handler::$handler(|ctx, args| ::std::boxed::Box::pin(async move {
                 #[allow(unused_variables)]
                 let a: $args = ::ferrix::__private::decode_args(stringify!($name), args)?;
                 let out = $name(&ctx, $(a.$arg),*).await?;
                 ::ferrix::__private::encode_output(out)
             })),
-            ts: || (::ferrix::__private::ts_inline::<$args>(), ::ferrix::__private::ts_inline::<$out>()),
+            ts: || (::ferrix::__private::ts_inline::<$args>(), ::ferrix::__private::ts_output::<$out>()),
         };
     };
 }

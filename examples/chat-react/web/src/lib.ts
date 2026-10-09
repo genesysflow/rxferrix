@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { FerrixError, type OutputOf } from "@ferrix/react";
-import { api, type Id } from "./ferrix";
+import { FerrixError } from "@ferrix/react";
+import type { Doc, Id } from "./ferrix";
 
-// Codegen names the types nested in outputs (MessageView, ...) but inlines top-level output structs, so these are
-// derived from the function references.
-export type ChannelSummary = OutputOf<typeof api.channels.list>[number];
-export type ChannelInfo = OutputOf<typeof api.channels.get>;
-export type Profile = NonNullable<OutputOf<typeof api.profiles.me>>;
+// The server's view structs (`#[object]`) are declared by codegen under their own names.
+export type { ChannelInfo, ChannelSummary, MessageView } from "./ferrix";
+export type Profile = Doc<"profiles">;
 
 const FRIENDLY: Record<string, string> = {
   invalid_credentials: "Wrong email or password.",

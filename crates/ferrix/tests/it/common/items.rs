@@ -104,6 +104,14 @@ pub async fn bad_range(ctx: &QueryCtx, kind: u32) -> Result<Vec<Doc<Item>>> {
         2 => q.with_index(Item::by_group_score, |r| r.gt(Item::group, 1).gte(Item::group, 2)).collect().await,
         3 => q.with_index(::ferrix::Index::new("nope"), |r| r).collect().await,
         4 => q.with_index(::ferrix::Index::new("by_id"), |r| r).collect().await,
+        // The key fields are `group, score, _creationTime`: a declared field after them is one too many.
+        5 => q
+            .with_index(Item::by_group_score, |r| {
+                r.eq(Item::group, 1).eq(Item::score, 1).eq(Item::_creation_time, 1.0).eq(Item::name, "x".to_string())
+            })
+            .collect()
+            .await,
+        // After the declared fields comes `_creationTime`, not another field.
         _ => q.with_index(Item::by_group_score, |r| r.eq(Item::group, 1).eq(Item::score, 1).eq(Item::name, "x".to_string())).collect().await,
     }
 }

@@ -1,0 +1,11 @@
+error: `dev_only` takes no value: write `#[action(dev_only)]`
+ --> tests/ui/fn_dev_only_args.rs:5:10
+  |
+5 | #[action(dev_only = true)]
+  |          ^^^^^^^^
+
+error: duplicate `dev_only`
+ --> tests/ui/fn_dev_only_args.rs:8:22
+  |
+8 | #[mutation(dev_only, dev_only)]
+  |                      ^^^^^^^^

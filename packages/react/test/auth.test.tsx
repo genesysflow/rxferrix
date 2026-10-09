@@ -2,7 +2,16 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FerrixClient, MemoryAuthStorage, getAuth } from "@ferrix/client";
 import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
-import { FerrixProvider, useAuthActions, useCurrentUser, useFerrixAuth } from "../src/index.js";
+import { useEffect, useState } from "react";
+import {
+  FerrixProvider,
+  useAuthActions,
+  useCurrentUser,
+  useFerrixAuth,
+  type AuthProviders,
+  type AuthTokens,
+  type CodeProof,
+} from "../src/index.js";
 
 let server: FakeServer;
 let client: FerrixClient;
@@ -76,5 +85,41 @@ describe("auth hooks", () => {
     await settle();
     expect(screen.getByTestId("status").textContent).toBe("out");
     expect(screen.getByTestId("user").textContent).toBe("none");
+  });
+
+  it("list the server's sign-in methods", async () => {
+    const providers: AuthProviders = { password: true, magicLink: true, signups: false, oauth: ["github"] };
+    const other = new FerrixClient("http://localhost:3211", {
+      webSocketConstructor: server.WebSocket,
+      unsavedChangesWarning: false,
+    });
+    const fetch = vi.fn(async (url: string) =>
+      url.endsWith("/api/auth/providers")
+        ? new Response(JSON.stringify(providers), { status: 200 })
+        : new Response("not found", { status: 404 }),
+    );
+    getAuth(other, { storage: new MemoryAuthStorage(), fetch: fetch as unknown as typeof globalThis.fetch, syncTabs: false });
+    function Methods() {
+      const { providers: list } = useAuthActions();
+      const [methods, setMethods] = useState<AuthProviders | null>(null);
+      useEffect(() => {
+        void list().then(setMethods);
+      }, [list]);
+      return <p data-testid="methods">{methods ? methods.oauth.join(",") + (methods.magicLink ? " +link" : "") : "…"}</p>;
+    }
+    render(
+      <FerrixProvider client={other}>
+        <Methods />
+      </FerrixProvider>,
+    );
+    await settle();
+    expect(screen.getByTestId("methods").textContent).toBe("github +link");
+    expect(fetch.mock.calls.map((c) => String(c[0]))).toContain("http://localhost:3211/api/auth/providers");
+    other.close();
+    // The auth types are re-exported from @ferrix/react.
+    const proof: CodeProof = { email: "a@b.co", code: "123456" };
+    const t: AuthTokens = tokens;
+    void proof;
+    void t;
   });
 });

@@ -8,17 +8,15 @@ use ferrix::log;
 use ferrix::prelude::*;
 use ferrix::storage::StoredFile;
 use ferrix::{MutationDb, QueryDb};
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::model::{Channel, Message, Reaction, Typing, require_member, require_readable, user_error};
 use crate::profiles::Names;
 
 pub const MAX_BODY: usize = 4000;
 
-#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+/// An attached file, as the app shows it.
+#[object]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Attachment {
     pub url: String,
     pub content_type: Option<String>,
@@ -27,9 +25,8 @@ pub struct Attachment {
 }
 
 /// One emoji's reactions on a message.
-#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReactionGroup {
     pub emoji: String,
     pub count: u32,
@@ -38,30 +35,23 @@ pub struct ReactionGroup {
     pub names: Vec<String>,
 }
 
-/// A message as the app shows it: the author's name and color, the attachment's URL, grouped reactions.
-#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+/// A message as the app shows it: the message document (`_id`, `_creationTime`, `body`, ...) plus the author's
+/// name and color, the attached file's URL, and the reactions grouped by emoji.
+#[object]
+#[derive(Clone, Debug)]
 pub struct MessageView {
-    #[serde(rename = "_id")]
-    #[ts(rename = "_id")]
-    pub id: Id<Message>,
-    pub channel: Id<Channel>,
-    pub author: Id<User>,
+    #[serde(flatten)]
+    pub message: Doc<Message>,
     pub author_name: String,
     pub author_color: String,
-    pub body: String,
-    pub kind: String,
-    pub edited: bool,
-    pub sent_at: f64,
-    pub attachment: Option<Attachment>,
+    /// The attachment's URL and metadata (`attachment` is its storage id).
+    pub file: Option<Attachment>,
     pub reactions: Vec<ReactionGroup>,
 }
 
 /// What `send` did: posted a message, or ran a slash command (then `notice` says what happened).
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase")]
+#[object]
+#[derive(Clone, Debug)]
 pub struct SendResult {
     pub message: Option<Id<Message>>,
     pub notice: Option<String>,
@@ -75,16 +65,12 @@ pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: Paginat
     let page = ctx
         .db
         .query::<Message>()
-        .with_index(Message::by_channel_sent, |q| q.eq(Message::channel, channel))
+        .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
         .order(Order::Desc)
         .paginate(pagination_opts)
         .await?;
-    let mut names = Names::default();
-    let mut views = Vec::with_capacity(page.page.len());
-    for message in page.page {
-        views.push(view(ctx, &mut names, user, message).await?);
-    }
-    Ok(PaginationResult { page: views, is_done: page.is_done, continue_cursor: page.continue_cursor })
+    let names = Names::default();
+    page.try_map(|message| view(ctx, &names, user, message)).await
 }
 
 /// Messages whose text contains every word of `text` (the last one as a prefix), most relevant first.
@@ -98,17 +84,17 @@ pub async fn search(ctx: &QueryCtx, channel: Id<Channel>, text: String) -> Resul
         .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
         .take(20)
         .await?;
-    let mut names = Names::default();
+    let names = Names::default();
     let mut views = Vec::with_capacity(hits.len());
     for message in hits {
-        views.push(view(ctx, &mut names, user, message).await?);
+        views.push(view(ctx, &names, user, message).await?);
     }
     Ok(views)
 }
 
-async fn view(ctx: &QueryCtx, names: &mut Names, me: Id<User>, message: Doc<Message>) -> Result<MessageView> {
+async fn view(ctx: &QueryCtx, names: &Names, me: Id<User>, message: Doc<Message>) -> Result<MessageView> {
     let (author_name, author_color) = names.get(&ctx.db, message.author).await?;
-    let attachment = match message.attachment {
+    let file = match message.attachment {
         Some(file) => match (ctx.storage.get_url(file).await?, ctx.storage.get_metadata(file).await?) {
             (Some(url), Some(meta)) => Some(Attachment {
                 url,
@@ -139,19 +125,7 @@ async fn view(ctx: &QueryCtx, names: &mut Names, me: Id<User>, message: Doc<Mess
             None => reactions.push(ReactionGroup { emoji: row.value.emoji, count: 1, mine, names: vec![name] }),
         }
     }
-    Ok(MessageView {
-        id: message.id,
-        channel: message.value.channel,
-        author: message.value.author,
-        author_name,
-        author_color,
-        body: message.value.body,
-        kind: message.value.kind,
-        edited: message.value.edited,
-        sent_at: message.value.sent_at,
-        attachment,
-        reactions,
-    })
+    Ok(MessageView { message, author_name, author_color, file, reactions })
 }
 
 /// Posts a message (text and/or an uploaded image), or runs a slash command:
@@ -173,14 +147,11 @@ pub async fn send(ctx: &MutationCtx, channel: Id<Channel>, body: String, attachm
     if let Some(file) = attachment {
         check_image(ctx, file).await?;
     }
-    let now = ctx.now();
-    let id = ctx
-        .db
-        .insert(Message { channel, author: user, body, attachment, edited: false, kind: "message".into(), sent_at: now })
-        .await?;
-    // Sending ends "typing…" and means the author has read the channel.
+    let id = ctx.db.insert(Message { channel, author: user, body, attachment, edited: false, kind: "message".into() }).await?;
+    // Sending ends "typing…" and means the author has read the channel, up to their own message.
     clear_typing(&ctx.db, channel, user).await?;
-    ctx.db.patch(member.id, json!({ "lastReadAt": now })).await?;
+    let sent_at = ctx.db.get(id).await?.map_or_else(|| ctx.now(), |m| m.creation_time);
+    ctx.db.patch(member.id, json!({ "lastReadAt": sent_at })).await?;
     Ok(SendResult { message: Some(id), notice: None })
 }
 
@@ -244,7 +215,7 @@ pub async fn deliver_reminder(ctx: &MutationCtx, channel: Id<Channel>, user: Id<
         log::info!("reminder dropped: the user left the channel");
         return Ok(());
     }
-    let message = Message { channel, author: user, body: text, attachment: None, edited: false, kind: "reminder".into(), sent_at: ctx.now() };
+    let message = Message { channel, author: user, body: text, attachment: None, edited: false, kind: "reminder".into() };
     ctx.db.insert(message).await?;
     Ok(())
 }
@@ -330,48 +301,30 @@ pub async fn clear_typing(db: &MutationDb, channel: Id<Channel>, user: Id<User>)
     Ok(())
 }
 
-/// Inserts `count` sample messages into a channel, backdated a minute apart so they sort before everything already
-/// there (for trying infinite scroll). One action, several mutations of up to 50 messages each.
+/// Posts `count` numbered sample messages to a channel (for trying infinite scroll): #1 is the oldest, #count the
+/// newest. They are inserted in one transaction: clients see them arrive at once, as one block of history (in
+/// batches, each batch would land on top of the newest page, which a client that already loaded older pages keeps
+/// pinned, so it would grow to hold them all).
 #[action]
 pub async fn seed(ctx: &ActionCtx, channel: Id<Channel>, count: u32) -> Result<u32> {
     ctx.auth.require_user()?;
     if count == 0 || count > 1000 {
         return Err(user_error("bad_count", "Seed between 1 and 1000 messages"));
     }
-    let mut anchor = None;
-    let mut done = 0;
-    while done < count {
-        let batch = (count - done).min(50);
-        anchor = Some(ctx.run_mutation::<insert_seed>((channel, anchor, done, batch, count)).await?);
-        done += batch;
-    }
-    Ok(done)
+    ctx.run_mutation::<insert_seed>((channel, 0, count, count)).await?;
+    Ok(count)
 }
 
-/// Inserts sample messages `start + 1 ..= start + n` of `total`; message `i` is sent `total - i + 1` minutes before
-/// `anchor` (default: the channel's oldest message, or now). Returns the anchor, for the next batch.
+/// Inserts sample messages `start + 1 ..= start + n` of `total`, in order.
 #[internal_mutation]
-pub async fn insert_seed(ctx: &MutationCtx, channel: Id<Channel>, anchor: Option<f64>, start: u32, n: u32, total: u32) -> Result<f64> {
+pub async fn insert_seed(ctx: &MutationCtx, channel: Id<Channel>, start: u32, n: u32, total: u32) -> Result<()> {
     let user = ctx.auth.require_user()?;
     require_member(&ctx.db, channel, user).await?;
-    let anchor = match anchor {
-        Some(anchor) => anchor,
-        None => ctx
-            .db
-            .query::<Message>()
-            .with_index(Message::by_channel_sent, |q| q.eq(Message::channel, channel))
-            .first()
-            .await?
-            .map_or_else(|| ctx.now(), |m| m.sent_at),
-    };
     for i in start + 1..=start + n {
-        let sent_at = anchor - f64::from(total - i + 1) * 60_000.0;
         let body = format!("Sample message #{i} of {total}");
-        ctx.db
-            .insert(Message { channel, author: user, body, attachment: None, edited: false, kind: "message".into(), sent_at })
-            .await?;
+        ctx.db.insert(Message { channel, author: user, body, attachment: None, edited: false, kind: "message".into() }).await?;
     }
-    Ok(anchor)
+    Ok(())
 }
 
 #[cfg(test)]

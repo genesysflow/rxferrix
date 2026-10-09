@@ -6,8 +6,9 @@
 //!   logs can name it) and `by_creation_time` (`["_creationTime"]`) indexes;
 //! - new indexes, and indexes whose fields changed, are rebuilt by a synchronous backfill;
 //! - indexes removed from code lose their entries;
-//! - a database written with an older key encoding (`keys::KEY_ENCODING_VERSION`, in `_meta`) has every index
-//!   rebuilt first.
+//! - a database written with an older key encoding (`keys::KEY_ENCODING_VERSION`, in `_meta`) has its indexes
+//!   rebuilt first (v1 → every index, search and vector ones included; v2 → the ordinary indexes, whose keys gained
+//!   the trailing `_creationTime`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,8 +28,11 @@ pub type IndexId = u32;
 pub struct IndexInfo {
     pub id: IndexId,
     pub name: String,
-    /// JSON field names. Empty for `by_id`, whose key is just the 16 id bytes.
+    /// The declared JSON field names. Empty for `by_id`, whose key is just the 16 id bytes.
     pub fields: Vec<String>,
+    /// The fields the keys are made of (before the trailing id): `fields`, then `_creationTime`
+    /// ([`keys::index_key_fields`]). Range constraints apply to these, in order.
+    pub key_fields: Vec<String>,
 }
 
 impl IndexInfo {
@@ -127,7 +131,9 @@ impl Catalog {
         while let Some(r) = rows.next()? {
             let table_number: u32 = r.get(1)?;
             let fields: String = r.get(3)?;
-            let info = IndexInfo { id: r.get(0)?, name: r.get(2)?, fields: serde_json::from_str(&fields)? };
+            let fields: Vec<String> = serde_json::from_str(&fields)?;
+            let key_fields = keys::index_key_fields(&fields);
+            let info = IndexInfo { id: r.get(0)?, name: r.get(2)?, fields, key_fields };
             if let Some(t) = tables.get_mut(&table_number) {
                 t.indexes.push(info);
             }
@@ -168,6 +174,14 @@ fn validate_defs(defs: &[TableDef]) -> anyhow::Result<Vec<TableDef>> {
             }
             if idx.fields.is_empty() {
                 bail!("table `{}`: index `{}` has no fields", def.name, idx.name);
+            }
+            if let Some(f) = idx.fields.iter().find(|f| f.starts_with('_')) {
+                bail!(
+                    "table `{}`: index `{}` lists the system field `{f}`; every index already ends with \
+                     `_creationTime, _id`",
+                    def.name,
+                    idx.name
+                );
             }
         }
         search::validate_def(def)?;
@@ -227,7 +241,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
             if let Some(id) = rebuild_id
                 && name != BY_ID
             {
-                backfill(&tx, number, id, fields)?;
+                backfill(&tx, number, id, &keys::index_key_fields(fields))?;
             }
         }
 
@@ -247,8 +261,9 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
 /// `_meta` key holding the key encoding version the index entries were written with (absent = 1).
 pub const META_KEY_ENCODING: &str = "key_encoding";
 
-/// Rebuild every index (ordinary, search and vector, also of tables no longer defined in code) if the database was
-/// written with an older key encoding, then record the current version.
+/// Rebuild the indexes (also of tables no longer defined in code) if the database was written with an older key
+/// encoding, then record the current version: from v1 every index (the Bytes tag also changed the search and vector
+/// indexes' filter encoding), from v2 the ordinary ones (their keys gained the trailing `_creationTime`).
 fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
     let stored = match storage::read_meta_u64(conn, META_KEY_ENCODING)? {
         0 => 1,
@@ -274,8 +289,11 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
             .collect::<Result<_, _>>()?;
         for (id, table_number, name, fields) in indexes {
             if name != BY_ID {
-                backfill(conn, table_number, id, &serde_json::from_str::<Vec<String>>(&fields)?)?;
+                backfill(conn, table_number, id, &keys::index_key_fields(&serde_json::from_str::<Vec<String>>(&fields)?))?;
             }
+        }
+        if stored >= 2 {
+            return storage::write_meta(conn, META_KEY_ENCODING, (keys::KEY_ENCODING_VERSION as i64).into());
         }
         let names: HashMap<u32, String> = conn
             .prepare("SELECT table_number, name FROM _tables")?
@@ -291,7 +309,8 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
     storage::write_meta(conn, META_KEY_ENCODING, (keys::KEY_ENCODING_VERSION as i64).into())
 }
 
-fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, fields: &[String]) -> anyhow::Result<()> {
+/// Write the entries of one index; `key_fields` as in [`IndexInfo::key_fields`].
+fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, key_fields: &[String]) -> anyhow::Result<()> {
     let docs = storage::table_documents(conn, table_number)?;
     if !docs.is_empty() {
         tracing::info!(table_number, index_id, docs = docs.len(), "backfilling index");
@@ -299,7 +318,7 @@ fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, fields: &[S
     for (id, json) in docs {
         let doc: Value = serde_json::from_str(&json)?;
         let obj = doc.as_object().context("stored document is not an object")?;
-        let key = keys::index_key(obj, fields, &id);
+        let key = keys::index_key(obj, key_fields, &id);
         storage::insert_index_entry(conn, index_id, &key, &id)?;
     }
     Ok(())

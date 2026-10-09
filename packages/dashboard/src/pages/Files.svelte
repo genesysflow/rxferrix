@@ -3,7 +3,7 @@
   import { useMutation, usePaginatedQuery, useQuery } from "@ferrix/svelte";
   import { storage, type FileSummary } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
-  import { formatBytes, formatTime, previewKind, sameOriginPath } from "../lib/format.js";
+  import { formatBytes, formatTime, hasThumbnail, previewKind, sameOriginPath, thumbUrl } from "../lib/format.js";
   import { href, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
 
@@ -19,8 +19,12 @@
   const selectedQuery = useQuery(storage.file, () => (selectedId ? { id: selectedId } : "skip"));
   const selected = $derived(selectedQuery.data ?? null);
 
-  /** `/api/storage/<id>` on this origin (the dashboard's CSP only allows same-origin requests). */
-  const fileUrl = (f: FileSummary, download = false) => sameOriginPath(f.url) + (download ? "?download=1" : "");
+  /**
+   * `/api/storage/<id>` on this origin (the dashboard's CSP only allows same-origin requests). In private storage mode
+   * the URLs are signed (`?exp=…&sig=…`): `downloadUrl` already has `download=1` added correctly, and thumbnails
+   * are added with `withParams`, never by appending a second `?`.
+   */
+  const fileUrl = (f: FileSummary, download = false) => sameOriginPath(download ? f.downloadUrl : f.url);
   const label = (f: FileSummary) => f.filename ?? f._id;
 
   function select(id: string | null) {
@@ -173,8 +177,10 @@
                 aria-selected={selectedId === f._id}
               >
                 <td class="thumb">
-                  {#if previewKind(f.contentType) === "image"}
-                    <img src={fileUrl(f)} alt="" loading="lazy" />
+                  {#if hasThumbnail(f.contentType)}
+                    <img src={thumbUrl(f.url, 96)} alt="" loading="lazy" width="36" height="36" data-testid="thumb" />
+                  {:else if previewKind(f.contentType) === "image"}
+                    <img src={fileUrl(f)} alt="" loading="lazy" width="36" height="36" />
                   {:else}
                     <span class="icon" aria-hidden="true">▤</span>
                   {/if}

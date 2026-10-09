@@ -42,7 +42,7 @@ async function waitFor(url: string, what: string) {
 async function startServers() {
   dataDir = mkdtempSync(join(tmpdir(), "chat-e2e-"));
   const server = Bun.spawn(
-    [BIN, "serve", "--dev", "--http", `127.0.0.1:${BACKEND_PORT}`, "--dir", dataDir, "--public-url", APP],
+    [BIN, "serve", "--dev", "--http", `127.0.0.1:${BACKEND_PORT}`, "--dir", dataDir],
     { stdout: "ignore", stderr: "ignore" },
   );
   started.push({ proc: server, port: BACKEND_PORT });
@@ -256,6 +256,9 @@ try {
     caption,
     { timeout: 5000 },
   );
+  // In --dev without --public-url, file URLs are root-relative, so they load through Vite's /api proxy.
+  const src = (await message(b, caption).locator(".attachment img").getAttribute("src")) ?? "";
+  if (!src.startsWith("/api/storage/")) failures.push(`expected a root-relative image URL, got ${src}`);
   await shot(b, "attachment");
 
   console.log("search: finds the message, and new matches live");
@@ -288,7 +291,7 @@ try {
   await message(a, "check the oven").waitFor({ timeout: 3000 });
   await shot(a, "reminder");
 
-  console.log("infinite scroll: seed 200 older messages, scroll up to the first");
+  console.log("infinite scroll: seed 200 messages, scroll up to the first");
   await send(a, "/seed 200");
   await a.getByTestId("notice").filter({ hasText: "Added 200 sample messages" }).waitFor({ timeout: 15000 });
   const first = message(b, "Sample message #1 of 200");

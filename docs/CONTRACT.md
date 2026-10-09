@@ -534,7 +534,8 @@ committed snapshot; results are `(id, score)` with `score` the cosine similarity
 exact (vec0 does a brute-force scan). Errors: a query vector whose length isn't the index's `dims` (or containing
 NaN/inf), `limit` outside `1..=256`, a filter on a field that isn't a filter field, more than 64 `or` branches.
 Writing a document whose vector field has the wrong length (or isn't an array of numbers) fails before anything is
-written. Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
+written, unless the write leaves that field unchanged (a vector made unindexable by a change of `dims` stays
+unindexed, and the document stays editable). Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
 can't inline them for codegen): map results to a struct to return them.
 
 **Storage and consistency.** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as

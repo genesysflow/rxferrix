@@ -475,7 +475,13 @@ impl<'a> SpecialWrites<'a> {
     ) -> anyhow::Result<Self> {
         let mut changes = Vec::new();
         for info in &table.search_indexes {
-            let new_entry = new.map(|d| Entry::of(info, d)).transpose()?.flatten();
+            let new_entry = match new.map(|d| Entry::of(info, d)).transpose() {
+                Ok(entry) => entry.flatten(),
+                // A vector that was already unindexable and is left unchanged (e.g. written before the index's
+                // dimensions changed, then skipped by the backfill) stays unindexed rather than blocking other edits.
+                Err(_) if old.is_some_and(|o| o.get(info.field()) == new.and_then(|n| n.get(info.field()))) => None,
+                Err(e) => return Err(e),
+            };
             // The old version was accepted when it was written (or skipped by a backfill): never fail on it.
             let old_entry = old.and_then(|d| Entry::of(info, d).ok().flatten());
             if old_entry != new_entry {
@@ -593,4 +599,64 @@ fn stored_entries(conn: &Connection, info: &SearchIndexInfo) -> anyhow::Result<V
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::db::Database;
+    use crate::db::query::MutationDb;
+    use crate::schema::{TableDef, VectorIndexDef};
+
+    fn def(dimensions: usize) -> TableDef {
+        TableDef {
+            name: "vt",
+            indexes: vec![],
+            search_indexes: vec![],
+            vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "e", dimensions, filter_fields: vec![] }],
+            ts: || "{ }".into(),
+            validate: |_| Ok(()),
+        }
+    }
+
+    async fn insert(db: &Database, doc: Value) -> String {
+        let txn = db.begin_write().await.unwrap();
+        let id = MutationDb::new(txn.clone()).insert_raw("vt", doc).await.unwrap();
+        txn.commit_with(|_, _| Ok(())).unwrap();
+        id
+    }
+
+    async fn patch(db: &Database, id: &str, patch: Value) -> crate::Result<()> {
+        let txn = db.begin_write().await?;
+        let result = MutationDb::new(txn.clone()).patch_raw(id, patch).await;
+        match result {
+            Ok(()) => txn.commit_with(|_, _| Ok(())).map(drop),
+            Err(e) => {
+                txn.rollback();
+                Err(e)
+            }
+        }
+    }
+
+    /// After the dimensions change, old vectors are skipped by the backfill; their documents stay editable as long
+    /// as the vector itself is left alone, and a new vector must have the new dimensions.
+    #[tokio::test]
+    async fn unchanged_unindexable_vectors_do_not_block_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), &[def(2)], 1).unwrap();
+        let id = insert(&db, json!({ "e": [1.0, 2.0], "x": 1 })).await;
+        drop(db);
+
+        let db = Database::open(dir.path(), &[def(3)], 1).unwrap();
+        assert!(db.verify_indexes().await.unwrap().is_empty());
+        patch(&db, &id, json!({ "x": 2 })).await.unwrap();
+        patch(&db, &id, json!({ "e": [1.0, 2.0] })).await.unwrap();
+        let err = patch(&db, &id, json!({ "e": [1.0] })).await.unwrap_err();
+        assert!(err.to_string().contains("expects 3"), "{err}");
+        patch(&db, &id, json!({ "e": [1.0, 2.0, 3.0] })).await.unwrap();
+        let err = patch(&db, &id, json!({ "e": [1.0, 2.0] })).await.unwrap_err();
+        assert!(err.to_string().contains("expects 3"), "{err}");
+        assert!(db.verify_indexes().await.unwrap().is_empty());
+    }
 }

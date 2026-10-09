@@ -182,7 +182,10 @@ pub struct SearchIndex<T> {
 }
 impl<T> SearchIndex<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self { name, _t: PhantomData }
+        Self {
+            name,
+            _t: PhantomData,
+        }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -201,7 +204,10 @@ pub struct VectorIndex<T> {
 }
 impl<T> VectorIndex<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self { name, _t: PhantomData }
+        Self {
+            name,
+            _t: PhantomData,
+        }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -473,7 +479,9 @@ pub mod __private {
     impl VectorFieldType for Option<Vec<f32>> {}
     pub const fn assert_vector_field<T: VectorFieldType + ?Sized>() {}
 
-    pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
+    pub fn validate_doc<T: crate::Table>(
+        doc: &serde_json::Value,
+    ) -> std::result::Result<(), String> {
         <crate::Doc<T> as serde::Deserialize>::deserialize(doc)
             .map(drop)
             .map_err(|e| e.to_string())

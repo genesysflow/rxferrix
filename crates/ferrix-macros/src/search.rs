@@ -47,8 +47,12 @@ pub struct SpecialIndexSpec {
 impl SpecialIndexSpec {
     pub fn parse(kind: Kind, attr: &syn::Attribute) -> syn::Result<SpecialIndexSpec> {
         let usage = match kind {
-            Kind::Search => "expected `#[search_index(name, search = field, filter = [field, ...])]`",
-            Kind::Vector => "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...])]`",
+            Kind::Search => {
+                "expected `#[search_index(name, search = field, filter = [field, ...])]`"
+            }
+            Kind::Vector => {
+                "expected `#[vector_index(name, field = field, dims = N, filter = [field, ...])]`"
+            }
         };
         let syn::Meta::List(list) = &attr.meta else {
             return Err(syn::Error::new_spanned(attr, usage));
@@ -60,12 +64,21 @@ impl SpecialIndexSpec {
     }
 
     fn parse_body(kind: Kind, usage: &str, input: ParseStream) -> syn::Result<SpecialIndexSpec> {
-        let name: syn::Ident = input.parse().map_err(|e| syn::Error::new(e.span(), usage))?;
+        let name: syn::Ident = input
+            .parse()
+            .map_err(|e| syn::Error::new(e.span(), usage))?;
         if input.peek(Token![=]) {
             return Err(input.error(format!("the index name comes first, without `=`; {usage}")));
         }
-        let mut spec =
-            SpecialIndexSpec { kind, name, field: None, dims: None, filter: Vec::new(), filter_span: None, errors: Vec::new() };
+        let mut spec = SpecialIndexSpec {
+            kind,
+            name,
+            field: None,
+            dims: None,
+            filter: Vec::new(),
+            filter_span: None,
+            errors: Vec::new(),
+        };
         let mut seen_filter = false;
         while !input.is_empty() {
             input.parse::<Token![,]>()?;
@@ -82,13 +95,17 @@ impl SpecialIndexSpec {
             if key_name == field_key {
                 let f: syn::Ident = input.parse()?;
                 if spec.field.is_some() {
-                    spec.errors.push(syn::Error::new(key.span(), format!("duplicate `{field_key}` argument")));
+                    spec.errors.push(syn::Error::new(
+                        key.span(),
+                        format!("duplicate `{field_key}` argument"),
+                    ));
                 }
                 spec.field = Some(f);
             } else if key_name == "dims" && kind == Kind::Vector {
                 let lit: syn::LitInt = input.parse()?;
                 if spec.dims.is_some() {
-                    spec.errors.push(syn::Error::new(key.span(), "duplicate `dims` argument"));
+                    spec.errors
+                        .push(syn::Error::new(key.span(), "duplicate `dims` argument"));
                 }
                 match lit.base10_parse::<usize>() {
                     Ok(n) if (1..=MAX_DIMENSIONS).contains(&n) => spec.dims = Some((n, lit.span())),
@@ -105,7 +122,8 @@ impl SpecialIndexSpec {
                 let bracket = bracketed!(content in input);
                 let fields = Punctuated::<syn::Ident, Token![,]>::parse_terminated(&content)?;
                 if seen_filter {
-                    spec.errors.push(syn::Error::new(key.span(), "duplicate `filter` argument"));
+                    spec.errors
+                        .push(syn::Error::new(key.span(), "duplicate `filter` argument"));
                 }
                 seen_filter = true;
                 spec.filter = fields.into_iter().collect();
@@ -115,7 +133,13 @@ impl SpecialIndexSpec {
                     Kind::Search => "`search` or `filter`",
                     Kind::Vector => "`field`, `dims` or `filter`",
                 };
-                return Err(syn::Error::new(key.span(), format!("unknown #[{}] argument `{key_name}`; expected {expected}", kind.attr())));
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "unknown #[{}] argument `{key_name}`; expected {expected}",
+                        kind.attr()
+                    ),
+                ));
             }
         }
         Ok(spec)
@@ -136,7 +160,8 @@ pub enum TypeShape {
 }
 
 const PRIMITIVES: &[&str] = &[
-    "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
+    "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+    "usize", "f32", "f64",
 ];
 
 fn single_generic(seg: &syn::PathSegment) -> Option<&syn::Type> {
@@ -164,12 +189,17 @@ pub fn type_shape(ty: &syn::Type) -> TypeShape {
 
 fn shape(ty: &syn::Type, allow_option: bool) -> TypeShape {
     match ty {
-        syn::Type::Array(_) | syn::Type::Tuple(_) | syn::Type::Reference(_) | syn::Type::Slice(_) => {
+        syn::Type::Array(_)
+        | syn::Type::Tuple(_)
+        | syn::Type::Reference(_)
+        | syn::Type::Slice(_) => {
             return TypeShape::Other;
         }
         _ => {}
     }
-    let Some(seg) = last_segment(ty) else { return TypeShape::Unknown };
+    let Some(seg) = last_segment(ty) else {
+        return TypeShape::Unknown;
+    };
     let name = seg.ident.to_string();
     match name.as_str() {
         "String" if seg.arguments.is_none() => TypeShape::Text,
@@ -182,7 +212,10 @@ fn shape(ty: &syn::Type, allow_option: bool) -> TypeShape {
         },
         "Vec" => match single_generic(seg).and_then(last_segment) {
             Some(inner) if inner.ident == "f32" && inner.arguments.is_none() => TypeShape::F32Vec,
-            Some(inner) if PRIMITIVES.contains(&inner.ident.to_string().as_str()) || inner.ident == "String" => {
+            Some(inner)
+                if PRIMITIVES.contains(&inner.ident.to_string().as_str())
+                    || inner.ident == "String" =>
+            {
                 TypeShape::Other
             }
             _ => TypeShape::Unknown,

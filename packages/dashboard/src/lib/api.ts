@@ -547,6 +547,39 @@ export interface BackupInfo {
   ts: number | null;
 }
 
+/** `PendingRestore` (crates/ferrix/src/ops/restore.rs): a backup staged to replace the database at the next start. */
+export interface PendingRestore {
+  /** The backup's name, or the uploaded file's. */
+  source: string;
+  stagedAt: number;
+  stagedBy: string | null;
+  backupCreatedAt: number;
+  /** Commit ts of the backup's snapshot. */
+  ts: number;
+  ferrixVersion: string;
+  includesAux: boolean;
+  blobs: number;
+  bytes: number;
+  /** The archive had `auth_secret.key`; a staged restore never restores it. */
+  secretIgnored: boolean;
+  /** Why the last start didn't apply it (cancel it). */
+  error: string | null;
+}
+
+/** Whether the server can restart itself to apply a staged restore (`--restart-exit-code`). */
+export interface RestartInfo {
+  available: boolean;
+  exitCode: number | null;
+}
+
+/** `GET /api/admin/backups`. */
+export interface BackupListing {
+  target: string;
+  backups: BackupInfo[];
+  pendingRestore: PendingRestore | null;
+  restart: RestartInfo;
+}
+
 export interface ImportReport {
   tables: { table: string; documents: number; replaced: number; deleted: number }[];
   files: number;

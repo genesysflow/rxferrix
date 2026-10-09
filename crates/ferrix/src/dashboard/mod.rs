@@ -12,15 +12,18 @@
 //! | `document` | query | One document by id (any table), with its table name. |
 //! | `insert_document`, `patch_document`, `replace_document`, `delete_documents` | mutation | Untyped writes, validated with `TableDef::validate`. |
 //! | `functions` | query | The function registry, internal and system functions included. |
-//! | `run_function` | action | Run any function by path with JSON args, optionally as a given user. |
+//! | `run_function` | action | Run any function by path with JSON args, optionally as a given user (through a real, audited, short-lived session). |
 //! | `users`, `user_sessions`, `revoke_session`, `delete_user` | query / mutation | The Users page. |
 //! | `me` | query | The signed-in admin. |
 //!
-//! Secrets are never returned and system tables are mostly read-only; see [`secrets`].
+//! Secrets are never returned and system tables are mostly read-only; see [`secrets`]. Every write is recorded in the
+//! audit log (`crate::audit`) in its own transaction. Settings are in `crate::settings`, the audit log's query in
+//! `crate::audit`, and `POST /api/admin/impersonate` in [`impersonate`].
 
 #[cfg(feature = "dashboard")]
 pub mod assets;
 pub mod http;
+pub mod impersonate;
 pub mod secrets;
 
 use std::time::Instant;
@@ -28,6 +31,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::audit;
 use crate::auth::store;
 use crate::auth::tables::{Account, Admin, Credential, Session, User, VerificationCode};
 use crate::db::catalog::TableInfo;
@@ -275,10 +279,14 @@ fn user_fields(document: Value, id: Option<&str>) -> Result<Value> {
 /// Insert a document (JSON object, system fields ignored) into an app table. Validated against the table's type.
 #[mutation]
 pub async fn insert_document(ctx: &MutationCtx, table: String, document: Value) -> Result<String> {
-    ctx.auth.require_admin()?;
+    let admin = ctx.auth.require_admin()?;
     secrets::forbid_system_write(&table, "insert")?;
     let fields = user_fields(document, None)?;
-    ctx.db.insert_raw(&table, fields).await.map_err(input_error("invalid_document"))
+    let id = ctx.db.insert_raw(&table, fields).await.map_err(input_error("invalid_document"))?;
+    let after = ctx.db.get_raw(&id).await?.map(|(_, d)| d);
+    let rec = audit::Record::new("insert").target(&table, Some(id.clone())).documents(&table, None, after);
+    audit::record(&ctx.db, Some(admin), rec).await?;
+    Ok(id)
 }
 
 /// The `_users` fields changed by `new` relative to `old`; only [`EDITABLE_USER_FIELDS`] may change.
@@ -318,28 +326,36 @@ fn user_profile_patch(old: &Value, new: &Map<String, Value>, replace: bool) -> R
 /// Shared by `patch_document` and `replace_document`: `_users` gets a profile-only patch, other system tables are
 /// refused, app tables are written as asked.
 async fn write_existing(ctx: &MutationCtx, id: &str, document: Value, replace: bool) -> Result<()> {
+    let admin = ctx.auth.require_admin()?;
     let table = table_of(&ctx.db, id)?;
+    let action = if replace { "replace" } else { "patch" };
+    if table.name != USERS {
+        secrets::forbid_system_write(&table.name, if replace { "replace" } else { "update" })?;
+    }
+    let Some((_, old)) = ctx.db.get_raw(id).await? else {
+        return Err(user_error("not_found", format!("Document {id} does not exist")));
+    };
     if table.name == USERS {
         let Value::Object(new) = user_fields(document, Some(id))? else { unreachable!("user_fields returns an object") };
-        let Some((_, old)) = ctx.db.get_raw(id).await? else {
-            return Err(user_error("not_found", format!("Document {id} does not exist")));
-        };
         let patch = user_profile_patch(&old, &new, replace)?;
         if patch.is_empty() {
             return Ok(());
         }
-        return ctx.db.patch_raw(id, Value::Object(patch)).await.map_err(input_error("invalid_document"));
-    }
-    secrets::forbid_system_write(&table.name, if replace { "replace" } else { "update" })?;
-    let result = if replace {
-        ctx.db.replace_raw(id, user_fields(document, Some(id))?).await
+        ctx.db.patch_raw(id, Value::Object(patch)).await.map_err(input_error("invalid_document"))?;
     } else {
-        if !document.is_object() {
-            return Err(user_error("invalid_document", "A patch must be a JSON object"));
-        }
-        ctx.db.patch_raw(id, document).await
-    };
-    result.map_err(input_error("invalid_document"))
+        let result = if replace {
+            ctx.db.replace_raw(id, user_fields(document, Some(id))?).await
+        } else {
+            if !document.is_object() {
+                return Err(user_error("invalid_document", "A patch must be a JSON object"));
+            }
+            ctx.db.patch_raw(id, document).await
+        };
+        result.map_err(input_error("invalid_document"))?;
+    }
+    let new = ctx.db.get_raw(id).await?.map(|(_, d)| d).unwrap_or(Value::Null);
+    let rec = audit::Record::new(action).target(&table.name, Some(id.to_string())).diff(&table.name, &old, &new);
+    audit::record(&ctx.db, Some(admin), rec).await
 }
 
 /// Shallow-merge `patch` into a document (`null` sets a field to null). The result must match the table's type.
@@ -356,15 +372,20 @@ pub async fn replace_document(ctx: &MutationCtx, id: String, document: Value) ->
     write_existing(ctx, &id, document, true).await
 }
 
-/// Delete documents of app tables, all in one transaction. Returns how many were deleted.
+/// Delete documents of app tables, all in one transaction (one audit entry each). Returns how many were deleted.
 #[mutation]
 pub async fn delete_documents(ctx: &MutationCtx, ids: Vec<String>) -> Result<u32> {
-    ctx.auth.require_admin()?;
+    let admin = ctx.auth.require_admin()?;
     for id in &ids {
         secrets::forbid_system_write(&table_of(&ctx.db, id)?.name, "delete")?;
     }
     for id in &ids {
+        let before = ctx.db.get_raw(id).await?;
         ctx.db.delete_raw(id).await.map_err(input_error("not_found"))?;
+        if let Some((table, doc)) = before {
+            let rec = audit::Record::new("delete").target(&table.name, Some(id.clone())).documents(&table.name, Some(doc), None);
+            audit::record(&ctx.db, Some(admin), rec).await?;
+        }
     }
     Ok(ids.len() as u32)
 }
@@ -434,28 +455,52 @@ pub struct RunResult {
     pub identity: Option<String>,
 }
 
-/// Run any registered function (public, internal or system) by path with JSON `args`. Runs as the calling admin,
-/// or with `as_user` as that user (an identity without a session). A failing function still returns normally, with
-/// `success: false`, its error, its log lines and its duration.
+/// Run any registered function (public, internal or system) by path with JSON `args`. Runs as the calling admin, or
+/// with `as_user` as that user through a real, short-lived session (marked `impersonatedBy`, audited as
+/// `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and shared queries are keyed exactly
+/// as for the user. Every run is audited (`run_function`; for a mutation, in the mutation's own transaction). A
+/// failing function still returns normally, with `success: false`, its error, its log lines and its duration.
 #[action]
 pub async fn run_function(ctx: &ActionCtx, path: String, args: Option<Value>, as_user: Option<String>) -> Result<RunResult> {
-    ctx.auth.require_admin()?;
+    let admin = ctx.auth.require_admin()?;
     let app = &ctx.app;
     let Some(def) = app.registry().get(&path) else {
         return Err(user_error("not_found", format!("No function is registered at `{path}`")));
     };
-    let identity = match as_user.filter(|u| !u.is_empty()) {
-        None => ctx.auth.identity().clone(),
-        Some(user) => {
-            let id: Id<User> = parse_id(&user, "user")?;
-            if store::read(app, |db| async move { db.get(id).await }).await.ok().flatten().is_none() {
-                return Err(user_error("not_found", format!("User {user} does not exist")));
-            }
-            Identity::user(id, None)
-        }
-    };
     let args = args.filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
     let kind = def.handler.kind();
+    let as_user = as_user.filter(|u| !u.is_empty());
+    let (identity, impersonation) = match &as_user {
+        None => (ctx.auth.identity().clone(), None),
+        Some(user) => {
+            let id: Id<User> = parse_id(user, "user")?;
+            let purpose = json!({ "purpose": "run_function", "path": path });
+            let ttl = std::time::Duration::from_secs(300);
+            let Some((_, session, _)) =
+                app.auth().impersonate(app, admin, id, ttl, purpose, Default::default()).await?
+            else {
+                return Err(user_error("not_found", format!("User {user} does not exist")));
+            };
+            (Identity::user(id, Some(session)), Some(session))
+        }
+    };
+    let details = json!({
+        "path": path,
+        "kind": kind.as_str(),
+        "asUser": as_user,
+        "sessionId": impersonation.map(|s| s.to_string()),
+        "args": crate::exec_log::truncate_args(&crate::settings::redact_args(&path, &args)).0,
+    });
+    let audit_entry = |outcome: Value| {
+        let mut d = details.clone();
+        d["outcome"] = outcome;
+        audit::Record::new("run_function").details(d)
+    };
+    if kind != FunctionKind::Mutation {
+        // Recorded before the run: an action's writes happen in their own transactions.
+        let rec = audit_entry(json!("started"));
+        store::write(app, |db| async move { audit::record(&db, Some(admin), rec).await }).await?;
+    }
     let started = Instant::now();
     let (result, ts, log_lines) = match kind {
         FunctionKind::Query => {
@@ -463,7 +508,14 @@ pub async fn run_function(ctx: &ActionCtx, path: String, args: Option<Value>, as
             (run.result, Some(run.ts), run.log_lines)
         }
         FunctionKind::Mutation => {
-            let run = app.call_mutation(&path, args, &identity, true, None).await;
+            // Audited inside the mutation's transaction, so the entry commits with its writes; a failed run (rolled
+            // back) is audited on its own.
+            let hook = AuditHook { admin, record: audit_entry(json!("success")) };
+            let run = app.call_mutation_hooked(&path, args, &identity, true, None, Some(&hook)).await;
+            if run.result.is_err() {
+                let rec = audit_entry(json!("error"));
+                store::write(app, |db| async move { audit::record(&db, Some(admin), rec).await }).await?;
+            }
             let ts = run.result.as_ref().ok().map(|(_, ts)| *ts);
             (run.result.map(|(v, _)| v), ts, run.log_lines)
         }
@@ -472,6 +524,11 @@ pub async fn run_function(ctx: &ActionCtx, path: String, args: Option<Value>, as
             (run.result, None, run.log_lines)
         }
     };
+    if let Some(session) = impersonation
+        && let Err(e) = store::delete_session(app, session).await
+    {
+        tracing::warn!("dashboard: could not end impersonation session {session}: {e:#}");
+    }
     let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     let (success, value, error) = match result {
         Ok(v) => (true, v, None),
@@ -492,6 +549,22 @@ pub async fn run_function(ctx: &ActionCtx, path: String, args: Option<Value>, as
         ts,
         identity: identity.log_summary(),
     })
+}
+
+/// Writes the `run_function` audit entry inside the mutation's transaction.
+struct AuditHook {
+    admin: Id<Admin>,
+    record: audit::Record,
+}
+
+impl crate::runtime::MutationHook for AuditHook {
+    fn before<'a>(&'a self, _db: &'a crate::MutationDb) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn after<'a>(&'a self, db: &'a crate::MutationDb, _value: &'a Value) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(audit::record(db, Some(self.admin), self.record.clone()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -584,6 +657,8 @@ pub struct SessionSummary {
     pub user_agent: Option<String>,
     pub ip: Option<String>,
     pub expired: bool,
+    /// The admin who minted this session to act as the user (impersonation), if any.
+    pub impersonated_by: Option<String>,
 }
 
 /// A user's sessions, most recently used first (no token hashes).
@@ -606,6 +681,7 @@ pub async fn user_sessions(ctx: &QueryCtx, user: String) -> Result<Vec<SessionSu
             last_used_at: s.last_used_at,
             expired: s.expires_at <= now,
             user_agent: s.value.user_agent,
+            impersonated_by: s.value.impersonated_by.map(|a| a.to_string()),
             ip: s.value.ip,
         })
         .collect();
@@ -613,16 +689,19 @@ pub async fn user_sessions(ctx: &QueryCtx, user: String) -> Result<Vec<SessionSu
     Ok(sessions)
 }
 
-/// End a session (user or admin): its refresh token stops working at once, and new connections with its access
-/// tokens are refused. Sockets already authenticated with it keep their identity until the access token expires.
+/// End a session (user or admin): its refresh token stops working at once, new connections with its access tokens
+/// are refused, and sockets already authenticated with it get `AuthError` right away (live revocation).
 #[mutation]
 pub async fn revoke_session(ctx: &MutationCtx, session: String) -> Result<()> {
-    ctx.auth.require_admin()?;
+    let admin = ctx.auth.require_admin()?;
     let id: Id<Session> = parse_id(&session, "session")?;
-    if ctx.db.get(id).await?.is_none() {
+    let Some(doc) = ctx.db.get(id).await? else {
         return Err(user_error("not_found", format!("Session {session} does not exist")));
-    }
-    store::delete_session_in(&ctx.db, id).await
+    };
+    let before = serde_json::to_value(&doc)?;
+    store::delete_session_in(&ctx.db, id).await?;
+    let rec = audit::Record::new("revoke_session").target("_sessions", Some(session)).documents("_sessions", Some(before), None);
+    audit::record(&ctx.db, Some(admin), rec).await
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
@@ -639,7 +718,7 @@ pub struct DeletedUser {
 /// pending email codes. Documents of app tables that reference the user are left alone.
 #[mutation]
 pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser> {
-    ctx.auth.require_admin()?;
+    let admin = ctx.auth.require_admin()?;
     let id: Id<User> = parse_id(&user, "user")?;
     let Some(doc) = ctx.db.get(id).await? else {
         return Err(user_error("not_found", format!("User {user} does not exist")));
@@ -670,6 +749,12 @@ pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser>
         }
     }
     db.delete(id).await?;
+    let before = serde_json::to_value(&doc)?;
+    let rec = audit::Record::new("delete_user")
+        .target(USERS, Some(user))
+        .documents(USERS, Some(before), None)
+        .details(serde_json::to_value(&out)?);
+    audit::record(db, Some(admin), rec).await?;
     Ok(out)
 }
 

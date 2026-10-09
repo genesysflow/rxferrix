@@ -380,6 +380,7 @@ impl App {
         crate::storage::service::ensure_schema(&app).await?;
         crate::storage::service::spawn_sweeper(&app);
         crate::migrations::startup(&app).await?;
+        crate::auth::start(&app).await?;
         Ok(app)
     }
 
@@ -730,7 +731,8 @@ impl Execution {
             path: path.to_string(),
             kind,
             identity: identity_summary(identity),
-            args: crate::exec_log::truncate_args(args),
+            // System functions' secret arguments (settings passwords, ...) are masked (`settings::redact_args`).
+            args: crate::exec_log::truncate_args(&crate::settings::redact_args(path, args)),
         }
     }
 

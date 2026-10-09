@@ -33,6 +33,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
     Equals<
       TableNames,
       | "attachments"
+      | "audited_items"
       | "blobs"
       | "dash_items"
       | "items"
@@ -45,6 +46,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "mig_tasks"
       | "notes"
       | "private_notes"
+      | "revocation_notes"
       | "sched_notes"
       | "search_messages"
       | "search_vectors"

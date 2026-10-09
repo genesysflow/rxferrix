@@ -50,6 +50,11 @@ impl Interval {
     pub fn from_range(range: &KeyRange) -> Interval {
         Interval { start: range.start.clone(), end: End::from_range(range) }
     }
+
+    /// Does this range contain `key`?
+    pub fn contains(&self, key: &[u8]) -> bool {
+        self.start.as_slice() <= key && self.end.above(key)
+    }
 }
 
 struct Node<T> {

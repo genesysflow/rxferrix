@@ -87,6 +87,7 @@ impl Database {
         migrations: &[(String, String)],
     ) -> anyhow::Result<Database> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
+        configure_sqlite();
         search::vector::register_extension();
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
@@ -259,6 +260,35 @@ impl Database {
             on_commit: Mutex::new(Vec::new()),
         }))
     }
+}
+
+/// Process-wide SQLite settings for parallel readers, applied once before the first connection.
+///
+/// Two global mutexes in SQLite serialize reader connections that run on different threads: the memory statistics
+/// (`SQLITE_CONFIG_MEMSTATUS`, taken on every allocation) and, when SQLite is built with
+/// `SQLITE_ENABLE_MEMORY_MANAGEMENT` (rusqlite's bundled build defines it), the page cache that all connections then
+/// share. With both, N readers ran no faster than one. Memory statistics are turned off here (if SQLite is not
+/// initialized yet; the workspace also builds it with `SQLITE_DEFAULT_MEMSTATUS=0`); the shared page cache can only
+/// be avoided at build time, so its presence is logged (see `.cargo/config.toml`).
+fn configure_sqlite() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: called before this process opens any connection (unless the embedding app did; then SQLite is
+        // initialized and this returns SQLITE_MISUSE, which is harmless). The variadic argument is the C int it expects.
+        unsafe {
+            rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0 as std::ffi::c_int);
+        }
+        // SAFETY: a NUL-terminated string literal.
+        let shared_cache = unsafe { rusqlite::ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) };
+        if shared_cache != 0 {
+            tracing::warn!(
+                "SQLite was built with SQLITE_ENABLE_MEMORY_MANAGEMENT: its reader connections share one page cache behind \
+                 a global mutex, so queries won't run faster in parallel. Build with \
+                 LIBSQLITE3_FLAGS=\"-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0\" (as this repository's \
+                 .cargo/config.toml does)."
+            );
+        }
+    });
 }
 
 /// The wall clock plus an offset that only ever grows. The offset is 0 in production; tests advance it

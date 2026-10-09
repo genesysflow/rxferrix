@@ -4,3 +4,4 @@ fx_data/
 dist/
 .svelte-kit/
 *.tsbuildinfo
+.claude/

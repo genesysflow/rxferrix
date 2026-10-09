@@ -112,6 +112,36 @@ describe("FerrixAuth", () => {
     expect(listener).toHaveBeenCalled();
   });
 
+  it("calls fetch as a plain function (browsers reject a fetch called as a method of another object)", async () => {
+    const t = tokens("c");
+    const seen: unknown[] = [];
+    const fetch = function (this: unknown) {
+      seen.push(this);
+      return Promise.resolve(new Response(JSON.stringify(t), { status: 200 }));
+    } as unknown as typeof globalThis.fetch;
+    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+    await auth.signIn({ email: "a@b.co", password: "pw" });
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("creates the first admin with the setup token and signs in as them", async () => {
+    const t = { ...tokens("admin"), userId: undefined, adminId: "admin1" };
+    const { fetch, calls } = mockFetch({
+      "/api/auth/admin/setup": (b) => (b.token === "good" ? { status: 200, body: t } : authError(401, "invalid_setup_token")),
+    });
+    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+    const err = await auth.setupAdmin({ token: "bad", email: "a@b.co", password: "pw" }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "invalid_setup_token" });
+    await auth.setupAdmin({ token: "good", email: "a@b.co", password: "pw" });
+    await settle();
+    expect(calls.at(-1)).toEqual({ path: "/api/auth/admin/setup", body: { token: "good", email: "a@b.co", password: "pw" } });
+    expect(server.drain()).toEqual([{ type: "Authenticate", baseVersion: 0, token: t.accessToken }]);
+    server.transition({ identity: 1, ts: 1 });
+    expect(auth.state()).toEqual({ isLoading: false, isAuthenticated: true, userId: null, isAdmin: true });
+  });
+
   it("rejects with the server's error code", async () => {
     const { fetch } = mockFetch({ "/api/auth/signin": () => authError(401, "invalid_credentials", "Invalid email or password") });
     const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });

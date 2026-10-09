@@ -22,6 +22,7 @@ export interface UseAuthResult extends AuthState {
   signUp: FerrixAuth["signUp"];
   signIn: FerrixAuth["signIn"];
   signInAsAdmin: FerrixAuth["signInAsAdmin"];
+  setupAdmin: FerrixAuth["setupAdmin"];
   signOut: FerrixAuth["signOut"];
   signInWithOAuth: FerrixAuth["signInWithOAuth"];
   handleRedirectCallback: FerrixAuth["handleRedirectCallback"];
@@ -57,6 +58,7 @@ export function useAuth(options: { client?: FerrixClient } = {}): UseAuthResult 
     signUp: auth.signUp.bind(auth),
     signIn: auth.signIn.bind(auth),
     signInAsAdmin: auth.signInAsAdmin.bind(auth),
+    setupAdmin: auth.setupAdmin.bind(auth),
     signOut: auth.signOut.bind(auth),
     signInWithOAuth: auth.signInWithOAuth.bind(auth),
     handleRedirectCallback: auth.handleRedirectCallback.bind(auth),

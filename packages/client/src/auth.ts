@@ -209,7 +209,9 @@ export class FerrixAuth {
     this.storageKey = options.storageKey ?? `ferrix.auth:${client.url}`;
     const f = options.fetch ?? (globalThis as { fetch?: typeof fetch }).fetch;
     if (!f) throw new Error("FerrixAuth: no global fetch available; pass the `fetch` option");
-    this.fetchImpl = f;
+    // Called as a plain function: browsers throw "Illegal invocation" when `window.fetch` is called as a method of
+    // another object (e.g. `this.fetchImpl(...)`).
+    this.fetchImpl = (input, init) => f(input, init);
     this.baseUrl = client.url.replace(/\/+$/, "");
     this.loaded = this.load();
     // Holds the socket's subscriptions back until the stored session (if any) has been sent with Authenticate.
@@ -471,6 +473,22 @@ export class FerrixAuth {
   /** Sign in to an admin account (dashboard). Functions then see `ctx.auth.is_admin()`. */
   async signInAsAdmin(args: { email: string; password: string }): Promise<void> {
     await this.signedIn(await this.post<AuthTokens>("admin/signin", args));
+  }
+
+  /** Whether the server has no administrator yet (`GET /api/auth/admin/setup`). */
+  async needsAdminSetup(): Promise<boolean> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/auth/admin/setup`);
+    const json = (await res.json().catch(() => null)) as { needsSetup?: boolean } | null;
+    if (!res.ok) throw errorFrom(res.status, json);
+    return json?.needsSetup === true;
+  }
+
+  /**
+   * Create the first administrator with the one-time setup token that `serve` prints as `/_/setup#token=…`, and
+   * sign in as them. Rejects with code `"invalid_setup_token"` or `"setup_done"`.
+   */
+  async setupAdmin(args: { token: string; email: string; password: string }): Promise<void> {
+    await this.signedIn(await this.post<AuthTokens>("admin/setup", args));
   }
 
   /** End the session on the server and forget the tokens (also in other tabs). */

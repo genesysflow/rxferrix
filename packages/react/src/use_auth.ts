@@ -22,6 +22,7 @@ export type AuthActions = Pick<
   | "signUp"
   | "signIn"
   | "signInAsAdmin"
+  | "setupAdmin"
   | "signOut"
   | "signInWithOAuth"
   | "handleRedirectCallback"
@@ -42,6 +43,7 @@ export function useAuthActions(): AuthActions {
       signUp: auth.signUp.bind(auth),
       signIn: auth.signIn.bind(auth),
       signInAsAdmin: auth.signInAsAdmin.bind(auth),
+      setupAdmin: auth.setupAdmin.bind(auth),
       signOut: auth.signOut.bind(auth),
       signInWithOAuth: auth.signInWithOAuth.bind(auth),
       handleRedirectCallback: auth.handleRedirectCallback.bind(auth),

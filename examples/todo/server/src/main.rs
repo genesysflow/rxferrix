@@ -10,6 +10,7 @@
 //! notices a `dist/` created after the last build of this crate once one of its files changes: run
 //! `touch examples/todo/server/src/main.rs` after building the web app for the first time.
 
+mod migrations;
 mod todos;
 
 /// The built web app (empty when `web/dist` doesn't exist).

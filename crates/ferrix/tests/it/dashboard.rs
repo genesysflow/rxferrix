@@ -587,3 +587,57 @@ async fn users_sessions_revoke_and_delete() {
     assert!(sessions["page"].as_array().unwrap().iter().all(|s| s["user"].is_null()), "only admin sessions remain");
     assert_eq!(t.app().db().verify_indexes().await.unwrap(), Vec::<String>::new());
 }
+
+#[tokio::test]
+async fn stats_timeseries_and_overview_counters() {
+    let (t, http, admin, user, _) = setup().await;
+    for i in 0..4 {
+        http.call("mutation", &app::add_item::path(), json!({ "title": format!("ts{i}"), "category": "ts", "rank": i }), None).await;
+    }
+    http.call("mutation", &app::add_item::path(), json!({ "title": 1 }), None).await; // a user error
+    t.app().logs().flush().await.unwrap();
+
+    let endpoint = format!("/api/admin/stats/timeseries?path={}&bucket=1m", app::add_item::path());
+    let (s, b) = http.get(&endpoint, None).await;
+    assert_eq!((s, code_of(&b)), (401, "unauthenticated"));
+    let (s, b) = http.get(&endpoint, Some(&user)).await;
+    assert_eq!((s, code_of(&b)), (403, "forbidden"));
+
+    let (s, b) = http.get(&endpoint, Some(&admin)).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!((b["path"].as_str(), b["bucket"].as_i64()), (Some(app::add_item::path().as_str()), Some(60_000)));
+    assert_eq!(b["since"].as_i64().unwrap() % 60_000, 0, "aligned to the bucket");
+    let points = b["points"].as_array().unwrap();
+    let calls: u64 = points.iter().map(|p| p["calls"].as_u64().unwrap()).sum();
+    let errors: u64 = points.iter().map(|p| p["errors"].as_u64().unwrap()).sum();
+    assert_eq!((calls, errors), (5, 1), "{b}");
+    let p = &points[0];
+    assert!(p["t"].as_i64().unwrap() >= b["since"].as_i64().unwrap());
+    assert!(p["p95Us"].as_u64().unwrap() >= p["p50Us"].as_u64().unwrap() && p["maxUs"].as_u64() >= p["p95Us"].as_u64());
+
+    // Without a path: every app function; system functions (the admin's own calls) are left out.
+    http.ok("query", &path("tables"), json!({}), &admin).await;
+    t.app().logs().flush().await.unwrap();
+    let (s, b) = http.get("/api/admin/stats/timeseries?bucket=3600000", Some(&admin)).await;
+    assert_eq!(s, 200, "{b}");
+    let calls: u64 = b["points"].as_array().unwrap().iter().map(|p| p["calls"].as_u64().unwrap()).sum();
+    assert_eq!(calls, 5, "{b}");
+    // An unknown function has no points.
+    let (_, b) = http.get("/api/admin/stats/timeseries?path=nope:nothing", Some(&admin)).await;
+    assert_eq!(b["points"], json!([]));
+
+    for bad in ["bucket=0", "bucket=5x", "bucket=1s&since=0", "since=10&until=5", "since=abc"] {
+        let (s, b) = http.get(&format!("/api/admin/stats/timeseries?{bad}"), Some(&admin)).await;
+        assert_eq!((s, code_of(&b)), (400, "invalid_request"), "{bad}: {b}");
+    }
+
+    // The overview's live counters.
+    let (s, b) = http.get("/api/admin/stats", Some(&admin)).await;
+    assert_eq!(s, 200);
+    let o = &b["overview"];
+    for field in ["commitsPerSecond", "queueDepth", "runningJobs", "subscriptionRounds", "queryReruns"] {
+        assert!(o[field].is_number(), "{field}: {o}");
+    }
+    assert!(o["commitsPerSecond"].as_f64().unwrap() > 0.0, "{o}");
+    assert_eq!(o["metricsEnabled"], false);
+}

@@ -427,6 +427,7 @@ impl Logs {
     pub async fn query(&self, filter: LogFilter) -> Result<Vec<LogEntry>>;   // newest first
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LogEntry>;   // live tail, after each entry is written
     pub async fn stats(&self, since_ms: i64) -> Result<Vec<FunctionStats>>;  // per path, sorted by path
+    pub async fn timeseries(&self, spec: TimeseriesSpec) -> Result<Vec<TimePoint>>;  // per time bucket, oldest first
     pub fn dropped(&self) -> u64;                                             // entries dropped since startup
     pub async fn flush(&self) -> Result<()>;                                  // wait until queued entries are written
     pub async fn trim_now(&self) -> Result<()>;                               // apply retention now
@@ -466,6 +467,15 @@ pub struct FunctionStats {
     pub path: String, pub kind: FunctionKind,
     pub calls: u64, pub errors: u64, pub user_errors: u64, pub server_errors: u64,
     pub p50_us: u64, pub p95_us: u64,     // nearest-rank percentiles of duration_us
+}
+
+pub struct TimeseriesSpec {                // executions of `path` (None: every non-system function)
+    pub path: Option<String>, pub since: i64 /* rounded down to the bucket */, pub until: i64, pub bucket_ms: i64,
+}                                          // at most MAX_TIMESERIES_BUCKETS (1500) buckets, else an error
+#[derive(Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+pub struct TimePoint {                     // only buckets with executions
+    pub t: i64, pub calls: u64, pub errors: u64, pub user_errors: u64, pub server_errors: u64,
+    pub p50_us: u64, pub p95_us: u64, pub max_us: u64,
 }
 ```
 
@@ -1531,8 +1541,8 @@ The admin functions start with `ctx.auth.require_admin()` like §4.1.
 ### 4.1.4 Settings (`_settings`, `_system/settings:*`)
 
 Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
-need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`; there are
-no hand-written references in `@ferrix/dashboard` yet.
+need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`
+(references: `settings` in `packages/dashboard/src/lib/api.ts`; the form logic is `lib/settings.ts`).
 
 **`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
 per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
@@ -1610,7 +1620,8 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
 | `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user, 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
-| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
+| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, metricsEnabled } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
+| `GET /api/admin/stats/timeseries?path=&bucket=&since=&until=` | `{ path, bucket, since, until, points: TimePoint[] }`: the executions of `path` (every app function, system ones excluded, without it) that started in `[since, until)`, in buckets of `bucket` (ms, or `30s` / `1m` / `15m` / `1h` / `1d`; default `1m`), oldest first, only buckets with executions. `TimePoint` = `{ t (bucket start), calls, errors, userErrors, serverErrors, p50Us, p95Us, maxUs }` (nearest-rank percentiles). `since` is rounded down to a multiple of `bucket` (the returned `since`); defaults: `until` now, `since` an hour before. At most 1500 buckets, else 400 `invalid_request` (also for a malformed bucket or `until <= since`). From the execution log (`Logs::timeseries`), so only as far back as its retention. For the Functions page's charts. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the

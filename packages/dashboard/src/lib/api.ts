@@ -1,6 +1,8 @@
 /**
- * Hand-written references to the admin-only system functions (`_system/dashboard:*`, defined in
- * crates/ferrix/src/dashboard/mod.rs, and `_system/storage:*`) and the types they return. Codegen leaves system functions out of app APIs.
+ * Hand-written references to the admin-only system functions and the types they return (codegen leaves system
+ * functions out of app APIs): `_system/dashboard:*` (crates/ferrix/src/dashboard/mod.rs), `_system/storage:*`,
+ * `_system/scheduler:*`, `_system/migrations:*`, `_system/settings:*` and `_system/audit:list`, plus the types of
+ * the `/api/admin/*` endpoints (lib/admin.ts). See docs/CONTRACT.md §4.
  */
 import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@ferrix/client";
 
@@ -21,7 +23,14 @@ export interface SearchIndexSummary {
   kind: "search" | "vector";
   field: string;
   filterFields: string[];
+  /** Vector indexes only. */
   dimensions: number | null;
+  /** Search indexes only. */
+  tokenizer?: "unicode61" | "porter" | "trigram" | null;
+  /** Search indexes only: whether diacritics are folded (`café` = `cafe`). */
+  removeDiacritics?: boolean | null;
+  /** Vector indexes only. */
+  method?: "exact" | "hnsw" | null;
 }
 
 export interface TableSummary {
@@ -49,6 +58,14 @@ export interface DocumentsArgs {
   index?: string | null;
   filters?: IndexFilter[] | null;
   order?: "asc" | "desc" | null;
+  paginationOpts: PaginationOpts;
+}
+
+export interface SearchArgs {
+  table: string;
+  index: string;
+  text: string;
+  filters?: { field: string; value: Json }[] | null;
   paginationOpts: PaginationOpts;
 }
 
@@ -97,6 +114,8 @@ export interface SessionSummary {
   userAgent: string | null;
   ip: string | null;
   expired: boolean;
+  /** The admin id of an impersonation session, else null. */
+  impersonatedBy: string | null;
 }
 
 export interface DeletedUser {
@@ -113,6 +132,7 @@ const m = <Args, Out>(name: string) =>
 export const dashboard = {
   tables: q<Record<string, never>, TableSummary[]>("tables"),
   documents: q<DocumentsArgs, PaginationResult<JsonObject>>("documents"),
+  searchDocuments: q<SearchArgs, PaginationResult<JsonObject>>("search_documents"),
   document: q<{ id: string }, TableDocument | null>("document"),
   insertDocument: m<{ table: string; document: JsonObject }, string>("insert_document"),
   patchDocument: m<{ id: string; patch: JsonObject }, null>("patch_document"),
@@ -139,8 +159,13 @@ export interface FileSummary {
   contentType: string | null;
   createdBy: string | null;
   filename: string | null;
-  /** The serving URL (`ctx.storage.get_url`), absolute when the server has a public URL. */
+  /**
+   * The serving URL (`ctx.storage.get_url`), absolute when the server has a public URL. In private storage mode it is
+   * a signed URL that already has a query string: add parameters with `withParams` (lib/format.ts).
+   */
   url: string;
+  /** `url` with `download=1` added correctly. */
+  downloadUrl: string;
 }
 
 /** The Files page's admin-only system functions (`_system/storage:*`, crates/ferrix/src/storage/mod.rs). */
@@ -185,6 +210,10 @@ export interface CronSummary {
   _id: string;
   name: string;
   schedule: string;
+  /** The IANA time zone of the expression; null for UTC. */
+  timezone: string | null;
+  /** A ferrix system cron (name starting with `_`, e.g. `_storage_sweep`). */
+  system: boolean;
   path: string;
   args: Json;
   lastRun: number | null;
@@ -193,7 +222,8 @@ export interface CronSummary {
   lastJobState: JobState | null;
 }
 
-export type CancelOutcome = "canceled" | "alreadyFinished" | "running";
+/** `cancel_job`: pending jobs and actions in progress can be canceled. */
+export type CancelOutcome = "canceled" | "alreadyFinished";
 
 const sq = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out>("query", `_system/scheduler:${name}`);
 const sm = <Args, Out>(name: string) =>
@@ -205,7 +235,216 @@ export const scheduler = {
   cancelJob: sm<{ id: string }, CancelOutcome>("cancel_job"),
   runJobNow: sm<{ id: string }, string>("run_job_now"),
   crons: sq<Record<string, never>, CronSummary[]>("crons"),
+  /** The id of the enqueued job; user error `running` while the previous run is unfinished (unless `force`). */
+  runCronNow: sm<{ name: string; force?: boolean | null }, string>("run_cron_now"),
 } as const;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Migrations (`_system/migrations:*`, crates/ferrix/src/migrations)
+
+export type MigrationState = "pending" | "running" | "done" | "failed" | "canceled";
+
+export interface MigrationSummary {
+  name: string;
+  table: string;
+  /** Still declared in code (a row can outlive its migration). */
+  declared: boolean;
+  batchSize: number | null;
+  state: MigrationState;
+  processed: number;
+  changed: number;
+  /** The table's current document count, for a progress bar. */
+  documents: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  error: string | null;
+  failedDocument: string | null;
+  /** `"passed"` or `"failed: <report>"`. */
+  schemaCheck: string | null;
+  /** The table opened with documents that don't match its type: lenient writes until its migrations finish. */
+  tableMigrating: boolean;
+}
+
+export type RunOutcome = "completed" | "failed" | "canceled" | "alreadyDone" | "alreadyRunning" | "stopped" | "dryRun";
+
+export interface ChangeExample {
+  id: string;
+  before: Json;
+  /** null: the migration would delete the document. */
+  after: Json | null;
+}
+
+export interface MigrationReport {
+  name: string;
+  table: string;
+  outcome: RunOutcome;
+  batches: number;
+  processed: number;
+  changed: number;
+  error: string | null;
+  failedDocument: string | null;
+  schemaCheck: string | null;
+  /** Dry runs: up to 5 documents that would change. */
+  examples: ChangeExample[];
+}
+
+export const migrations = {
+  list: makeFunctionReference<"query", Record<string, never>, MigrationSummary[]>("query", "_system/migrations:list"),
+  run: makeFunctionReference<
+    "action",
+    { name?: string | null; dryRun?: boolean | null; restart?: boolean | null },
+    { started: string[]; reports: MigrationReport[] }
+  >("action", "_system/migrations:run"),
+  cancel: makeFunctionReference<"mutation", { name: string }, "canceled" | "notRunning">(
+    "mutation",
+    "_system/migrations:cancel",
+  ),
+} as const;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Settings (`_system/settings:*`, actions: crates/ferrix/src/settings)
+
+export type OAuthKind = "github" | "google" | "oidc";
+/** What the server shows in place of a stored secret (and accepts back as "keep it"). */
+export const MASK = "••••";
+
+export interface OAuthProviderView {
+  id: string;
+  kind: OAuthKind;
+  issuer: string | null;
+  clientId: string;
+  /** `"••••"` when a secret is stored, else null. */
+  clientSecret: string | null;
+  enabled: boolean;
+  scopes: string[] | null;
+  /** A provider with this id is configured in code: it wins and this entry is ignored. */
+  locked: boolean;
+}
+
+export interface SmtpView {
+  /** Without the password. */
+  url: string;
+  from: string;
+  /** `"••••"` when a password is stored, else null. */
+  password: string | null;
+}
+
+export interface SettingsView {
+  oauth: OAuthProviderView[];
+  smtp: SmtpView | null;
+  redirectUrls: string[] | null;
+  signups: boolean | null;
+  accessTokenTtlSecs: number | null;
+  sessionTtlSecs: number | null;
+  corsOrigins: string[] | null;
+  /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `oauth.<id>`. */
+  locked: string[];
+  effective: {
+    signups: boolean;
+    accessTokenTtlSecs: number;
+    sessionTtlSecs: number;
+    redirectUrls: string[];
+    oauthProviders: string[];
+    emailConfigured: boolean;
+    /** null: any origin. */
+    corsOrigins: string[] | null;
+  };
+}
+
+export interface OAuthProviderInput {
+  id: string;
+  kind: OAuthKind;
+  issuer?: string | null;
+  clientId: string;
+  /** Omitted, null or `"••••"`: keep the stored one; anything else replaces it. */
+  clientSecret?: string | null;
+  enabled: boolean;
+  scopes?: string[] | null;
+}
+
+export interface SmtpInput {
+  url: string;
+  from: string;
+  /** Omitted, null or `"••••"`: keep; `""`: none. */
+  password?: string | null;
+}
+
+export type SettingsKey =
+  | "oauth"
+  | "smtp"
+  | "redirectUrls"
+  | "signups"
+  | "accessTokenTtlSecs"
+  | "sessionTtlSecs"
+  | "corsOrigins";
+
+export interface SettingsUpdate {
+  oauth?: OAuthProviderInput[];
+  smtp?: SmtpInput;
+  redirectUrls?: string[];
+  signups?: boolean;
+  accessTokenTtlSecs?: number;
+  sessionTtlSecs?: number;
+  corsOrigins?: string[];
+  clear?: SettingsKey[];
+}
+
+export const settings = {
+  get: makeFunctionReference<"action", Record<string, never>, SettingsView>("action", "_system/settings:get"),
+  update: makeFunctionReference<"action", SettingsUpdate, SettingsView>("action", "_system/settings:update"),
+  sendTestEmail: makeFunctionReference<"action", { to: string; smtp?: SmtpInput | null }, null>(
+    "action",
+    "_system/settings:send_test_email",
+  ),
+} as const;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Audit log (`_system/audit:list`, crates/ferrix/src/audit.rs)
+
+export const AUDIT_ACTIONS = [
+  "insert",
+  "patch",
+  "replace",
+  "delete",
+  "revoke_session",
+  "delete_user",
+  "settings_update",
+  "impersonate",
+  "run_function",
+] as const;
+
+export interface AuditEntry {
+  _id: string;
+  _creationTime: number;
+  admin: string | null;
+  adminEmail: string | null;
+  action: string;
+  targetTable: string | null;
+  targetId: string | null;
+  /** The changed fields before and after (whole documents for inserts and deletes), secrets masked. */
+  before: Json | null;
+  after: Json | null;
+  details: Json | null;
+  /** ms since the epoch. */
+  at: number;
+}
+
+export interface AuditArgs {
+  admin?: string | null;
+  action?: string | null;
+  table?: string | null;
+  target?: string | null;
+  since?: number | null;
+  until?: number | null;
+  paginationOpts: PaginationOpts;
+}
+
+export const audit = {
+  list: makeFunctionReference<"query", AuditArgs, PaginationResult<AuditEntry>>("query", "_system/audit:list"),
+} as const;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The admin HTTP endpoints' types (lib/admin.ts)
 
 /** One execution from the execution log (`LogEntry` in Rust). */
 export interface LogEntry {
@@ -258,7 +497,72 @@ export interface Stats {
     registeredFunctions: number;
     sockets: number;
     subscriptions: number;
+    /** Distinct queries the server reruns (shared between subscribers). */
+    sharedQueries?: number;
     droppedLogEntries: number;
     files: { name: string; bytes: number }[];
+    /** Over the last 10 seconds. */
+    commitsPerSecond?: number;
+    /** Pending scheduled jobs. */
+    queueDepth?: number;
+    /** Scheduled actions in progress. */
+    runningJobs?: number;
+    subscriptionRounds?: number;
+    queryReruns?: number;
+    /** `--metrics`: Prometheus `/metrics` is served. */
+    metricsEnabled?: boolean;
   };
+}
+
+/** One bucket of `GET /api/admin/stats/timeseries`: the executions that started in `[t, t + bucket)`. */
+export interface TimePoint {
+  t: number;
+  calls: number;
+  errors: number;
+  userErrors: number;
+  serverErrors: number;
+  p50Us: number;
+  p95Us: number;
+  maxUs: number;
+}
+
+export interface Timeseries {
+  path: string | null;
+  /** The bucket size in ms. */
+  bucket: number;
+  /** The first bucket's start. */
+  since: number;
+  until: number;
+  /** Oldest first; only buckets with executions. */
+  points: TimePoint[];
+}
+
+/** `BackupInfo` (crates/ferrix/src/ops/backup.rs). */
+export interface BackupInfo {
+  name: string;
+  bytes: number;
+  createdAt: number;
+  /** A `ferrix-auto-*` archive from `--backup-every` (only those are rotated). */
+  scheduled: boolean;
+  ts: number | null;
+}
+
+export interface ImportReport {
+  tables: { table: string; documents: number; replaced: number; deleted: number }[];
+  files: number;
+  missingFiles: number;
+  remappedIds: boolean;
+}
+
+export type ImportMode = "insert" | "upsert" | "replace";
+export type ExportFormat = "jsonl" | "csv";
+
+/** `POST /api/admin/impersonate`, without the tokens (the dashboard never keeps or shows them). */
+export interface Impersonation {
+  userId: string;
+  sessionId: string;
+  /** ms since the epoch. */
+  expiresAt: number;
+  /** The app URL with the tokens in its fragment (only with `redirectTo`). */
+  url: string | null;
 }

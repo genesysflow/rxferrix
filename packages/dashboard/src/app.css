@@ -22,6 +22,9 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --radius: 6px;
+  /* Chart series (categorical slots 1 and 2, validated for both themes). */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
   color-scheme: light;
 }
 
@@ -47,6 +50,8 @@
     --err-soft: #331617;
     --selected: #2a1d14;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 4px 16px rgb(0 0 0 / 0.35);
+    --series-1: #3987e5;
+    --series-2: #d95926;
     color-scheme: dark;
   }
 }
@@ -72,6 +77,8 @@
   --err-soft: #331617;
   --selected: #2a1d14;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 4px 16px rgb(0 0 0 / 0.35);
+  --series-1: #3987e5;
+  --series-2: #d95926;
   color-scheme: dark;
 }
 
@@ -361,4 +368,47 @@ table.grid tbody tr.selected {
 button.primary kbd {
   color: rgb(255 255 255 / 0.85);
   border-color: rgb(255 255 255 / 0.45);
+}
+
+/* A field-level before/after diff (audit entries, migration dry runs). */
+table.diff {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 50%;
+}
+table.diff th,
+table.diff td {
+  text-align: left;
+  padding: 3px 14px 3px 6px;
+  border-bottom: 1px solid var(--border);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+table.diff th {
+  color: var(--muted);
+  font-weight: 500;
+}
+table.diff tr.changed .before,
+table.diff tr.removed .before {
+  background: var(--err-soft);
+}
+table.diff tr.changed .after,
+table.diff tr.added .after {
+  background: var(--ok-soft);
+}
+table.diff tr.same {
+  color: var(--faint);
+}
+
+/* Row actions: a plain table cell (a flex cell would leave the row's box). */
+table.grid td.actions {
+  text-align: right;
+  white-space: nowrap;
+  max-width: none;
+  vertical-align: middle;
+}
+table.grid td.actions > * + * {
+  margin-left: 6px;
 }

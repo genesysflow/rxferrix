@@ -1,11 +1,13 @@
 <script lang="ts">
   import { FerrixError } from "@ferrix/client";
-  import { useMutation, usePaginatedQuery } from "@ferrix/svelte";
-  import { dashboard, type UserSummary } from "../lib/api.js";
+  import { useAction, useMutation, usePaginatedQuery } from "@ferrix/svelte";
+  import { dashboard, settings, type Impersonation, type UserSummary } from "../lib/api.js";
+  import { impersonate } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatTime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
+  import Modal from "../components/Modal.svelte";
   import UserSessions from "./UserSessions.svelte";
 
   const ctx = dashboardContext();
@@ -14,6 +16,58 @@
   let open = $state<string | null>(null);
   const users = usePaginatedQuery(dashboard.users, () => ({ search: search || null }), { initialNumItems: 50 });
   const deleteUser = useMutation(dashboard.deleteUser);
+  const getSettings = useAction(settings.get);
+
+  // "Open app as user": a short-lived impersonation session, opened in a new tab.
+  let opening = $state<UserSummary | null>(null);
+  let redirectUrls = $state<string[] | null>(null);
+  let redirectTo = $state("");
+  let ttlMinutes = $state(15);
+  let impersonating = $state(false);
+  let impersonateError = $state<string | null>(null);
+  let opened = $state<(Impersonation & { email: string }) | null>(null);
+
+  async function startImpersonation(u: UserSummary) {
+    opening = u;
+    opened = null;
+    impersonateError = null;
+    if (redirectUrls === null) {
+      try {
+        redirectUrls = (await getSettings({})).effective.redirectUrls;
+      } catch (e) {
+        redirectUrls = [];
+        impersonateError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (!redirectTo) redirectTo = redirectUrls[0] ?? "";
+  }
+
+  async function openApp() {
+    const u = opening;
+    if (!u || !redirectTo) return;
+    impersonating = true;
+    impersonateError = null;
+    // Open the tab now, while the click still counts as a user gesture (popup blockers), and point it at the app
+    // once the session exists. It gets no reference back to the dashboard.
+    const tab = window.open("about:blank", "_blank");
+    try {
+      const r = await impersonate(ctx.auth, { user: u._id, ttlSeconds: ttlMinutes * 60, redirectTo });
+      if (r.url && tab) {
+        tab.opener = null;
+        tab.location.replace(r.url);
+      } else if (r.url) {
+        window.open(r.url, "_blank", "noopener,noreferrer");
+      }
+      opened = { ...r, url: null, email: u.email ?? u._id };
+      opening = null;
+      ctx.toast(`Opened the app as ${u.email ?? u._id} until ${formatTime(r.expiresAt).slice(11)}`);
+    } catch (e) {
+      tab?.close();
+      impersonateError = e instanceof FerrixError ? e.message : String(e);
+    } finally {
+      impersonating = false;
+    }
+  }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   function onSearch(value: string) {
@@ -74,6 +128,9 @@
               <td>{u.sessions}</td>
               <td class="faint">{formatTime(u._creationTime)}</td>
               <td class="actions" onclick={(e) => e.stopPropagation()}>
+                <button class="small" onclick={() => startImpersonation(u)} title="Open the app signed in as this user, in a new tab"
+                  >Open app as user</button
+                >
                 <a href={href("data", ["_users"], { doc: u._id })} onclick={link}>Document</a>
                 <button class="small danger" onclick={() => remove(u)}>Delete</button>
               </td>
@@ -93,18 +150,93 @@
   </div>
 </div>
 
+{#if opened}
+  <div class="banner" role="status" data-testid="impersonation-banner">
+    <span>⚠ An impersonation session for <strong>{opened.email}</strong> is open in another tab until
+      <strong>{formatTime(opened.expiresAt)}</strong> (it can't be extended). Revoke it from the user's sessions to end it early.</span>
+    <button class="small ghost" onclick={() => (opened = null)} aria-label="Dismiss">✕</button>
+  </div>
+{/if}
+
+{#if opening}
+  {@const u = opening}
+  <Modal title={`Open the app as ${u.email ?? u._id}`} onclose={() => (opening = null)}>
+    <div class="alert info warning">
+      You will act with <strong>all of this user's rights</strong>: everything you do is done as them. The session is
+      audited, marked as impersonated, listed with their sessions and revocable, and it expires on its own.
+    </div>
+    <p class="muted small">
+      The app opens in a new tab and stores the session in that browser's app storage, replacing whoever is signed in to
+      the app there. Use a private window (copy the tab's address) to keep your own app session.
+    </p>
+    <div class="form">
+      <label for="imp-redirect">App URL</label>
+      {#if redirectUrls === null}
+        <span class="faint">Loading…</span>
+      {:else if redirectUrls.length === 0}
+        <span class="error-text">No redirect URL is allowed: add the app's URL under Settings → Redirect URLs (or
+          <code>--auth-redirect-url</code>).</span>
+      {:else}
+        <select id="imp-redirect" bind:value={redirectTo}>
+          {#each redirectUrls as r (r)}<option value={r}>{r}</option>{/each}
+        </select>
+      {/if}
+      <label for="imp-ttl">Expires after</label>
+      <select id="imp-ttl" bind:value={ttlMinutes}>
+        <option value={5}>5 minutes</option>
+        <option value={15}>15 minutes</option>
+        <option value={30}>30 minutes</option>
+        <option value={60}>1 hour (the maximum)</option>
+      </select>
+    </div>
+    <p class="faint small">Expires at {formatTime(Date.now() + ttlMinutes * 60_000)}; refreshing never extends it.</p>
+    {#if impersonateError}<div class="alert" role="alert">{impersonateError}</div>{/if}
+    {#snippet actions()}
+      <button onclick={() => (opening = null)}>Cancel</button>
+      <button class="primary" onclick={openApp} disabled={impersonating || !redirectTo}
+        >{impersonating ? "Opening…" : "Open app as user"}</button
+      >
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
+  .banner {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    max-width: min(760px, calc(100vw - 260px));
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--warn-soft);
+    color: var(--warn);
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    box-shadow: var(--shadow);
+    z-index: 50;
+  }
+  .warning {
+    white-space: normal;
+  }
+  .small {
+    font-size: 12.5px;
+  }
+  .form {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 12px;
+    align-items: center;
+    margin: 10px 0;
+  }
   .body {
     flex: 1;
     overflow: auto;
   }
   .search {
     width: 260px;
-  }
-  .actions {
-    display: flex;
-    gap: 10px;
-    align-items: center;
   }
   tr.detail {
     cursor: default;

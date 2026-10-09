@@ -138,3 +138,67 @@ export function sameOriginPath(url: string): string {
   const u = new URL(url, "http://localhost");
   return u.pathname + u.search;
 }
+
+/**
+ * `url` with query parameters added (or replaced), keeping the ones it has: a signed storage URL already carries
+ * `?exp=…&sig=…`, so variants such as `thumb` must be added with `&`, never a second `?`. Keeps relative URLs
+ * relative and the fragment in place.
+ */
+export function withParams(url: string, params: Record<string, string | number | null | undefined>): string {
+  const hashAt = url.indexOf("#");
+  const hash = hashAt === -1 ? "" : url.slice(hashAt);
+  const base = hashAt === -1 ? url : url.slice(0, hashAt);
+  const queryAt = base.indexOf("?");
+  const path = queryAt === -1 ? base : base.slice(0, queryAt);
+  const query = new URLSearchParams(queryAt === -1 ? "" : base.slice(queryAt + 1));
+  for (const [k, v] of Object.entries(params)) {
+    if (v === null || v === undefined) query.delete(k);
+    else query.set(k, String(v));
+  }
+  const qs = query.toString();
+  return `${path}${qs ? `?${qs}` : ""}${hash}`;
+}
+
+/** A server-side thumbnail of a stored image (`thumb=WxH&fit=…`, docs/PROTOCOL.md), on this origin. */
+export function thumbUrl(url: string, width: number, height = width, fit: "cover" | "contain" = "cover"): string {
+  return sameOriginPath(withParams(url, { thumb: `${width}x${height}`, fit }));
+}
+
+/** Thumbnails are generated for these types only (the server answers 415 for others). */
+export function hasThumbnail(contentType: string | null | undefined): boolean {
+  const essence = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  return ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(essence);
+}
+
+/** A duration in seconds, compactly: `90` → `1m 30s`, `86400` → `1d`. */
+export function formatSeconds(total: number): string {
+  if (!Number.isFinite(total) || total < 0) return "—";
+  const parts: string[] = [];
+  let s = Math.round(total);
+  for (const [unit, size] of [
+    ["d", 86400],
+    ["h", 3600],
+    ["m", 60],
+  ] as const) {
+    if (s >= size) {
+      parts.push(`${Math.floor(s / size)}${unit}`);
+      s %= size;
+    }
+  }
+  if (s > 0 || parts.length === 0) parts.push(`${s}s`);
+  return parts.slice(0, 2).join(" ");
+}
+
+/** Whether any value of `doc` (keys excluded, nested values included) contains `needle` (lowercase). */
+export function documentMatches(doc: Record<string, unknown>, needle: string): boolean {
+  if (!needle) return true;
+  const visit = (v: unknown): boolean => {
+    if (v === null || v === undefined) return false;
+    if (typeof v === "string") return v.toLowerCase().includes(needle);
+    if (typeof v === "number" || typeof v === "boolean") return String(v).toLowerCase().includes(needle);
+    if (Array.isArray(v)) return v.some(visit);
+    if (typeof v === "object") return Object.values(v as Record<string, unknown>).some(visit);
+    return false;
+  };
+  return Object.values(doc).some(visit);
+}

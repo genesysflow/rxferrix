@@ -109,7 +109,8 @@ pub mod app {
         pub owner: Option<Id<OpsDoc>>,
     }
 
-    #[mutation]
+    /// Internal: its argument type would otherwise show up in the codegen fixture of `codegen.rs`.
+    #[internal_mutation]
     pub async fn add_mixed(ctx: &MutationCtx, doc: Mixed) -> Result<Id<Mixed>> {
         ctx.db.insert(doc).await
     }

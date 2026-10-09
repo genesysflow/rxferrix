@@ -1,5 +1,6 @@
-//! HTTP endpoints under `/api/auth/*` (see docs/PROTOCOL.md, "Auth endpoints"), the admin setup page at `/_/setup`,
-//! and bearer token parsing for the HTTP function API.
+//! HTTP endpoints under `/api/auth/*` (see docs/PROTOCOL.md, "Auth endpoints") and bearer token parsing for the HTTP
+//! function API. The admin setup page (`/_/setup#token=…`) is part of the dashboard SPA; builds without the
+//! `dashboard` feature get a minimal stand-alone page ([`setup_page_routes`]).
 //!
 //! Bodies are JSON with camelCase keys. Success responses are the JSON object itself; errors use the same shape as
 //! the function API: `{ "status": "error", "errorMessage", "errorData": { "code", "data" } }`. Every response
@@ -12,7 +13,9 @@ use axum::body::Bytes;
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+#[cfg(not(feature = "dashboard"))]
+use axum::response::Html;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -43,7 +46,12 @@ pub fn routes() -> Router<App> {
         .route("/api/auth/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/auth/admin/signin", post(admin_sign_in))
         .route("/api/auth/admin/setup", get(admin_setup_status).post(admin_setup))
-        .route("/_/setup", get(setup_page))
+}
+
+/// `/_/setup` for builds without the dashboard SPA.
+#[cfg(not(feature = "dashboard"))]
+pub(crate) fn setup_page_routes() -> Router<App> {
+    Router::new().route("/_/setup", get(setup_page))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -485,12 +493,14 @@ async fn oauth_callback(
 // Admin setup page
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// A minimal page for `/_/setup#token=…` until the dashboard exists. The token stays in the fragment (never sent to
-/// the server except in the POST body).
+/// A minimal page for `/_/setup#token=…` in builds without the dashboard. The token stays in the fragment (never sent
+/// to the server except in the POST body).
+#[cfg(not(feature = "dashboard"))]
 async fn setup_page() -> Response {
     (no_store(), Html(SETUP_PAGE)).into_response()
 }
 
+#[cfg(not(feature = "dashboard"))]
 const SETUP_PAGE: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer"><title>Ferrix setup</title>

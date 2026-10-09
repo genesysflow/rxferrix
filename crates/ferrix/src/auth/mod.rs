@@ -20,9 +20,10 @@ pub mod oauth;
 mod password;
 pub mod rate_limit;
 pub mod service;
-mod store;
+pub(crate) mod store;
 pub mod tables;
 pub mod tokens;
+
 
 pub use config::{AuthConfig, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{Email, Mailer, MemoryMailer};

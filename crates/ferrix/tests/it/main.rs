@@ -6,6 +6,7 @@ mod auth;
 mod catalog;
 mod codegen;
 mod contract;
+mod dashboard;
 mod hardening;
 mod macros;
 mod model;

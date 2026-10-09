@@ -794,8 +794,10 @@ async fn admins_setup_token_and_admin_identity() {
     let res = http.client.get(format!("{}/api/auth/admin/setup", http.base)).send().await.unwrap();
     assert_eq!(res.json::<Value>().await.unwrap(), json!({ "needsSetup": true }));
     let setup = app.auth().create_setup_token(&app).await.unwrap().expect("no admin yet");
+    // The printed link opens the dashboard's setup page (the SPA; a stand-alone page without the `dashboard` feature).
     let page = http.client.get(format!("{}/_/setup", http.base)).send().await.unwrap();
-    assert!(page.text().await.unwrap().contains("/api/auth/admin/setup"));
+    assert_eq!(page.status(), 200);
+    assert!(page.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
     let (s, b) = http.post("/api/auth/admin/setup", json!({ "token": "wrong", "email": "root@example.com", "password": "admin password" })).await;
     assert_eq!((s, code_of(&b)), (401, "invalid_setup_token"));
     let (s, b) = http.post("/api/auth/admin/setup", json!({ "token": setup, "email": "Root@example.com", "password": "admin password" })).await;

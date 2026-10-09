@@ -118,6 +118,12 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
     worker.run(inbound).await
 }
 
+impl Drop for SyncWorker {
+    fn drop(&mut self) {
+        self.app.metrics().subscriptions_removed(self.queries.len() as u64);
+    }
+}
+
 impl SyncWorker {
     async fn run(mut self, mut inbound: mpsc::Receiver<Inbound>) {
         let mut commits = self.app.db().write_log().subscribe();
@@ -201,10 +207,12 @@ impl SyncWorker {
                                 force: true,
                             };
                             self.queries.insert(query_id, state);
+                            self.app.metrics().subscriptions_added(1);
                         }
                         QuerySetModification::Remove { query_id } => {
                             // Removing an id that isn't live is harmless (e.g. a client racing a reconnect); ignore it.
                             if self.queries.remove(&query_id).is_some() {
+                                self.app.metrics().subscriptions_removed(1);
                                 removed.push(StateModification::QueryRemoved { query_id });
                             }
                         }

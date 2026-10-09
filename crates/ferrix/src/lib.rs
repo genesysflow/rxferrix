@@ -10,6 +10,7 @@
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
+//! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
 
@@ -19,6 +20,7 @@ extern crate self as ferrix;
 pub mod auth;
 pub mod cli;
 pub mod codegen;
+pub mod dashboard;
 pub mod db;
 pub mod error;
 pub mod exec_log;
@@ -44,12 +46,12 @@ pub use cli::Ferrix;
 pub use ferrix_macros::{action, internal_action, internal_mutation, internal_query, mutation, query, table};
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
-pub use db::query::{IndexRange, MutationDb, Query, QueryDb};
+pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
 pub use error::{Error, MutationTimeout, Result, UserError};
 pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs};
 pub use private::FunctionKind;
 pub use id::Id;
-pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, MutationCtx, QueryCtx, Registry, registry};
+pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
 pub use schema::{Doc, Field, Index, IndexDef, Order, Table, TableDef};
 pub use server::{router, serve, serve_with_shutdown};
 pub use serde_json::json;

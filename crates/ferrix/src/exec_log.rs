@@ -195,7 +195,28 @@ pub struct LogFilter {
     pub limit: Option<usize>,
     /// Only rows with `id < before_id`: pass the last id of the previous page to page backwards.
     pub before_id: Option<i64>,
+    /// Only executions by this caller: an [`LogEntry::identity`] value (`"user:<id>"`, `"admin:<id>"`), or
+    /// `"anonymous"` for anonymous callers.
+    pub identity: Option<String>,
+    /// Leave out ferrix's own functions (paths under `_system/`, e.g. the dashboard's queries).
+    pub exclude_system: bool,
 }
+
+impl LogFilter {
+    /// Whether `entry` passes every condition except `limit` and `before_id` (used to filter the live tail the same
+    /// way [`Logs::query`] filters history).
+    pub fn matches(&self, entry: &LogEntry) -> bool {
+        self.path_prefix.as_deref().is_none_or(|p| entry.path.starts_with(p))
+            && self.kind.is_none_or(|k| entry.kind == k)
+            && self.outcome.is_none_or(|o| entry.outcome == o)
+            && self.since.is_none_or(|t| entry.timestamp >= t)
+            && self.identity.as_deref().is_none_or(|i| entry.identity.as_deref().unwrap_or(ANONYMOUS) == i)
+            && !(self.exclude_system && crate::private::is_system_path(&entry.path))
+    }
+}
+
+/// The [`LogFilter::identity`] value matching anonymous callers.
+pub const ANONYMOUS: &str = "anonymous";
 
 mod opt_kind_serde {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -496,6 +517,15 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     }
     if let Some(before) = f.before_id {
         arg(&mut sql, " AND id < ?", before.into());
+    }
+    match f.identity.as_deref() {
+        None => {}
+        Some(ANONYMOUS) => sql.push_str(" AND identity IS NULL"),
+        Some(identity) => arg(&mut sql, " AND identity = ?", identity.to_string().into()),
+    }
+    if f.exclude_system {
+        // `is_system_path`: the first path segment is exactly `_system`.
+        sql.push_str(" AND NOT (path = '_system' OR substr(path, 1, 8) IN ('_system/', '_system:'))");
     }
     let limit = f.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
     arg(&mut sql, " ORDER BY id DESC LIMIT ?", (limit as i64).into());

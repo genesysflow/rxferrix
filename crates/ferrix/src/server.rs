@@ -3,7 +3,9 @@
 //! - `GET  /api/sync`: the WebSocket sync protocol (docs/PROTOCOL.md).
 //! - `POST /api/query | /api/mutation | /api/action`: the HTTP fallback, `{ "path", "args" }`.
 //! - `GET  /api/health`.
-//! - `/api/auth/*` and `/_/setup`: authentication (`crate::auth::http`).
+//! - `/api/auth/*`: authentication (`crate::auth::http`).
+//! - `/api/admin/*`: admin-only logs and stats (`crate::dashboard::http`).
+//! - `/_/`: the dashboard SPA (`crate::dashboard::assets`, feature `dashboard`; without it, a minimal `/_/setup`).
 
 use std::future::Future;
 
@@ -34,10 +36,22 @@ pub fn router(app: App) -> Router {
         .route("/api/action", post(http_action))
         .route("/api/health", get(|| async { axum::Json(json!({ "status": "ok" })) }))
         .merge(crate::auth::http::routes())
+        .merge(crate::dashboard::http::routes())
+        .merge(dashboard_ui())
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
         // on top-level navigations, which CORS doesn't govern).
         .layer(CorsLayer::permissive())
         .with_state(app)
+}
+
+#[cfg(feature = "dashboard")]
+fn dashboard_ui() -> Router<App> {
+    crate::dashboard::assets::routes()
+}
+
+#[cfg(not(feature = "dashboard"))]
+fn dashboard_ui() -> Router<App> {
+    crate::auth::http::setup_page_routes()
 }
 
 /// Serve `app` on `listener` until the process ends.
@@ -69,6 +83,14 @@ async fn sync_handler(ws: WebSocketUpgrade, State(app): State<App>) -> Response 
 /// Wire a socket to a sync worker: a reader loop parses frames into the worker's input; a writer task serializes the
 /// worker's output. When the worker stops (fatal error), the writer flushes, closes the socket, and we stop reading.
 async fn handle_socket(app: App, socket: WebSocket) {
+    struct Open(App);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            self.0.metrics().socket_closed();
+        }
+    }
+    app.metrics().socket_opened();
+    let _open = Open(app.clone());
     let (mut sink, mut stream) = socket.split();
     let (in_tx, mut out_rx) = worker::spawn(app);
 

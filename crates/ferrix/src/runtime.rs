@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -58,7 +59,7 @@ impl MutationCtx {
 /// Context of an action: no transaction; can call queries, mutations and other actions (including internal ones).
 pub struct ActionCtx {
     pub auth: Auth,
-    app: App,
+    pub(crate) app: App,
     identity: Identity,
 }
 
@@ -213,6 +214,44 @@ struct AppInner {
     options: AppOptions,
     auth: crate::auth::AuthService,
     logs: Logs,
+    dir: PathBuf,
+    metrics: Metrics,
+    started_at: f64,
+}
+
+/// Live counters for the dashboard's overview (`App::metrics`). Updated by the WebSocket server and sync workers.
+#[derive(Debug, Default)]
+pub struct Metrics {
+    sockets: AtomicU64,
+    subscriptions: AtomicU64,
+}
+
+impl Metrics {
+    /// Open WebSocket connections.
+    pub fn sockets(&self) -> u64 {
+        self.sockets.load(Ordering::Relaxed)
+    }
+
+    /// Live query subscriptions across all connections.
+    pub fn subscriptions(&self) -> u64 {
+        self.subscriptions.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn socket_opened(&self) {
+        self.sockets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn socket_closed(&self) {
+        self.sockets.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn subscriptions_added(&self, n: u64) {
+        self.subscriptions.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(crate) fn subscriptions_removed(&self, n: u64) {
+        self.subscriptions.fetch_sub(n, Ordering::Relaxed);
+    }
 }
 
 impl App {
@@ -224,6 +263,7 @@ impl App {
         let registry = registry()?;
         let tables = registered_tables();
         let dir = dir.as_ref().to_path_buf();
+        let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
         let open_options =
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
@@ -234,7 +274,24 @@ impl App {
             Ok((db, logs))
         })
         .await??;
-        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs }) })
+        let started_at = crate::db::wall_clock_ms();
+        let metrics = Metrics::default();
+        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at }) })
+    }
+
+    /// The data directory (`data.db`, `aux.db`, `auth_secret.key`).
+    pub fn dir(&self) -> &Path {
+        &self.inner.dir
+    }
+
+    /// Connection and subscription counters.
+    pub fn metrics(&self) -> &Metrics {
+        &self.inner.metrics
+    }
+
+    /// When this `App` was opened (ms since the epoch).
+    pub fn started_at(&self) -> f64 {
+        self.inner.started_at
     }
 
     pub fn db(&self) -> &Database {

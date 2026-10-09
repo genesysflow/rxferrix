@@ -11,6 +11,7 @@ mod contract;
 mod dashboard;
 mod hardening;
 mod macros;
+mod migrations;
 mod model;
 mod pagination;
 mod query_engine;

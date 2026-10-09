@@ -37,6 +37,12 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "dash_items"
       | "items"
       | "lossy"
+      | "mig_counted"
+      | "mig_dry"
+      | "mig_dry_log"
+      | "mig_flaky"
+      | "mig_slow"
+      | "mig_tasks"
       | "notes"
       | "private_notes"
       | "sched_notes"
@@ -58,6 +64,8 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   assertType<Equals<typeof job.state, "pending" | "inProgress" | "success" | "failed" | "canceled">>();
   // @ts-expect-error `_crons` is not exposed
   void ({} as Id<"_crons">);
+  // @ts-expect-error `_migrations` is not exposed either
+  void ({} as Id<"_migrations">);
   // `ferrix::Bytes` is `{ $bytes: string }`, converted with the client's helpers.
   assertType<Equals<DataModel["blobs"]["data"], Bytes>>();
   assertType<Equals<DataModel["blobs"]["thumb"], Bytes | null>>();

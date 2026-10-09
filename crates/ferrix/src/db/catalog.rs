@@ -69,9 +69,34 @@ impl TableInfo {
 pub struct Catalog {
     by_name: HashMap<String, Arc<TableInfo>>,
     by_number: HashMap<u32, Arc<TableInfo>>,
+    /// Tables opened despite documents that don't match their type, because migrations for them are pending. Writes
+    /// to them are validated leniently (see [`Catalog::is_migrating`]) until their last migration has run and the
+    /// table passed the schema check again.
+    migrating: std::sync::RwLock<std::collections::BTreeSet<String>>,
 }
 
 impl Catalog {
+    /// True while `table` is *migrating*: a patch or replace may then leave a document that doesn't match the
+    /// table's type, but only if it didn't match before the write either (a document the migrations haven't
+    /// rewritten yet). Inserts, and writes to documents that match, are always validated strictly.
+    pub fn is_migrating(&self, table: &str) -> bool {
+        self.migrating.read().unwrap_or_else(|e| e.into_inner()).contains(table)
+    }
+
+    /// The migrating tables, by name.
+    pub fn migrating_tables(&self) -> Vec<String> {
+        self.migrating.read().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+    }
+
+    pub(crate) fn set_migrating(&self, table: &str, migrating: bool) {
+        let mut set = self.migrating.write().unwrap_or_else(|e| e.into_inner());
+        if migrating {
+            set.insert(table.to_string());
+        } else {
+            set.remove(table);
+        }
+    }
+
     pub fn table(&self, name: &str) -> anyhow::Result<&Arc<TableInfo>> {
         self.by_name.get(name).with_context(|| format!("table `{name}` is not registered"))
     }

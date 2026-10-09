@@ -7,12 +7,14 @@
 //! - [`writelog`]: recent commits, used to invalidate subscriptions.
 //! - [`runtime`]: function registry, contexts and [`App`].
 //! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
+//! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
 
 // The macros emit `::ferrix::...` paths; this lets ferrix define its own system tables and functions with them.
 extern crate self as ferrix;
 
+pub mod auth;
 pub mod cli;
 pub mod codegen;
 pub mod db;

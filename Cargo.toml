@@ -21,3 +21,9 @@ syn = { version = "3.0.6", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 proptest = "1.11.0"
+
+# Password hashing (argon2id) is unbearably slow unoptimized; tests and `serve` in debug builds hash for real.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

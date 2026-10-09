@@ -29,6 +29,30 @@ impl TestApp {
         Ok(TestApp { app, dir })
     }
 
+    /// A dev-mode app with this auth configuration.
+    pub async fn with_auth(auth: crate::auth::AuthConfig) -> crate::Result<TestApp> {
+        Self::with_options(AppOptions { dev: true, auth, ..Default::default() }).await
+    }
+
+    /// Run a query as `identity` (e.g. `Identity::user(id, None)`).
+    pub async fn query_as<F: QueryFunction>(&self, identity: &Identity, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+        self.app.typed_query::<F>(args.into(), identity).await
+    }
+
+    /// Run a mutation as `identity`.
+    pub async fn mutation_as<F: MutationFunction>(
+        &self,
+        identity: &Identity,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<F::Output> {
+        Ok(self.app.typed_mutation::<F>(args.into(), identity).await?.0)
+    }
+
+    /// Run an action as `identity`.
+    pub async fn action_as<F: ActionFunction>(&self, identity: &Identity, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+        self.app.typed_action::<F>(args.into(), identity).await
+    }
+
     pub fn app(&self) -> &App {
         &self.app
     }

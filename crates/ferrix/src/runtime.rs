@@ -21,28 +21,8 @@ use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 // Identity and contexts
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Who is calling. Phase 0: always anonymous.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Identity {
-    pub user_id: Option<String>,
-}
-
-/// Authentication info available to functions.
-#[derive(Debug, Clone, Default)]
-pub struct Auth {
-    identity: Identity,
-}
-
-impl Auth {
-    pub(crate) fn new(identity: Identity) -> Self {
-        Auth { identity }
-    }
-
-    /// The authenticated user's id, if any (phase 0: always `None`).
-    pub fn user_id(&self) -> Option<&str> {
-        self.identity.user_id.as_deref()
-    }
-}
+// `Identity` (who is calling) and `Auth` (`ctx.auth`) live in the auth module.
+pub use crate::auth::{Auth, Identity};
 
 /// Context of a query: read-only access to one consistent snapshot.
 pub struct QueryCtx {
@@ -171,11 +151,13 @@ pub struct AppOptions {
     pub dev: bool,
     /// Number of read-only connections.
     pub readers: usize,
+    /// Sign-in methods, token lifetimes, email and OAuth settings (`crate::auth`).
+    pub auth: crate::auth::AuthConfig,
 }
 
 impl Default for AppOptions {
     fn default() -> Self {
-        AppOptions { dev: false, readers: crate::db::DEFAULT_READERS }
+        AppOptions { dev: false, readers: crate::db::DEFAULT_READERS, auth: Default::default() }
     }
 }
 
@@ -196,6 +178,7 @@ struct AppInner {
     db: Database,
     registry: &'static Registry,
     options: AppOptions,
+    auth: crate::auth::AuthService,
 }
 
 impl App {
@@ -205,8 +188,9 @@ impl App {
         let tables = registered_tables();
         let dir = dir.as_ref().to_path_buf();
         let readers = options.readers;
+        let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
         let db = tokio::task::spawn_blocking(move || Database::open(&dir, &tables, readers)).await??;
-        Ok(App { inner: Arc::new(AppInner { db, registry, options }) })
+        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth }) })
     }
 
     pub fn db(&self) -> &Database {
@@ -219,6 +203,11 @@ impl App {
 
     pub fn registry(&self) -> &'static Registry {
         self.inner.registry
+    }
+
+    /// Auth state and operations (token validation, sign-in, admins).
+    pub fn auth(&self) -> &crate::auth::AuthService {
+        &self.inner.auth
     }
 
     /// Look up a function of `kind`. Internal functions are only found when `allow_internal`.

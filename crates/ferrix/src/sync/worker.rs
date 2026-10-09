@@ -76,6 +76,11 @@ pub struct SyncWorker {
     pending_mutation_ts: Option<u64>,
     completions_tx: mpsc::UnboundedSender<Completion>,
     completions_rx: mpsc::UnboundedReceiver<Completion>,
+    /// When the current access token expires; the socket then ends with `AuthError` unless the client has sent a
+    /// fresh token by then.
+    auth_expires_at: Option<Instant>,
+    /// Set when the connection ends because of an auth failure: sent as `AuthError` instead of `FatalError`.
+    auth_error: Option<String>,
 }
 
 /// Spawn a worker and return its input and output channels (used by the WebSocket handler and by tests).
@@ -98,6 +103,8 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         pending_mutation_ts: None,
         completions_tx,
         completions_rx,
+        auth_expires_at: None,
+        auth_error: None,
     };
     worker.run(inbound).await
 }
@@ -110,6 +117,7 @@ impl SyncWorker {
 
         let result: Result<(), Fatal> = async {
             loop {
+                let auth_expiry = self.auth_expires_at;
                 tokio::select! {
                     msg = inbound.recv() => match msg {
                         None => return Ok(()),
@@ -127,6 +135,10 @@ impl SyncWorker {
                         self.refresh_and_send().await?;
                     }
                     _ = ping.tick() => self.send(ServerMessage::Ping).await?,
+                    _ = sleep_until_opt(auth_expiry) => {
+                        self.auth_error = Some("access token expired".into());
+                        return Err(Fatal("access token expired".into()));
+                    }
                 }
             }
         }
@@ -134,7 +146,11 @@ impl SyncWorker {
 
         if let Err(Fatal(error)) = result {
             tracing::debug!("closing sync connection: {error}");
-            let _ = self.out.send(ServerMessage::FatalError { error }).await;
+            let msg = match self.auth_error.take() {
+                Some(error) => ServerMessage::AuthError { error },
+                None => ServerMessage::FatalError { error },
+            };
+            let _ = self.out.send(msg).await;
         }
     }
 
@@ -191,16 +207,28 @@ impl SyncWorker {
                 let end = StateVersion { query_set: new_version, ts, ..self.sent };
                 self.send_transition(end, removed).await?;
             }
-            ClientMessage::Authenticate { base_version, token: _ } => {
+            ClientMessage::Authenticate { base_version, token } => {
                 if base_version != self.sent.identity {
                     return Err(Fatal(format!(
                         "invalid Authenticate: server identity version is {}, got baseVersion {base_version}",
                         self.sent.identity
                     )));
                 }
-                // Phase 0: tokens are not validated and identity stays anonymous; everything reruns anyway since
+                // An invalid, expired or revoked token ends the socket with AuthError (the client refreshes and
+                // reconnects); a valid one becomes this socket's identity until it expires. Everything reruns:
                 // query results may depend on who is asking.
-                self.identity = Identity::default();
+                let (identity, expires_at) = match token {
+                    None => (Identity::default(), None),
+                    Some(token) => match self.app.auth().authenticate(&self.app, &token).await {
+                        Ok(a) => (a.identity, Some(deadline(a.expires_at))),
+                        Err(e) => {
+                            self.auth_error = Some(e.to_string());
+                            return Err(Fatal(e.to_string()));
+                        }
+                    },
+                };
+                self.identity = identity;
+                self.auth_expires_at = expires_at;
                 for q in self.queries.values_mut() {
                     q.force = true;
                 }
@@ -331,6 +359,19 @@ impl SyncWorker {
             q.valid_at = q.valid_at.max(ts);
         }
         Ok((ts, mods))
+    }
+}
+
+/// The tokio instant at which `at` (wall clock) is reached.
+fn deadline(at: std::time::SystemTime) -> Instant {
+    let left = at.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+    Instant::now() + left
+}
+
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

@@ -276,9 +276,9 @@ async fn mutation_user_error_and_bad_messages() {
     assert!(resp["errorMessage"].as_str().unwrap().starts_with("Invalid args for add: "), "{resp}");
     assert_eq!(resp["errorData"], Value::Null);
 
-    // Authenticate bumps the identity version; a stale baseVersion is fatal.
+    // Authenticate bumps the identity version; a stale baseVersion is fatal. (Real tokens: tests/it/auth.rs.)
     a.subscribe(0, 1, &todos::list::path(), json!({})).await;
-    a.send(json!({ "type": "Authenticate", "baseVersion": 0, "token": "t" })).await;
+    a.send(json!({ "type": "Authenticate", "baseVersion": 0, "token": null })).await;
     let t1 = a.recv_type("Transition").await;
     assert_eq!(t1["endVersion"]["identity"], 1);
     assert_eq!(t1["modifications"], json!([]), "results did not change");
@@ -317,13 +317,13 @@ async fn server_errors_are_hidden_outside_dev() {
     assert!(body["errorMessage"].as_str().unwrap().contains("secret internal detail"));
 }
 
-/// A minimal HTTP/1.1 client (no extra dependency): returns (status, JSON body).
+/// A minimal HTTP/1.1 client (no extra dependency): returns (status, JSON body). Anonymous (no Authorization).
 async fn http(addr: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-         Authorization: Bearer ignored\r\nConnection: close\r\n\r\n{body}",
+         Connection: close\r\n\r\n{body}",
         body.len()
     );
     s.write_all(req.as_bytes()).await.unwrap();

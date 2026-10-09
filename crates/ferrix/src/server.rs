@@ -3,6 +3,7 @@
 //! - `GET  /api/sync`: the WebSocket sync protocol (docs/PROTOCOL.md).
 //! - `POST /api/query | /api/mutation | /api/action`: the HTTP fallback, `{ "path", "args" }`.
 //! - `GET  /api/health`.
+//! - `/api/auth/*` and `/_/setup`: authentication (`crate::auth::http`).
 
 use std::future::Future;
 
@@ -10,7 +11,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::{SinkExt, StreamExt};
@@ -20,7 +21,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 use crate::error::ClientError;
-use crate::runtime::{App, Identity};
+use crate::runtime::App;
 use crate::sync::protocol::ClientMessage;
 use crate::sync::worker::{self, Inbound};
 
@@ -32,14 +33,16 @@ pub fn router(app: App) -> Router {
         .route("/api/mutation", post(http_mutation))
         .route("/api/action", post(http_action))
         .route("/api/health", get(|| async { axum::Json(json!({ "status": "ok" })) }))
-        // Phase 0: permissive CORS in every mode (single-user apps, no cookies). Tighten once auth lands.
+        .merge(crate::auth::http::routes())
+        // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
+        // on top-level navigations, which CORS doesn't govern).
         .layer(CorsLayer::permissive())
         .with_state(app)
 }
 
 /// Serve `app` on `listener` until the process ends.
 pub async fn serve(listener: TcpListener, app: App) -> crate::Result<()> {
-    axum::serve(listener, router(app)).await?;
+    axum::serve(listener, router(app).into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
 
@@ -49,7 +52,9 @@ pub async fn serve_with_shutdown(
     app: App,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> crate::Result<()> {
-    axum::serve(listener, router(app)).with_graceful_shutdown(shutdown).await?;
+    axum::serve(listener, router(app).into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }
 
@@ -136,24 +141,31 @@ fn parse_call(body: &[u8]) -> Result<HttpCall, Box<Response>> {
     Ok(call)
 }
 
-async fn http_query(State(app): State<App>, body: Bytes) -> Response {
+async fn http_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
     };
-    // Phase 0: the Authorization header is accepted but ignored.
-    match app.run_query(&call.path, call.args, &Identity::default()).await.result {
+    let identity = match crate::auth::http::identity_from_headers(&app, &headers).await {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
+    };
+    match app.run_query(&call.path, call.args, &identity).await.result {
         Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": [] })).into_response(),
         Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev)),
     }
 }
 
-async fn http_mutation(State(app): State<App>, body: Bytes) -> Response {
+async fn http_mutation(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
     };
-    match app.run_mutation(&call.path, call.args, &Identity::default()).await {
+    let identity = match crate::auth::http::identity_from_headers(&app, &headers).await {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
+    };
+    match app.run_mutation(&call.path, call.args, &identity).await {
         Ok((value, ts)) => {
             axum::Json(json!({ "status": "success", "value": value, "ts": ts, "logLines": [] })).into_response()
         }
@@ -161,12 +173,16 @@ async fn http_mutation(State(app): State<App>, body: Bytes) -> Response {
     }
 }
 
-async fn http_action(State(app): State<App>, body: Bytes) -> Response {
+async fn http_action(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
     };
-    match app.run_action(&call.path, call.args, &Identity::default()).await {
+    let identity = match crate::auth::http::identity_from_headers(&app, &headers).await {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
+    };
+    match app.run_action(&call.path, call.args, &identity).await {
         Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": [] })).into_response(),
         Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev)),
     }

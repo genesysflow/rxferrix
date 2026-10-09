@@ -5,7 +5,11 @@
 //! - `GET  /api/health`.
 //! - `/api/auth/*`: authentication (`crate::auth::http`).
 //! - `POST /api/storage/upload`, `GET /api/storage/{id}`: file storage (`crate::storage::http`).
-//! - `/api/admin/*`: admin-only logs and stats (`crate::dashboard::http`).
+//! - `/api/admin/*`: admin-only logs and stats (`crate::dashboard::http`); backups, export and import
+//!   (`crate::ops::http`).
+//! - `GET /metrics`: Prometheus metrics when enabled (`crate::ops::metrics`).
+//!
+//! `crate::ops::web::router` adds the app's own routes and static frontend around this router.
 //! - `/_/`: the dashboard SPA (`crate::dashboard::assets`, feature `dashboard`; without it, a minimal `/_/setup`).
 
 use std::future::Future;
@@ -39,6 +43,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::auth::http::routes())
         .merge(crate::storage::http::routes())
         .merge(crate::dashboard::http::routes())
+        .merge(crate::ops::http::routes())
         .merge(dashboard_ui())
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
         // on top-level navigations, which CORS doesn't govern). Administrators can restrict origins at runtime.

@@ -1,0 +1,15 @@
+# Build outputs and local state never go into the build context.
+target/
+dist/
+**/dist/
+node_modules/
+**/node_modules/
+fx_data/
+**/fx_data/
+*.tsbuildinfo
+.svelte-kit/
+.claude/
+.git/
+.github/
+Dockerfile
+.dockerignore

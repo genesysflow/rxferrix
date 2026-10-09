@@ -109,3 +109,22 @@ export function prettyArgs(args: string): string {
   const parsed = parseJson(args);
   return parsed.ok ? pretty(parsed.value) : args;
 }
+
+/** How the Files page previews a file of this content type, or null for no preview. */
+export function previewKind(contentType: string | null | undefined): "image" | "video" | "audio" | "text" | null {
+  const essence = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (essence.startsWith("image/")) return "image";
+  if (essence.startsWith("video/")) return "video";
+  if (essence.startsWith("audio/")) return "audio";
+  if (essence.startsWith("text/") || /^application\/([\w.+-]+\+)?(json|xml)$/.test(essence)) return "text";
+  return null;
+}
+
+/**
+ * The same-origin path of a server URL (absolute or root-relative), e.g. `/api/storage/<id>`. The dashboard is served
+ * by the server itself, and its CSP only allows same-origin requests even when the configured public URL differs.
+ */
+export function sameOriginPath(url: string): string {
+  const u = new URL(url, "http://localhost");
+  return u.pathname + u.search;
+}

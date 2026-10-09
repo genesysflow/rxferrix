@@ -4,8 +4,8 @@
 //
 // Starts the server on a free port with a temp data dir (after `admin create`), then in Chromium: signs in at /_/,
 // watches a todo inserted over the HTTP API appear live in the data grid, edits a document in the side panel, runs
-// todos:add from the function runner, sees executions arrive in the live logs tail, and checks that anonymous callers
-// can't use the system functions. A second server with a fresh data dir checks the printed /_/setup#token=… flow.
+// todos:add from the function runner, sees executions arrive in the live logs tail, uploads files on the Files page
+// (picker and drag and drop, previews, delete), and checks that anonymous callers can't use the system functions. A second server with a fresh data dir checks the printed /_/setup#token=… flow.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -215,7 +215,66 @@ try {
     await page.getByText("No users yet").waitFor();
   });
 
-  // 6. Non-admins can't call the system functions.
+  // 6. Files: upload through the picker and by drag and drop, preview, serve, delete.
+  await step("upload, preview and delete files on the Files page", async () => {
+    await nav(page, "Files").click();
+    await page.getByRole("heading", { name: "Files" }).waitFor();
+    await page.getByText("No files yet").waitFor();
+    const text = `hello from the dashboard e2e ${Date.now()}`;
+    await page.getByLabel("Upload files").setInputFiles({ name: "hello.txt", mimeType: "text/plain", buffer: Buffer.from(text) });
+    const grid = page.getByTestId("files");
+    await grid.getByText("hello.txt").waitFor({ timeout: 5000 });
+    // The new file is selected: its text preview is fetched from /api/storage/<id>.
+    await page.getByTestId("text-preview").getByText(text).waitFor({ timeout: 5000 });
+    const id = new URL(page.url()).searchParams.get("file");
+    if (!id) throw new Error(`no file selected: ${page.url()}`);
+    const served = await fetch(`${base}/api/storage/${id}`);
+    if ((await served.text()) !== text || served.headers.get("content-type") !== "text/plain") {
+      throw new Error(`served file differs: ${served.status} ${served.headers.get("content-type")}`);
+    }
+    // Drag and drop a PNG: it gets a thumbnail.
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const dataTransfer = await page.evaluateHandle((b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], "pixel.png", { type: "image/png" }));
+      return dt;
+    }, png.toString("base64"));
+    const region = page.getByRole("region", { name: "Files" });
+    await region.dispatchEvent("dragover", { dataTransfer });
+    await region.dispatchEvent("drop", { dataTransfer });
+    await grid.getByText("pixel.png").waitFor({ timeout: 5000 });
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll<HTMLImageElement>("[data-testid=files] img")].some((i) => i.complete && i.naturalWidth === 1),
+    );
+    await shot(page, "files");
+    // An app document referencing a file (a todo's image): its Id<"_storage"> in the data grid opens the Files page.
+    const upload = await call(base, "mutation", "todos:generate_upload_url", {});
+    const uploaded = await fetch(upload.body.value as string, { method: "POST", headers: { "content-type": "image/png" }, body: png });
+    const { storageId } = (await uploaded.json()) as { storageId: string };
+    const todo = await call(base, "mutation", "todos:add", { text: "todo with an image" });
+    const attached = await call(base, "mutation", "todos:set_image", { id: todo.body.value, image: storageId });
+    if (attached.status !== 200) throw new Error(`set_image failed: ${JSON.stringify(attached.body)}`);
+    await nav(page, "Data").click();
+    await page.getByRole("link", { name: /^todos/ }).click();
+    await page.getByTestId("document-grid").getByRole("link", { name: storageId }).click();
+    await page.getByRole("heading", { name: "Files" }).waitFor();
+    await page.getByRole("complementary", { name: "File details" }).getByText(storageId, { exact: true }).first().waitFor();
+    if (new URL(page.url()).searchParams.get("file") !== storageId) throw new Error(`not linked: ${page.url()}`);
+    // Admin-only: anonymous callers can't list files.
+    const anon = await call(base, "query", "_system/storage:files", { paginationOpts: { numItems: 10, cursor: null } });
+    if (anon.status !== 400 || anon.body.errorData?.code !== "unauthenticated") throw new Error(`files not refused: ${JSON.stringify(anon.body)}`);
+    // Delete the text file (the confirm dialog is accepted): it disappears live and is no longer served.
+    await grid.getByRole("row").filter({ hasText: "hello.txt" }).getByRole("button", { name: "Delete" }).click();
+    await grid.getByText("hello.txt").waitFor({ state: "detached", timeout: 5000 });
+    const gone = await fetch(`${base}/api/storage/${id}`);
+    if (gone.status !== 404) throw new Error(`deleted file still served: ${gone.status}`);
+  });
+
+  // 7. Non-admins can't call the system functions.
   await step("anonymous callers are refused", async () => {
     const q = await call(base, "query", "_system/dashboard:tables", {});
     const a = await call(base, "action", "_system/dashboard:run_function", { path: "todos:add", args: { text: "x" } });

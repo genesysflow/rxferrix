@@ -64,10 +64,11 @@ describe("JsonValue", () => {
     secretFields: [],
     access: "readWrite",
   };
+  const files: TableSummary = { ...todos, name: "_storage", number: 9, system: true, access: "readOnly" };
   const ctx: DashboardContext = {
     auth: {} as DashboardContext["auth"],
-    tables: [todos],
-    tableByNumber: (n) => (n === 8 ? todos : undefined),
+    tables: [todos, files],
+    tableByNumber: (n) => (n === 8 ? todos : n === 9 ? files : undefined),
     toast: () => {},
   };
   const render = (value: Json | undefined, field = "x") => {
@@ -82,6 +83,11 @@ describe("JsonValue", () => {
     expect(a.getAttribute("href")).toBe("/_/data/todos?doc=0000022dbsg2b0typca0183asm");
     // An id-shaped string of an unknown table stays text.
     expect(render("00000k2dbsg2b0typca0183asm").querySelector("a")).toBeNull();
+  });
+
+  it("links stored file ids to the Files page", () => {
+    const a = render("0000028dbsg2b0typca0183asm").querySelector("a")!;
+    expect(a.getAttribute("href")).toBe("/_/files?file=0000028dbsg2b0typca0183asm");
   });
 
   it("renders scalars, objects and creation times compactly", () => {

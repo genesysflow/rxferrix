@@ -126,9 +126,10 @@ pub enum Order { Asc, Desc }
 ### 1.2 Contexts and database API
 
 ```rust
-pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, /* private */ }
-pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, /* private */ }
-pub struct ActionCtx   { pub auth: Auth, /* private: runtime handle */ }
+pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage,    /* private */ }
+pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, /* private */ }
+pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, /* private: runtime handle */ }
+// ctx.storage: file storage, see §1.6.
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit.
 
 // ctx.auth: the caller, from a validated access token (WS `Authenticate` or HTTP `Authorization: Bearer`).
@@ -319,6 +320,7 @@ pub struct AppOptions {
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
     pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
+    pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
@@ -453,6 +455,102 @@ appear in function args or the execution log.
 (mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@ferrix/client` exports hand-written references
 as `systemApi.auth.me` / `systemApi.auth.updateProfile`. The admin-only dashboard functions are listed in §4.1;
 `FerrixAuth.setupAdmin({ token, email, password })` completes the printed setup link.
+
+### 1.6 File storage
+
+```rust
+use ferrix::storage::{StorageConfig, StoredFile};
+
+#[mutation]
+pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> { ctx.storage.generate_upload_url().await }
+
+#[mutation]
+pub async fn attach(ctx: &MutationCtx, doc: Id<Note>, file: Id<StoredFile>) -> Result<()> {
+    ctx.db.patch(doc, json!({ "file": file })).await
+}
+
+#[query]
+pub async fn file_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> { ctx.storage.get_url(file).await }
+
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new().storage(StorageConfig::s3("my-bucket", "uploads").max_upload_size(20 << 20)).run()
+}
+```
+
+**The `_storage` table** (`ferrix::storage::StoredFile`, defined with `#[table]`; TS `Id<"_storage">`, declared in
+`SystemDataModel` so app tables may reference it):
+```rust
+#[table(name = "_storage")]
+#[index(by_sha256 = [sha256])]
+pub struct StoredFile {
+    pub sha256: String,               // hex SHA-256 of the content (also the HTTP ETag)
+    pub size: u64,                    // bytes (TS: number)
+    pub content_type: Option<String>, // as uploaded (`Content-Type`), validated; None = none was sent
+    pub created_by: Option<String>,   // Identity::log_summary() of whoever generated the upload URL / ran the action
+    pub filename: Option<String>,     // the original name (`?filename=` on upload), sanitized; None if not given
+}
+pub type StorageId = Id<StoredFile>;
+// created_at is the document's `_creationTime`.
+```
+The table is read-only through the dashboard's generic writes; files are removed with `ctx.storage.delete` (or the
+Files page).
+
+**`ctx.storage`.**
+```rust
+impl QueryStorage {      // deterministic, tracked reads: a query reruns when the file is deleted
+    pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>>;           // None if no such file
+    pub async fn get_metadata(&self, id: Id<StoredFile>) -> Result<Option<Doc<StoredFile>>>;
+}
+impl MutationStorage {   // the same reads, in the mutation's transaction, plus:
+    pub async fn generate_upload_url(&self) -> Result<String>;   // single-use, signed, upload_url_ttl (1h)
+    pub async fn delete(&self, id: Id<StoredFile>) -> Result<()>; // transactional; UserError "not_found" if missing
+}
+impl ActionStorage {     // generate_upload_url, get_url, get_metadata (latest snapshot), delete (own transaction), plus:
+    pub async fn store(&self, bytes: impl Into<Bytes>, content_type: Option<&str>) -> Result<Id<StoredFile>>;
+    pub async fn get(&self, id: Id<StoredFile>) -> Result<Option<Bytes>>;   // None if no such file
+}
+```
+- **URLs.** `get_url` returns `<public url>/api/storage/<id>`. The base is `StorageConfig::public_url`, else the auth
+  public URL (`--public-url`, which `serve` defaults to `http://<--http address>`), else nothing (a root-relative
+  `/api/storage/<id>`, e.g. in `TestApp`). The id carries 96 random bits, so the URL is an **unguessable capability
+  URL**: whoever has it can read the file, nobody can enumerate files. It never changes, which keeps
+  `get_url` deterministic inside queries. Signed or expiring URLs for private files are a possible later addition.
+  Upload URLs are `<base>/api/storage/upload?token=<token>`, token = `base64url(json {n: nonce, e: exp_s, b?:
+  created_by}) "." base64url(HMAC-SHA256)`, keyed by a key derived from `auth_secret.key` (BLAKE3 KDF, context
+  `"ferrix storage v1 upload url HMAC key"`), so restarting keeps URLs valid and deleting the secret voids them.
+- **Single use.** A token's nonce is recorded (raw table `_storage_used_upload_tokens` in `data.db`, kept until the
+  token expires) in the same transaction that inserts the file's document. A failed upload (413, a dropped
+  connection) does not use the URL up; a concurrent second upload with the same URL is refused (409).
+- **Blob layout and consistency.** A blob is stored at `<prefix>/<storage id>` (local default `<data dir>/storage/`,
+  no prefix). The id is chosen before the upload; the blob becomes visible only when complete (one `put` up to 8 MiB,
+  otherwise a multipart upload completed at the end: a staged file renamed into place locally, a completed multipart
+  upload on S3; aborted on failure), and the document is inserted after that. So a document always has a complete
+  blob. `MutationStorage::delete` deletes the document in the transaction and registers the blob deletion as an
+  after-commit hook (`WriteTxn::on_commit`), which never runs if the mutation rolls back. **Orphans** (a crash between
+  blob and document, a failed delete) are removed by `StorageService::sweep`, run every `sweep_interval` (6 h; first
+  after 5 minutes): blobs named like a `_storage` id, without a document, older than `orphan_grace` (1 h), and not
+  being uploaded. Other keys under the prefix are left alone.
+- **Configuration.**
+  ```rust
+  pub struct StorageConfig {
+      pub backend: StorageBackend,              // Local(Option<PathBuf>) | S3 { bucket, prefix } | Custom { store: Arc<dyn ObjectStore>, prefix }
+      pub max_upload_size: u64,                 // 100 MiB; `--max-upload-size 100MB` (FERRIX_MAX_UPLOAD_SIZE)
+      pub upload_url_ttl: Duration,             // 1 h
+      pub cache_max_age: Duration,              // 30 days (Cache-Control of served files)
+      pub public_url: Option<String>,           // see URLs
+      pub upload_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP; Some((60, 120))
+      pub sweep_interval: Option<Duration>,     // Some(6 h); None = no background sweep
+      pub orphan_grace: Duration,               // 1 h
+  }
+  // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder setters.
+  ```
+  `--storage <location>` (`FERRIX_STORAGE`): a directory, `file:///dir`, or `s3://bucket[/prefix]`. S3 (feature `s3`,
+  default) reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` /
+  `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (R2, MinIO), `AWS_ALLOW_HTTP`, ... (`object_store`'s `from_env`).
+  `ferrix::storage::object_store` re-exports the crate, e.g. `object_store::memory::InMemory` for tests. Configure an
+  abort-incomplete-multipart-uploads lifecycle rule on S3 buckets.
+- `App::storage() -> &Arc<StorageService>`: `object_store()`, `blob_path(id)`, `file_url(id)`, `config()`,
+  `sweep(&app)`.
 
 ---
 
@@ -614,7 +712,7 @@ ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping)
 
 - **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
   in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
-  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`, today just `_users`)
+  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`)
   are declared in a separate `SystemDataModel`, and the generated `Id<T>` / `Doc<T>` accept
   `TableNames | keyof SystemDataModel`.
 - **System functions** get paths under `_system/` (`function_path` maps crate `ferrix` to `_system`), e.g.
@@ -660,6 +758,18 @@ binary-search a hash).
 `name`, `image` and `emailVerified` can be changed through `patch_document` / `replace_document` (any other changed
 field: `read_only_field`; `image` must be an http(s) URL). Users and sessions are removed with `delete_user` and
 `revoke_session`, which keep the auth invariants (no orphaned credentials, accounts, or rotated-token rows).
+
+### 4.1.1 Files page functions
+
+`crates/ferrix/src/storage/mod.rs` defines the Files page backend, admin-only like §4.1 (`unauthenticated` /
+`forbidden`). References: `storage` in `packages/dashboard/src/lib/api.ts`.
+
+| Path `_system/storage:…` | Kind | Args → result |
+|---|---|---|
+| `files` | query | `{ paginationOpts }` → `PaginationResult<FileSummary>`, newest first, live. `FileSummary` = `{ _id, _creationTime, sha256, size, contentType, createdBy, filename, url }`. |
+| `file` | query | `{ id }` → `FileSummary \| null`. `invalid_id` for a malformed id. |
+| `delete_file` | mutation | `{ id }` → `null` (`ctx.storage.delete`). `not_found` if missing. |
+| `generate_upload_url` | mutation | `{}` → an upload URL (the dashboard's upload button; `createdBy` = the admin). |
 
 ### 4.2 Admin HTTP endpoints
 

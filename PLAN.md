@@ -415,6 +415,10 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - Serving: `GET /api/storage/:id`, with optional signed or expiring URLs for private files and range requests for media.
 - Actions can also call `ctx.storage.store(bytes)` and `ctx.storage.get(id) -> bytes`.
 - Later: image thumbnails (`?thumb=200x200`, via the `image` crate) and orphan cleanup through a built-in cron.
+- As built (docs/CONTRACT.md §1.6, docs/PROTOCOL.md "File storage"): `ctx.storage` exists in all three contexts
+  (queries: `get_url`, `get_metadata`); `_storage` also records the original file name, and its creation time is
+  `_creationTime`. URLs are stable capability URLs (`/api/storage/<id>`, the id carries 96 random bits), so
+  `get_url` stays deterministic in queries; signed or expiring URLs remain an option for private files.
 
 ### 7.3 Scheduler and cron
 - `ctx.scheduler.run_after::<fn_ref>(dur, args)` and `run_at::<fn_ref>(time, args)`. Called inside a mutation, the job row is inserted **in the same transaction**, so it is scheduled only if the mutation commits. Both return an `Id<_scheduled_jobs>`, which can be passed to `ctx.scheduler.cancel(id)`.
@@ -545,8 +549,24 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 ### Phase 6 — Scheduler and cron (M)
 - [ ] `run_after`, `run_at`, `cancel`, the scheduler task, crons, and the dashboard Scheduler page.
 
-### Phase 7 — File storage (M)
-- [ ] Upload URLs, serving, the local and S3 backends, and the dashboard Files page.
+### Phase 7 — File storage (M) — mostly done
+- [x] The `_storage` system table (`StoredFile`: sha256, size, content type, `createdBy`, original file name) and the
+  local (`<data dir>/storage/`) and S3-compatible backends via `object_store` (`--storage s3://bucket/prefix`,
+  `AWS_*` env vars; any `object_store` through the builder). Blobs are named by their storage id and only become
+  visible once complete.
+- [x] Upload URLs: HMAC-signed with a key derived from `auth_secret.key`, valid for an hour, single-use (recorded in
+  the transaction that inserts the file's document), rate limited per IP. `POST /api/storage/upload` streams to the
+  backend while hashing and answers 413 past `--max-upload-size` (default 100 MB).
+- [x] `ctx.storage`: `get_url` / `get_metadata` in queries (tracked reads), plus `generate_upload_url` and a
+  transactional `delete` in mutations (the blob goes after the commit), plus `store` / `get` in actions. An orphan
+  sweep removes blobs without a document.
+- [x] Serving `GET /api/storage/{id}`: ETag/304, single ranges (206/416), `Cache-Control: private, immutable`,
+  `nosniff`, a sandboxing CSP, and active content (HTML, SVG, …) only as attachments. Unguessable capability URLs.
+- [x] `uploadFile()` in `@ferrix/client` (XHR progress, `fetch` fallback), re-exported by React and Svelte.
+- [x] The dashboard Files page (live list, previews, download, delete, drag-and-drop upload; `_storage` ids in the data
+  grid link to it) and image attachments in `examples/todo`.
+- [ ] Later: signed, expiring URLs for private files; image thumbnails; multiple-range responses; running the orphan
+  sweep as a built-in cron once the scheduler exists.
 
 ### Phase 8 — Search (M)
 - [ ] FTS5 search indexes, then `sqlite-vec` vector indexes.

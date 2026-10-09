@@ -211,3 +211,51 @@ dashboard's execution log and stats. They require `Authorization: Bearer <access
 for the event stream, which clients read with `fetch()` rather than `EventSource`, so tokens never go in URLs). The
 dashboard's data views use the admin-only system functions `_system/dashboard:*` over this protocol. Both are
 specified in docs/CONTRACT.md §4.1 and §4.2.
+
+## File storage
+
+Files are uploaded through signed upload URLs and served by id. The Rust side (`ctx.storage`, the `_storage` table,
+configuration) is in docs/CONTRACT.md §1.6; `uploadFile(uploadUrl, blob, { onProgress })` in `@ferrix/client`
+implements the client side of the upload.
+
+### `POST /api/storage/upload?token=<token>[&filename=<name>]`
+
+The URL comes from `ctx.storage.generate_upload_url()` (a mutation or action returns it to the client). The body is
+the raw file content (not multipart form data); `Content-Type` is stored as the file's type (optional; must be a valid
+`type/subtype[; params]` of at most 255 printable ASCII bytes). `filename` is optional; only its last path segment is
+kept (control characters removed, at most 255 characters). No `Authorization` is needed: the token is the
+credential, and `createdBy` is whoever generated the URL.
+
+- **200** `{ "storageId": "<id>" }` (an `Id<"_storage">`) once the blob is stored and its document committed.
+- **400** `invalid_content_type`; `upload_failed` (the request body broke off).
+- **403** `invalid_upload_url` (missing, malformed or wrongly signed token), `upload_url_expired` (older than an
+  hour), `upload_url_used` (an upload with it already succeeded).
+- **409** `upload_in_progress` (another upload with the same URL is running).
+- **413** `file_too_large`: refused up front when `Content-Length` exceeds the limit (default 100 MiB), otherwise as
+  soon as the streamed body does. Nothing is stored and the URL stays usable.
+- **429** `rate_limited` with `Retry-After` (per client IP; default burst 60, 120 per minute).
+
+Errors use the auth endpoints' shape (`{ "status": "error", "errorMessage", "errorData": { "code", "data" } }`) and
+`Cache-Control: no-store`. A failed upload doesn't use the URL up; it can be retried until it expires.
+
+### `GET /api/storage/{id}` (and `HEAD`)
+
+`ctx.storage.get_url(id)` returns this URL (absolute when the server has a public URL). Anyone holding it can read the
+file: ids carry 96 random bits, so URLs are unguessable capabilities, and they never change.
+
+- **200** the content, streamed, with `Content-Type` (as uploaded, else `application/octet-stream`),
+  `Content-Length`, `ETag: "<sha256>"`, `Accept-Ranges: bytes`, `Cache-Control: private, max-age=2592000, immutable`
+  (a file's content never changes), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
+  `Content-Disposition`.
+- **304** when `If-None-Match` lists the ETag (or `*`).
+- **206** for a single `Range: bytes=a-b | a- | -n`, with `Content-Range: bytes a-b/size`. `If-Range` with another
+  ETag, malformed ranges and multiple ranges get the whole file (200).
+- **416** for an unsatisfiable range, with `Content-Range: bytes */size`.
+- **404** `not_found` for unknown or deleted files and ids of other tables.
+
+**Content-Disposition and active content.** Images (png, jpeg, gif, webp, avif, bmp, ico), audio, video,
+`text/plain`, `text/csv`, `application/json` and `application/pdf` are `inline`; everything else, in particular
+HTML, SVG, XML and JavaScript, is an `attachment`, so an upload can't run script on the app's origin. `?download=1`
+forces `attachment`. The original file name is included (`filename="…"; filename*=UTF-8''…`). Every response except
+inline PDFs (which browsers refuse to render sandboxed) also carries `Content-Security-Policy: default-src 'none';
+style-src 'unsafe-inline'; sandbox`, which gives a file rendered by a browser an opaque origin.

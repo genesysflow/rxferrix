@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { useAction, useConnectionState, useMutation, useQuery } from "@ferrix/svelte";
-  import { api, type Doc } from "./lib/ferrix";
+  import { uploadFile, useAction, useConnectionState, useMutation, useQuery } from "@ferrix/svelte";
+  import { api, type Doc, type Id } from "./lib/ferrix";
+  import TodoImage from "./TodoImage.svelte";
 
   type Filter = "all" | "open" | "done";
   let filter = $state<Filter>("all");
@@ -20,6 +21,7 @@
       _creationTime: Date.now(),
       text: args.text.trim(),
       done: false,
+      image: null,
     } as Doc<"todos">;
     store.setQuery(api.todos.list, {}, [temp, ...current]);
   });
@@ -27,6 +29,21 @@
   const remove = useMutation(api.todos.remove);
   const clearCompleted = useMutation(api.todos.clear_completed);
   const addSamples = useAction(api.todos.add_samples);
+  const generateUploadUrl = useMutation(api.todos.generate_upload_url);
+  const setImage = useMutation(api.todos.set_image);
+
+  // Attaching an image: get an upload URL, POST the file to it, then store the returned id on the todo.
+  let uploading = $state<Id<"todos"> | null>(null);
+  async function attach(id: Id<"todos">, file: File) {
+    uploading = id;
+    try {
+      const url = await generateUploadUrl();
+      const image = await uploadFile(url, file);
+      await setImage({ id, image });
+    } finally {
+      uploading = null;
+    }
+  }
 
   async function run(promise: Promise<unknown>) {
     error = null;
@@ -76,6 +93,21 @@
             onchange={(e) => run(setDone({ id: todo._id, done: e.currentTarget.checked }))}
           />
           <span>{todo.text}</span>
+        </label>
+        {#if todo.image}<TodoImage image={todo.image} alt={todo.text} />{/if}
+        <label class="attach" title="Attach an image">
+          {uploading === todo._id ? "…" : "📎"}
+          <input
+            type="file"
+            accept="image/*"
+            hidden
+            aria-label={`Attach an image to ${todo.text}`}
+            onchange={(e) => {
+              const file = e.currentTarget.files?.[0];
+              e.currentTarget.value = "";
+              if (file) run(attach(todo._id, file));
+            }}
+          />
         </label>
         <button class="remove" aria-label="Delete" onclick={() => run(remove({ id: todo._id }))}>×</button>
       </li>

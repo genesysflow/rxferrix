@@ -8,7 +8,11 @@ button { padding: .4rem .8rem; cursor: pointer; }
 .toolbar .active { font-weight: 700; text-decoration: underline; }
 ul { list-style: none; padding: 0; }
 li { display: flex; align-items: center; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid #8884; }
+li > label:first-child { flex: 1; }
 li.done span { text-decoration: line-through; opacity: .6; }
+.thumb { display: block; width: 2rem; height: 2rem; object-fit: cover; border-radius: .25rem; margin: 0 .4rem; }
+.attach { cursor: pointer; opacity: .6; padding: 0 .3rem; }
+.attach:hover { opacity: 1; }
 li.empty { opacity: .6; }
 .remove { border: none; background: none; font-size: 1.2rem; }
 .error { color: #d33; }

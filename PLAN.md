@@ -223,7 +223,7 @@ ferrix/
 - New index: backfill synchronously at startup (fine at this scale) and log progress.
 - Removed index: delete its entries.
 - Changed fields: validate every existing document against the new schema. If any fail, **refuse to start** and print the failing doc IDs and a hint (including a migration snippet), unless migrations for the table are pending (below). `ferrix serve --dev` offers to open them in the dashboard (not built yet).
-- Migrations (built, docs/CONTRACT.md §1.9): `#[migration(table = T, batch = N)]` functions get each document as raw JSON (or a typed `Doc<Old>`) and return a patch, a `DocChange` or nothing. They run in batches, each one mutation transaction that also advances a cursor in `_migrations`, so a run processes each document exactly once and resumes after a crash or a failure. `ferrix migrate [--name] [--dry-run]`, `ferrix migrate status`, `serve --migrate` and the admin functions `_system/migrations:{list, status, run, cancel}` run and show them. A table whose documents fail the startup check still opens while it has pending migrations, as *migrating*: writes may leave a document invalid only if it already was, and the check runs again (recording the fingerprint) in the transaction where its last migration finishes; a table still invalid after its migrations refuses the next start. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
+- Migrations (built, docs/CONTRACT.md §1.9): `#[migration(table = T, batch = N, after = [..])]` functions get each document as raw JSON (or a typed `Doc<Old>`) and return a patch, a `DocChange` or nothing. `after` dependencies form a DAG checked at startup; migrations run in topological order (name order as the tie-break), and running one before its dependencies are done is refused unless forced. They run in batches, each one mutation transaction that also advances a cursor in `_migrations`, so a run processes each document exactly once and resumes after a crash or a failure. `ferrix migrate [--name] [--dry-run]`, `ferrix migrate status`, `serve --migrate` and the admin functions `_system/migrations:{list, status, run, cancel}` run and show them. A table whose documents fail the startup check still opens while it has pending migrations, as *migrating*: writes may leave a document invalid only if it already was, and the check runs again (recording the fingerprint) in the transaction where its last migration finishes; a table still invalid after its migrations refuses the next start. Adding `Option<T>` or `#[serde(default)]` fields needs no migration.
 
 ### 4.3 Storage layout in SQLite
 
@@ -449,15 +449,17 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - Query API: `.with_search_index(Message::search_body, |q| q.search(Message::body, "hello wor").eq(Message::channel, c)).take(10)`, ordered by bm25 relevance. The last term gets prefix matching for search-as-you-type.
 - Reactivity is per filter value: a search with `.eq(channel, c)` only reruns after writes to documents whose channel
   is or was `c` (docs/CONTRACT.md §1.8). Relevance is a per-document BM25 so that this, and pagination, are exact.
-- `tokenizer = "unicode61" | "porter" | "trigram"` (stemming, substring search), `diacritics = "keep"`.
+- `tokenizer = "unicode61" | "porter" | "trigram" | "snowball"` (stemming, substring search), `language = "…"`
+  (Snowball stemmers for 18 languages through a custom FTS5 tokenizer, `db::search::stem`), `diacritics = "keep"`.
 - `.paginate(opts)` like index pagination.
 
 ### 7.5 Vector search (`sqlite-vec`)
 - `#[vector_index(name, field = embedding, dims = 1536, filter = [f])]` on a `Vec<f32>` field.
-- `ctx.vector_search(Table::index, query_vec, { limit, filter })` is available **in actions only**. Embeddings come from external APIs, which only actions can call, so this keeps queries deterministic and cheap.
+- `ctx.vector_search(Table::index, query_vec, { limit, filter })` in actions: embeddings come from external APIs, which only actions can call. It uses the HNSW graph when there is one and is not reactive.
+- `ctx.db.vector_search(..)` in queries (built after Phase 8): always the exact `vec0` scan at the query's snapshot, so it stays deterministic, and reactive with read sets narrowed per filter value like text search (docs/CONTRACT.md §1.8).
 - Brute-force or `vec0` virtual tables handle roughly 100k vectors comfortably (75–120 ms per query at 200k × 384).
   Beyond that, `kind = "hnsw"` adds an in-memory HNSW graph kept consistent with the committed `vec0` table (done in
-  Phase 8; ~0.4 ms per query at 200k × 384).
+  Phase 8; ~0.4 ms per query at 200k × 384), with per-index `m`, `ef_construction`, `ef_search` and a per-search `ef`.
 
 ---
 
@@ -516,15 +518,18 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - **Exit criteria met**: `examples/todo` passes `e2e/two-tabs.ts` (about 2ms tab-to-tab) and `e2e/reconnect.ts` (server restart).
 - Design change found during the build: function references are type-namespace-only braced structs, called as `ctx.run_query::<list>(args)` (docs/CONTRACT.md §1).
 
-### Phase 1 — Core engine (L) — mostly done
+### Phase 1 — Core engine (L) — done
 - [x] Full value model in the key encoding, with proptests, including `ferrix::Bytes` (`{"$bytes": "<base64>"}`, its
   own tag between String and Array; the encoding is versioned in `_meta` and older databases get every index rebuilt).
 - [x] `#[table]` with typed field and index handles, catalog reconciliation, and index backfill.
 - [x] Validating existing documents against a changed schema at startup (only tables whose schema fingerprint changed; `--skip-schema-check` escape hatch).
 - [x] `#[migration]`: batched, resumable, exactly once per run, dry runs, `_migrations`, `ferrix migrate`,
   `serve --migrate`, admin system functions, and lenient startup for tables with pending migrations (CONTRACT §1.9).
-  The dashboard's Migrations page (live progress, run / cancel / restart, dry runs with examples). Not yet:
-  dependencies between migrations other than name order.
+  The dashboard's Migrations page (live progress, run / cancel / restart, dry runs with examples).
+- [x] Migration dependencies: `#[migration(after = ["0001_x", ..])]`, a DAG validated at startup (unknown names,
+  cycles, duplicates), topological run order with name order as the tie-break everywhere (`ferrix migrate`,
+  `serve --migrate`, `run_pending_migrations`, "Run all pending"); running one before its dependencies are done is
+  refused (`dependencies_not_done`) unless forced; `list` and the Migrations page show the dependencies.
 - [x] Query builder: `get`, `with_index` ranges, `order`, `filter`, `take`, `first`, `unique`, `collect`, and `paginate` (opaque cursors over the index key space, `endCursor` pinning, read sets narrowed to the scanned span, a 10k-document scan cap per page).
 - [x] Mutations: `insert`, `patch`, `replace`, `delete`. Every write is validated against the table type (`patch` checks the merged document; `insert`/`replace` check that the stored JSON round-trips).
 - [x] Actions with `run_query` / `run_mutation` / `run_action`, internal functions, and `UserError`.
@@ -542,12 +547,12 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Model-based reactivity test suite.
 - [x] Execution logging to `aux.db` (`App::logs()`: query, live tail, per-function stats), and forwarding log lines (`logLines`) to clients in `--dev`.
 
-### Phase 3 — Clients and codegen (L) — mostly done
+### Phase 3 — Clients and codegen (L) — done
 - [x] `ferrix codegen --out` producing `api.ts`, `dataModel.ts` and `index.ts`; auto codegen in `serve --dev --codegen-out` (or `FERRIX_CODEGEN_OUT`).
 - [x] `@ferrix/client` core with optimistic updates.
 - [x] Reactive pagination: `client.paginatedQuery` (pins each page's `endCursor` once a next page follows it), `usePaginatedQuery` for React and Svelte, and the `insertAtTop` optimistic helper.
 - [x] `@ferrix/react` and `@ferrix/svelte`.
-- [x] `examples/todo` (Svelte), with Playwright e2e scripts. `examples/chat-react` is still to do.
+- [x] `examples/todo` (Svelte), with Playwright e2e scripts, and `examples/chat-react` (React; Phase 10).
 - **Milestone reached: usable for a real (unauthenticated) app.**
 
 ### Phase 4 — Dashboard v1 (L) — done
@@ -676,8 +681,18 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Backend for a dashboard search box: admin-only `_system/dashboard:search_documents` (docs/CONTRACT.md §4.1).
 - [x] The dashboard's search box (live, paginated; the index, tokenizer and filter fields shown) and tokenizer /
   HNSW details in the schema view.
-- [ ] Not yet: stemmers for languages other than English, vector search in queries (reactive), tunable HNSW
-  parameters (`M`, `ef`) per index.
+- [x] Stemmers for other languages: `tokenizer = "snowball", language = "romanian" | "french" | "german" | …` (18
+  languages, `rust-stemmers`), a custom FTS5 tokenizer wrapping `unicode61`, registered on every connection by the
+  auto extension (readers included); accents kept for stemming, then folded, with the unaccented spelling's stem as
+  a colocated synonym; `ferrix_score` unchanged. Validated by the macro and at startup; a language change rebuilds.
+- [x] Vector search in queries: `ctx.db.vector_search` (exact `vec0` scan at the snapshot, also on HNSW indexes, so
+  deterministic), reactive with per-filter-value read sets (one prefix per `or` branch; vector entries write the same
+  synthetic keys as search entries); randomized soundness test and live updates over WebSocket.
+- [x] Tunable HNSW parameters: `m`, `ef_construction`, `ef_search` per index (validated), `VectorSearchOpts::ef(n)`
+  per search; changing `m` or `ef_construction` rebuilds the graph and replaces its saved file.
+- [x] HNSW robustness: a node is linked on every layer before neighbours link back to it (concurrent inserts under
+  CPU contention used to leave ~0.2% of the nodes unreachable), and the background thread is stopped and joined
+  when the `Database` drops.
 
 ### Phase 10 — DX fixes found by `examples/chat-react` (M)
 - [x] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild

@@ -1,0 +1,53 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "migration(quote!(table = \"todos\", name = \"0002_split-name\", batch = 7), quote!\n{\n    #[cfg(feature = \"x\")] async fn\n    split(_ctx: &ferrix::MutationCtx, doc: Doc<OldTodo>) ->\n    anyhow::Result<DocChange> { Ok(DocChange::Keep) }\n})"
+---
+#[cfg(feature = "x")]
+async fn split(
+    _ctx: &ferrix::MutationCtx,
+    doc: Doc<OldTodo>,
+) -> anyhow::Result<DocChange> {
+    Ok(DocChange::Keep)
+}
+/// Migration reference for [`split`](fn@split).
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types, dead_code)]
+struct split {}
+#[cfg(feature = "x")]
+impl ::ferrix::migrations::MigrationRef for split {
+    fn name() -> ::std::string::String {
+        ::ferrix::__private::MigrationDef::name(&__FERRIX_MIGRATION_split)
+    }
+    fn table() -> &'static str {
+        __FERRIX_MIGRATION_split.table
+    }
+}
+#[cfg(feature = "x")]
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_MIGRATION_split: ::ferrix::__private::MigrationDef = ::ferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "split",
+    name: ::core::option::Option::Some("0002_split-name"),
+    table: "todos",
+    batch_size: 7usize,
+    handler: {
+        fn __ferrix_migrate<'a>(
+            __ferrix_ctx: &'a ::ferrix::MutationCtx,
+            __ferrix_doc: ::ferrix::__private::serde_json::Value,
+        ) -> ::ferrix::__private::BoxFuture<
+            'a,
+            ::ferrix::Result<::ferrix::migrations::DocChange>,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let __ferrix_doc: Doc<OldTodo> = ::ferrix::__private::decode_migration_doc::<
+                    Doc<OldTodo>,
+                >(__ferrix_doc)?;
+                let __ferrix_out: DocChange = split(__ferrix_ctx, __ferrix_doc).await?;
+                ::ferrix::__private::migration_output(__ferrix_out)
+            })
+        }
+        __ferrix_migrate
+    },
+};

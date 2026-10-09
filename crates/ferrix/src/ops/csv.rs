@@ -295,13 +295,16 @@ fn cell_value(cell: &str, shape: Option<&FieldShape>) -> (Value, Vec<Value>) {
     }
 }
 
+/// A table's document check (`crate::schema::TableDef::validate`).
+type Validate = fn(&Value) -> Result<(), String>;
+
 /// Documents from a CSV file with a header: each record as the JSON object the JSONL import reads (`_id` and
 /// `_creationTime` included when the columns are there).
 pub struct CsvDocs<R> {
     reader: CsvReader<R>,
     columns: Vec<String>,
     shapes: BTreeMap<String, FieldShape>,
-    validate: Option<fn(&Value) -> Result<(), String>>,
+    validate: Option<Validate>,
     table_number: u32,
 }
 
@@ -311,7 +314,7 @@ impl<R: BufRead> CsvDocs<R> {
     pub fn new(
         reader: R,
         ts: Option<String>,
-        validate: Option<fn(&Value) -> Result<(), String>>,
+        validate: Option<Validate>,
         table_number: u32,
     ) -> crate::Result<Self> {
         let mut reader = CsvReader::new(reader);
@@ -368,7 +371,7 @@ impl<R: BufRead> CsvDocs<R> {
 
     /// The document doesn't validate: try the other readings of ambiguous cells, one field at a time (in the order
     /// serde reports them), keeping a change when the document validates or fails on another field.
-    fn settle(&self, doc: &mut Map<String, Value>, alternatives: &[(String, Vec<Value>)], validate: fn(&Value) -> Result<(), String>) {
+    fn settle(&self, doc: &mut Map<String, Value>, alternatives: &[(String, Vec<Value>)], validate: Validate) {
         let check = |doc: &Map<String, Value>| {
             let mut full = doc.clone();
             full.entry(ID_FIELD.to_string())

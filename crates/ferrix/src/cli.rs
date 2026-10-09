@@ -550,7 +550,7 @@ fn serve(
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let exit_code = rt.block_on(async move {
         let explicit = explicit_public_url(&args, &auth);
         let auth = auth_config(&args, auth);
         let storage = storage_config(&args, storage, explicit)?;
@@ -568,6 +568,20 @@ fn serve(
         let listen = args.ops.listen(args.http, &args.dir)?;
         // Held while serving: `restore` refuses to run under a server.
         let _lock = crate::ops::DirLock::acquire(&args.dir)?;
+        // A restore staged from the dashboard replaces the database now, before anything opens it.
+        let storage_dir = crate::ops::backup::local_storage_dir(&args.dir, &options.storage.backend);
+        let dir = args.dir.clone();
+        if let Some(report) =
+            tokio::task::spawn_blocking(move || crate::ops::restore::apply_pending(&dir, storage_dir)).await??
+        {
+            tracing::warn!(
+                ts = report.manifest.ts,
+                previous = ?report.previous,
+                blobs = report.blobs_restored,
+                "restored the staged backup"
+            );
+        }
+        let restart = options.ops.restart.clone();
         let app = App::open(&args.dir, options).await?;
         app.start_scheduler().await?;
         if args.migrate {
@@ -611,11 +625,21 @@ fn serve(
         }
         server
             .run_until(async {
-                crate::ops::tls::shutdown_signal().await;
-                tracing::info!("shutting down");
+                tokio::select! {
+                    _ = crate::ops::tls::shutdown_signal() => tracing::info!("shutting down"),
+                    _ = restart.requested() => tracing::warn!("restarting: shutting down to apply the staged restore"),
+                }
             })
-            .await
-    })
+            .await?;
+        app.logs().flush().await?;
+        Ok::<_, crate::Error>(restart.is_requested().then(|| restart.exit_code()).flatten())
+    })?;
+    // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.
+    if let Some(code) = exit_code {
+        drop(rt);
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

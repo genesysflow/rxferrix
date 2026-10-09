@@ -27,7 +27,10 @@ use subtle::ConstantTimeEq;
 
 use super::backup::{self, BackupSpec, BackupTarget};
 use super::export::{self, ExportFormat, ImportMode, ImportOptions};
-use crate::auth::AuthFailure;
+use super::restore;
+use crate::audit;
+use crate::auth::{Admin, AuthFailure};
+use crate::id::Id;
 use crate::dashboard::http::require_admin;
 use crate::runtime::App;
 
@@ -40,6 +43,9 @@ pub fn routes() -> Router<App> {
         .route("/metrics", get(metrics))
         .route("/api/admin/backups", get(list_backups).post(create_backup))
         .route("/api/admin/backups/{name}", get(download_backup).delete(delete_backup))
+        .route("/api/admin/backups/{name}/restore", post(stage_backup))
+        .route("/api/admin/restore", get(get_restore).post(stage_upload).delete(cancel_restore))
+        .route("/api/admin/restore/restart", post(restart))
         .route("/api/admin/export/{table}", get(export_table))
         .route("/api/admin/import/{table}", post(import_table))
 }
@@ -52,7 +58,11 @@ fn no_store() -> [(header::HeaderName, &'static str); 1] {
 /// admins reach these endpoints).
 fn failure(e: crate::Error) -> Response {
     if let Some(u) = e.chain().find_map(|c| c.downcast_ref::<crate::UserError>()) {
-        let status = if u.code == "not_found" { 404 } else { 400 };
+        let status = match u.code.as_str() {
+            "not_found" => 404,
+            "restore_pending" | "no_pending_restore" => 409,
+            _ => 400,
+        };
         return AuthFailure::new(status, &u.code, u.message.clone()).into_response();
     }
     tracing::error!("admin operation failed: {e:#}");
@@ -112,11 +122,24 @@ macro_rules! try_or {
     };
 }
 
+/// The pending restore and whether the server can restart itself, as `GET /api/admin/backups` and
+/// `GET /api/admin/restore` report them.
+fn restore_state(app: &App) -> crate::Result<serde_json::Value> {
+    let restart = &app.options().ops.restart;
+    Ok(json!({
+        "pendingRestore": restore::pending(app.dir())?.map(restore::PendingRestore::public),
+        "restart": { "available": restart.exit_code().is_some(), "exitCode": restart.exit_code() },
+    }))
+}
+
 async fn list_backups(State(app): State<App>, headers: HeaderMap) -> Response {
     admin!(app, headers);
     let target = try_or!(BackupTarget::for_app(&app));
     let backups = try_or!(target.list().await);
-    (no_store(), axum::Json(json!({ "target": target.location, "backups": backups }))).into_response()
+    let mut body = try_or!(restore_state(&app));
+    body["target"] = json!(target.location);
+    body["backups"] = json!(backups);
+    (no_store(), axum::Json(body)).into_response()
 }
 
 async fn create_backup(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
@@ -168,6 +191,159 @@ async fn delete_backup(State(app): State<App>, headers: HeaderMap, Path(name): P
     } else {
         not_found(format!("Backup {name} does not exist"))
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Staged restores (`super::restore`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Largest archive accepted by `POST /api/admin/restore`.
+pub const MAX_RESTORE_UPLOAD_BYTES: u64 = 64 << 30;
+
+/// The administrator behind `headers`, or the refusal.
+async fn admin_of(app: &App, headers: &HeaderMap) -> Result<Option<Id<Admin>>, Box<AuthFailure>> {
+    match require_admin(app, headers).await {
+        Ok(a) => Ok(a.identity.admin_id.as_deref().and_then(|id| id.parse().ok())),
+        Err(f) => Err(f),
+    }
+}
+
+/// Record an operations action in the audit log (best effort: the action already happened).
+async fn audit_ops(app: &App, admin: Option<Id<Admin>>, action: &'static str, details: serde_json::Value) {
+    let rec = audit::Record::new(action).details(details);
+    if let Err(e) = crate::auth::store::write(app, move |db| async move { audit::record(&db, admin, rec).await }).await {
+        tracing::warn!("recording `{action}` in the audit log failed: {e:#}");
+    }
+}
+
+async fn staged(app: &App, admin: Option<Id<Admin>>, archive: &std::path::Path, source: &str) -> Response {
+    let marker = match restore::stage(app.dir(), archive, source, admin.map(|a| a.to_string())).await {
+        Ok(m) => m,
+        Err(e) => return failure(e),
+    };
+    let details = json!({ "source": marker.source, "ts": marker.ts, "secretIgnored": marker.secret_ignored });
+    audit_ops(app, admin, "restore_stage", details).await;
+    let mut body = try_or!(restore_state(app));
+    body["pendingRestore"] = json!(marker.public());
+    (no_store(), axum::Json(body)).into_response()
+}
+
+/// `POST /api/admin/backups/{name}/restore`: stage a backup of the target.
+async fn stage_backup(State(app): State<App>, headers: HeaderMap, Path(name): Path<String>) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    try_or!(backup::validate_name(&name));
+    let target = try_or!(BackupTarget::for_app(&app));
+    let work = try_or!(tempfile::Builder::new().prefix(".ferrix-download-").tempdir_in(app.dir()));
+    let local = work.path().join(&name);
+    if try_or!(target.open(&name).await).is_none() {
+        return not_found(format!("Backup {name} does not exist"));
+    }
+    try_or!(target.download(&name, &local).await);
+    staged(&app, admin, &local, &name).await
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct UploadQuery {
+    name: Option<String>,
+}
+
+/// `POST /api/admin/restore?name=<file name>` with a backup archive as the body: stage it.
+async fn stage_upload(
+    State(app): State<App>,
+    headers: HeaderMap,
+    q: Result<Query<UploadQuery>, axum::extract::rejection::QueryRejection>,
+    body: Body,
+) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let name = q.ok().and_then(|Query(q)| q.name).unwrap_or_default();
+    let mut source: String =
+        name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).take(200).collect();
+    if source.is_empty() {
+        source = "uploaded archive".into();
+    }
+    if restore::pending(app.dir()).ok().flatten().is_some() {
+        return failure(crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into());
+    }
+    let spool = try_or!(tempfile::Builder::new().prefix(".ferrix-upload-").tempfile_in(app.dir()));
+    let mut file = try_or!(tokio::fs::File::create(spool.path()).await);
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => return AuthFailure::new(400, "invalid_request", format!("reading the body failed: {e}")).into_response(),
+        };
+        size += chunk.len() as u64;
+        if size > MAX_RESTORE_UPLOAD_BYTES {
+            let message = format!("uploaded archives are limited to {} GiB; use `ferrix restore`", MAX_RESTORE_UPLOAD_BYTES >> 30);
+            return AuthFailure::new(413, "too_large", message).into_response();
+        }
+        try_or!(tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await);
+    }
+    try_or!(tokio::io::AsyncWriteExt::flush(&mut file).await);
+    drop(file);
+    if size == 0 {
+        return AuthFailure::new(400, "invalid_request", "send the backup archive as the request body").into_response();
+    }
+    staged(&app, admin, spool.path(), &source).await
+}
+
+/// `GET /api/admin/restore`: `{ pendingRestore, restart }`.
+async fn get_restore(State(app): State<App>, headers: HeaderMap) -> Response {
+    admin!(app, headers);
+    (no_store(), axum::Json(try_or!(restore_state(&app)))).into_response()
+}
+
+/// `DELETE /api/admin/restore`: cancel the pending restore.
+async fn cancel_restore(State(app): State<App>, headers: HeaderMap) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let before = try_or!(restore::pending(app.dir()));
+    if !try_or!(restore::cancel(app.dir())) {
+        return not_found("No restore is staged");
+    }
+    audit_ops(&app, admin, "restore_cancel", json!({ "source": before.map(|p| p.source) })).await;
+    (no_store(), axum::Json(json!({ "canceled": true }))).into_response()
+}
+
+/// `POST /api/admin/restore/restart`: shut down gracefully and exit with `--restart-exit-code`, so the supervisor
+/// starts the server again and the staged restore is applied.
+async fn restart(State(app): State<App>, headers: HeaderMap) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let handle = app.options().ops.restart.clone();
+    let Some(code) = handle.exit_code() else {
+        let message = "This server can't restart itself (start it with --restart-exit-code under systemd or Docker); \
+                       restart it by hand to apply the restore";
+        return AuthFailure::new(400, "restart_unavailable", message).into_response();
+    };
+    match try_or!(restore::pending(app.dir())) {
+        None => return failure(crate::UserError::new("no_pending_restore", "No restore is staged").into()),
+        Some(p) if p.error.is_some() => {
+            return AuthFailure::new(400, "invalid_backup", "The staged restore can't be applied; cancel it").into_response();
+        }
+        Some(_) => {}
+    }
+    audit_ops(&app, admin, "restore_restart", json!({ "exitCode": code })).await;
+    tracing::warn!("restart requested by an administrator to apply the staged restore; exiting with code {code}");
+    // Answer first; the shutdown lets open requests finish.
+    let response = (StatusCode::ACCEPTED, no_store(), axum::Json(json!({ "restarting": true, "exitCode": code }))).into_response();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        handle.request();
+    });
+    response
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

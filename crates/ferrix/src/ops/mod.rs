@@ -5,6 +5,7 @@
 //!   directory or an S3-compatible bucket), scheduled backups with rotation, and the offline `restore`.
 //! - [`export`]: JSONL and CSV export of tables, and JSONL and CSV import through the normal write path ([`csv`]:
 //!   reading CSV with the table's types).
+//! - [`restore`]: staged restores (validated while the server runs, applied at the next start) and restart requests.
 //! - [`metrics`]: counters and the Prometheus text format of `GET /metrics`.
 //! - [`http`]: the admin endpoints (`/api/admin/backups*`, `/api/admin/export/{table}`, `/api/admin/import/{table}`)
 //!   and `/metrics`.
@@ -21,6 +22,7 @@ pub mod export;
 pub mod http;
 pub mod lock;
 pub mod metrics;
+pub mod restore;
 pub mod tls;
 pub mod web;
 
@@ -40,6 +42,9 @@ pub struct OpsOptions {
     /// Where backups go: the admin endpoints list, create, download and delete backups there, and scheduled backups
     /// write there. `None` = `<data dir>/backups`. A directory, `file:///dir` or `s3://bucket/prefix` (`--backup-to`).
     pub backup_target: Option<String>,
+    /// Whether (and with which exit code) an administrator may ask the server to restart to apply a staged restore
+    /// (`--restart-exit-code`; [`restore`]).
+    pub restart: restore::RestartHandle,
 }
 
 /// `"500ms"`, `"30s"`, `"5m"`, `"6h"`, `"7d"`, or a bare number of seconds.
@@ -63,7 +68,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 
 /// `2026-10-09T12:00:00.123Z` → `20261009T120000.123Z`: a UTC timestamp that sorts lexicographically and is safe in
 /// file names.
-pub(crate) fn file_timestamp(ms: f64) -> String {
+pub fn file_timestamp(ms: f64) -> String {
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64).unwrap_or_default();
     dt.format("%Y%m%dT%H%M%S%.3fZ").to_string()
 }

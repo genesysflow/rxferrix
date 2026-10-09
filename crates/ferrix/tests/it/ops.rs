@@ -876,7 +876,12 @@ struct Admin {
 }
 
 async fn admin_setup() -> Admin {
-    let t = TestApp::with_auth(AuthConfig::password().rate_limits(None)).await.unwrap();
+    admin_setup_with(AppOptions::default()).await
+}
+
+async fn admin_setup_with(options: AppOptions) -> Admin {
+    let options = AppOptions { dev: true, auth: AuthConfig::password().rate_limits(None), ..options };
+    let t = TestApp::with_options(options).await.unwrap();
     let base = format!("http://{}", t.serve().await.unwrap());
     let client = reqwest::Client::new();
     let app = t.app().clone();
@@ -929,6 +934,11 @@ async fn ops_admin_endpoints_are_admin_only() {
         (Method::DELETE, "/api/admin/backups/ferrix-x.tar.zst"),
         (Method::GET, "/api/admin/export/ops_docs"),
         (Method::POST, "/api/admin/import/ops_docs"),
+        (Method::POST, "/api/admin/backups/ferrix-x.tar.zst/restore"),
+        (Method::GET, "/api/admin/restore"),
+        (Method::POST, "/api/admin/restore"),
+        (Method::DELETE, "/api/admin/restore"),
+        (Method::POST, "/api/admin/restore/restart"),
     ];
     for (method, path) in &endpoints {
         let r = a.req(method.clone(), path, None).send().await.unwrap();
@@ -945,6 +955,8 @@ async fn ops_admin_endpoints_are_admin_only() {
     // Nothing was created by the refused calls.
     let r: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["backups"], json!([]));
+    assert_eq!((r["pendingRestore"].clone(), r["restart"].clone()), (Value::Null, json!({ "available": false, "exitCode": null })));
+    assert!(!a.t.dir().join(ferrix::ops::restore::MARKER).exists());
 }
 
 #[tokio::test]
@@ -1026,4 +1038,215 @@ async fn ops_admin_backup_export_and_import_flows() {
     let r = a.req(Method::POST, "/api/admin/import/ops_docs?format=xml", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
     assert_eq!(r.status(), 400);
     verify(a.t.app()).await;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Staged restores
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A backup (with aux.db, a file blob and the secret) of a database with the pair "one", and a data directory
+/// (closed) whose database has "keep me".
+async fn backup_and_other_dir() -> (TestApp, tempfile::TempDir, PathBuf, tempfile::TempDir) {
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_pair>((1, "one".to_string())).await.unwrap();
+    let file = t.action::<store_text>(("restored blob".to_string(),)).await.unwrap();
+    t.mutation::<add_doc>(("with file".to_string(), 1, Some(file), None)).await.unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = BackupTarget::parse(target_dir.path().to_str().unwrap(), t.dir()).unwrap();
+    let spec = BackupSpec { include_aux: true, include_files: true, include_secret: true };
+    let info = backup::create(t.app(), &spec, &target, false).await.unwrap();
+    let archive = archive_path(target_dir.path(), &info);
+    let dest = tempfile::tempdir().unwrap();
+    let other = App::open(dest.path(), AppOptions::default()).await.unwrap();
+    other.mutation::<add_pair>((7, "keep me".to_string())).await.unwrap();
+    drop(other);
+    (t, target_dir, archive, dest)
+}
+
+async fn pair_texts(dir: &Path) -> Vec<String> {
+    let app = App::open(dir, AppOptions::default()).await.unwrap();
+    let texts = app.query::<all_pairs>(()).await.unwrap().into_iter().map(|p| p.value.text).collect();
+    verify(&app).await;
+    texts
+}
+
+#[tokio::test]
+async fn staged_restore_is_applied_at_the_next_start() {
+    use ferrix::ops::restore;
+    let (_t, _target, archive, dest) = backup_and_other_dir().await;
+    let key_before = std::fs::read(dest.path().join("auth_secret.key")).unwrap();
+    {
+        // Staged while a "server" holds the data directory: nothing it uses changes.
+        let _lock = DirLock::acquire(dest.path()).unwrap();
+        let pending = restore::stage(dest.path(), &archive, "the backup", Some("admin-1".into())).await.unwrap();
+        assert!(pending.includes_aux && pending.blobs == 1 && pending.secret_ignored && pending.error.is_none(), "{pending:?}");
+        assert_eq!(restore::pending(dest.path()).unwrap().as_ref(), Some(&pending));
+        assert!(dest.path().join(restore::STAGED_DIR).join("data.db").exists());
+        assert!(!dest.path().join(restore::STAGED_DIR).join("auth_secret.key").exists(), "the key is never staged");
+        // A second staging is refused until the first is canceled.
+        let err = restore::stage(dest.path(), &archive, "again", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("staged already"), "{err:#}");
+    }
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"], "opening the app doesn't apply it");
+
+    // The next start (serve calls this with the lock held, before opening the database).
+    let report = restore::apply_pending(dest.path(), None).unwrap().expect("applied");
+    assert!(report.previous.as_ref().unwrap().join("data.db").exists() && report.blobs_restored == 1);
+    assert!(!dest.path().join(restore::MARKER).exists() && !dest.path().join(restore::STAGED_DIR).exists());
+    assert_eq!(pair_texts(dest.path()).await, ["one a", "one b"]);
+    assert_eq!(std::fs::read(dest.path().join("auth_secret.key")).unwrap(), key_before, "the server's key stays");
+    let app = App::open(dest.path(), AppOptions::default()).await.unwrap();
+    let doc = app.query::<docs>(()).await.unwrap().remove(0);
+    assert_eq!(app.action::<read_text>((doc.file.unwrap(),)).await.unwrap().as_deref(), Some("restored blob"));
+    drop(app);
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none(), "nothing left to apply");
+}
+
+#[tokio::test]
+async fn an_interrupted_staged_restore_is_finished_by_the_next_start() {
+    use ferrix::ops::restore;
+    let (_t, _target, archive, dest) = backup_and_other_dir().await;
+    let pending = restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    // A crash after the old data.db went aside and the restored one moved in, before aux.db and the marker.
+    let previous = dest.path().join(format!("pre-restore-{}", ferrix::ops::file_timestamp(pending.staged_at)));
+    std::fs::create_dir_all(&previous).unwrap();
+    for f in ["data.db", "data.db-wal", "data.db-shm"] {
+        if dest.path().join(f).exists() {
+            std::fs::rename(dest.path().join(f), previous.join(f)).unwrap();
+        }
+    }
+    std::fs::rename(dest.path().join(restore::STAGED_DIR).join("data.db"), dest.path().join("data.db")).unwrap();
+    let report = restore::apply_pending(dest.path(), None).unwrap().expect("finished");
+    assert_eq!(report.previous.as_deref(), Some(previous.as_path()));
+    assert!(previous.join("aux.db").exists() && previous.join("data.db").exists());
+    assert_eq!(pair_texts(dest.path()).await, ["one a", "one b"]);
+}
+
+#[tokio::test]
+async fn staged_restores_cancel_and_refuse_bad_archives() {
+    use ferrix::ops::restore;
+    let (_t, target, archive, dest) = backup_and_other_dir().await;
+    // Canceled: the marker and the files go, the next start changes nothing.
+    restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    assert!(restore::cancel(dest.path()).unwrap());
+    assert!(!restore::cancel(dest.path()).unwrap());
+    assert!(!dest.path().join(restore::MARKER).exists() && !dest.path().join(restore::STAGED_DIR).exists());
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none());
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"]);
+
+    // A corrupt archive is refused when staging: nothing is staged, no temporary files stay.
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xff;
+    let corrupt = target.path().join("ferrix-corrupt.tar.zst");
+    std::fs::write(&corrupt, &bytes).unwrap();
+    let err = restore::stage(dest.path(), &corrupt, "corrupt", None).await.unwrap_err();
+    let user = err.chain().find_map(|c| c.downcast_ref::<ferrix::UserError>()).expect("a user error");
+    assert_eq!(user.code, "invalid_backup");
+    assert!(restore::pending(dest.path()).unwrap().is_none() && !dest.path().join(restore::STAGED_DIR).exists());
+    let leftovers: Vec<String> = std::fs::read_dir(dest.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".ferrix-") || n.starts_with(".pending-restore"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Staged files changed after staging: not applied, the server starts on its data, the marker says why.
+    restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    let staged_db = dest.path().join(restore::STAGED_DIR).join("data.db");
+    let mut db = std::fs::read(&staged_db).unwrap();
+    let last = db.len() - 1;
+    db[last] ^= 1;
+    std::fs::write(&staged_db, db).unwrap();
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none());
+    let marker = restore::pending(dest.path()).unwrap().unwrap();
+    assert!(marker.error.as_deref().unwrap().contains("changed since it was staged"), "{marker:?}");
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"]);
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none(), "not retried");
+    assert!(restore::cancel(dest.path()).unwrap());
+}
+
+#[tokio::test]
+async fn staged_restore_over_http() {
+    use ferrix::ops::restore::{self, RestartHandle};
+    use reqwest::Method;
+    let restart = RestartHandle::new(Some(75));
+    let options = AppOptions { ops: OpsOptions { restart: restart.clone(), ..Default::default() }, ..Default::default() };
+    let a = admin_setup_with(options).await;
+    a.t.mutation::<add_pair>((1, "from the backup".to_string())).await.unwrap();
+    let r = a.req(Method::POST, "/api/admin/backups", Some(&a.admin)).json(&json!({})).send().await.unwrap();
+    let name = r.json::<Value>().await.unwrap()["name"].as_str().unwrap().to_string();
+    a.t.mutation::<add_pair>((2, "after the backup".to_string())).await.unwrap();
+
+    // Restart needs a staged restore; unknown backups are 404.
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 409);
+    let r = a.req(Method::POST, "/api/admin/backups/ferrix-nope.tar.zst/restore", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+
+    // Stage a backup of the target: validated, pending, shown in the listing; the server keeps serving its data.
+    let r = a.req(Method::POST, &format!("/api/admin/backups/{name}/restore"), Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["pendingRestore"]["source"], name.as_str());
+    assert_eq!(body["restart"], json!({ "available": true, "exitCode": 75 }));
+    let list: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["pendingRestore"]["source"], name.as_str());
+    assert_eq!(a.t.query::<all_pairs>(()).await.unwrap().len(), 4);
+    let r = a.req(Method::POST, &format!("/api/admin/backups/{name}/restore"), Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 409, "one staged restore at a time");
+
+    // Cancel; canceling again is a 404.
+    let r = a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "canceled": true }));
+    assert_eq!(a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().status(), 404);
+    let state: Value = a.req(Method::GET, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(state["pendingRestore"], Value::Null);
+
+    // Upload: a corrupt archive is refused at once; the real one is staged.
+    let bytes =
+        a.req(Method::GET, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap().bytes().await.unwrap();
+    let mut corrupt = bytes.to_vec();
+    let mid = corrupt.len() / 2;
+    corrupt[mid] ^= 0xff;
+    let r = a.req(Method::POST, "/api/admin/restore?name=mine.tar.zst", Some(&a.admin)).body(corrupt).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "invalid_backup");
+    let r = a.req(Method::POST, "/api/admin/restore", Some(&a.admin)).body(Vec::<u8>::new()).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = a
+        .req(Method::POST, "/api/admin/restore?name=../my%20backup.tar.zst", Some(&a.admin))
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["pendingRestore"]["source"], "..mybackup.tar.zst");
+    assert!(body["pendingRestore"].get("stagedFiles").is_none(), "{body}");
+    assert!(a.t.dir().join(restore::STAGED_DIR).join("data.db").exists());
+
+    // Restart: accepted, then the handle fires (`serve` then shuts down and exits with 75).
+    assert!(!restart.is_requested());
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "restarting": true, "exitCode": 75 }));
+    tokio::time::timeout(Duration::from_secs(5), restart.requested()).await.unwrap();
+    let args = json!({ "paginationOpts": { "numItems": 20, "cursor": null } });
+    let audit = a.t.app().run_query("_system/audit:list", args, &admin_identity(&a.t).await).await;
+    let actions: Vec<String> =
+        audit.result.unwrap()["page"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string()).collect();
+    for action in ["restore_stage", "restore_cancel", "restore_restart"] {
+        assert!(actions.iter().any(|a| a == action), "{action} in {actions:?}");
+    }
+}
+
+/// Without `--restart-exit-code`, restarting is refused.
+#[tokio::test]
+async fn restart_needs_an_exit_code() {
+    use reqwest::Method;
+    let a = admin_setup().await;
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "restart_unavailable");
 }

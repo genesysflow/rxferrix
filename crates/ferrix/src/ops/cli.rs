@@ -70,6 +70,11 @@ pub struct OpsServeArgs {
     /// changed (renewals without a restart; a pair that doesn't load is ignored and logged). `0` turns it off.
     #[arg(long, value_name = "DURATION", default_value = "30s", value_parser = super::parse_duration)]
     pub tls_reload_every: Duration,
+    /// Let administrators restart the server to apply a restore staged from the dashboard: it shuts down gracefully
+    /// and exits with CODE, for a supervisor to start it again (systemd: `Restart=on-failure` or
+    /// `RestartForceExitStatus=CODE`; Docker: a restart policy). Without it, staged restores wait for a manual restart.
+    #[arg(long, env = "FERRIX_RESTART_EXIT_CODE", value_name = "CODE", value_parser = clap::value_parser!(i32).range(1..=255))]
+    pub restart_exit_code: Option<i32>,
 }
 
 impl OpsServeArgs {
@@ -83,6 +88,9 @@ impl OpsServeArgs {
         }
         if let Some(to) = self.backup_to.clone().filter(|t| !t.trim().is_empty()) {
             options.ops.backup_target = Some(to);
+        }
+        if self.restart_exit_code.is_some() {
+            options.ops.restart = super::restore::RestartHandle::new(self.restart_exit_code);
         }
         if let Some(every) = self.backup_every {
             let schedule = ScheduledBackup {
@@ -221,7 +229,11 @@ pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()>
 #[derive(Args, Debug, Clone)]
 pub struct RestoreArgs {
     /// The archive: a file, or s3://bucket/path/to/ferrix-….tar.zst.
-    pub backup: String,
+    #[arg(required_unless_present = "cancel")]
+    pub backup: Option<String>,
+    /// Cancel the restore staged from the dashboard (it would otherwise be applied at the next start).
+    #[arg(long, conflicts_with_all = ["backup", "skip_verify", "storage_dir"])]
+    pub cancel: bool,
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     pub dir: PathBuf,
@@ -236,10 +248,27 @@ pub struct RestoreArgs {
 pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<()> {
     let storage_dir = args.storage_dir.clone().or_else(|| backup::local_storage_dir(&args.dir, &storage.backend));
     let options = RestoreOptions { storage_dir, skip_verify: args.skip_verify };
+    if args.cancel {
+        let _lock = super::DirLock::acquire(&args.dir).context("cancel the staged restore from the dashboard while the server runs")?;
+        match super::restore::cancel(&args.dir)? {
+            true => println!("Canceled the staged restore of {}.", args.dir.display()),
+            false => println!("No restore is staged in {}.", args.dir.display()),
+        }
+        return Ok(());
+    }
+    let given = args.backup.clone().context("which backup to restore?")?;
+    if let Some(p) = super::restore::pending(&args.dir)? {
+        anyhow::bail!(
+            "a restore of {} is staged in {} (from the dashboard) and would replace this one at the next start; cancel \
+             it first with `restore --cancel`",
+            p.source,
+            args.dir.display()
+        );
+    }
     runtime()?.block_on(async {
         std::fs::create_dir_all(&args.dir)?;
         let work = tempfile::Builder::new().prefix(".ferrix-download-").tempdir_in(&args.dir)?;
-        let archive = match args.backup.strip_prefix("s3://") {
+        let archive = match given.strip_prefix("s3://") {
             Some(rest) => {
                 let (location, name) = rest.rsplit_once('/').context("expected s3://bucket/path/ferrix-….tar.zst")?;
                 let target = BackupTarget::parse(&format!("s3://{location}"), &args.dir)?;
@@ -247,12 +276,12 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
                 target.download(name, &local).await?;
                 local
             }
-            None => PathBuf::from(&args.backup),
+            None => PathBuf::from(&given),
         };
         let report = backup::restore(&archive, &args.dir, &options).await?;
         println!(
             "Restored {} into {} (snapshot ts {}, taken {}).",
-            args.backup,
+            given,
             args.dir.display(),
             report.manifest.ts,
             super::file_timestamp(report.manifest.created_at)

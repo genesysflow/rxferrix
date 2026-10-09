@@ -2,6 +2,7 @@
 
 mod common;
 
+mod audit;
 mod auth;
 mod authkit;
 mod bench;
@@ -10,6 +11,7 @@ mod codegen;
 mod contract;
 mod dashboard;
 mod hardening;
+mod jwt;
 mod macros;
 mod model;
 mod pagination;
@@ -19,5 +21,6 @@ mod revocation;
 mod storage;
 mod scheduler;
 mod search;
+mod settings;
 mod shared;
 mod websocket;

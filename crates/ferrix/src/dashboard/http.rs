@@ -41,6 +41,7 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/logs", get(logs))
         .route("/api/admin/logs/stream", get(logs_stream))
         .route("/api/admin/stats", get(stats))
+        .route("/api/admin/impersonate", axum::routing::post(super::impersonate::impersonate))
 }
 
 fn no_store() -> [(header::HeaderName, &'static str); 1] {

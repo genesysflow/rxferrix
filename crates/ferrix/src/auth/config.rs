@@ -9,6 +9,13 @@
 //!
 //! Anything set here can be extended from the command line or the environment (`serve --public-url`,
 //! `--auth-redirect-url`, `--smtp-url`, `--smtp-from`, and `FERRIX_*` variables; see `ferrix serve --help`).
+//!
+//! **Precedence over `_settings`.** Administrators can also configure OAuth providers, SMTP, the redirect allowlist,
+//! sign-ups, token lifetimes and CORS origins at runtime from the dashboard (`crate::settings`). What is set here (in
+//! code, on the command line or in the environment) wins over those settings, field by field: a builder call such as
+//! `.signups(false)` or `.access_token_ttl(..)`, a non-empty redirect list, any SMTP config or custom mailer, and an
+//! OAuth provider with credentials (for its id). Fields left at their defaults are taken from `_settings` when set
+//! there. `_system/settings:get` reports which fields are locked this way.
 
 use std::fmt;
 use std::sync::Arc;
@@ -36,6 +43,22 @@ pub struct AuthConfig {
     pub(crate) mailer: Option<Arc<dyn Mailer>>,
     pub(crate) rate_limits: Option<RateLimits>,
     pub(crate) trust_proxy: bool,
+    /// External JWT issuers whose tokens are accepted (`super::jwt`).
+    pub(crate) jwt: Vec<super::jwt::JwtProvider>,
+    /// How long `_audit_log` entries are kept.
+    pub(crate) audit_retention: Duration,
+    /// Whether admins may mint impersonation tokens (`POST /api/admin/impersonate`).
+    pub(crate) impersonation: bool,
+    /// Which defaults were set explicitly in code (they then win over `_settings`).
+    pub(crate) explicit: Explicit,
+}
+
+/// Fields of [`AuthConfig`] whose builder method was called (their values take precedence over `_settings`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Explicit {
+    pub signups: bool,
+    pub access_token_ttl: bool,
+    pub session_ttl: bool,
 }
 
 impl Default for AuthConfig {
@@ -55,6 +78,10 @@ impl Default for AuthConfig {
             mailer: None,
             rate_limits: Some(RateLimits::default()),
             trust_proxy: false,
+            jwt: Vec::new(),
+            audit_retention: Duration::from_secs(90 * 24 * 3600),
+            impersonation: true,
+            explicit: Explicit::default(),
         }
     }
 }
@@ -76,6 +103,9 @@ impl fmt::Debug for AuthConfig {
             .field("mailer", &self.mailer.as_ref().map(|_| "<custom>"))
             .field("rate_limits", &self.rate_limits)
             .field("trust_proxy", &self.trust_proxy)
+            .field("jwt", &self.jwt)
+            .field("audit_retention", &self.audit_retention)
+            .field("impersonation", &self.impersonation)
             .finish()
     }
 }
@@ -107,6 +137,7 @@ impl AuthConfig {
     /// Whether new users may sign up (password sign-up, or first sign-in by magic link or OAuth). Default: true.
     pub fn signups(mut self, allowed: bool) -> Self {
         self.signups = allowed;
+        self.explicit.signups = true;
         self
     }
 
@@ -119,12 +150,34 @@ impl AuthConfig {
     /// Lifetime of access tokens. Default: 15 minutes.
     pub fn access_token_ttl(mut self, ttl: Duration) -> Self {
         self.access_token_ttl = ttl;
+        self.explicit.access_token_ttl = true;
         self
     }
 
     /// Sessions end after this long without a refresh. Default: 30 days.
     pub fn session_ttl(mut self, ttl: Duration) -> Self {
         self.session_ttl = ttl;
+        self.explicit.session_ttl = true;
+        self
+    }
+
+    /// Accept access tokens issued by an external identity provider (Clerk, Auth0, Supabase, any OIDC issuer),
+    /// verified against its JWKS. Repeatable. See [`super::JwtProvider`].
+    pub fn jwt(mut self, provider: super::jwt::JwtProvider) -> Self {
+        self.jwt.push(provider);
+        self
+    }
+
+    /// How long dashboard audit log entries (`_audit_log`) are kept. Default: 90 days.
+    pub fn audit_retention(mut self, retention: Duration) -> Self {
+        self.audit_retention = retention;
+        self
+    }
+
+    /// Whether administrators may mint short-lived impersonation tokens to open the app as a user
+    /// (`POST /api/admin/impersonate`). Default: true. The dashboard's "run as user" works either way.
+    pub fn impersonation(mut self, allowed: bool) -> Self {
+        self.impersonation = allowed;
         self
     }
 
@@ -402,6 +455,11 @@ impl RedirectAllowlist {
             parsed.push(url);
         }
         Ok(RedirectAllowlist { entries: parsed, allow_localhost })
+    }
+
+    /// The allowed entries, normalized.
+    pub fn entries(&self) -> Vec<String> {
+        self.entries.iter().map(|u| u.to_string()).collect()
     }
 
     /// The default redirect target: the first configured entry.

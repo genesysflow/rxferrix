@@ -223,6 +223,65 @@ pub(crate) async fn oauth_user(
     .await
 }
 
+/// The user behind an external JWT subject (`super::jwt`): the `_accounts` row `(provider = issuer,
+/// providerAccountId = subject)` links it, and is created together with a fresh `_users` row the first time the
+/// subject is seen.
+///
+/// External subjects are never linked to an existing user by email (unlike OAuth): the issuer is trusted to identify
+/// its own users, not to vouch for addresses that another sign-in method may already own. The new user gets the
+/// token's `email` only when the issuer marks it verified and no other user has it yet (so password sign-up and
+/// magic links can't be used to take it over either), plus `name` and `picture`. The profile is not updated on later
+/// sign-ins (apps can do that from the claims they receive through their own functions).
+///
+/// Returns the user id; looks up first in a snapshot so that known subjects cost no write.
+pub(crate) async fn external_user(app: &App, claims: &super::jwt::ExternalClaims) -> crate::Result<Id<User>> {
+    let (provider, subject) = (claims.issuer.clone(), claims.subject.clone());
+    let lookup = |db: QueryDb, provider: String, subject: String| async move {
+        let account = db
+            .query::<Account>()
+            .with_index(Account::by_provider_account, |q| {
+                q.eq(Account::provider, provider).eq(Account::provider_account_id, subject)
+            })
+            .first()
+            .await?;
+        Ok::<_, crate::Error>(match account {
+            Some(a) if db.get(a.user).await?.is_some() => Some(Ok(a.user)),
+            Some(a) => Some(Err(a.id)),
+            None => None,
+        })
+    };
+    let (p, s) = (provider.clone(), subject.clone());
+    if let Some(Ok(user)) = read(app, |db| lookup(db, p, s)).await? {
+        return Ok(user);
+    }
+    let claims = claims.clone();
+    write(app, |db| async move {
+        match lookup(db.share(), provider.clone(), subject.clone()).await? {
+            Some(Ok(user)) => return Ok(user),
+            // An account whose user is gone (shouldn't happen: delete_user removes accounts): replace it.
+            Some(Err(stale)) => db.delete(stale).await?,
+            None => {}
+        }
+        let mut email = claims.email.as_deref().filter(|_| claims.email_verified).and_then(|e| normalize_email(e).ok());
+        if let Some(e) = &email
+            && user_by_email(&db, e).await?.is_some()
+        {
+            email = None;
+        }
+        let image = claims.picture.filter(|p| p.starts_with("https://") && p.len() <= 2048);
+        let name = claims.name.map(|n| n.chars().take(200).collect());
+        let user = db.insert(User { email_verified: email.is_some(), email, name, image }).await?;
+        db.insert(Account { user, provider, provider_account_id: subject }).await?;
+        Ok(user)
+    })
+    .await
+}
+
+/// Whether a document (a user, a session) still exists.
+pub(crate) async fn exists(app: &App, id: String) -> crate::Result<bool> {
+    read(app, |db| async move { Ok(db.get_raw(&id).await?.is_some()) }).await
+}
+
 fn signups_disabled() -> UserError {
     UserError::new("signups_disabled", "New accounts can't be created")
 }
@@ -280,9 +339,54 @@ pub(crate) async fn create_session(
         user_agent: client.user_agent.map(|s| s.chars().take(512).collect()),
         ip: client.ip,
         last_used_at: now,
+        impersonated_by: None,
     };
     let id = write(app, |db| async move { db.insert(session).await }).await?;
     Ok((id, refresh))
+}
+
+/// Create a session of `user` on behalf of `admin` (impersonation), with a fixed expiry, and audit it in the same
+/// transaction. Returns its id, refresh token and expiry. `None` if the user doesn't exist.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_impersonation_session(
+    app: &App,
+    keys: &Keys,
+    admin: Id<Admin>,
+    user: Id<User>,
+    client: ClientInfo,
+    now: f64,
+    ttl_ms: f64,
+    purpose: serde_json::Value,
+) -> crate::Result<Option<(Id<Session>, String, f64)>> {
+    let refresh = random_token();
+    let refresh_token_hash = keys.hash_token(&refresh);
+    let expires_at = now + ttl_ms;
+    let found = write(app, |db| async move {
+        // An id of another table is "no such user", not an error.
+        if db.get(user).await.ok().flatten().is_none() {
+            return Ok(None);
+        }
+        let admin_email = db.get(admin).await?.map(|a| a.value.email).unwrap_or_default();
+        let session = Session {
+            user: Some(user),
+            admin: None,
+            refresh_token_hash,
+            expires_at,
+            user_agent: Some(format!("impersonation by {admin_email}").chars().take(512).collect()),
+            ip: client.ip,
+            last_used_at: now,
+            impersonated_by: Some(admin),
+        };
+        let id = db.insert(session).await?;
+        let mut details = purpose;
+        details["sessionId"] = id.to_string().into();
+        details["expiresAt"] = expires_at.into();
+        let rec = crate::audit::Record::new("impersonate").target("_users", Some(user.to_string())).details(details);
+        crate::audit::record(&db, Some(admin), rec).await?;
+        Ok(Some(id))
+    })
+    .await?;
+    Ok(found.map(|id| (id, refresh, expires_at)))
 }
 
 pub(crate) async fn delete_session_in(db: &MutationDb, session: Id<Session>) -> crate::Result<()> {
@@ -340,7 +444,7 @@ pub(crate) async fn session_active(app: &App, session: Id<Session>, principal: P
 /// What happened to a refresh token.
 #[derive(Debug)]
 pub(crate) enum RefreshOutcome {
-    Rotated { session: Id<Session>, principal: Principal, refresh: String },
+    Rotated { session: Id<Session>, principal: Principal, refresh: String, expires_at: f64 },
     /// Unknown token.
     Invalid,
     /// The session expired (and was deleted).
@@ -386,13 +490,17 @@ pub(crate) async fn rotate_refresh_token(
             db.insert(UsedRefreshToken { session: s.id, token_hash: hash, rotated_at: now }).await?;
             let mut session = s.value;
             session.refresh_token_hash = new_hash;
-            session.expires_at = now + ttl_ms;
+            // Impersonation sessions keep their fixed expiry; others slide.
+            if session.impersonated_by.is_none() {
+                session.expires_at = now + ttl_ms;
+            }
             session.last_used_at = now;
             if client.ip.is_some() {
                 session.ip = client.ip;
             }
+            let expires_at = session.expires_at;
             db.replace(s.id, session).await?;
-            return Ok(RefreshOutcome::Rotated { session: s.id, principal, refresh: new_refresh });
+            return Ok(RefreshOutcome::Rotated { session: s.id, principal, refresh: new_refresh, expires_at });
         }
         let used = db
             .query::<UsedRefreshToken>()

@@ -175,7 +175,10 @@ impl Auth {
     pub fn is_admin(&self) -> bool;
     pub fn admin_id(&self) -> Option<Id<Admin>>;
     pub fn require_admin(&self) -> Result<Id<Admin>>;   // "unauthenticated" when anonymous, "forbidden" for users
-    pub fn session_id(&self) -> Option<Id<Session>>;
+    pub fn session_id(&self) -> Option<Id<Session>>;      // None for external JWTs (they have no session row). For an
+                                                        // admin acting as the user, an impersonation session whose
+                                                        // `Session::impersonated_by` is set (check it to refuse
+                                                        // sensitive operations).
     pub fn identity(&self) -> &Identity;
 }
 // What a query reads of `ctx.auth` decides who shares its subscription (docs/PROTOCOL.md "Shared subscriptions"):
@@ -483,19 +486,73 @@ fn main() -> ferrix::Result<()> {
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
 `session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
-`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`.
+`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+`jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
+`impersonation(bool)` (`POST /api/admin/impersonate`, default true).
 CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `FERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`FERRIX_SMTP_URL`, `FERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted).
 
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
-`sign_in_as(app, user)`, `create_admin`, `reset_admin_password`, `create_setup_token`, ...). `TestApp::with_auth(cfg)`
-and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+`authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
+`reset_admin_password`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`, `revocations()`, ...).
+`TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+
+**External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
+HTTP Bearer tokens, alongside ferrix's own:
+
+```rust
+use ferrix::auth::{AuthConfig, JwtProvider, JwtAlgorithm};
+AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())                // JWKS by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com"))
+    .jwt(JwtProvider::new("https://<ref>.supabase.co/auth/v1").audience("authenticated")
+        .jwks_url("https://<ref>.supabase.co/auth/v1/.well-known/jwks.json"))
+// JwtProvider: jwks_url(url), audience(aud) (repeatable), any_audience(), user_id_claim("sub"), leeway(60s),
+// algorithms([JwtAlgorithm::Rs256, Es256, EdDsa]), jwks_refetch_interval(30s), jwks_cache_ttl(1h).
+```
+
+- Routing: a header `alg` of `HS256` means a ferrix token; anything else is looked up by its `iss` (exact match). An
+  unknown issuer is refused without network traffic. HMAC and `none` are never accepted for external tokens, and the
+  `alg` must match the key's type and curve (and the JWK's own `alg`, if any).
+- Keys: the issuer's JWKS, cached for an hour; an unknown `kid` refetches it (key rotation), at most once per
+  `jwks_refetch_interval` per issuer; 5s timeouts, no redirects, 1 MiB cap; on fetch failure the cached keys stay.
+- Claims: `exp` required and `nbf` optional, both with the leeway; `aud` (string or array) must contain a configured
+  audience, unless `any_audience()` (startup fails if neither is set); the user id claim must be a non-empty string
+  (or number) of at most 255 characters. Rejections are `AuthError` / 401 `invalid_token` with the messages listed in
+  docs/PROTOCOL.md.
+- Users: the subject maps to an `_accounts` row `{ provider: <issuer>, providerAccountId: <subject> }` and its
+  `_users` row, both created on first sight, so `ctx.auth.user_id()` is an ordinary `Id<User>` for every sign-in
+  method. External subjects are never linked to an existing user by email (the issuer vouches for its subjects, not
+  for addresses another sign-in method may own); the new user copies `email` only if `email_verified` is true and no
+  user has it yet, plus `name` and an https `picture`. The profile isn't updated on later sign-ins. The identity has
+  no session id; the connection's identity ends at the token's `exp` (plus leeway), or as soon as the user is
+  deleted. Deleting a user doesn't block the subject: its next token provisions a new user (block it at the issuer).
+
+**Live revocation** (`ferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
+log stream) authenticate with `authenticate_watched`, which registers the token's session id (or, for external
+tokens, the user id) in the app's `Revocations` registry *before* checking that it exists, and returns a
+`SessionWatch` whose `ended()` future resolves when the document is deleted. One watcher task per app follows the
+write log; for commits that wrote a watched document's `by_id` key it checks the document in a fresh snapshot and
+fires the watches of deleted ones. So every way a session ends is covered (sign-out, refresh-token reuse,
+`revoke_session`, `delete_user`, password reset, ...) and refreshes (which rewrite the session) are not mistaken for
+deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
+guarantee 10).
+
+**Runtime settings and precedence** (`ferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
+the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
+encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
+wins, field by field: an explicit `signups(..)`, `access_token_ttl(..)` or `session_ttl(..)` call; a non-empty
+redirect list (`redirect_url`, `--auth-redirect-url`); any `smtp(..)` / `--smtp-url` or custom `mailer`; and, per
+provider id, an OAuth provider with credentials (settings may add providers with other ids). Everything else is taken
+from `_settings` when set there, else the defaults apply. CORS origins exist only as a setting (default: any origin).
 
 **System tables** (all defined with `#[table]` in `ferrix::auth::tables`): `_users` (`User`), `_credentials`
-(argon2id password hash per user), `_accounts` (provider + provider account id), `_sessions` (user or admin, keyed
-hash of the current refresh token, sliding `expires_at`, user agent, ip, `last_used_at`), `_used_refresh_tokens`
+(argon2id password hash per user), `_accounts` (provider + provider account id; for external JWTs the provider is
+the issuer URL), `_sessions` (user or admin, keyed hash of the current refresh token, sliding `expires_at`, user
+agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on impersonation sessions, whose expiry is
+fixed), `_used_refresh_tokens`
 (rotated refresh token hashes, for reuse detection; deleted with their session), `_verification_codes` (keyed hashes
 of a 6-digit code and a link token, purpose, expiry, attempts), `_admins` (email, argon2id hash). The auth code
 reads and writes them directly through `QueryDb` / `MutationDb` (not through registered functions), so hashes never
@@ -793,7 +850,9 @@ restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a s
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel])]            // body: String or Option<String>
-#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]   // Vec<f32> or Option<Vec<f32>>
+#[search_index(search_stems, search = body, tokenizer = "porter", language = "english")]   // "run" finds "running"
+#[search_index(search_sub, search = body, tokenizer = "trigram", diacritics = "keep")]     // substrings
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]  // Vec<f32> / Option<Vec<f32>>
 pub struct Message { pub channel: Id<Channel>, pub body: String, pub embedding: Option<Vec<f32>> }
 
 #[query]
@@ -801,6 +860,15 @@ pub async fn search(ctx: &QueryCtx, channel: Id<Channel>, text: String) -> Resul
     ctx.db.query::<Message>()
         .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
         .take(10)
+        .await
+}
+
+#[query]   // works with usePaginatedQuery like index pagination (§1.2.1)
+pub async fn search_page(ctx: &QueryCtx, channel: Id<Channel>, text: String, pagination_opts: PaginationOpts)
+    -> Result<PaginationResult<Doc<Message>>> {
+    ctx.db.query::<Message>()
+        .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
+        .paginate(pagination_opts)
         .await
 }
 
@@ -817,14 +885,32 @@ impl<T> SearchFilter<T> {
     pub fn search<V>(self, field: Field<T, V>, text: impl Into<String>) -> Self;   // exactly once, on the search field
     pub fn eq<V: Serialize>(self, field: Field<T, V>, value: V) -> Self;          // any filter field, any number
 }
-impl<'a, T: Table> SearchQuery<'a, T> {      // no order / paginate: results are ordered by relevance
+impl<'a, T: Table> SearchQuery<'a, T> {      // no order: results are ordered by relevance
     pub fn filter(self, pred: impl Fn(&Doc<T>) -> bool + Send + Sync + 'a) -> Self;   // applied after ranking
     pub async fn take(self, n: usize) -> Result<Vec<Doc<T>>>;     // n clamped to MAX_SEARCH_RESULTS (1024)
     pub async fn first(self) -> Result<Option<Doc<T>>>;
     pub async fn collect(self) -> Result<Vec<Doc<T>>>;            // up to MAX_SEARCH_RESULTS
+    pub async fn paginate(self, opts: PaginationOpts) -> Result<PaginationResult<Doc<T>>>;   // see "Pagination"
 }
-pub struct VectorSearchOpts<T> { pub limit: usize /* 1..=256, default 10 */, pub filter: Option<VectorFilter<T>> }
-impl<T> VectorSearchOpts<T> { pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; }
+impl QueryDb { pub fn search_table(&self, table: &str, index: &str) -> RawSearchQuery<'_>; }   // untyped (dashboard)
+impl RawSearchQuery<'_> {   // search(field, text), eq(field, json), filter(Fn(&Value) -> bool), take, collect, paginate
+}
+pub struct VectorSearchOpts<T> {
+    pub limit: usize,                       // 1..=256, default 10
+    pub filter: Option<VectorFilter<T>>,
+    pub exact: bool,                        // HNSW indexes: search exactly anyway (default false)
+}
+impl<T> VectorSearchOpts<T> {
+    pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; pub fn exact(self) -> Self;
+}
+// TableDef additions: SearchIndexDef { .., tokenizer: Tokenizer }, VectorIndexDef { .., kind: VectorIndexKind }.
+pub struct Tokenizer { pub kind: TokenizerKind /* Unicode61 | Porter | Trigram */, pub language: Option<&'static str>,
+                       pub remove_diacritics: bool }
+impl Tokenizer {   // const fns, used by the #[table] expansion
+    pub const fn unicode61() -> Self; pub const fn porter(language: &'static str) -> Self; pub const fn trigram() -> Self;
+    pub const fn keep_diacritics(self) -> Self;
+}
+pub enum VectorIndexKind { Exact /* default */, Hnsw }
 impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
     pub fn eq<V: Serialize>(field: Field<T, V>, value: V) -> Self;
     pub fn any_of<V: Serialize>(field: Field<T, V>, values: impl IntoIterator<Item = V>) -> Self;
@@ -839,25 +925,92 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
   are separators or plain words). A document matches when its search field contains **every** term; the **last
   term is a prefix** (search-as-you-type: `"hello wor"` matches "hello world"). At most 32 terms are used.
 - **Empty text** (or text with no alphanumeric characters) matches nothing: the query returns `[]` and reads nothing.
-- Tokenizer: FTS5 `unicode61 remove_diacritics 2` (case-insensitive, `café` = `cafe`). Scripts without spaces (e.g.
-  Chinese) are indexed as whole runs.
-- Results are ordered by bm25 (best first; ties by first-indexed). At most `MAX_SEARCH_RESULTS` (1024) documents are
-  examined per query; `take(n)` with a larger `n` is clamped. `eq` filters are applied inside FTS5 (they don't use
-  up the cap); a `.filter(...)` predicate is applied to the ranked candidates.
+- **Tokenizers** (`#[search_index(.., tokenizer = .., language = .., diacritics = ..)]`, all optional):
+  - `"unicode61"` (default): FTS5 `unicode61 remove_diacritics 2`: words, case-insensitive, `café` = `cafe`. Scripts
+    without spaces (e.g. Chinese) are indexed as whole runs.
+  - `"porter"`: FTS5 `porter unicode61 …`: words reduced to their English stem, so "run", "runs" and "running" match
+    each other (the last term is a prefix of the stem). `language` is only accepted with `porter`, and only
+    `"english"` (the default; FTS5's stemmer is English-only).
+  - `"trigram"`: FTS5 `trigram`: substring search; each term matches anywhere inside a word ("ell" finds "hello"),
+    the last term is not a prefix (substrings cover it), and terms shorter than 3 characters are ignored (FTS5
+    can't match them), so text whose terms are all shorter matches nothing. Case-insensitive.
+  - `diacritics = "remove"` (default) folds diacritics; `"keep"` makes `café` and `cafe` different terms
+    (`remove_diacritics 0`).
+  Changing an index's tokenizer rebuilds it at startup (same index id, backfilled).
+- **Relevance**: BM25's per-document part (`db::search::score`): for each query phrase with `tf` occurrences in a
+  document of `dl` tokens, `Σ tf·(k1+1) / (tf + k1·(1 − b + b·dl/32))`, `k1 = 1.2`, `b = 0.75`. There is no IDF and
+  the reference length is fixed (not the corpus average), so a document's score depends only on its own text and the
+  query: more occurrences rank higher (saturating), shorter documents rank higher for equal occurrences. Every term
+  must match anyway (AND), so IDF would only re-weigh terms every result contains; in exchange, results, page
+  boundaries and per-filter-value invalidation are exact (see below). Ties: first-indexed first (FTS rowid).
+- At most `MAX_SEARCH_RESULTS` (1024) documents are examined per query (per page with `paginate`); `take(n)` with a
+  larger `n` is clamped. `eq` filters are applied inside FTS5 (they don't use up the cap); a `.filter(...)` predicate
+  is applied to the ranked candidates.
 - Documents whose search field is missing, null or not a string are not indexed (never returned).
 - `with_search_index` after `with_index` or `order(Desc)` fails when run. Using a field other than the index's search
   field in `search`, a field that is not a filter field in `eq`, or `search` other than exactly once is an error.
 - Equality on filter fields compares the memcomparable encoding (§4.3 of PLAN.md), i.e. the same equality as index
   keys: a missing field is not equal to `null`.
 
+**Pagination** (`SearchQuery::paginate`, `RawSearchQuery::paginate`; same `PaginationOpts` / `PaginationResult` and
+client behaviour as §1.2.1, so `usePaginatedQuery` works unchanged).
+- **Order and positions.** Matches are ordered by `(score desc, FTS rowid asc)`. Because a score depends only on its
+  document (see Relevance), this is a *stable ordering key*: a document's position changes only when that document
+  is written. A cursor is a position "just past `(score, rowid)`" or "the end": URL-safe base64 (no padding) of
+  `[2][fingerprint: 8 bytes][0][score: f64 bits BE][rowid: i64 BE]` or `[2][fingerprint][1]`, the fingerprint being a
+  blake3 hash of the index id, the FTS5 match expression (the normalized terms: whitespace and punctuation don't
+  matter) and the `eq` filters. A cursor of another search (text, filters, index) or of index pagination fails with
+  `paginate: cursor does not belong to this query`; garbage with `paginate: malformed cursor`.
+- **Without `end_cursor`**: the first `numItems` matches after `cursor` (clamped to 1024) passing `.filter(..)`,
+  examining at most 1024 matches; `continueCursor` is just past the last examined match. `isDone` is exact (one more
+  match is looked up), so a page ending at the last match is done (`continueCursor` = the end) and no trailing empty
+  page is needed.
+- **With `end_cursor`**: every match in `(cursor, endCursor]`, whatever `numItems` says; `continueCursor =
+  endCursor`, `isDone` iff `endCursor` is the end. `endCursor` before `cursor` is an error.
+- **Within one snapshot** a chain of pinned pages partitions the matches: no document is duplicated or skipped (the
+  client applies all its pages at one ts, so this holds on screen). **Across changes**, only written documents move:
+  a new or newly matching document appears in the page whose interval contains its position (pinned pages grow, the
+  last page grows up to `numItems`), a deleted or no longer matching one disappears, an edited one may move to
+  another page. Nothing else shifts.
+- **Read set**: the same synthetic key range as `take` (below) plus a `by_id` point per examined document. So every
+  page of a search reruns after a write in its filter partition, and none after writes elsewhere.
+
 **Vector search semantics.** Only `ActionCtx` has `vector_search` (a compile error elsewhere). It reads the latest
-committed snapshot; results are `(id, score)` with `score` the cosine similarity (higher = more similar), best first,
-exact (vec0 does a brute-force scan). Errors: a query vector whose length isn't the index's `dims` (or containing
-NaN/inf), `limit` outside `1..=256`, a filter on a field that isn't a filter field, more than 64 `or` branches.
-Writing a document whose vector field has the wrong length (or isn't an array of numbers) fails before anything is
-written, unless the write leaves that field unchanged (a vector made unindexable by a change of `dims` stays
-unindexed, and the document stays editable). Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs
-can't inline them for codegen): map results to a struct to return them.
+committed snapshot; results are `(id, score)` with `score` the cosine similarity (higher = more similar), best first.
+Errors: a query vector whose length isn't the index's `dims` (or containing NaN/inf), `limit` outside `1..=256`, a
+filter on a field that isn't a filter field, more than 64 `or` branches. Writing a document whose vector field has the
+wrong length (or isn't an array of numbers) fails before anything is written, unless the write leaves that field
+unchanged (a vector made unindexable by a change of `dims` stays unindexed, and the document stays editable).
+Documents whose vector field is missing or null are not indexed. Tuples can't be function outputs (ts-rs can't inline
+them for codegen): map results to a struct to return them.
+- **`kind = "exact"`** (default): sqlite-vec's `vec0` brute-force scan; exact (checked against brute force). About
+  18 ms per k=10 query at 50k × 384, 75–120 ms at 200k × 384.
+- **`kind = "hnsw"`** (`db::search::hnsw`, `db::search::ann`): an in-memory HNSW graph (M = 16, ef_construction =
+  128, search width `ef = max(128, k')`, cosine) on top of the same `vec0` table, which stays the source of truth.
+  Approximate: recall@10 ≈ 0.95 at 200k × 384 for embedding-like data (low intrinsic dimension), ~0.4 ms per query;
+  uniformly random high-dimensional vectors (no structure) are the known worst case. `opts.exact()` forces the exact
+  scan. While the graph isn't ready (building at startup, or failed), searches are exact.
+  - *Consistency*: every write changing an HNSW entry adds `(index id, doc id)` to its commit entry; the graph is
+    updated after commit from the write log (a background thread follows commits, and every search first catches
+    the graph up to its own snapshot), so a search sees every commit up to its snapshot (or later). If the log no
+    longer covers the gap (5 min / 100k commits), the whole `vec0` table is diffed instead. Rolled-back writes never
+    reach the log.
+  - *Deletes*: a deleted or changed document's node becomes a tombstone (still routing, never returned); when
+    tombstones exceed 25% of the nodes (and 256) the graph is rebuilt from the live nodes on all cores in the
+    background, with changes made meanwhile journaled and replayed before the swap.
+  - *Filters*: post-filtering with oversampling. Each node keeps its filter values and each `(field, value)` has a
+    posting set; if at most 4096 live documents match the filter, their distances are computed exactly; otherwise
+    the graph is asked for `k' = k · live / matching · 1.25` candidates, filtered, and retried with `4k'` (up to
+    three times, then the exact computation) if fewer than `k` remain.
+  - *Persistence*: indexes with ≥ 10 000 live vectors are saved to `<data dir>/vector_index_<id>.hnsw` (graph,
+    vectors, per-node doc id, filter values and vector hash; blake3 checksum; written to a temporary file and renamed)
+    after the build, after rebuilds and every `max(1000, live/10)` changes. At startup a file with a valid checksum,
+    format and definition is loaded and **validated against the table**: the whole `vec0` table is scanned at one
+    snapshot and every difference (changed vector or filter values, missing or extra documents) is applied. A missing,
+    stale or corrupt file only costs a rebuild; smaller indexes are rebuilt at every startup. Files of indexes that no
+    longer exist (or became exact) are deleted.
+  - Benchmarks (`search::perf_hnsw`, release, 16 threads): building 200k × 384 takes 9–25 s; saving the 330 MB
+    file ~0.2 s, loading it ~0.2 s.
 
 **Storage and consistency (search).** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
 `UNINDEXED` columns, each the hex of its memcomparable encoding, and `_search_<n>_docs` mapping FTS rowids to doc
@@ -865,15 +1018,30 @@ ids); each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filte
 are listed in `_search_indexes` and updated inside the mutation's write transaction by both the typed and untyped
 write paths, so search results are always consistent with document reads and roll back with the mutation.
 `App::open` reconciles them like ordinary indexes: creates and backfills new ones, rebuilds (drop, create, backfill)
-indexes whose definition changed, and drops removed ones (a backfill skips documents whose vector has the wrong
-length, with a warning). `Database::verify_indexes` also recomputes every search and vector index.
+indexes whose definition changed (fields, dimensions, tokenizer), and drops removed ones (a backfill skips documents
+whose vector has the wrong length, with a warning). Switching a vector index between `exact` and `hnsw` only updates
+its stored definition (the `vec0` table is kept). Stored definitions from before tokenizers existed read as the
+default tokenizer, so they are not rebuilt. `Database::verify_indexes` also recomputes every search and vector index
+and compares each ready HNSW graph's live nodes with its `vec0` table.
 
-**Reactivity (coarse).** Search and vector indexes have ids in the upper half of the index id space
-(`db::search::SPECIAL_INDEX_BASE = 1 << 31`). A search query records the full key range `[b"", ∞)` of its search
-index id plus a `by_id` point read for each document it examined; every write that changes a document's entry in a
-search index (its text or a filter value; inserts and deletes of indexed documents) adds `(search index id, doc id)`
-to the commit entry. So a subscription is invalidated by any such write to the table (and by any change to a document
-it returned), never by unrelated tables. No change to `ReadSet`/`CommitEntry` was needed.
+**Reactivity (per filter value).** Search and vector indexes have ids in the upper half of the index id space
+(`db::search::SPECIAL_INDEX_BASE = 1 << 31`). A search index's synthetic keys are laid out as
+`[filter column i: 1 byte][memcomparable encoding of the document's value of filter field i][doc id: 16 bytes]`:
+every write that changes a document's entry in a search index (its text or a filter value; inserts and deletes of
+indexed documents) adds, for the old entry and for the new one, one such key per filter field to the commit entry (an
+index without filter fields adds `[doc id]`). A search query records:
+- with `eq` filters: the prefix range `[i][enc(v)]` of its `eq` on the lowest filter column (a document matching
+  every filter has a key under each prefix, so one is enough), i.e. the documents whose value of that field is, or was
+  before the write, `v`;
+- without filters: the full range `[b"", ∞)`;
+- plus a `by_id` point for each document it examined.
+So a search with `.eq(channel, c)` is invalidated only by writes to documents whose channel is or was `c` (and by
+changes to documents it returned), never by writes in other channels. This is exact because the relevance of a
+document depends only on that document (see Relevance): documents outside the filter can neither enter the result nor
+reorder it. Encoded values are self-delimiting, so one value's prefix never contains another's keys, and the
+subscription manager's interval index stabs each written key like any index key. No change to `ReadSet`/`CommitEntry`
+was needed. Vector indexes are not reactive (actions only); HNSW indexes write `(index id, doc id)` for the graph's
+catch-up.
 
 ### 1.9 Migrations
 
@@ -1079,21 +1247,29 @@ Compile errors (with spans) for: tuple or unit structs, enums, generics, an inde
 index name, an index named `by_id` or `by_creation_time`, and an existing `#[serde(rename_all)]` other than camelCase.
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
 
-**Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...])]` and
-`#[vector_index(name, field = f, dims = N, filter = [f, ...])]` (both consumed; `filter` optional) add, for
+**Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...], tokenizer = "...", language =
+"...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...")]` (both
+consumed; `filter`, `tokenizer`, `language`, `diacritics` and `kind` optional) add, for
 ```rust
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel])]
-#[vector_index(by_embedding, field = embedding, dims = 1536)]
+#[search_index(search_stems, search = body, tokenizer = "porter", language = "english", diacritics = "keep")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, kind = "hnsw")]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 ```
 these items to the expansion above (the `TableDef` literal always has both fields, `vec![]` when unused):
 ```rust
 ::ferrix::TableDef { name: "messages", indexes: vec![],
-    search_indexes: vec![::ferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"] }],
+    search_indexes: vec![
+        ::ferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"],
+                                   tokenizer: ::ferrix::Tokenizer::unicode61() },
+        ::ferrix::SearchIndexDef { name: "search_stems", search_field: "body", filter_fields: vec![],
+                                   tokenizer: ::ferrix::Tokenizer::porter("english").keep_diacritics() }],
     vector_indexes: vec![::ferrix::VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 1536usize,
-                                                     filter_fields: vec![] }],
+                                                     filter_fields: vec![], kind: ::ferrix::VectorIndexKind::Hnsw }],
     ts: …, validate: … }
+// tokenizer: unicode61() (default or "unicode61"), porter("<language>") (language defaults to "english"), trigram();
+// `.keep_diacritics()` is appended for diacritics = "keep". kind: Exact (default or "exact") or Hnsw.
 // in `impl Message { … }`, after by_creation_time:
 pub const search_body: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new("search_body");
 pub const by_embedding: ::ferrix::VectorIndex<Message> = ::ferrix::VectorIndex::new("by_embedding");
@@ -1105,7 +1281,11 @@ Compile errors (with spans) for: a missing or unknown `search`/`field`, unknown 
 searched field itself), system fields, a missing `dims` or one outside `1..=8192`, more than 16 filter fields,
 unknown or duplicate arguments, a name equal to another index (of any kind), to a field handle, or to a reserved name
 (`by_id`, `by_creation_time`, `_id`, `_creation_time`), and a field type that is visibly wrong (`u32` as a search
-field, `Vec<f64>` as a vector field). Types behind aliases are caught by the `assert_*_field` check instead.
+field, `Vec<f64>` as a vector field). Types behind aliases are caught by the `assert_*_field` check instead. Also
+(spanned at the string literal): an unknown `tokenizer` (not `"unicode61"`, `"porter"`, `"trigram"`), `diacritics`
+(not `"remove"`, `"keep"`) or `kind` (not `"exact"`, `"hnsw"`), a `language` other than `"english"`, a `language`
+without `tokenizer = "porter"`, a non-string value, and `tokenizer`/`language`/`diacritics` on a vector index or
+`kind` on a search index (unknown arguments). `TableDef`s built by hand are checked at startup the same way.
 
 ### 3.2 `#[query]` / `#[mutation]` / `#[action]` (and the `internal_*` variants)
 
@@ -1250,18 +1430,19 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 
 | Path `_system/dashboard:…` | Kind | Args → result |
 |---|---|---|
-| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
+| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions, tokenizer: "unicode61" \| "porter" \| "trigram" \| null, removeDiacritics, method: "exact" \| "hnsw" \| null }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
 | `documents` | query | `{ table, index?, filters?: [{ field, op: "eq"\|"gt"\|"gte"\|"lt"\|"lte", value }], order?: "asc"\|"desc", paginationOpts }` → `PaginationResult<object>`. Untyped `query_table(..).with_index(..).paginate(..)`: same cursors and read sets as typed queries, so pages update live (`usePaginatedQuery` works). Filters follow the `with_index` rules. Errors: `unknown_table`, `invalid_query`, `index_not_allowed`. |
+| `search_documents` | query | `{ table, index, text, filters?: [{ field, value }], paginationOpts }` → `PaginationResult<object>`, most relevant first: untyped `search_table(table, index).search(<its search field>, text).eq(field, value)….paginate(..)` (§1.8: same matching, cursors and per-filter-value read sets, so pages update live and `usePaginatedQuery` works). For the Data page's search box; `tables` lists each table's `searchIndexes` (`kind: "search"`, `field`, `filterFields`, `tokenizer`, `removeDiacritics`). Errors: `unknown_table`, `invalid_query` (no such search index, a vector index, a field that is not a filter field, a bad cursor), `index_not_allowed` (an index over a secret field). |
 | `document` | query | `{ id }` → `{ table, document } \| null` (any table; the table number is in the id). `invalid_id`. |
 | `insert_document` | mutation | `{ table, document }` → new id. System fields in `document` are ignored. |
 | `patch_document` | mutation | `{ id, patch }` → `null`. Shallow merge, validated. |
 | `replace_document` | mutation | `{ id, document }` → `null`. System fields are ignored (`_id`, if given, must match). |
 | `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
 | `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
-| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` (`Identity::user(id, None)`; the user must exist). A failing function is a result with `success: false`, not an error. |
+| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
 | `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
-| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired }]` (no token hashes). |
-| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens. |
+| `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, impersonatedBy }]` (no token hashes; `impersonatedBy` is the admin id of an impersonation session, else null). |
+| `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens; its sockets get `AuthError` at once (live revocation). |
 | `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
 | `me` | query | `{}` → `{ _id, email }` of the signed-in admin. |
 
@@ -1269,8 +1450,13 @@ Write errors (schema validation, unknown table, missing document) are user error
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
 written: …``).
 
-**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` (case-insensitive: `passwordHash`,
-`refreshTokenHash`, `tokenHash`, `codeHash`) is replaced by `"••••"` in everything the dashboard returns, and indexes
+**Audited.** `insert_document`, `patch_document`, `replace_document`, `delete_documents` (one entry per document),
+`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.5), so an entry exists
+exactly for the writes that committed.
+
+**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` or `encrypted` (case-insensitive:
+`passwordHash`, `refreshTokenHash`, `tokenHash`, `codeHash`, `_settings.encrypted`) is replaced by `"••••"` in
+everything the dashboard returns (audit log diffs included), and indexes
 over such a field are `usable: false` and refused by `documents` (a range filter on them would let an admin
 binary-search a hash).
 
@@ -1341,6 +1527,68 @@ Read-only through the dashboard's generic writes; codegen leaves it out.
 
 The admin functions start with `ctx.auth.require_admin()` like §4.1.
 
+### 4.1.4 Settings (`_settings`, `_system/settings:*`)
+
+Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
+need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`; there are
+no hand-written references in `@ferrix/dashboard` yet.
+
+**`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
+per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
+holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets as a JSON map by provider id, or the
+SMTP password), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
+from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
+key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
+A row that can't be decrypted (another `auth_secret.key`) is ignored with an error in the log: its providers are off
+until the secret is entered again.
+
+| Path `_system/settings:…` | Kind | Args → result |
+|---|---|---|
+| `get` | action | `{}` → `SettingsView` |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `oidc` (the latter needs an https `issuer`, http only for loopback or in `--dev`); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
+
+```ts
+type OAuthKind = "github" | "google" | "oidc";
+type SettingsView = {
+  oauth: { id: string; kind: OAuthKind; issuer: string | null; clientId: string; clientSecret: "••••" | null;
+           enabled: boolean; scopes: string[] | null; locked: boolean }[];    // locked: a provider with this id is configured in code
+  smtp: { url: string /* no password */; from: string; password: "••••" | null } | null;
+  redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
+  sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
+  locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
+  effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
+               oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */ };
+};
+type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
+                            clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
+                            enabled: boolean; scopes?: string[] | null };
+type SmtpInput = { url: string /* a password in the URL is moved out of it */; from: string;
+                   password?: string | null /* omitted, null or "••••": keep; "": none */ };
+```
+
+Precedence: §1.5 ("Runtime settings and precedence"); `locked` and `effective` show its result. Secrets are only ever
+accepted, never returned, and never logged: the execution log stores system functions' arguments with every
+`password` / `secret` / `token` field and every URL password replaced by `"••••"` (`settings::redact_args`).
+
+### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
+
+Defined in `crates/ferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
+action, targetTable, targetId, before, after, details, at }` with indexes `by_at = [at]`, `by_admin = [admin, at]`,
+`by_action = [action, at]`, `by_table = [targetTable, at]`, `by_target = [targetId, at]`. Actions: `insert`, `patch`,
+`replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
+for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
+`details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
+`open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1). Secrets are masked by the §4.1 rule.
+
+Each entry is written in the same transaction as the write it describes. The table is a system table, so the
+dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
+entries older than `AuthConfig::audit_retention` (90 days) are swept at startup and hourly (`ferrix::audit::sweep`).
+
+| Path | Kind | Args → result |
+|---|---|---|
+| `_system/audit:list` | query (admin) | `{ admin?, action?, table?, target?, since?, until?, paginationOpts }` → `PaginationResult<Doc<"_audit_log">>`, newest first, live. The most selective filter picks the index (`target` > `admin` > `action` > `table` > time); the others are applied while scanning; `since` / `until` bound `at` (ms, inclusive). |
+
 ### 4.2 Admin HTTP endpoints
 
 The execution log and server stats live outside the reactive database, so they are plain HTTP. Every endpoint
@@ -1351,13 +1599,23 @@ endpoints' shape; responses carry `Cache-Control: no-store`.
 | Endpoint | Response |
 |---|---|
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
-| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, and `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token). |
+| `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
+| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user, 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }] } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the
 short-lived access token travels only in the `Authorization` header. The stream ends when that token expires (at most
-15 minutes); revoking the session stops new streams, while one already open runs until then.
+15 minutes), and immediately (`event: revoked`) when its session ends.
+
+**Impersonation, security.** Impersonation lets an admin act with all of a user's rights, so: it is admin-only and
+can be disabled; every impersonation session is audited at creation (same transaction), carries
+`impersonatedBy` (apps can refuse sensitive operations such as changing credentials or payments when
+`ctx.db.get(ctx.auth.session_id()?)` has it set), shows in the user's session list, is revocable like any session
+(with live revocation), dies with `delete_user`, and has a hard expiry of at most an hour that refreshing can't
+extend. `run_function`'s sessions last 5 minutes and are deleted as soon as the run ends. The minted tokens are never
+logged; they travel only in the response body or a URL fragment (never sent to servers). Opening the app with them
+stores them in that browser's app storage, replacing whoever was signed in there: use a private window.
 
 ### 4.3 The embedded dashboard
 

@@ -86,9 +86,32 @@ await auth.handleRedirectCallback();              // on the page OAuth and email
 ```
 
 Access tokens are 15-minute HS256 JWTs signed with a key from `<data dir>/auth_secret.key`; refresh tokens rotate
-on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
-one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
-("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
+on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a rotated refresh token
+ends the sockets of that session **at once** (`AuthError`, then the client continues signed out), not when the access
+token expires. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
+one-time `/_/setup#token=…` link; `admin create <email>` works too.
+
+**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): ferrix verifies their JWTs
+against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
+subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in method:
+
+```rust
+.auth(AuthConfig::default()
+    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())          // JWKS found by OIDC discovery
+    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com")))
+```
+
+```ts
+// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError.
+client.setAuth(({ forceRefresh }) => clerk.session!.getToken({ skipCache: forceRefresh }));
+```
+
+**Runtime settings.** Administrators can change OAuth providers, SMTP, the redirect allowlist, sign-ups, token
+lifetimes and CORS origins without a restart (`_system/settings:*`). Secrets are encrypted at rest with a key derived
+from `auth_secret.key` and never shown again. Whatever the code, the command line or the environment configures wins
+over these settings. Every administrator write is recorded in an audit log (`_audit_log`), and admins can act as a
+user through a short-lived, audited session. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md) ("Auth") and
+[docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5, §4.1.4, §4.1.5.
 
 ## File storage
 
@@ -178,8 +201,8 @@ reactive like any other query (docs/CONTRACT.md §1.8).
 
 ```rust
 #[table(name = "messages")]
-#[search_index(search_body, search = body, filter = [channel])]
-#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+#[search_index(search_body, search = body, filter = [channel], tokenizer = "porter")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
 pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
 
 #[query]   // most relevant first; the last word is a prefix ("hello wor" matches "hello world")
@@ -198,10 +221,29 @@ pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>) -> Result<Vec<Id<Mess
 ```
 
 User text is split into words that are always matched literally (never parsed as FTS5 syntax); empty text matches
-nothing; a query returns at most 1024 documents. A search subscription reruns after any write that changes the text or
-a filter field of the table's documents. Rough numbers (release build, a laptop): 50k documents of 12 words: a
-one-word query takes 0.35 ms, a broad two-letter prefix matching every document 80 ms; 50k vectors of 384 dimensions:
-a k=10 query takes about 18 ms (7 ms with a filter keeping 1 in 10). The todo example has a search box.
+nothing; a query returns at most 1024 documents. Relevance is BM25 per document (term frequency and length, no
+corpus statistics), so a document's rank depends only on itself and the query. That makes two things exact:
+
+- **Pagination**: `.paginate(pagination_opts)` instead of `.take(n)` returns the usual `PaginationResult`, so
+  `usePaginatedQuery` works as for index queries. Pages never duplicate or skip a match; when documents change, only
+  those documents move.
+- **Invalidation per filter value**: a search with `.eq(Message::channel, c)` reruns only after writes to messages
+  whose channel is (or was) `c`; an unfiltered search reruns after any write to the index.
+
+Tokenizers: `tokenizer = "porter"` (English stemming: "run" finds "running"), `tokenizer = "trigram"` (substring
+search: "ell" finds "hello"), default `"unicode61"`; `diacritics = "keep"` stops folding `café` into `cafe`. Changing
+the tokenizer rebuilds the index at startup.
+
+Vector indexes are exact by default (sqlite-vec). For large sets, `kind = "hnsw"` adds an in-memory HNSW graph
+(approximate, recall@10 ≈ 0.95 on embedding-like data) that follows commits through the write log, so a search sees
+everything committed before it; filters are applied after the graph search with oversampling (exactly, when few
+documents match), deletes become tombstones that a background rebuild drops, and graphs of 10k+ vectors are saved
+next to `data.db` and validated against the table at startup. `VectorSearchOpts::exact()` bypasses the graph.
+
+Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.35 ms, a broad two-letter
+prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
+HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
+`_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).
 
 ## Migrations
 
@@ -253,8 +295,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   fields, a side panel with a JSON editor (insert, edit, delete; validated against the table's Rust type), and
   clickable ids that open the referenced document. Secrets (password and token hashes) are never shown, and system
   tables are read-only except the `name`, `image` and `emailVerified` of users.
-- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user*, showing the
-  result, log lines and duration.
+- **Functions**: every function with its TS signature, and a runner: JSON args, optionally *as a user* (through a
+  real, short-lived, audited session), showing the result, log lines and duration.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
 - **Users**: users, linked providers, sessions (revoke), delete.
 - **Files**: stored files with previews (images, video, audio, text), download, delete, and upload by drag and drop.
@@ -262,6 +304,10 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 - **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
   and retry.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
+
+Runtime settings, the audit log and "open the app as this user" already have their admin-only backend
+(`_system/settings:*`, `_system/audit:list`, `POST /api/admin/impersonate`; docs/CONTRACT.md §4.1.4, §4.1.5, §4.2);
+their pages are still to come.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every
 view is live, plus `/api/admin/*` for logs and stats (docs/CONTRACT.md §4). The built assets are committed, so

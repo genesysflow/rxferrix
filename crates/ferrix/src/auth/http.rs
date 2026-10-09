@@ -190,8 +190,8 @@ async fn providers(State(app): State<App>) -> Response {
     ok(json!({
         "password": c.password,
         "magicLink": c.magic_link,
-        "signups": c.signups,
-        "oauth": auth.oauth.provider_ids(),
+        "signups": auth.signups_allowed(),
+        "oauth": auth.oauth_provider_ids(),
     }))
 }
 
@@ -388,12 +388,12 @@ async fn oauth_start(
     let result: AuthResult<(String, String)> = async {
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let auth = app.auth();
-        let provider = auth.oauth.provider(&provider_id).ok_or_else(|| AuthFailure::not_found("This OAuth provider"))?;
+        let provider = auth.oauth_provider(&provider_id).ok_or_else(|| AuthFailure::not_found("This OAuth provider"))?;
         let redirect = auth
             .resolve_redirect(q.redirect_to.as_deref())?
             .ok_or_else(|| AuthFailure::new(400, "invalid_redirect", "No redirect URL given and none configured"))?;
         let callback = callback_url(&app, &headers, &provider_id);
-        let (url, state) = auth.oauth.start(provider, redirect, &callback).await?;
+        let (url, state) = auth.oauth.start(&provider, redirect, &callback).await?;
         let secure = if callback.starts_with("https://") { "; Secure" } else { "" };
         let cookie = format!(
             "{STATE_COOKIE}={state}; Path=/api/auth/oauth; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
@@ -465,10 +465,10 @@ async fn oauth_callback(
         return fail(code, "The sign-in provider did not grant access");
     }
     let Some(code) = q.code.as_deref() else { return fail("oauth_failed", "The provider returned no code") };
-    let Some(provider) = auth.oauth.provider(&provider_id) else { return fail("oauth_failed", "Unknown provider") };
+    let Some(provider) = auth.oauth_provider(&provider_id) else { return fail("oauth_failed", "Unknown provider") };
     let callback = callback_url(&app, &headers, &provider_id);
     let result = async {
-        let profile = auth.oauth.finish(provider, code, &pending.verifier, &callback).await?;
+        let profile = auth.oauth.finish(&provider, code, &pending.verifier, &callback).await?;
         auth.oauth_sign_in(&app, &provider_id, profile, caller.client()).await
     }
     .await;

@@ -402,7 +402,8 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   The builder is `AuthConfig::password()` rather than `Auth::password()`, because `ferrix::Auth` is `ctx.auth`'s type.)
 - **Endpoints**: `/api/auth/{signup,signin,signout,refresh,verify,reset,oauth/:provider,oauth/:provider/callback}`.
 - **Hardening**: rate limits on auth endpoints (`tower` governor), a constant-time compare, and no account enumeration.
-- **Later**: accept external JWTs (Clerk, Auth0) through a JWKS URL.
+- **External JWTs** (Clerk, Auth0, Supabase, any OIDC issuer) verified through the issuer's JWKS and mapped to
+  provisioned `_users` (built in Phase 5).
 
 ### 7.2 File storage
 - Backend: `object_store`, either `LocalFileSystem` at `fx_data/storage/` or S3-compatible storage (R2, MinIO, AWS).
@@ -443,12 +444,17 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 - `#[search_index(name, search = field, filter = [f1, f2])]` creates an FTS5 table per search index, with filter fields stored as `UNINDEXED` columns.
 - The index is maintained **inside the mutation transaction**, so search results are always consistent with document reads. This is the main advantage over tantivy, which would need a separate index kept in sync.
 - Query API: `.with_search_index(Message::search_body, |q| q.search(Message::body, "hello wor").eq(Message::channel, c)).take(10)`, ordered by bm25 relevance. The last term gets prefix matching for search-as-you-type.
-- Reactivity is coarse (see §4.5), which is good enough.
+- Reactivity is per filter value: a search with `.eq(channel, c)` only reruns after writes to documents whose channel
+  is or was `c` (docs/CONTRACT.md §1.8). Relevance is a per-document BM25 so that this, and pagination, are exact.
+- `tokenizer = "unicode61" | "porter" | "trigram"` (stemming, substring search), `diacritics = "keep"`.
+- `.paginate(opts)` like index pagination.
 
 ### 7.5 Vector search (`sqlite-vec`)
 - `#[vector_index(name, field = embedding, dims = 1536, filter = [f])]` on a `Vec<f32>` field.
 - `ctx.vector_search(Table::index, query_vec, { limit, filter })` is available **in actions only**. Embeddings come from external APIs, which only actions can call, so this keeps queries deterministic and cheap.
-- Brute-force or `vec0` virtual tables handle roughly 100k to 1M vectors on a small VPS. If that ever runs out, the fallback is an HNSW crate.
+- Brute-force or `vec0` virtual tables handle roughly 100k vectors comfortably (75–120 ms per query at 200k × 384).
+  Beyond that, `kind = "hnsw"` adds an in-memory HNSW graph kept consistent with the committed `vec0` table (done in
+  Phase 8; ~0.4 ms per query at 200k × 384).
 
 ---
 
@@ -544,8 +550,13 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] The SPA (`packages/dashboard`, Svelte 5) embedded with `rust-embed` (feature `dashboard`) and served at `/_/`:
   sign-in and setup, data browser (live grid, index filters, JSON editor, follow IDs, schema view), function runner,
   live logs tail, users and sessions, overview. Built assets are committed; a test fails when they are stale.
-- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, audited dashboard writes, per-function
-  latency charts, impersonation via a real session.
+- [x] Audited dashboard writes: `_audit_log` written in each write's own transaction (generic writes,
+  `revoke_session`, `delete_user`, settings, impersonation, `run_function`), `_system/audit:list` (live, filterable),
+  90-day retention (docs/CONTRACT.md §4.1.5). The dashboard page for it is still to build.
+- [x] Impersonation via a real session: `run_function` "as user" runs through a short-lived, audited session marked
+  `impersonatedBy`; `POST /api/admin/impersonate` mints one to open the app as a user (§4.2). No UI button yet.
+- [ ] Not yet: a virtualized grid, full-text filter, CSV/JSONL export, per-function latency charts, and the UI for
+  settings, the audit log and impersonation.
 
 ### Phase 5 — Auth (M) — mostly done
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
@@ -556,9 +567,15 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Client integration: `getAuth(client)` (`signIn`/`signOut`/…, refresh wired into `setAuth`, cross-tab sync),
   React `useFerrixAuth` / `useAuthActions` / `useCurrentUser`, Svelte `useAuth` / `useCurrentUser`.
 - [x] The dashboard Users page (users, linked providers, sessions, revoke, delete; "act as user" in the runner).
-- [ ] Provider configuration in `_settings`, editable from the dashboard.
-- [ ] External JWTs via JWKS; live revocation of already-authenticated sockets on sign-out (today they keep their
-  identity until the access token expires).
+- [x] Provider configuration in `_settings` (OAuth providers, SMTP, redirect allowlist, sign-ups, token lifetimes,
+  CORS origins), secrets encrypted at rest (XChaCha20-Poly1305, key from `auth_secret.key`), applied without a
+  restart, config wins over settings; admin-only `_system/settings:get|update|send_test_email` (docs/CONTRACT.md
+  §4.1.4). The dashboard Settings page is still to build.
+- [x] External JWTs via JWKS (`AuthConfig::jwt(JwtProvider)`: RS256/ES256/EdDSA, cached JWKS with rate-limited
+  refetch on unknown `kid`, iss/aud/exp/nbf with leeway, subjects provisioned as `_users` + `_accounts`), on WS and
+  HTTP Bearer (§1.5).
+- [x] Live revocation: sockets and the admin log stream end with `AuthError` / `event: revoked` as soon as their
+  session (or, for external tokens, user) is deleted (docs/PROTOCOL.md guarantee 10).
 - **Milestone: usable for real apps with users.**
 
 ### Phase 6 — Scheduler and cron (M) — done
@@ -609,7 +626,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [ ] Not yet: dashboard UI for private mode (the Download link appends `?download=1`; `downloadUrl` is provided),
   thumbnails as previews on the Files page.
 
-### Phase 8 — Search (M) — mostly done
+### Phase 8 — Search (M) — done
 - [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`
   with span-accurate errors, typed `SearchIndex<T>` / `VectorIndex<T>` handles, `TableDef::{search_indexes,
   vector_indexes}` (docs/CONTRACT.md §1.8, §3.1).
@@ -624,8 +641,24 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   with `sqlite3_auto_extension`); `ActionCtx::vector_search` (actions only), dimension-checked, OR/AND equality
   filters, exact results (checked against brute force). ~18 ms per k=10 query over 50k × 384.
 - [x] Dashboard schema view lists search and vector indexes; the todo example has a live search box.
-- [ ] Not yet: search pagination, a dashboard search box, per-filter-value read sets (finer invalidation), an
-  approximate (HNSW) index for millions of vectors, configurable tokenizers.
+- [x] Search pagination: `SearchQuery::paginate` (and untyped `RawSearchQuery::paginate`) with the same
+  `PaginationOpts`/`PaginationResult` and pinned-`endCursor` behaviour as index pagination, so `usePaginatedQuery`
+  works. Relevance is a per-document BM25 (no corpus statistics), so `(score, rowid)` is a stable ordering key:
+  cursors are positions in it (fingerprinted by index, terms and filters), pinned pages partition the matches at
+  every snapshot, and only written documents move across changes (docs/CONTRACT.md §1.8 "Pagination").
+- [x] Per-filter-value read sets: synthetic keys `[filter column][encoded value][doc id]`; a search with `eq`
+  reads only its value's prefix (old and new values are written), unfiltered searches the full range. Randomized
+  soundness test (no missed change) plus a pinned-pages partition test.
+- [x] Configurable tokenizers: `tokenizer = "unicode61" | "porter" | "trigram"`, `language = "english"` (porter),
+  `diacritics = "remove" | "keep"`; validated by the macro (trybuild) and at startup; changing one rebuilds the index.
+- [x] Approximate vector indexes: `kind = "hnsw"`, an in-house HNSW graph (no crate fit: deletes, a validated
+  persisted form, concurrent search + insert) on top of the `vec0` table: updated after commit from the write log,
+  tombstones plus background rebuilds, post-filtering with oversampling (exact below 4096 matches), persisted next to
+  `data.db` for ≥ 10k vectors and validated against the table at startup. Recall@10 ≥ 0.9 asserted against exact
+  search; 200k × 384: built in 9–25 s on 16 threads, ~0.4 ms per query at recall ≈ 0.95 (embedding-like data).
+- [x] Backend for a dashboard search box: admin-only `_system/dashboard:search_documents` (docs/CONTRACT.md §4.1).
+- [ ] Not yet: the dashboard UI for search, stemmers for languages other than English, vector search in queries
+  (reactive), tunable HNSW parameters (`M`, `ef`) per index.
 
 ### Phase 10 — DX fixes found by `examples/chat-react` (M)
 - [ ] Index keys end in `_creationTime, _id`, so `eq(channel)` + `order(Desc)` is newest first; rebuild

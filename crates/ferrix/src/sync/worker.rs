@@ -77,6 +77,9 @@ pub struct SyncWorker {
     auth_expires_at: Option<Instant>,
     /// Set when the connection ends because of an auth failure: sent as `AuthError` instead of `FatalError`.
     auth_error: Option<String>,
+    /// Fires when the authenticated session ends (sign-out, revocation, ...): the socket then ends with `AuthError`
+    /// right away instead of at token expiry (`crate::auth::revocation`).
+    session_watch: Option<crate::auth::SessionWatch>,
 }
 
 /// Spawn a worker and return its input and output channels (used by the WebSocket handler and by tests).
@@ -112,6 +115,7 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         completions_rx,
         auth_expires_at: None,
         auth_error: None,
+        session_watch: None,
     };
     worker.run(inbound, doorbell).await
 }
@@ -124,6 +128,7 @@ impl SyncWorker {
         let result: Result<(), Fatal> = async {
             loop {
                 let auth_expiry = self.auth_expires_at;
+                let session_ended = self.session_watch.as_ref().map(|w| w.ended());
                 tokio::select! {
                     msg = inbound.recv() => match msg {
                         None => return Ok(()),
@@ -136,6 +141,10 @@ impl SyncWorker {
                     _ = sleep_until_opt(auth_expiry) => {
                         self.auth_error = Some("access token expired".into());
                         return Err(Fatal("access token expired".into()));
+                    }
+                    _ = wait_opt(session_ended) => {
+                        self.auth_error = Some(crate::auth::revocation::SESSION_ENDED.into());
+                        return Err(Fatal(crate::auth::revocation::SESSION_ENDED.into()));
                     }
                 }
             }
@@ -222,10 +231,10 @@ impl SyncWorker {
                 // An invalid, expired or revoked token ends the socket with AuthError (the client refreshes and
                 // reconnects); a valid one becomes this socket's identity until it expires. Query results may depend
                 // on who is asking: the manager moves every subscription to the shared query for the new identity.
-                let (identity, expires_at) = match token {
-                    None => (Identity::default(), None),
-                    Some(token) => match self.app.auth().authenticate(&self.app, &token).await {
-                        Ok(a) => (a.identity, Some(deadline(a.expires_at))),
+                let (identity, expires_at, watch) = match token {
+                    None => (Identity::default(), None, None),
+                    Some(token) => match self.app.auth().authenticate_watched(&self.app, &token).await {
+                        Ok((a, watch)) => (a.identity, Some(deadline(a.expires_at)), watch),
                         Err(e) => {
                             self.auth_error = Some(e.to_string());
                             return Err(Fatal(e.to_string()));
@@ -234,6 +243,7 @@ impl SyncWorker {
                 };
                 self.identity = identity.clone();
                 self.auth_expires_at = expires_at;
+                self.session_watch = watch;
                 self.identity_version = base_version + 1;
                 self.conn.authenticate(self.identity_version, identity).await?;
             }
@@ -289,6 +299,13 @@ impl SyncWorker {
 fn deadline(at: std::time::SystemTime) -> Instant {
     let left = at.duration_since(std::time::SystemTime::now()).unwrap_or_default();
     Instant::now() + left
+}
+
+async fn wait_opt(f: Option<impl std::future::Future<Output = ()>>) {
+    match f {
+        Some(f) => f.await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn sleep_until_opt(at: Option<Instant>) {

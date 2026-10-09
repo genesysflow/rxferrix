@@ -2,16 +2,20 @@
 //! setup token), and the operations behind the HTTP endpoints, the sync worker and the CLI.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::config::{AuthConfig, RedirectAllowlist};
-use super::email::{Email, LogMailer, Mailer, Purpose, SmtpMailer};
+use super::config::{AuthConfig, OAuthProvider};
+use super::effective::Effective;
+use super::jwt::JwtVerifier;
+use crate::settings::model::StoredSettings;
+use super::email::{Email, Mailer, Purpose};
 use super::identity::Identity;
 use super::oauth::OAuthFlows;
 use super::rate_limit::{RateLimiter, Rule};
+use super::revocation::{Revocations, SessionWatch};
 use super::store::{self, ClientInfo, Principal, RefreshOutcome};
 use super::tables::{Admin, Session, User};
 use super::tokens::{AccessClaims, Keys, TokenError, ct_eq, random_token};
@@ -102,12 +106,22 @@ pub enum Limit {
 pub struct AuthService {
     pub(crate) config: AuthConfig,
     pub(crate) keys: Keys,
-    pub(crate) redirects: RedirectAllowlist,
-    mailer: Option<Arc<dyn Mailer>>,
+    dev: bool,
+    /// The mailer configured in code or on the command line (wins over SMTP from `_settings`).
+    pub(crate) config_mailer: Option<Arc<dyn Mailer>>,
+    /// `config` merged with `_settings`; swapped when the settings change.
+    effective: RwLock<Arc<Effective>>,
     limiter: RateLimiter,
     pub(crate) oauth: OAuthFlows,
+    pub(crate) jwt: JwtVerifier,
     setup_token_hash: Mutex<Option<String>>,
+    revocations: Arc<Revocations>,
 }
+
+/// The longest an impersonation session may last.
+pub const MAX_IMPERSONATION_TTL: Duration = Duration::from_secs(3600);
+/// The default lifetime of an impersonation session.
+pub const DEFAULT_IMPERSONATION_TTL: Duration = Duration::from_secs(15 * 60);
 
 pub(crate) fn now_ms() -> f64 {
     crate::db::wall_clock_ms()
@@ -121,33 +135,87 @@ impl AuthService {
     /// Load the server secret from `dir` and set up mail, OAuth and limits from `config`.
     pub fn new(dir: &Path, config: AuthConfig, dev: bool) -> crate::Result<AuthService> {
         let keys = Keys::load_or_create(dir)?;
-        let redirects = RedirectAllowlist::new(&config.redirect_urls, dev)?;
-        let mailer: Option<Arc<dyn Mailer>> = match (&config.mailer, &config.smtp) {
-            (Some(m), _) => Some(m.clone()),
-            (None, Some(smtp)) => Some(Arc::new(SmtpMailer::new(smtp)?)),
-            (None, None) if dev => Some(Arc::new(LogMailer)),
-            (None, None) => None,
-        };
-        if mailer.is_none() && (config.password || config.magic_link) {
-            tracing::warn!(
-                "auth: no SMTP configured (--smtp-url / FERRIX_SMTP_URL); verification, reset and magic-link emails \
-                 can't be sent"
-            );
+        for p in config.oauth.iter().filter(|p| !p.is_configured()) {
+            tracing::warn!("auth: OAuth provider `{}` has no client id/secret configured; it is disabled", p.id);
         }
-        let oauth = OAuthFlows::new(&config.oauth);
-        Ok(AuthService { config, keys, redirects, mailer, limiter: RateLimiter::default(), oauth, setup_token_hash: Mutex::new(None) })
+        let config_mailer = super::effective::config_mailer(&config)?;
+        // Settings are loaded once the database is open (`start`); until then the configuration alone applies.
+        let effective = Effective::build(&config, dev, config_mailer.clone(), &StoredSettings::default(), 0)?;
+        let jwt = JwtVerifier::new(&config.jwt)?;
+        Ok(AuthService {
+            config,
+            keys,
+            dev,
+            config_mailer,
+            effective: RwLock::new(Arc::new(effective)),
+            limiter: RateLimiter::default(),
+            oauth: OAuthFlows::new(),
+            jwt,
+            setup_token_hash: Mutex::new(None),
+            revocations: Arc::default(),
+        })
     }
 
+    /// The configuration given in code and on the command line (without `_settings`; the merged result is `current()`).
     pub fn config(&self) -> &AuthConfig {
         &self.config
     }
 
+    /// The configuration in effect: [`AuthService::config`] merged with the runtime settings in `_settings`.
+    pub(crate) fn current(&self) -> Arc<Effective> {
+        self.effective.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Re-read `_settings` and swap in the resulting configuration (a newer one is never replaced by an older one).
+    pub(crate) async fn reload_settings(&self, app: &App) -> crate::Result<()> {
+        let snapshot = app.db().snapshot().await?;
+        let ts = snapshot.ts;
+        let db = crate::db::query::QueryDb::new(crate::db::query::Source::Snapshot(snapshot), app.db().catalog().clone());
+        let stored = StoredSettings::load(&db, &self.keys.secret_box()).await?;
+        drop(db);
+        let next = match Effective::build(&self.config, self.dev, self.config_mailer.clone(), &stored, ts) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("settings: the stored settings can't be applied; keeping the previous ones: {e:#}");
+                return Ok(());
+            }
+        };
+        let mut current = self.effective.write().unwrap_or_else(|e| e.into_inner());
+        if next.ts >= current.ts {
+            *current = Arc::new(next);
+        }
+        Ok(())
+    }
+
+    /// The OAuth provider `id`, if enabled (in code or in `_settings`).
+    pub(crate) fn oauth_provider(&self, id: &str) -> Option<OAuthProvider> {
+        self.current().oauth.get(id).cloned()
+    }
+
+    /// The ids of the enabled OAuth providers.
+    pub fn oauth_provider_ids(&self) -> Vec<String> {
+        self.current().oauth.keys().cloned().collect()
+    }
+
+    /// Whether sign-ups are allowed (configuration, then `_settings`).
+    pub fn signups_allowed(&self) -> bool {
+        self.current().signups
+    }
+
+    /// Whether a browser origin may call the API (CORS); every origin unless `_settings` restricts them.
+    pub fn cors_allows(&self, origin: &str) -> bool {
+        match &self.current().cors_origins {
+            None => true,
+            Some(list) => list.iter().any(|o| o == origin),
+        }
+    }
+
     fn access_ttl_s(&self) -> u64 {
-        self.config.access_token_ttl.as_secs().max(1)
+        self.current().access_token_ttl.as_secs().max(1)
     }
 
     fn session_ttl_ms(&self) -> f64 {
-        self.config.session_ttl.as_secs_f64() * 1000.0
+        self.current().session_ttl.as_secs_f64() * 1000.0
     }
 
     /// Take a rate-limit token for `(group, key)`.
@@ -171,6 +239,34 @@ impl AuthService {
     /// Validate an access token: signature, expiry, and that its session is still active (so sign-out and
     /// revocation take effect for every new connection and request immediately).
     pub async fn authenticate(&self, app: &App, token: &str) -> Result<Authenticated, TokenError> {
+        self.authenticate_inner(app, token, false).await.map(|(a, _)| a)
+    }
+
+    /// [`AuthService::authenticate`] for long-lived connections: also returns a [`SessionWatch`] that fires as soon
+    /// as the token's session ends (sign-out, revocation, user deletion, ...; see [`super::revocation`]). The watch is
+    /// registered before the session check, so no revocation can slip in between.
+    pub async fn authenticate_watched(
+        &self,
+        app: &App,
+        token: &str,
+    ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
+        self.authenticate_inner(app, token, true).await
+    }
+
+    /// The registry of connections watching their sessions (live revocation).
+    pub fn revocations(&self) -> &Arc<Revocations> {
+        &self.revocations
+    }
+
+    async fn authenticate_inner(
+        &self,
+        app: &App,
+        token: &str,
+        watch: bool,
+    ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
+        if !self.jwt.is_empty() && super::tokens::header_alg(token).is_some_and(|alg| alg != "HS256") {
+            return self.authenticate_external(app, token, watch).await;
+        }
         let claims = self.keys.verify(token, now_s())?;
         let session: Id<Session> = claims.sid.parse().map_err(|_| TokenError::Malformed)?;
         let (principal, identity) = if claims.adm {
@@ -180,8 +276,9 @@ impl AuthService {
             let user: Id<User> = claims.sub.parse().map_err(|_| TokenError::Malformed)?;
             (Principal::User(user), Identity::user(user, Some(session)))
         };
+        let watch = watch.then(|| self.revocations.watch(app, session.to_string()));
         match store::session_active(app, session, principal, now_ms()).await {
-            Ok(true) => Ok(Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }),
+            Ok(true) => Ok((Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }, watch)),
             Ok(false) => Err(TokenError::SessionEnded),
             Err(e) => {
                 tracing::error!("auth: session lookup failed: {e:#}");
@@ -190,8 +287,36 @@ impl AuthService {
         }
     }
 
-    fn issue(&self, session: Id<Session>, principal: Principal, refresh: String) -> AuthTokens {
-        let ttl = self.access_ttl_s();
+    /// An external JWT (`super::jwt`): verify it, find or provision its user, and (for connections) watch the user
+    /// document, since such tokens have no `_sessions` row: deleting the user ends their connections at once.
+    async fn authenticate_external(
+        &self,
+        app: &App,
+        token: &str,
+        watch: bool,
+    ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
+        let claims = self.jwt.verify(token, now_s()).await?;
+        let user = store::external_user(app, &claims).await.map_err(|e| {
+            tracing::error!("auth: provisioning the user of an external token failed: {e:#}");
+            TokenError::SessionEnded
+        })?;
+        let identity = Identity::user(user, None);
+        let authenticated = Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.expires_at) };
+        if !watch {
+            return Ok((authenticated, None));
+        }
+        // Registered before this existence check, like sessions (see `super::revocation`).
+        let w = self.revocations.watch(app, user.to_string());
+        match store::exists(app, user.to_string()).await {
+            Ok(true) => Ok((authenticated, Some(w))),
+            _ => Err(TokenError::SessionEnded),
+        }
+    }
+
+    /// Sign tokens for a session. The access token never outlives the session (`session_expires_at`, ms).
+    fn issue(&self, session: Id<Session>, principal: Principal, refresh: String, session_expires_at: f64) -> AuthTokens {
+        let left_s = ((session_expires_at - now_ms()) / 1000.0).ceil().max(1.0) as u64;
+        let ttl = self.access_ttl_s().min(left_s);
         let (sub, adm, user_id, admin_id) = match principal {
             Principal::User(u) => (u.to_string(), false, Some(u.to_string()), None),
             Principal::Admin(a) => (a.to_string(), true, None, Some(a.to_string())),
@@ -201,14 +326,34 @@ impl AuthService {
     }
 
     async fn start_session(&self, app: &App, principal: Principal, client: ClientInfo) -> AuthResult<AuthTokens> {
-        let (session, refresh) =
-            store::create_session(app, &self.keys, principal, client, now_ms(), self.session_ttl_ms()).await?;
-        Ok(self.issue(session, principal, refresh))
+        let (now, ttl) = (now_ms(), self.session_ttl_ms());
+        let (session, refresh) = store::create_session(app, &self.keys, principal, client, now, ttl).await?;
+        Ok(self.issue(session, principal, refresh, now + ttl))
     }
 
     /// Mint tokens for `user` without credentials, e.g. from a test or an admin tool.
     pub async fn sign_in_as(&self, app: &App, user: Id<User>) -> crate::Result<AuthTokens> {
         self.start_session(app, Principal::User(user), ClientInfo::default()).await.map_err(|f| anyhow::anyhow!(f.error))
+    }
+
+    /// Impersonation: a real session of `user` minted by `admin`, marked `impersonated_by`, expiring after `ttl`
+    /// (capped at [`MAX_IMPERSONATION_TTL`]; refreshing never extends it), and audited (`impersonate`) in the same
+    /// transaction. `purpose` goes into the audit entry's details. `None` if the user doesn't exist.
+    pub(crate) async fn impersonate(
+        &self,
+        app: &App,
+        admin: Id<Admin>,
+        user: Id<User>,
+        ttl: Duration,
+        purpose: serde_json::Value,
+        client: ClientInfo,
+    ) -> crate::Result<Option<(AuthTokens, Id<Session>, f64)>> {
+        let ttl_ms = ttl.min(MAX_IMPERSONATION_TTL).max(Duration::from_secs(1)).as_secs_f64() * 1000.0;
+        let created =
+            store::create_impersonation_session(app, &self.keys, admin, user, client, now_ms(), ttl_ms, purpose).await?;
+        Ok(created.map(|(session, refresh, expires_at)| {
+            (self.issue(session, Principal::User(user), refresh, expires_at), session, expires_at)
+        }))
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -227,7 +372,7 @@ impl AuthService {
         client: ClientInfo,
     ) -> AuthResult<SignUpResult> {
         self.require_password()?;
-        if !self.config.signups {
+        if !self.current().signups {
             return Err(AuthFailure::new(403, "signups_disabled", "New accounts can't be created"));
         }
         let email = store::normalize_email(email)?;
@@ -235,8 +380,8 @@ impl AuthService {
         let name = name.map(|n| n.trim().chars().take(200).collect::<String>()).filter(|n| !n.is_empty());
         let hash = password::hash(password).await?;
         let user = store::create_password_user(app, email.clone(), hash, name).await??;
-        if self.mailer.is_some() {
-            let redirect = self.redirects.default_target();
+        if self.current().mailer.is_some() {
+            let redirect = self.current().redirects.default_target();
             self.send_code(app, email, Purpose::VerifyEmail, Some(user), redirect).await?;
         }
         if self.config.require_email_verification {
@@ -281,7 +426,9 @@ impl AuthService {
         )
         .await?;
         match outcome {
-            RefreshOutcome::Rotated { session, principal, refresh } => Ok(self.issue(session, principal, refresh)),
+            RefreshOutcome::Rotated { session, principal, refresh, expires_at } => {
+                Ok(self.issue(session, principal, refresh, expires_at))
+            }
             RefreshOutcome::Invalid => Err(AuthFailure::new(401, "invalid_refresh_token", "Invalid refresh token")),
             RefreshOutcome::Expired => Err(AuthFailure::new(401, "session_expired", "The session has expired")),
             RefreshOutcome::Stale => Err(AuthFailure::new(
@@ -316,18 +463,18 @@ impl AuthService {
     // Email codes
 
     fn require_mailer(&self) -> AuthResult<Arc<dyn Mailer>> {
-        self.mailer.clone().ok_or_else(|| AuthFailure::new(503, "email_not_configured", "Email is not configured on this server"))
+        self.current().mailer.clone().ok_or_else(|| AuthFailure::new(503, "email_not_configured", "Email is not configured on this server"))
     }
 
     /// Resolve an app URL for links/redirects. An explicit URL that isn't allowed is an error (never silently
     /// replaced); no URL means the default target, if any.
     pub(crate) fn resolve_redirect(&self, redirect_to: Option<&str>) -> AuthResult<Option<String>> {
         match redirect_to.filter(|r| !r.is_empty()) {
-            Some(r) => match self.redirects.resolve(Some(r)) {
+            Some(r) => match self.current().redirects.resolve(Some(r)) {
                 Some(url) => Ok(Some(url)),
                 None => Err(AuthFailure::new(400, "invalid_redirect", "This redirect URL is not allowed")),
             },
-            None => Ok(self.redirects.default_target()),
+            None => Ok(self.current().redirects.default_target()),
         }
     }
 
@@ -442,7 +589,7 @@ impl AuthService {
         let redirect = self.resolve_redirect(redirect_to)?;
         let email = store::normalize_email(email)?;
         self.limit(Limit::Email, &email)?;
-        if !self.config.signups {
+        if !self.current().signups {
             let exists = store::read(app, |db| {
                 let email = email.clone();
                 async move { store::user_by_email(&db, &email).await }
@@ -461,7 +608,7 @@ impl AuthService {
             return Err(AuthFailure::not_found("Magic link sign-in"));
         }
         let row = self.consume(app, Purpose::SignIn, proof).await?;
-        let user = store::passwordless_user(app, row.email, self.config.signups).await??;
+        let user = store::passwordless_user(app, row.email, self.current().signups).await??;
         self.start_session(app, Principal::User(user), client).await
     }
 
@@ -473,7 +620,7 @@ impl AuthService {
         profile: store::ExternalProfile,
         client: ClientInfo,
     ) -> AuthResult<AuthTokens> {
-        let user = store::oauth_user(app, provider.to_string(), profile, self.config.signups).await??;
+        let user = store::oauth_user(app, provider.to_string(), profile, self.current().signups).await??;
         self.start_session(app, Principal::User(user), client).await
     }
 

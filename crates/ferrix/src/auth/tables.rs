@@ -65,6 +65,10 @@ pub struct Session {
     pub user_agent: Option<String>,
     pub ip: Option<String>,
     pub last_used_at: f64,
+    /// Set on sessions an administrator minted to act as the user (impersonation): such sessions have a fixed,
+    /// short expiry that refreshing doesn't extend. Apps can refuse sensitive operations when it is set
+    /// (`ctx.db.get(ctx.auth.session_id()?)`).
+    pub impersonated_by: Option<Id<Admin>>,
 }
 
 /// A refresh token that has already been rotated (`_used_refresh_tokens`). Presenting one again means the token

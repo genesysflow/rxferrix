@@ -166,6 +166,36 @@ pub struct SearchIndexDef {
     pub name: &'static str,
     pub search_field: &'static str,
     pub filter_fields: Vec<&'static str>,
+    pub tokenizer: Tokenizer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerKind {
+    Unicode61,
+    Porter,
+    Trigram,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokenizer {
+    pub kind: TokenizerKind,
+    pub language: Option<&'static str>,
+    pub remove_diacritics: bool,
+}
+
+impl Tokenizer {
+    pub const fn unicode61() -> Self {
+        Tokenizer { kind: TokenizerKind::Unicode61, language: None, remove_diacritics: true }
+    }
+    pub const fn porter(language: &'static str) -> Self {
+        Tokenizer { kind: TokenizerKind::Porter, language: Some(language), remove_diacritics: true }
+    }
+    pub const fn trigram() -> Self {
+        Tokenizer { kind: TokenizerKind::Trigram, language: None, remove_diacritics: true }
+    }
+    pub const fn keep_diacritics(self) -> Self {
+        Tokenizer { remove_diacritics: false, ..self }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +204,14 @@ pub struct VectorIndexDef {
     pub vector_field: &'static str,
     pub dimensions: usize,
     pub filter_fields: Vec<&'static str>,
+    pub kind: VectorIndexKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorIndexKind {
+    #[default]
+    Exact,
+    Hnsw,
 }
 
 pub struct SearchIndex<T> {

@@ -46,6 +46,8 @@ impl QueryCtx {
 pub struct MutationCtx {
     pub db: MutationDb,
     pub auth: Auth,
+    /// Schedule functions to run later; jobs are written in this mutation's transaction (`crate::scheduler`).
+    pub scheduler: crate::scheduler::Scheduler,
     now: f64,
 }
 
@@ -59,6 +61,8 @@ impl MutationCtx {
 /// Context of an action: no transaction; can call queries, mutations and other actions (including internal ones).
 pub struct ActionCtx {
     pub auth: Auth,
+    /// Schedule functions to run later; takes effect immediately (`crate::scheduler`).
+    pub scheduler: crate::scheduler::Scheduler,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -164,6 +168,8 @@ pub struct AppOptions {
     pub skip_schema_check: bool,
     /// Retention of the execution log in `aux.db`. Default: 7 days or 200k rows.
     pub log_retention: LogRetention,
+    /// Scheduled jobs and crons: concurrency, retention, declared crons (`crate::scheduler`).
+    pub scheduler: crate::scheduler::SchedulerOptions,
 }
 
 /// Default [`AppOptions::mutation_timeout`].
@@ -178,6 +184,7 @@ impl Default for AppOptions {
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             skip_schema_check: false,
             log_retention: LogRetention::default(),
+            scheduler: Default::default(),
         }
     }
 }
@@ -217,6 +224,7 @@ struct AppInner {
     dir: PathBuf,
     metrics: Metrics,
     started_at: f64,
+    scheduler: crate::scheduler::SchedulerState,
 }
 
 /// Live counters for the dashboard's overview (`App::metrics`). Updated by the WebSocket server and sync workers.
@@ -265,6 +273,7 @@ impl App {
         let dir = dir.as_ref().to_path_buf();
         let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
+        let scheduler = crate::scheduler::SchedulerState::new(&options.scheduler)?;
         let open_options =
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
         let retention = options.log_retention.clone();
@@ -276,7 +285,9 @@ impl App {
         .await??;
         let started_at = crate::db::wall_clock_ms();
         let metrics = Metrics::default();
-        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at }) })
+        Ok(App {
+            inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at, scheduler }),
+        })
     }
 
     /// The data directory (`data.db`, `aux.db`, `auth_secret.key`).
@@ -309,6 +320,11 @@ impl App {
 
     pub fn registry(&self) -> &'static Registry {
         self.inner.registry
+    }
+
+    /// The scheduler's in-memory state (the runner itself is in `crate::scheduler`).
+    pub(crate) fn scheduler_state(&self) -> &crate::scheduler::SchedulerState {
+        &self.inner.scheduler
     }
 
     /// Auth state and operations (token validation, sign-in, admins).
@@ -442,6 +458,20 @@ impl App {
         allow_internal: bool,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> MutationRun {
+        self.call_mutation_hooked(path, args, identity, allow_internal, idempotency_key, None).await
+    }
+
+    /// [`App::call_mutation`], with `hook` running inside the mutation's transaction (the scheduler records a job's
+    /// outcome atomically with the job's writes).
+    pub(crate) async fn call_mutation_hooked(
+        &self,
+        path: &str,
+        args: Value,
+        identity: &Identity,
+        allow_internal: bool,
+        idempotency_key: Option<&IdempotencyKey>,
+        hook: Option<&dyn MutationHook>,
+    ) -> MutationRun {
         let not_run = |e| MutationRun { result: Err(e), log_lines: Vec::new() };
         let def = match self.lookup(path, FunctionKind::Mutation, allow_internal) {
             Ok(d) => d,
@@ -468,14 +498,30 @@ impl App {
                 Err(e) => return not_run(e),
             }
         }
-        let ctx = MutationCtx { db: MutationDb::new(txn.clone()), auth: Auth::new(identity.clone()), now: txn.now() };
+        if let Some(hook) = hook
+            && let Err(e) = hook.before(&MutationDb::new(txn.clone())).await
+        {
+            txn.rollback();
+            return not_run(e);
+        }
+        let ctx = MutationCtx {
+            db: MutationDb::new(txn.clone()),
+            auth: Auth::new(identity.clone()),
+            scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path),
+            now: txn.now(),
+        };
         let timeout = self.options().mutation_timeout;
         let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
         let run = async {
-            let result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+            let mut result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
                 Ok(r) => r,
                 Err(_elapsed) => Err(MutationTimeout { path: path.to_string(), timeout }.into()),
             };
+            if let (Some(hook), Ok(value)) = (hook, &result)
+                && let Err(e) = hook.after(&MutationDb::new(txn.clone()), value).await
+            {
+                result = Err(e);
+            }
             match result {
                 Ok(value) => {
                     let ts = txn
@@ -516,12 +562,26 @@ impl App {
             Err(e) => return ActionRun { result: Err(e), log_lines: Vec::new() },
         };
         let Handler::Action(handler) = def.handler else { unreachable!("kind checked by lookup") };
-        let ctx = ActionCtx { auth: Auth::new(identity.clone()), app: self.clone(), identity: identity.clone() };
+        let ctx = ActionCtx {
+            auth: Auth::new(identity.clone()),
+            scheduler: crate::scheduler::Scheduler::in_action(self.clone(), identity.clone(), path),
+            app: self.clone(),
+            identity: identity.clone(),
+        };
         let exec = Execution::start(path, FunctionKind::Action, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self.logs(), &result, &log_lines);
         ActionRun { result, log_lines }
     }
+}
+
+/// Code that runs inside a mutation's write transaction, around the user's handler (see
+/// [`App::call_mutation_hooked`]).
+pub(crate) trait MutationHook: Send + Sync {
+    /// Runs first. An error rolls the transaction back and the function is not run (nor logged).
+    fn before<'a>(&'a self, db: &'a MutationDb) -> futures::future::BoxFuture<'a, crate::Result<()>>;
+    /// Runs after the handler succeeded, right before the commit. An error fails (and rolls back) the mutation.
+    fn after<'a>(&'a self, db: &'a MutationDb, value: &'a Value) -> futures::future::BoxFuture<'a, crate::Result<()>>;
 }
 
 /// An execution being timed for the execution log.
@@ -565,10 +625,10 @@ impl Execution {
 }
 
 /// The execution log's summary of who called (`Identity::log_summary`: `user:<id>` / `admin:<id>`, never a token or
-/// session id); the anonymous identity logs as `None`.
+/// session id); the anonymous identity logs as `None`, or as `scheduler` inside a scheduled job.
 fn identity_summary(identity: &Identity) -> Option<String> {
     const MAX: usize = 256;
-    let mut s = identity.log_summary()?;
+    let mut s = identity.log_summary().or_else(crate::scheduler::log_caller)?;
     if s.len() > MAX {
         let mut cut = MAX;
         while !s.is_char_boundary(cut) {

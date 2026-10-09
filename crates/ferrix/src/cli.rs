@@ -10,6 +10,8 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::auth::{AuthConfig, SmtpConfig};
 use crate::runtime::{App, AppOptions, registry};
+use crate::scheduler::SchedulerOptions;
+use crate::SchedulableFunction;
 
 #[derive(Parser, Debug)]
 #[command(about = "A Ferrix backend", args_conflicts_with_subcommands = true)]
@@ -126,6 +128,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 #[derive(Debug, Default)]
 pub struct Ferrix {
     auth: AuthConfig,
+    scheduler: SchedulerOptions,
 }
 
 impl Ferrix {
@@ -140,6 +143,28 @@ impl Ferrix {
         self
     }
 
+    /// Run `F` with `args` on a cron schedule (6 fields with seconds, UTC): `.cron::<cleanup>("cleanup",
+    /// "0 0 3 * * *", ())`. See [`crate::scheduler::CronSpec::cron`].
+    pub fn cron<F: SchedulableFunction>(mut self, name: impl Into<String>, expr: impl Into<String>, args: impl Into<F::Args>) -> Self {
+        self.scheduler = self.scheduler.cron::<F>(name, expr, args);
+        self
+    }
+
+    /// Run `F` with `args` every `every`: `.interval::<sync>("sync", Duration::from_secs(300), ())`.
+    pub fn interval<F: SchedulableFunction>(mut self, name: impl Into<String>, every: Duration, args: impl Into<F::Args>) -> Self {
+        self.scheduler = self.scheduler.interval::<F>(name, every, args);
+        self
+    }
+
+    /// Scheduler settings (concurrency, job retention, retry backoff). Crons declared with [`Ferrix::cron`] /
+    /// [`Ferrix::interval`] are kept, before or after this call.
+    pub fn scheduler(mut self, options: SchedulerOptions) -> Self {
+        let declared = std::mem::take(&mut self.scheduler.crons);
+        self.scheduler = options;
+        self.scheduler.crons.splice(0..0, declared);
+        self
+    }
+
     /// Parse the command line and run it. Builds its own tokio runtime.
     pub fn run(self) -> crate::Result<()> {
         let cli = Cli::parse();
@@ -147,8 +172,8 @@ impl Ferrix {
             Some(Command::Functions) => print_functions(),
             Some(Command::Codegen(args)) => codegen(&args.out),
             Some(Command::Admin(cmd)) => admin(cmd, self.auth),
-            Some(Command::Serve(args)) => serve(args, self.auth),
-            None => serve(cli.serve, self.auth),
+            Some(Command::Serve(args)) => serve(args, self.auth, self.scheduler),
+            None => serve(cli.serve, self.auth, self.scheduler),
         }
     }
 }
@@ -238,7 +263,7 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     auth
 }
 
-fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
+fn serve(args: ServeArgs, auth: AuthConfig, scheduler: SchedulerOptions) -> crate::Result<()> {
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
@@ -259,9 +284,11 @@ fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
             mutation_timeout: args.mutation_timeout,
             skip_schema_check: args.skip_schema_check,
             auth,
+            scheduler,
             ..Default::default()
         };
         let app = App::open(&args.dir, options).await?;
+        app.start_scheduler().await?;
         let listener = tokio::net::TcpListener::bind(args.http).await?;
         tracing::info!(
             "ferrix listening on http://{} (data: {}, dev: {})",

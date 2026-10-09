@@ -52,6 +52,7 @@ impl ::ferrix::FunctionRef for add_many {
     }
 }
 impl ::ferrix::ActionFunction for add_many {}
+impl ::ferrix::SchedulableFunction for add_many {}
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
 #[allow(non_upper_case_globals)]

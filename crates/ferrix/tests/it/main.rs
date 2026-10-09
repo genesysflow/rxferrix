@@ -13,4 +13,5 @@ mod model;
 mod pagination;
 mod query_engine;
 mod readsets;
+mod scheduler;
 mod websocket;

@@ -36,6 +36,7 @@ impl ::ferrix::FunctionRef for im {
     }
 }
 impl ::ferrix::MutationFunction for im {}
+impl ::ferrix::SchedulableFunction for im {}
 #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
 #[linkme(crate = ::ferrix::__private::linkme)]
 #[allow(non_upper_case_globals)]

@@ -1,0 +1,722 @@
+//! The scheduler and crons: transactional scheduling, exactly-once mutations (also across a simulated crash),
+//! at-most-once actions with restart recovery and opt-in retries, cancel, same-time ordering, the concurrency
+//! limit, crons (next run, missed-run catch-up, no pile-up, reconcile), retention, the admin-only dashboard
+//! functions, the execution log's `scheduler` caller, and reactivity over a real socket.
+
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use ferrix::auth::AuthConfig;
+use ferrix::scheduler::{CancelOutcome, JobState, ScheduledJob, SchedulerOptions};
+use ferrix::testing::TestApp;
+use ferrix::{AppOptions, Doc, FunctionRef, Id, LogFilter};
+use futures::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+
+mod app {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use ferrix::prelude::*;
+    use ferrix::scheduler::ScheduledJob;
+    use tokio::sync::Notify;
+
+    #[table(name = "sched_notes")]
+    pub struct Note {
+        pub text: String,
+    }
+
+    #[query]
+    pub async fn notes(ctx: &QueryCtx) -> Result<Vec<Doc<Note>>> {
+        ctx.db.query::<Note>().collect().await
+    }
+
+    #[query]
+    pub async fn get_job(ctx: &QueryCtx, id: Id<ScheduledJob>) -> Result<Option<Doc<ScheduledJob>>> {
+        ctx.db.get(id).await
+    }
+
+    #[query]
+    pub async fn all_jobs(ctx: &QueryCtx) -> Result<Vec<Doc<ScheduledJob>>> {
+        ctx.db.query::<ScheduledJob>().collect().await
+    }
+
+    #[query]
+    pub async fn all_crons(ctx: &QueryCtx) -> Result<Vec<Doc<ferrix::scheduler::Cron>>> {
+        ctx.db.query::<ferrix::scheduler::Cron>().collect().await
+    }
+
+    #[internal_mutation]
+    pub async fn add_note(ctx: &MutationCtx, text: String) -> Result<Id<Note>> {
+        ctx.db.insert(Note { text }).await
+    }
+
+    /// Adds a note now and schedules another one after `delay_ms`; with `fail`, then fails (rolling both back).
+    #[mutation]
+    pub async fn add_and_schedule(ctx: &MutationCtx, text: String, delay_ms: u64, fail: bool) -> Result<Id<ScheduledJob>> {
+        ctx.db.insert(Note { text: text.clone() }).await?;
+        let job = ctx.scheduler.run_after::<add_note>(Duration::from_millis(delay_ms), (format!("{text} (later)"),)).await?;
+        if fail {
+            return Err(UserError::new("nope", "failing on purpose").into());
+        }
+        Ok(job)
+    }
+
+    #[mutation]
+    pub async fn schedule_at(ctx: &MutationCtx, text: String, at: f64) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.run_at::<add_note>(at, (text,)).await
+    }
+
+    /// Schedules a note at `at` for each label, in order, in one transaction.
+    #[mutation]
+    pub async fn schedule_many(ctx: &MutationCtx, labels: Vec<String>, at: f64) -> Result<()> {
+        for label in labels {
+            ctx.scheduler.run_at::<add_note>(at, (label,)).await?;
+        }
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_and_cancel(ctx: &MutationCtx, text: String) -> Result<Id<ScheduledJob>> {
+        let id = ctx.scheduler.run_after::<add_note>(Duration::ZERO, (text,)).await?;
+        ctx.scheduler.cancel(id).await?;
+        Ok(id)
+    }
+
+    #[mutation]
+    pub async fn cancel(ctx: &MutationCtx, id: Id<ScheduledJob>) -> Result<()> {
+        ctx.scheduler.cancel(id).await
+    }
+
+    #[mutation]
+    pub async fn schedule_failing(ctx: &MutationCtx) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.run_after::<failing_add>(Duration::ZERO, ("doomed".to_string(),)).await
+    }
+
+    #[internal_mutation]
+    pub async fn failing_add(ctx: &MutationCtx, text: String) -> Result<()> {
+        ctx.db.insert(Note { text }).await?;
+        Err(anyhow::anyhow!("the scheduled mutation broke"))
+    }
+
+    /// Records whether it ran with an identity.
+    #[internal_mutation]
+    pub async fn whoami(ctx: &MutationCtx) -> Result<()> {
+        let who = if ctx.auth.identity().is_anonymous() { "anonymous" } else { "someone" };
+        ctx.db.insert(Note { text: who.to_string() }).await?;
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_whoami(ctx: &MutationCtx) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.run_after::<whoami>(Duration::ZERO, ()).await
+    }
+
+    // ---- crash simulation: a mutation that hangs (after writing) while CRASH is set
+
+    pub static CRASH: AtomicBool = AtomicBool::new(false);
+    pub static CRASH_STARTED: Notify = Notify::const_new();
+
+    #[internal_mutation]
+    pub async fn crashy_add(ctx: &MutationCtx, text: String) -> Result<()> {
+        ctx.db.insert(Note { text }).await?;
+        if CRASH.load(Ordering::SeqCst) {
+            CRASH_STARTED.notify_one();
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_crashy(ctx: &MutationCtx, text: String) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.run_after::<crashy_add>(Duration::ZERO, (text,)).await
+    }
+
+    // ---- actions
+
+    #[action]
+    pub async fn act_add(ctx: &ActionCtx, text: String) -> Result<String> {
+        ctx.run_mutation::<add_note>((text.clone(),)).await?;
+        Ok(format!("added {text}"))
+    }
+
+    #[internal_action]
+    pub async fn act_fail(_ctx: &ActionCtx) -> Result<()> {
+        Err(anyhow::anyhow!("the action broke"))
+    }
+
+    #[mutation]
+    pub async fn schedule_action(ctx: &MutationCtx, text: String, fail: bool) -> Result<Id<ScheduledJob>> {
+        if fail {
+            ctx.scheduler.run_after::<act_fail>(Duration::ZERO, ()).await
+        } else {
+            ctx.scheduler.run_after::<act_add>(Duration::ZERO, (text,)).await
+        }
+    }
+
+    /// Schedules from an action (immediately, through `_system/scheduler:schedule`), and cancels the second job.
+    #[action]
+    pub async fn act_schedule(ctx: &ActionCtx, text: String) -> Result<Vec<Id<ScheduledJob>>> {
+        let a = ctx.scheduler.run_after::<add_note>(Duration::from_secs(10), (text.clone(),)).await?;
+        let b = ctx.scheduler.run_after::<add_note>(Duration::from_secs(10), (format!("{text} (canceled)"),)).await?;
+        ctx.scheduler.cancel(b).await?;
+        Ok(vec![a, b])
+    }
+
+    pub static FLAKY_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+    /// Fails its first two runs.
+    #[internal_action]
+    pub async fn flaky(_ctx: &ActionCtx) -> Result<u32> {
+        let n = FLAKY_FAILURES.fetch_add(1, Ordering::SeqCst);
+        if n < 2 {
+            return Err(anyhow::anyhow!("flaky failure #{}", n + 1));
+        }
+        Ok(n as u32 + 1)
+    }
+
+    #[mutation]
+    pub async fn schedule_flaky(ctx: &MutationCtx, retries: u32) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.with_retries(retries).run_after::<flaky>(Duration::ZERO, ()).await
+    }
+
+    pub static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    pub static MAX_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+    #[internal_action]
+    pub async fn slow(_ctx: &ActionCtx) -> Result<()> {
+        let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+        MAX_RUNNING.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_slow(ctx: &MutationCtx, n: u32) -> Result<()> {
+        for _ in 0..n {
+            ctx.scheduler.run_after::<slow>(Duration::ZERO, ()).await?;
+        }
+        Ok(())
+    }
+
+    /// An action that waits until released (`HANG_STARTED` is notified when it starts).
+    pub static HANG_STARTED: Notify = Notify::const_new();
+    pub static HANG_RELEASE: Notify = Notify::const_new();
+
+    #[internal_action]
+    pub async fn hang(_ctx: &ActionCtx) -> Result<()> {
+        HANG_STARTED.notify_one();
+        HANG_RELEASE.notified().await;
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_hang(ctx: &MutationCtx) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.run_after::<hang>(Duration::ZERO, ()).await
+    }
+
+    /// The same for the cron pile-up test.
+    pub static CRON_HANG_STARTED: Notify = Notify::const_new();
+    pub static CRON_HANG_RELEASE: Notify = Notify::const_new();
+
+    #[internal_action]
+    pub async fn cron_hang(_ctx: &ActionCtx) -> Result<()> {
+        CRON_HANG_STARTED.notify_one();
+        CRON_HANG_RELEASE.notified().await;
+        Ok(())
+    }
+
+    #[internal_mutation]
+    pub async fn cron_tick(ctx: &MutationCtx, label: String) -> Result<()> {
+        ctx.db.insert(Note { text: format!("cron:{label}") }).await?;
+        Ok(())
+    }
+}
+
+use app::*;
+
+fn texts(notes: &[Doc<Note>]) -> Vec<String> {
+    notes.iter().map(|n| n.text.clone()).collect()
+}
+
+async fn job(t: &TestApp, id: Id<ScheduledJob>) -> Doc<ScheduledJob> {
+    t.query::<get_job>((id,)).await.unwrap().expect("job exists")
+}
+
+#[tokio::test]
+async fn transactional_scheduling_runs_after_the_delay_exactly_once() {
+    let t = TestApp::new().await.unwrap();
+
+    // A rolled-back mutation schedules nothing.
+    let err = t.mutation::<add_and_schedule>(("x".to_string(), 0, true)).await.unwrap_err();
+    assert!(err.to_string().contains("failing on purpose"));
+    assert!(t.query::<all_jobs>(()).await.unwrap().is_empty());
+    assert!(t.query::<notes>(()).await.unwrap().is_empty());
+
+    // A committed one schedules its job, which runs once it's due.
+    let id = t.mutation::<add_and_schedule>(("a".to_string(), 60_000, false)).await.unwrap();
+    let pending = job(&t, id).await;
+    assert_eq!((pending.state, pending.attempts, pending.origin.as_deref()), (JobState::Pending, 0, Some(add_and_schedule::path().as_str())));
+    assert_eq!(pending.path, add_note::path());
+    assert_eq!(pending.args, json!({ "text": "a (later)" }));
+    assert!((pending.run_at - pending.scheduled_at - 60_000.0).abs() < 1.0);
+
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0, "not due yet");
+    assert_eq!(t.advance_time(Duration::from_secs(30)).await.unwrap(), 0);
+    assert_eq!(t.advance_time(Duration::from_secs(31)).await.unwrap(), 1);
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["a", "a (later)"]);
+    let done = job(&t, id).await;
+    assert_eq!((done.state, done.attempts), (JobState::Success, 1));
+    assert!(done.result.as_deref().unwrap().starts_with('"'), "the result is the new note's id as JSON: {:?}", done.result);
+    assert!(done.started_at.is_some() && done.completed_at.is_some() && done.error.is_none());
+
+    // Never again.
+    assert_eq!(t.advance_time(Duration::from_secs(3600)).await.unwrap(), 0);
+    assert_eq!(t.query::<notes>(()).await.unwrap().len(), 2);
+    let t = t.restart().await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+    assert_eq!(t.query::<notes>(()).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_failing_scheduled_mutation_rolls_back_and_is_marked_failed() {
+    let t = TestApp::new().await.unwrap();
+    let id = t.mutation::<schedule_failing>(()).await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 1);
+    let failed = job(&t, id).await;
+    assert_eq!((failed.state, failed.attempts), (JobState::Failed, 1));
+    assert!(failed.error.as_deref().unwrap().contains("the scheduled mutation broke"), "{:?}", failed.error);
+    assert!(failed.completed_at.is_some());
+    assert!(t.query::<notes>(()).await.unwrap().is_empty(), "its write was rolled back");
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0, "not retried");
+}
+
+#[tokio::test]
+async fn a_crash_mid_mutation_leaves_the_job_pending_and_it_then_runs_once() {
+    let t = TestApp::with_options(AppOptions { dev: true, mutation_timeout: Duration::from_secs(3600), ..Default::default() })
+        .await
+        .unwrap();
+    let id = t.mutation::<schedule_crashy>(("once".to_string(),)).await.unwrap();
+
+    // The job's mutation has written its note and hangs; the "process" dies (the runner's future is dropped).
+    CRASH.store(true, Ordering::SeqCst);
+    let app = t.app().clone();
+    let runner = tokio::spawn(async move { app.run_due_jobs().await });
+    tokio::time::timeout(Duration::from_secs(5), CRASH_STARTED.notified()).await.expect("job started");
+    runner.abort();
+    assert!(runner.await.unwrap_err().is_cancelled());
+    CRASH.store(false, Ordering::SeqCst);
+
+    let after_crash = job(&t, id).await;
+    assert_eq!((after_crash.state, after_crash.attempts), (JobState::Pending, 0), "nothing of the attempt was committed");
+    assert!(t.query::<notes>(()).await.unwrap().is_empty());
+
+    // After the "restart" it runs, exactly once.
+    let t = t.restart().await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 1);
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["once"]);
+    let done = job(&t, id).await;
+    assert_eq!((done.state, done.attempts), (JobState::Success, 1));
+    assert_eq!(t.app().db().verify_indexes().await.unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn cancel_in_mutations_and_actions() {
+    let t = TestApp::new().await.unwrap();
+    // Cancel later.
+    let id = t.mutation::<add_and_schedule>(("c".to_string(), 60_000, false)).await.unwrap();
+    t.mutation::<cancel>((id,)).await.unwrap();
+    let canceled = job(&t, id).await;
+    assert_eq!(canceled.state, JobState::Canceled);
+    assert!(canceled.completed_at.is_some());
+    assert_eq!(t.advance_time(Duration::from_secs(120)).await.unwrap(), 0);
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["c"], "the canceled job never ran");
+    // Canceling again (or a finished job) does nothing.
+    t.mutation::<cancel>((id,)).await.unwrap();
+
+    // Schedule and cancel in one transaction.
+    let id = t.mutation::<schedule_and_cancel>(("never".to_string(),)).await.unwrap();
+    assert_eq!(job(&t, id).await.state, JobState::Canceled);
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+
+    // From an action: takes effect immediately.
+    let [a, b] = t.action::<act_schedule>(("from action".to_string(),)).await.unwrap()[..] else { panic!("two ids") };
+    let (ja, jb) = (job(&t, a).await, job(&t, b).await);
+    assert_eq!((ja.state, jb.state), (JobState::Pending, JobState::Canceled));
+    assert_eq!(ja.origin.as_deref(), Some(act_schedule::path().as_str()));
+    assert_eq!(t.advance_time(Duration::from_secs(11)).await.unwrap(), 1);
+    assert!(texts(&t.query::<notes>(()).await.unwrap()).contains(&"from action".to_string()));
+
+    // Once deleted (after the retention period), canceling is a `not_found` user error.
+    t.advance_time(Duration::from_secs(8 * 24 * 3600)).await.unwrap();
+    let err = t.mutation::<cancel>((id,)).await.unwrap_err();
+    let user_error = err.downcast_ref::<ferrix::UserError>().expect("a user error");
+    assert_eq!(user_error.code, "not_found");
+}
+
+#[tokio::test]
+async fn jobs_due_at_the_same_time_run_in_scheduling_order() {
+    let t = TestApp::new().await.unwrap();
+    let at = t.app().db().clock().now_ms() + 1000.0;
+    let labels = |r: std::ops::Range<u32>| r.map(|i| format!("{i:02}")).collect::<Vec<_>>();
+    t.mutation::<schedule_many>((labels(0..5), at)).await.unwrap();
+    t.mutation::<schedule_at>(("early".to_string(), at - 500.0)).await.unwrap();
+    t.mutation::<schedule_many>((labels(5..10), at)).await.unwrap();
+    t.mutation::<schedule_at>(("late".to_string(), at + 500.0)).await.unwrap();
+    assert_eq!(t.advance_time(Duration::from_secs(2)).await.unwrap(), 12);
+    let mut expected = vec!["early".to_string()];
+    expected.extend(labels(0..10));
+    expected.push("late".into());
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), expected);
+}
+
+#[tokio::test]
+async fn actions_run_at_most_once_and_are_failed_by_a_restart() {
+    let t = TestApp::new().await.unwrap();
+    let ok = t.mutation::<schedule_action>(("act".to_string(), false)).await.unwrap();
+    let bad = t.mutation::<schedule_action>((String::new(), true)).await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 2);
+    let ok = job(&t, ok).await;
+    assert_eq!((ok.state, ok.attempts, ok.result.as_deref()), (JobState::Success, 1, Some("\"added act\"")));
+    let bad = job(&t, bad).await;
+    assert_eq!((bad.state, bad.attempts), (JobState::Failed, 1));
+    assert!(bad.error.as_deref().unwrap().contains("the action broke"));
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0, "failed actions are not retried by default");
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["act"]);
+
+    // An action is in progress when the process stops: after the restart it is failed, never run again.
+    let id = t.mutation::<schedule_hang>(()).await.unwrap();
+    let app = t.app().clone();
+    let runner = tokio::spawn(async move { app.run_due_jobs().await });
+    tokio::time::timeout(Duration::from_secs(5), HANG_STARTED.notified()).await.expect("action started");
+    let running = job(&t, id).await;
+    assert_eq!((running.state, running.attempts), (JobState::InProgress, 1));
+    runner.abort();
+    let _ = runner.await;
+    let t = t.restart().await.unwrap();
+    let interrupted = job(&t, id).await;
+    assert_eq!(interrupted.state, JobState::Failed);
+    assert_eq!(interrupted.error.as_deref(), Some(ferrix::scheduler::runner::INTERRUPTED));
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+    // The old process's action finishing late doesn't overwrite that.
+    HANG_RELEASE.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(job(&t, id).await.state, JobState::Failed);
+}
+
+#[tokio::test]
+async fn actions_can_opt_into_retries_with_backoff() {
+    let t = TestApp::new().await.unwrap();
+    let id = t.mutation::<schedule_flaky>((2,)).await.unwrap();
+    assert_eq!(job(&t, id).await.max_attempts, 3);
+    assert_eq!(t.run_due_jobs().await.unwrap(), 1);
+    let first = job(&t, id).await;
+    assert_eq!((first.state, first.attempts), (JobState::Pending, 1), "back to pending after the first failure");
+    assert!(first.error.as_deref().unwrap().contains("flaky failure #1"));
+    assert!(first.run_at > t.app().db().clock().now_ms() + 500.0, "1s backoff");
+    assert_eq!(t.advance_time(Duration::from_millis(1100)).await.unwrap(), 1);
+    let second = job(&t, id).await;
+    assert_eq!((second.state, second.attempts), (JobState::Pending, 2));
+    assert_eq!(t.advance_time(Duration::from_millis(1100)).await.unwrap(), 0, "the backoff doubled to 2s");
+    assert_eq!(t.advance_time(Duration::from_millis(1000)).await.unwrap(), 1);
+    let third = job(&t, id).await;
+    assert_eq!((third.state, third.attempts, third.result.as_deref()), (JobState::Success, 3, Some("3")));
+    assert!(third.error.is_none());
+}
+
+#[tokio::test]
+async fn the_concurrency_limit_bounds_running_actions() {
+    let options = AppOptions { dev: true, scheduler: SchedulerOptions { concurrency: 2, ..Default::default() }, ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    t.mutation::<schedule_slow>((6,)).await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 6);
+    assert_eq!(MAX_RUNNING.load(Ordering::SeqCst), 2);
+    assert!(t.query::<all_jobs>(()).await.unwrap().iter().all(|j| j.state == JobState::Success));
+}
+
+#[tokio::test]
+async fn scheduled_functions_run_without_identity_and_log_as_scheduler() {
+    let t = TestApp::new().await.unwrap();
+    let someone = ferrix::Identity { user_id: Some("someone".into()), ..Default::default() };
+    t.mutation_as::<schedule_whoami>(&someone, ()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["anonymous"]);
+    t.app().logs().flush().await.unwrap();
+    let logs = t.app().logs().query(LogFilter { identity: Some("scheduler".into()), ..Default::default() }).await.unwrap();
+    assert!(logs.iter().any(|e| e.path == whoami::path()), "{logs:?}");
+}
+
+fn crons_options(crons: SchedulerOptions) -> AppOptions {
+    AppOptions { dev: true, scheduler: crons, ..Default::default() }
+}
+
+async fn cron_rows(t: &TestApp) -> Vec<Value> {
+    let rows = t.query::<all_crons>(()).await.unwrap();
+    rows.into_iter().map(|c| serde_json::to_value(c).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn crons_fire_on_schedule_catch_up_once_and_reconcile() {
+    let every_minute = SchedulerOptions::default()
+        .cron::<cron_tick>("tick", "0 * * * * *", ("a".to_string(),))
+        .interval::<cron_tick>("every-hour", Duration::from_secs(3600), ("h".to_string(),));
+    let t = TestApp::with_options(crons_options(every_minute.clone())).await.unwrap();
+    let rows = cron_rows(&t).await;
+    assert_eq!(rows.len(), 2);
+    let tick = rows.iter().find(|r| r["name"] == "tick").unwrap().clone();
+    let now = t.app().db().clock().now_ms();
+    let next = tick["nextRun"].as_f64().unwrap();
+    assert!(next > now && next <= now + 60_000.0 && next % 1000.0 == 0.0, "next minute: {tick}");
+    assert_eq!(tick["schedule"], "0 * * * * *");
+    let hourly = rows.iter().find(|r| r["name"] == "every-hour").unwrap();
+    assert_eq!(hourly["schedule"], "every 1h");
+
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+    assert_eq!(t.advance_time(Duration::from_secs(60)).await.unwrap(), 1);
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["cron:a"]);
+    let jobs = t.query::<all_jobs>(()).await.unwrap();
+    assert_eq!(jobs[0].origin.as_deref(), Some("cron:tick"));
+    let tick = cron_rows(&t).await.into_iter().find(|r| r["name"] == "tick").unwrap();
+    assert_eq!(tick["lastJob"], json!(jobs[0].id));
+    assert!(tick["lastRun"].as_f64().is_some());
+
+    // Ten minutes of downtime: the missed runs run once at startup, not ten times.
+    t.app().db().clock().advance(Duration::from_secs(600));
+    let t = t.restart().await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 1);
+    let ticks = texts(&t.query::<notes>(()).await.unwrap()).iter().filter(|n| *n == "cron:a").count();
+    assert_eq!(ticks, 2);
+    let next = cron_rows(&t).await.into_iter().find(|r| r["name"] == "tick").unwrap()["nextRun"].as_f64().unwrap();
+    assert!(next > t.app().db().clock().now_ms(), "the next run is computed from now");
+    // A 50-minute jump is like downtime too: the minutely cron runs once, and the hourly interval (due an hour
+    // after the first start) once.
+    assert_eq!(t.advance_time(Duration::from_secs(50 * 60)).await.unwrap(), 2);
+    assert_eq!(texts(&t.query::<notes>(()).await.unwrap()).iter().filter(|n| *n == "cron:h").count(), 1);
+
+    // Redeploy: "every-hour" is gone, "tick" changed its schedule.
+    let changed = SchedulerOptions::default().cron::<cron_tick>("tick", "0 0 * * * *", ("a".to_string(),));
+    let t = t.restart_with(crons_options(changed)).await.unwrap();
+    let rows = cron_rows(&t).await;
+    assert_eq!(rows.len(), 1, "removed crons are deleted: {rows:?}");
+    assert_eq!(rows[0]["schedule"], "0 0 * * * *");
+    let next = rows[0]["nextRun"].as_f64().unwrap();
+    assert_eq!(next % 3_600_000.0, 0.0, "recomputed for the new schedule");
+}
+
+#[tokio::test]
+async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
+    let options = crons_options(SchedulerOptions::default().cron::<cron_hang>("hang", "* * * * * *", ()));
+    let t = TestApp::with_options(options).await.unwrap();
+    let app = t.app().clone();
+    t.app().db().clock().advance(Duration::from_secs(1));
+    let first = tokio::spawn(async move { app.run_due_jobs().await });
+    tokio::time::timeout(Duration::from_secs(5), CRON_HANG_STARTED.notified()).await.expect("cron job started");
+
+    // Three more runs come due while the first is still in progress: all skipped.
+    for _ in 0..3 {
+        t.app().db().clock().advance(Duration::from_secs(1));
+        let app = t.app().clone();
+        let again = tokio::spawn(async move { app.run_due_jobs().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!again.is_finished(), "waits for the running action");
+        again.abort();
+    }
+    let jobs = t.query::<all_jobs>(()).await.unwrap();
+    assert_eq!(jobs.len(), 1, "no pile-up: {jobs:?}");
+    assert_eq!(jobs[0].state, JobState::InProgress);
+    let row = cron_rows(&t).await.remove(0);
+    assert!(row["nextRun"].as_f64().unwrap() > t.app().db().clock().now_ms(), "skipped runs still advance nextRun");
+
+    CRON_HANG_RELEASE.notify_one();
+    assert_eq!(first.await.unwrap().unwrap(), 1);
+    assert_eq!(t.query::<all_jobs>(()).await.unwrap()[0].state, JobState::Success);
+}
+
+#[tokio::test]
+async fn invalid_crons_fail_startup() {
+    let bad = |s: SchedulerOptions| async move { TestApp::with_options(crons_options(s)).await.err().unwrap().to_string() };
+    let msg = bad(SchedulerOptions::default().cron::<cron_tick>("x", "*/5 * * * *", ("a".to_string(),))).await;
+    assert!(msg.contains("has 5 fields"), "{msg}");
+    let msg = bad(SchedulerOptions::default().cron::<cron_tick>("x", "0 61 * * * *", ("a".to_string(),))).await;
+    assert!(msg.contains("invalid expression"), "{msg}");
+    let msg = bad(SchedulerOptions::default()
+        .interval::<cron_tick>("x", Duration::from_secs(1), ("a".to_string(),))
+        .interval::<cron_tick>("x", Duration::from_secs(2), ("b".to_string(),)))
+    .await;
+    assert!(msg.contains("two crons are named `x`"), "{msg}");
+    let msg = bad(SchedulerOptions::default().interval::<cron_tick>("x", Duration::ZERO, ("a".to_string(),))).await;
+    assert!(msg.contains("longer than zero"), "{msg}");
+}
+
+#[tokio::test]
+async fn finished_jobs_are_deleted_after_the_retention_period() {
+    let t = TestApp::new().await.unwrap();
+    let done = t.mutation::<add_and_schedule>(("r".to_string(), 0, false)).await.unwrap();
+    let canceled = t.mutation::<schedule_and_cancel>(("never".to_string(),)).await.unwrap();
+    let failed = t.mutation::<schedule_failing>(()).await.unwrap();
+    let far = t.mutation::<add_and_schedule>(("far".to_string(), 30 * 24 * 3600 * 1000, false)).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    assert_eq!(t.advance_time(Duration::from_secs(6 * 24 * 3600)).await.unwrap(), 0);
+    assert_eq!(t.query::<all_jobs>(()).await.unwrap().len(), 4, "kept for 7 days");
+    t.advance_time(Duration::from_secs(2 * 24 * 3600)).await.unwrap();
+    let left: Vec<_> = t.query::<all_jobs>(()).await.unwrap().into_iter().map(|j| j.id).collect();
+    assert_eq!(left, vec![far], "only the pending job is left");
+    for id in [done, canceled, failed] {
+        assert!(t.query::<get_job>((id,)).await.unwrap().is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Dashboard functions and reactivity, over real HTTP / WebSockets
+// ---------------------------------------------------------------------------------------------------------------------
+
+struct Http {
+    client: reqwest::Client,
+    base: String,
+}
+
+impl Http {
+    async fn post(&self, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
+        let mut req = self.client.post(format!("{}{path}", self.base)).json(&body);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let res = req.send().await.unwrap();
+        (res.status().as_u16(), res.json().await.unwrap_or(Value::Null))
+    }
+
+    async fn call(&self, kind: &str, name: &str, args: Value, token: Option<&str>) -> (u16, Value) {
+        self.post(&format!("/api/{kind}"), token, json!({ "path": format!("_system/scheduler:{name}"), "args": args })).await
+    }
+
+    async fn ok(&self, kind: &str, name: &str, args: Value, token: &str) -> Value {
+        let (s, b) = self.call(kind, name, args, Some(token)).await;
+        assert_eq!(s, 200, "{name}: {b}");
+        b["value"].clone()
+    }
+}
+
+fn code_of(v: &Value) -> &str {
+    v["errorData"]["code"].as_str().unwrap_or("")
+}
+
+fn page(state: Option<&str>) -> Value {
+    json!({ "state": state, "paginationOpts": { "numItems": 50, "cursor": null } })
+}
+
+#[tokio::test]
+async fn dashboard_functions_are_admin_only_and_manage_jobs() {
+    let options = AppOptions {
+        dev: true,
+        auth: AuthConfig::password().rate_limits(None),
+        scheduler: SchedulerOptions::default().cron::<cron_tick>("dash", "0 0 0 * * *", ("d".to_string(),)),
+        ..Default::default()
+    };
+    let t = TestApp::with_options(options).await.unwrap();
+    let app = t.app().clone();
+    let addr: SocketAddr = t.serve().await.unwrap();
+    let http = Http { client: reqwest::Client::new(), base: format!("http://{addr}") };
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let (_, admin) = http.post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" })).await;
+    let (_, user) = http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (admin, user) = (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
+
+    let pending = t.mutation::<add_and_schedule>(("p".to_string(), 3_600_000, false)).await.unwrap();
+    let failed = t.mutation::<schedule_failing>(()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+
+    let calls = [
+        ("query", "jobs", page(None)),
+        ("query", "crons", json!({})),
+        ("mutation", "cancel_job", json!({ "id": pending })),
+        ("mutation", "run_job_now", json!({ "id": pending })),
+    ];
+    for (kind, name, args) in &calls {
+        let (s, b) = http.call(kind, name, args.clone(), None).await;
+        assert_eq!((s, code_of(&b)), (400, "unauthenticated"), "anonymous {name}: {b}");
+        let (s, b) = http.call(kind, name, args.clone(), Some(&user)).await;
+        assert_eq!((s, code_of(&b)), (400, "forbidden"), "user {name}: {b}");
+    }
+    // The internal mutations can't be called by clients at all.
+    let (s, _) = http.call("mutation", "schedule", json!({}), Some(&admin)).await;
+    assert_eq!(s, 404);
+    assert_eq!(job(&t, pending).await.state, JobState::Pending, "nothing above ran");
+
+    // Listing, filtered by state.
+    let all = http.ok("query", "jobs", page(None), &admin).await;
+    assert_eq!(all["page"].as_array().unwrap().len(), 2);
+    let only_failed = http.ok("query", "jobs", page(Some("failed")), &admin).await;
+    let ids: Vec<_> = only_failed["page"].as_array().unwrap().iter().map(|j| j["_id"].clone()).collect();
+    assert_eq!(ids, vec![json!(failed)]);
+    assert_eq!(only_failed["page"][0]["state"], "failed");
+    let crons = http.ok("query", "crons", json!({}), &admin).await;
+    assert_eq!(crons[0]["name"], "dash");
+    assert_eq!(crons[0]["schedule"], "0 0 0 * * *");
+    assert!(crons[0]["nextRun"].as_f64().is_some() && crons[0]["lastRun"].is_null());
+
+    // Retry a failed job: a new job with the same function and args.
+    let retry = http.ok("mutation", "run_job_now", json!({ "id": failed }), &admin).await;
+    let retry: Id<ScheduledJob> = retry.as_str().unwrap().parse().unwrap();
+    assert_ne!(retry, failed);
+    let retried = job(&t, retry).await;
+    assert_eq!((retried.state, retried.origin.as_deref(), retried.path.as_str()), (JobState::Pending, Some("dashboard"), failing_add::path().as_str()));
+    // Run a pending job now: same id, due immediately.
+    let same = http.ok("mutation", "run_job_now", json!({ "id": pending }), &admin).await;
+    assert_eq!(same, json!(pending));
+    assert_eq!(t.run_due_jobs().await.unwrap(), 2);
+    assert_eq!(job(&t, pending).await.state, JobState::Success);
+
+    // Cancel.
+    let later = t.mutation::<add_and_schedule>(("l".to_string(), 3_600_000, false)).await.unwrap();
+    let outcome = http.ok("mutation", "cancel_job", json!({ "id": later }), &admin).await;
+    assert_eq!(serde_json::from_value::<CancelOutcome>(outcome).unwrap(), CancelOutcome::Canceled);
+    let again = http.ok("mutation", "cancel_job", json!({ "id": later }), &admin).await;
+    assert_eq!(again, "alreadyFinished");
+    let (_, b) = http.call("mutation", "cancel_job", json!({ "id": "nonsense" }), Some(&admin)).await;
+    assert_eq!(code_of(&b), "invalid_id");
+    let (_, b) = http.call("mutation", "run_job_now", json!({ "id": "nonsense" }), Some(&admin)).await;
+    assert_eq!(code_of(&b), "invalid_id");
+}
+
+#[tokio::test]
+async fn subscribers_see_the_writes_of_scheduled_mutations() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let t = TestApp::new().await.unwrap();
+    t.start_scheduler().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
+    let session = format!("sched{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let send = |v: Value| Message::text(v.to_string());
+    ws.send(send(json!({ "type": "Connect", "sessionId": session, "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" })))
+        .await
+        .unwrap();
+    ws.send(send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1,
+        "modifications": [{ "type": "Add", "queryId": 0, "udfPath": notes::path(), "args": {} }] })))
+        .await
+        .unwrap();
+    let mut next_values = async || -> Value {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("timed out").unwrap().unwrap();
+            let Message::Text(text) = msg else { continue };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            if v["type"] == "Transition"
+                && let Some(m) = v["modifications"].as_array().and_then(|m| m.first())
+            {
+                return m["value"].clone();
+            }
+        }
+    };
+    assert_eq!(next_values().await, json!([]));
+
+    // The background runner picks the job up (woken by the commit) and the subscriber sees both writes.
+    t.mutation::<add_and_schedule>(("live".to_string(), 50, false)).await.unwrap();
+    let first = next_values().await;
+    assert_eq!(first.as_array().unwrap().len(), 1, "{first}");
+    let second = next_values().await;
+    let texts: Vec<_> = second.as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(texts, vec!["live", "live (later)"]);
+}

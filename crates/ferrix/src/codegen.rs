@@ -4,7 +4,7 @@
 //! - `dataModel.ts` declares `DataModel` (table name → the table struct's TS object type), `TableNames`, `Id<T>`,
 //!   `Doc<T>` (the table type plus the system fields), and every named user type that a table or a public function
 //!   signature refers to (e.g. a `#[derive(TS)] enum Status`), recursively. `SystemDataModel` holds the few system
-//!   tables apps may reference ([`REFERENCEABLE_SYSTEM_TABLES`], i.e. `_users`), so `Id<"_users">` type-checks.
+//!   tables apps may reference ([`REFERENCEABLE_SYSTEM_TABLES`]: `_users`, `_scheduled_jobs`), so `Id<"_users">` type-checks.
 //! - `api.ts` exports a nested `api` object of function references: path `"a/b:fn"` becomes `api.a.b.fn`, a root
 //!   path `"fn"` becomes `api.fn`. Internal functions are left out.
 //!
@@ -40,7 +40,7 @@ const RESERVED_TYPE_NAMES: &[&str] =
 
 /// System tables that app tables and functions may refer to (`Id<User>` → `Id<"_users">`). They are declared in
 /// `SystemDataModel`, apart from the app's `DataModel`; every other `_`-prefixed table is left out.
-pub const REFERENCEABLE_SYSTEM_TABLES: &[&str] = &["_users"];
+pub const REFERENCEABLE_SYSTEM_TABLES: &[&str] = &["_users", "_scheduled_jobs"];
 
 /// The generated TypeScript sources.
 #[derive(Debug, Clone, PartialEq, Eq)]

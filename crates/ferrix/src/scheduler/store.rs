@@ -78,30 +78,34 @@ pub(crate) async fn insert(db: &MutationDb, job: NewJob, now: f64) -> crate::Res
 #[serde(rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
 pub enum CancelOutcome {
-    /// It was pending; now it is canceled.
+    /// It was pending, or an action in progress: now it is canceled (a running action is signaled once the cancel
+    /// commits, and aborted after `SchedulerOptions::cancel_grace` if it doesn't stop by itself).
     Canceled,
     /// It had already finished (success, failed or canceled): nothing changed.
     AlreadyFinished,
-    /// An action that is running: it runs to completion.
-    Running,
 }
 
-/// Cancel a job, in the caller's transaction. `not_found` (a user error) for an unknown id.
-pub(crate) async fn cancel(db: &MutationDb, id: Id<ScheduledJob>, now: f64) -> crate::Result<CancelOutcome> {
+/// Cancel a job, in the caller's transaction, recording `reason` in its `error`. `not_found` (a user error) for an
+/// unknown id. Canceling an action in progress also signals it once the transaction commits (`super::cancellation`).
+pub(crate) async fn cancel(db: &MutationDb, id: Id<ScheduledJob>, now: f64, reason: &str) -> crate::Result<CancelOutcome> {
     let Some(job) = db.get(id).await? else {
         return Err(UserError::new("not_found", format!("Scheduled job {id} does not exist")).into());
     };
-    match job.state {
-        JobState::Pending => {
-            let mut job = job.value;
-            job.state = JobState::Canceled;
-            job.completed_at = Some(now);
-            db.replace(id, job).await?;
-            Ok(CancelOutcome::Canceled)
-        }
-        JobState::InProgress => Ok(CancelOutcome::Running),
-        _ => Ok(CancelOutcome::AlreadyFinished),
+    let running = match job.state {
+        JobState::Pending => false,
+        JobState::InProgress => true,
+        _ => return Ok(CancelOutcome::AlreadyFinished),
+    };
+    let mut value = job.value;
+    value.state = JobState::Canceled;
+    value.completed_at = Some(now);
+    let reason = truncate(if running { format!("{reason} (while running)") } else { reason.to_string() });
+    value.error = Some(reason.clone());
+    db.replace(id, value).await?;
+    if running {
+        db.txn().on_commit(move || super::cancellation::signal(id, &reason));
     }
+    Ok(CancelOutcome::Canceled)
 }
 
 /// `s` cut to [`MAX_OUTCOME_BYTES`] (on a char boundary, with `…` appended when cut).

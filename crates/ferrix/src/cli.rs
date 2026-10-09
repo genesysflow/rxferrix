@@ -183,6 +183,19 @@ impl Ferrix {
         self
     }
 
+    /// [`Ferrix::cron`] evaluated in an IANA time zone, DST included: `.cron_tz::<report>("report", "0 0 9 * * *",
+    /// "Europe/Bucharest", ())`. See [`crate::scheduler::CronSpec::timezone`].
+    pub fn cron_tz<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        expr: impl Into<String>,
+        tz: impl Into<String>,
+        args: impl Into<F::Args>,
+    ) -> Self {
+        self.scheduler = self.scheduler.cron_tz::<F>(name, expr, tz, args);
+        self
+    }
+
     /// Run `F` with `args` every `every`: `.interval::<sync>("sync", Duration::from_secs(300), ())`.
     pub fn interval<F: SchedulableFunction>(mut self, name: impl Into<String>, every: Duration, args: impl Into<F::Args>) -> Self {
         self.scheduler = self.scheduler.interval::<F>(name, every, args);

@@ -39,6 +39,10 @@ ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 url = "2.5.8"
 cron = "0.17.0"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Per-cron time zones (IANA database compiled in).
+chrono-tz = "0.10.4"
+# Image thumbnails (`GET /api/storage/{id}?thumb=WxH`): decoders and encoders for the formats it accepts only.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [features]
 default = ["dashboard", "s3"]

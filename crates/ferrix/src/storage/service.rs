@@ -97,12 +97,16 @@ pub(crate) enum WriteError {
     Store(anyhow::Error),
 }
 
-/// What [`StorageService::sweep`] did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What [`StorageService::sweep`] did (also the result of the `_storage_sweep` system cron's jobs).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
 pub struct SweepStats {
     /// Blobs looked at.
+    #[ts(type = "number")]
     pub scanned: u64,
     /// Blobs deleted because no `_storage` document refers to them.
+    #[ts(type = "number")]
     pub deleted: u64,
 }
 
@@ -438,7 +442,8 @@ impl StorageService {
     pub async fn sweep(&self, app: &App) -> crate::Result<SweepStats> {
         let prefix = (!self.prefix.is_empty()).then(|| ObjectPath::from(self.prefix.as_str()));
         let table_number = app.db().catalog().table(StoredFile::NAME)?.number;
-        let cutoff_ms = crate::db::wall_clock_ms() as i64 - self.config.orphan_grace.as_millis() as i64;
+        // The app's clock (the wall clock, moved forward by `TestApp::advance_time` in tests).
+        let cutoff_ms = app.db().clock().now_ms() as i64 - self.config.orphan_grace.as_millis() as i64;
         let mut stats = SweepStats::default();
         let mut listing = self.store.list(prefix.as_ref());
         let mut candidates: Vec<(DocId, ObjectPath)> = Vec::new();
@@ -504,25 +509,6 @@ pub(crate) async fn ensure_schema(app: &App) -> crate::Result<()> {
     })?;
     txn.commit_with(|_, _| Ok(()))?;
     Ok(())
-}
-
-/// Run [`StorageService::sweep`] every `config.sweep_interval` (the first time 5 minutes after startup) for as long
-/// as the app is alive.
-pub(crate) fn spawn_sweeper(app: &App) {
-    let Some(interval) = app.storage().config.sweep_interval else { return };
-    let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
-    let weak = app.downgrade();
-    handle.spawn(async move {
-        let mut delay = interval.min(Duration::from_secs(300));
-        loop {
-            tokio::time::sleep(delay).await;
-            delay = interval;
-            let Some(app) = weak.upgrade() else { return };
-            if let Err(e) = app.storage().sweep(&app).await {
-                tracing::warn!("storage sweep failed: {e:#}");
-            }
-        }
-    });
 }
 
 /// The upload rate limit check for `ip`: `Err(retry_after)` when exhausted.

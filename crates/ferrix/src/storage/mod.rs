@@ -128,3 +128,11 @@ pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
     ctx.auth.require_admin()?;
     ctx.storage.generate_upload_url().await
 }
+
+/// The orphan sweep ([`StorageService::sweep`]), run by the system cron `_storage_sweep` every
+/// `StorageConfig::sweep_interval`.
+#[internal_action]
+pub async fn sweep_orphans(ctx: &ActionCtx) -> Result<SweepStats> {
+    let app = ctx.app.clone();
+    app.storage().clone().sweep(&app).await
+}

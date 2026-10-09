@@ -6,14 +6,14 @@ WebSocket and get updated results automatically whenever a write affects them.
 
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
-Phase 9 (operations: backups, migrations, release builds) is next.
+Phase 9 (operations: backups, release builds) is next; data migrations (`#[migration]`) are built.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `crates/ferrix` | The runtime: SQLite storage, query engine, read sets, write log, sync worker, axum server, CLI, codegen, `TestApp`. |
-| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`. |
+| `crates/ferrix-macros` | `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
 | `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery`, `useMutation`, `useAction`. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
@@ -183,6 +183,46 @@ nothing; a query returns at most 1024 documents. A search subscription reruns af
 a filter field of the table's documents. Rough numbers (release build, a laptop): 50k documents of 12 words: a
 one-word query takes 0.35 ms, a broad two-letter prefix matching every document 80 ms; 50k vectors of 384 dimensions:
 a k=10 query takes about 18 ms (7 ms with a filter keeping 1 in 10). The todo example has a search box.
+
+## Migrations
+
+At startup, a table whose Rust type changed has its documents validated; if some don't match, the server refuses to
+start, listing them. Make the change backward compatible (`Option<T>`, `#[serde(default)]`), or write a migration.
+Migrations get the stored JSON, so they work however far the type has moved on:
+
+```rust
+#[table(name = "todos")]
+pub struct Todo { pub text: String, pub done: bool, pub priority: i64 }   // `priority` is new
+
+#[migration(table = Todo, batch = 100)]             // optionally `name = "0002_priority"`: a stable id
+async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<Option<serde_json::Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // a patch, or None to keep it
+}
+```
+
+Return `DocChange::{Keep, Patch, Replace, Delete}` for more, or take a typed `Doc<OldTodo>` when the old shape still
+deserializes. A migration runs in batches, each one transaction that also advances its cursor in the `_migrations`
+table, so every document is processed exactly once per run, a crash or a failure resumes where it stopped, and
+subscriptions update as documents change.
+
+```sh
+todo-server migrate --dry-run          # what would change (with examples); writes nothing
+todo-server migrate                    # run every migration that isn't done, in name order
+todo-server migrate status             # state and progress of each
+todo-server serve --migrate            # or: start, then run them in the background
+```
+
+While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
+table is *migrating*, writes may leave a document invalid only if it already was, and reads of not-yet-migrated
+documents fail. When its last migration finishes, the table is validated again in the same transaction; if anything
+is still invalid, the next start refuses. The dashboard backend has admin functions for it
+(`_system/migrations:{list, status, run, cancel}`). Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.9.
+
+## Binary data
+
+`ferrix::Bytes` holds binary values in documents, args and results. It travels and is stored as
+`{"$bytes": "<base64>"}` (TS: `{ $bytes: string }`), can be indexed (ordered byte-wise), and converts with
+`bytesToJson(uint8Array)` / `bytesFromJson(value)` from `@ferrix/client`. For files, use file storage instead.
 
 ## Dashboard
 

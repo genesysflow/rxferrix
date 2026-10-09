@@ -1,0 +1,5 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "migration_err(quote!(table),\nquote!(async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}))"
+---
+expected `#[migration(table = TableType, batch = 100, name = "...")]` (`batch` and `name` are optional)

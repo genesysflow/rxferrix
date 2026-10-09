@@ -46,7 +46,7 @@ enum Command {
     Restore(crate::ops::cli::RestoreArgs),
     /// Export tables as JSONL or CSV; works while the server runs.
     Export(crate::ops::cli::ExportArgs),
-    /// Import JSONL (an export directory or files) through the normal write path (offline).
+    /// Import JSONL or CSV (an export directory or files) through the normal write path (offline).
     Import(crate::ops::cli::ImportArgs),
     /// Run data migrations (`#[migration]`), or show their status with `migrate status`. Stop the server first, or
     /// use `serve --migrate` / the dashboard to migrate a running server.
@@ -74,6 +74,9 @@ struct MigrateArgs {
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     dir: PathBuf,
+    /// Format of the progress log lines (default: pretty; the report itself is plain text).
+    #[arg(long, env = "FERRIX_LOG_FORMAT", value_enum, value_name = "FORMAT")]
+    log_format: Option<crate::log::LogFormat>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -169,6 +172,10 @@ struct ServeArgs {
     /// expiring URLs (ctx.storage.get_signed_url).
     #[arg(long, env = "FERRIX_STORAGE_PRIVATE")]
     storage_private: bool,
+    /// How log lines are written to stdout: `json` (one object per line), `pretty` or `compact`. Default: pretty on a
+    /// terminal, json otherwise. `RUST_LOG` filters them either way.
+    #[arg(long, env = "FERRIX_LOG_FORMAT", value_enum, value_name = "FORMAT")]
+    log_format: Option<crate::log::LogFormat>,
     /// Metrics, scheduled backups and TLS (`crate::ops::cli`).
     #[command(flatten)]
     ops: crate::ops::cli::OpsServeArgs,
@@ -356,7 +363,8 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
 fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, scheduler: SchedulerOptions) -> crate::Result<()> {
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,ferrix::migrations=info".into());
-    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
+    let format = args.log_format.unwrap_or(crate::log::LogFormat::Pretty);
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout, format).try_init();
     let dir = match &args.command {
         Some(MigrateCommand::Status { dir }) => dir.clone(),
         None => args.dir.clone(),
@@ -548,7 +556,8 @@ fn serve(
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
-    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout).try_init();
+    let format = args.log_format.unwrap_or_else(crate::log::LogFormat::default_for_stdout);
+    let _ = crate::log::cli_subscriber(stdout_filter, std::io::stdout, format).try_init();
     if args.dev {
         let out = args.codegen_out.clone().or_else(|| std::env::var_os(CODEGEN_OUT_ENV).map(PathBuf::from));
         if let Some(out) = out.filter(|o| !o.as_os_str().is_empty()) {
@@ -557,7 +566,7 @@ fn serve(
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let exit_code = rt.block_on(async move {
         let explicit = explicit_public_url(&args, &auth);
         let auth = auth_config(&args, auth);
         let storage = storage_config(&args, storage, explicit)?;
@@ -575,6 +584,20 @@ fn serve(
         let listen = args.ops.listen(args.http, &args.dir)?;
         // Held while serving: `restore` refuses to run under a server.
         let _lock = crate::ops::DirLock::acquire(&args.dir)?;
+        // A restore staged from the dashboard replaces the database now, before anything opens it.
+        let storage_dir = crate::ops::backup::local_storage_dir(&args.dir, &options.storage.backend);
+        let dir = args.dir.clone();
+        if let Some(report) =
+            tokio::task::spawn_blocking(move || crate::ops::restore::apply_pending(&dir, storage_dir)).await??
+        {
+            tracing::warn!(
+                ts = report.manifest.ts,
+                previous = ?report.previous,
+                blobs = report.blobs_restored,
+                "restored the staged backup"
+            );
+        }
+        let restart = options.ops.restart.clone();
         let app = App::open(&args.dir, options).await?;
         app.start_scheduler().await?;
         if args.migrate {
@@ -618,11 +641,21 @@ fn serve(
         }
         server
             .run_until(async {
-                crate::ops::tls::shutdown_signal().await;
-                tracing::info!("shutting down");
+                tokio::select! {
+                    _ = crate::ops::tls::shutdown_signal() => tracing::info!("shutting down"),
+                    _ = restart.requested() => tracing::warn!("restarting: shutting down to apply the staged restore"),
+                }
             })
-            .await
-    })
+            .await?;
+        app.logs().flush().await?;
+        Ok::<_, crate::Error>(restart.is_requested().then(|| restart.exit_code()).flatten())
+    })?;
+    // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.
+    if let Some(code) = exit_code {
+        drop(rt);
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -738,6 +771,23 @@ mod tests {
         assert!(parse(&["migrate", "--restart"]).is_err(), "--restart needs --name");
         let cli = parse(&["serve", "--migrate"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Serve(ref a)) if a.migrate));
+    }
+
+    #[test]
+    fn log_format_flag() {
+        use crate::log::LogFormat;
+        assert_eq!(parse(&["serve", "--log-format", "json"]).unwrap().command.map(|c| match c {
+            Command::Serve(a) => a.log_format,
+            _ => None,
+        }), Some(Some(LogFormat::Json)));
+        assert_eq!(parse(&["--log-format", "compact"]).unwrap().serve.log_format, Some(LogFormat::Compact));
+        assert_eq!(parse(&["--log-format", "pretty"]).unwrap().serve.log_format, Some(LogFormat::Pretty));
+        assert!(parse(&["--log-format", "xml"]).is_err());
+        // Tests don't run on a terminal: the default is JSON.
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            assert_eq!(LogFormat::default_for_stdout(), LogFormat::Json);
+        }
     }
 
     #[test]

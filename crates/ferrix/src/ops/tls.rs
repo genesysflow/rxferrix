@@ -11,8 +11,12 @@
 //! `https://<domain>`.
 //!
 //! **`--tls-cert cert.pem --tls-key key.pem`**: HTTPS on `--https-addr` with the given PEM certificate chain and
-//! private key (PKCS#8, PKCS#1 or SEC1). Restart to pick up renewed files. No redirect listener unless
-//! `--http-redirect <addr>` is given.
+//! private key (PKCS#8, PKCS#1 or SEC1). No redirect listener unless `--http-redirect <addr>` is given. The files are
+//! re-read every `--tls-reload-every` (default 30 s; `0` turns it off): when their content changed and they make a
+//! valid certificate and key pair, new connections get the new certificate (the rustls configuration is swapped
+//! atomically; open connections keep theirs and are not dropped). If the new files don't load (a half-written
+//! renewal, a key that doesn't match), the current certificate stays and an error is logged once per change, so a
+//! renewal tool that writes the two files one after the other is picked up as soon as both are in place.
 //!
 //! Without either, the server listens on `--http` (plain HTTP), e.g. behind a reverse proxy that terminates TLS.
 
@@ -101,8 +105,75 @@ pub enum Listen {
     Http(SocketAddr),
     /// HTTPS with Let's Encrypt certificates, plus an optional redirect listener.
     Acme { https: SocketAddr, redirect: Option<SocketAddr>, acme: AcmeSettings },
-    /// HTTPS with certificate files, plus an optional redirect listener.
-    CertFiles { https: SocketAddr, redirect: Option<SocketAddr>, cert: PathBuf, key: PathBuf },
+    /// HTTPS with certificate files, plus an optional redirect listener. With `reload_every`, the files are checked
+    /// that often and a changed, valid pair replaces the certificate without a restart.
+    CertFiles { https: SocketAddr, redirect: Option<SocketAddr>, cert: PathBuf, key: PathBuf, reload_every: Option<Duration> },
+}
+
+/// A digest of the certificate and key files' contents.
+fn files_digest(cert: &Path, key: &Path) -> std::io::Result<[u8; 32]> {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    for path in [cert, key] {
+        let bytes = std::fs::read(path)?;
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(&bytes);
+    }
+    Ok(h.finalize().into())
+}
+
+/// Re-read `cert` and `key` every `every` until `stop`; swap in a changed, valid pair (see the module docs).
+fn spawn_cert_reloader(
+    rustls: axum_server::tls_rustls::RustlsConfig,
+    cert: PathBuf,
+    key: PathBuf,
+    every: Duration,
+    stop: Stop,
+) {
+    tokio::spawn(async move {
+        // What is loaded now, and the last content that failed (to log each bad change once).
+        let mut loaded = files_digest(&cert, &key).ok();
+        // `Some(None)`: the files couldn't be read.
+        let mut failed: Option<Option<[u8; 32]>> = None;
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = stopped(&stop) => return,
+                _ = ticks.tick() => {}
+            }
+            let (c, k) = (cert.clone(), key.clone());
+            let attempt = tokio::task::spawn_blocking(move || -> (Option<[u8; 32]>, crate::Result<Arc<ServerConfig>>) {
+                match files_digest(&c, &k) {
+                    Ok(d) => (Some(d), server_config_from_pem(&c, &k)),
+                    Err(e) => (None, Err(anyhow::Error::from(e).context("reading the certificate files"))),
+                }
+            })
+            .await;
+            let Ok((digest, config)) = attempt else { continue };
+            if digest.is_some() && digest == loaded {
+                failed = None;
+                continue;
+            }
+            match config {
+                Ok(config) => {
+                    rustls.reload_from_config(config);
+                    loaded = digest;
+                    failed = None;
+                    tracing::info!(cert = %cert.display(), "tls: loaded the new certificate");
+                }
+                Err(e) => {
+                    if failed != Some(digest) {
+                        tracing::error!(
+                            cert = %cert.display(),
+                            "tls: the changed certificate files don't load; keeping the current certificate: {e:#}"
+                        );
+                    }
+                    failed = Some(digest);
+                }
+            }
+        }
+    });
 }
 
 /// A rustls server configuration from PEM files (aws-lc-rs).
@@ -265,11 +336,14 @@ pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServ
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
             start_tls(serve, handle, addr, *redirect, acme.domains.clone(), stop).await
         }
-        Listen::CertFiles { https, redirect, cert, key } => {
+        Listen::CertFiles { https, redirect, cert, key, reload_every } => {
             let config = server_config_from_pem(cert, key)?;
             let listener = std_listener(*https)?;
             let addr = listener.local_addr()?;
             let rustls = axum_server::tls_rustls::RustlsConfig::from_config(config);
+            if let Some(every) = reload_every.filter(|d| !d.is_zero()) {
+                spawn_cert_reloader(rustls.clone(), cert.clone(), key.clone(), every, stop.clone());
+            }
             let handle = axum_server::Handle::new();
             let serve = axum_server::from_tcp(listener)?
                 .acceptor(axum_server::tls_rustls::RustlsAcceptor::new(rustls))

@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use super::identity::Identity;
-use super::oauth::{STATE_COOKIE, STATE_TTL, with_fragment};
+use super::oauth::{CallbackExtras, STATE_COOKIE, STATE_TTL, with_fragment};
 use super::service::{AuthFailure, AuthResult, CodeProof, Limit, SignUpResult};
 use super::store::ClientInfo;
 use super::tokens::{TokenError, ct_eq};
@@ -43,7 +43,7 @@ pub fn routes() -> Router<App> {
         .route("/api/auth/magic/request", post(magic_request))
         .route("/api/auth/magic/verify", post(magic_verify))
         .route("/api/auth/oauth/{provider}", get(oauth_start))
-        .route("/api/auth/oauth/{provider}/callback", get(oauth_callback))
+        .route("/api/auth/oauth/{provider}/callback", get(oauth_callback).post(oauth_callback_post))
         .route("/api/auth/admin/signin", post(admin_sign_in))
         .route("/api/auth/admin/setup", get(admin_setup_status).post(admin_setup))
 }
@@ -394,9 +394,12 @@ async fn oauth_start(
             .ok_or_else(|| AuthFailure::new(400, "invalid_redirect", "No redirect URL given and none configured"))?;
         let callback = callback_url(&app, &headers, &provider_id);
         let (url, state) = auth.oauth.start(&provider, redirect, &callback).await?;
-        let secure = if callback.starts_with("https://") { "; Secure" } else { "" };
+        let https = callback.starts_with("https://");
+        // A provider that posts the callback cross-site needs `SameSite=None` (https only); see `super::oauth`.
+        let same_site = if provider.kind.form_post() && https { "None" } else { "Lax" };
+        let secure = if https { "; Secure" } else { "" };
         let cookie = format!(
-            "{STATE_COOKIE}={state}; Path=/api/auth/oauth; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+            "{STATE_COOKIE}={state}; Path=/api/auth/oauth; HttpOnly; SameSite={same_site}; Max-Age={}{secure}",
             STATE_TTL.as_secs()
         );
         Ok((url, cookie))
@@ -431,11 +434,14 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-#[derive(Deserialize)]
-struct CallbackQuery {
+/// The callback's parameters: the query of a `GET`, or the form of a `POST` (`response_mode=form_post`).
+#[derive(Deserialize, Default)]
+struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+    /// Apple: `{"name":{"firstName","lastName"},"email"}`, on the first sign-in only.
+    user: Option<String>,
 }
 
 async fn oauth_callback(
@@ -443,32 +449,73 @@ async fn oauth_callback(
     caller: Caller,
     headers: HeaderMap,
     Path(provider_id): Path<String>,
-    Query(q): Query<CallbackQuery>,
+    Query(q): Query<CallbackParams>,
 ) -> Response {
-    let clear_cookie = format!("{STATE_COOKIE}=; Path=/api/auth/oauth; HttpOnly; SameSite=Lax; Max-Age=0");
+    // Only form_post providers send a `user` field, and only in the form.
+    let q = CallbackParams { user: None, ..q };
+    oauth_complete(app, caller, headers, provider_id, q, false).await
+}
+
+/// `POST` callbacks, for providers that use `response_mode=form_post` (Apple) only.
+async fn oauth_callback_post(
+    State(app): State<App>,
+    caller: Caller,
+    headers: HeaderMap,
+    Path(provider_id): Path<String>,
+    form: Result<axum::Form<CallbackParams>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    if !app.auth().oauth_provider(&provider_id).is_some_and(|p| p.kind.form_post()) {
+        return (StatusCode::METHOD_NOT_ALLOWED, no_store(), "This provider's callback is a GET").into_response();
+    }
+    let Ok(axum::Form(params)) = form else {
+        return (StatusCode::BAD_REQUEST, no_store(), "Sign-in failed: the callback form is malformed").into_response();
+    };
+    oauth_complete(app, caller, headers, provider_id, params, true).await
+}
+
+async fn oauth_complete(
+    app: App,
+    caller: Caller,
+    headers: HeaderMap,
+    provider_id: String,
+    q: CallbackParams,
+    posted: bool,
+) -> Response {
     let auth = app.auth();
+    // Clear the cookie with the attributes it was set with (`oauth_start`).
+    let https = callback_url(&app, &headers, &provider_id).starts_with("https://");
+    let same_site = if posted && https { "None; Secure" } else { "Lax" };
+    let clear_cookie = format!("{STATE_COOKIE}=; Path=/api/auth/oauth; HttpOnly; SameSite={same_site}; Max-Age=0");
+    // After a POST, the redirect must turn into a GET of the app URL.
+    let redirect = |location: &str| {
+        let mut r = redirect_response(location, Some(&clear_cookie));
+        if posted {
+            *r.status_mut() = StatusCode::SEE_OTHER;
+        }
+        r
+    };
     // Without a valid pending flow there is no trusted app URL to go back to: answer with a plain error.
     let Some(pending) = q.state.as_deref().and_then(|s| auth.oauth.take(s)).filter(|p| p.provider == provider_id) else {
         let body = "Sign-in failed: this sign-in link is invalid or has expired. Please start again.";
         return (StatusCode::BAD_REQUEST, no_store(), body).into_response();
     };
     let fail = |code: &str, message: &str| {
-        let location = with_fragment(&pending.redirect_to, &[("ferrix_error", code), ("ferrix_error_description", message)]);
-        redirect_response(&location, Some(&clear_cookie))
+        redirect(&with_fragment(&pending.redirect_to, &[("ferrix_error", code), ("ferrix_error_description", message)]))
     };
     let state = q.state.as_deref().unwrap_or_default();
     if !cookie_value(&headers, STATE_COOKIE).is_some_and(|c| ct_eq(c, state)) {
         return fail("state_mismatch", "The sign-in was started in another browser or has expired");
     }
     if let Some(error) = q.error.as_deref() {
-        let code = if error == "access_denied" { "access_denied" } else { "oauth_failed" };
+        let code = if matches!(error, "access_denied" | "user_cancelled_authorize") { "access_denied" } else { "oauth_failed" };
         return fail(code, "The sign-in provider did not grant access");
     }
     let Some(code) = q.code.as_deref() else { return fail("oauth_failed", "The provider returned no code") };
     let Some(provider) = auth.oauth_provider(&provider_id) else { return fail("oauth_failed", "Unknown provider") };
     let callback = callback_url(&app, &headers, &provider_id);
+    let extras = CallbackExtras { apple_user: q.user.clone() };
     let result = async {
-        let profile = auth.oauth.finish(&provider, code, &pending.verifier, &callback).await?;
+        let profile = auth.oauth.finish(&provider, code, &pending, &callback, &extras).await?;
         auth.oauth_sign_in(&app, &provider_id, profile, caller.client()).await
     }
     .await;
@@ -483,7 +530,7 @@ async fn oauth_callback(
             if let Some(u) = tokens.user_id.as_deref() {
                 pairs.push(("ferrix_user_id", u));
             }
-            redirect_response(&with_fragment(&pending.redirect_to, &pairs), Some(&clear_cookie))
+            redirect(&with_fragment(&pending.redirect_to, &pairs))
         }
         Err(e) => fail(&e.error.code, &e.error.message),
     }

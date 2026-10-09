@@ -79,6 +79,47 @@ pub mod app {
         ctx.db.query::<OpsDoc>().with_index(OpsDoc::by_rank, |q| q.eq(OpsDoc::rank, rank)).collect().await
     }
 
+    #[object]
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Mood {
+        Happy,
+        Sad,
+    }
+
+    #[object]
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Meta {
+        pub score: f64,
+        pub label: Option<String>,
+    }
+
+    /// Every kind of value a CSV cell has to carry back (`csv_import_round_trips_mixed_types`).
+    #[table(name = "ops_mixed")]
+    pub struct Mixed {
+        pub name: String,
+        pub count: i64,
+        pub ratio: f64,
+        pub flag: bool,
+        pub note: Option<String>,
+        pub maybe: Option<bool>,
+        pub tags: Vec<String>,
+        pub meta: Meta,
+        pub mood: Mood,
+        pub data: Bytes,
+        pub owner: Option<Id<OpsDoc>>,
+    }
+
+    /// Internal: its argument type would otherwise show up in the codegen fixture of `codegen.rs`.
+    #[internal_mutation]
+    pub async fn add_mixed(ctx: &MutationCtx, doc: Mixed) -> Result<Id<Mixed>> {
+        ctx.db.insert(doc).await
+    }
+
+    #[query]
+    pub async fn mixed(ctx: &QueryCtx) -> Result<Vec<Doc<Mixed>>> {
+        ctx.db.query::<Mixed>().collect().await
+    }
+
     #[action]
     pub async fn store_text(ctx: &ActionCtx, text: String) -> Result<Id<StoredFile>> {
         ctx.storage.store(text.into_bytes(), Some("text/plain")).await
@@ -315,7 +356,7 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     // Same table numbers: identical documents (ids and creation times included).
     let b = TestApp::new().await.unwrap();
     let ts = b.app().db().write_log().latest();
-    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 2, allow_system_tables: true };
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 2, allow_system_tables: true, format: None };
     let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
     assert!(!report.remapped_ids && report.files == 1);
     assert_eq!(report.tables.iter().map(|t| (t.table.as_str(), t.documents)).collect::<Vec<_>>(), [("_storage", 1), ("ops_docs", 5)]);
@@ -407,6 +448,79 @@ async fn csv_export_escapes_fields() {
     // A newline inside a field stays inside its quotes.
     assert!(csv.contains("\"child number 0\nsecond line\""), "{csv}");
     assert_eq!(csv.matches("\r\n").count(), 6);
+}
+
+fn mixed_doc(name: &str, count: i64, note: Option<&str>, owner: Option<ferrix::Id<OpsDoc>>) -> Mixed {
+    Mixed {
+        name: name.into(),
+        count,
+        ratio: count as f64 / 3.0,
+        flag: count % 2 == 0,
+        note: note.map(str::to_string),
+        maybe: (count % 3 != 0).then_some(count % 3 == 1),
+        tags: vec![name.into(), "a,b".into(), "say \"hi\"".into()],
+        meta: Meta { score: -0.1 * count as f64, label: (count > 1).then(|| format!("label {count}")) },
+        mood: if count % 2 == 0 { Mood::Happy } else { Mood::Sad },
+        data: ferrix::Bytes::new(vec![0, count as u8, 255]),
+        owner,
+    }
+}
+
+#[tokio::test]
+async fn csv_import_round_trips_mixed_types() {
+    let a = TestApp::new().await.unwrap();
+    let owner = a.mutation::<add_doc>(("owner".to_string(), 1, None, None)).await.unwrap();
+    // Strings that look like other types (only the table's shape tells them apart), quoting, line breaks, numbers
+    // that need every digit, and nested values.
+    let names = ["42", "true", "null", "", " padded ", "a,b\nc \"quoted\"", "{\"x\":1}", "[1]", "plain", "1e400"];
+    for (i, name) in names.iter().enumerate() {
+        let note = match i % 3 {
+            0 => None,
+            1 => Some("12"),
+            _ => Some("false"),
+        };
+        a.mutation::<add_mixed>((mixed_doc(name, i as i64 - 3, note, (i % 2 == 0).then_some(owner)),)).await.unwrap();
+    }
+    let original = a.query::<mixed>(()).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let options = ExportOptions { tables: Some(vec!["ops_mixed".into()]), format: ExportFormat::Csv, include_files: false };
+    let manifest = export::export_to_dir(a.dir(), None, out.path(), &options).await.unwrap();
+    assert_eq!(manifest.tables[0].documents, names.len() as u64);
+
+    // Into a fresh database: the export directory (CSV manifest), then a single .csv file with replace.
+    let b = TestApp::new().await.unwrap();
+    let import = ImportOptions { batch_size: 3, ..Default::default() };
+    let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
+    assert_eq!(report.tables[0].documents, names.len() as u64);
+    let as_json = |docs: &[ferrix::Doc<Mixed>]| docs.iter().map(|d| serde_json::to_value(d).unwrap()).collect::<Vec<_>>();
+    assert_eq!(as_json(&b.query::<mixed>(()).await.unwrap()), as_json(&original), "ids, creation times and values");
+    let replace = ImportOptions { mode: ImportMode::Replace, ..import.clone() };
+    let report = export::import_path(b.app(), &out.path().join("ops_mixed.csv"), None, &replace).await.unwrap();
+    assert_eq!((report.tables[0].deleted, report.tables[0].documents), (names.len() as u64, names.len() as u64));
+    assert_eq!(as_json(&b.query::<mixed>(()).await.unwrap()), as_json(&original));
+    verify(b.app()).await;
+
+    // Hand-written CSV: no `_id` / `_creationTime` columns (new ids), columns in any order, LF line ends.
+    let file = out.path().join("hand.csv");
+    std::fs::write(
+        &file,
+        "flag,name,count,ratio,note,maybe,tags,meta,mood,data,owner\n\
+         false,007,7,0.5,,,[],\"{\"\"score\"\":1,\"\"label\"\":null}\",sad,\"{\"\"$bytes\"\":\"\"AQI=\"\"}\",\n",
+    )
+    .unwrap();
+    let csv_insert = ImportOptions { format: Some(ExportFormat::Csv), ..Default::default() };
+    export::import_path(b.app(), &file, Some("ops_mixed"), &csv_insert).await.unwrap();
+    let added = b.query::<mixed>(()).await.unwrap().into_iter().find(|d| d.name == "007").unwrap();
+    assert_eq!((added.count, added.note.clone(), added.maybe, added.data.0.clone()), (7, None, None, vec![1, 2]));
+
+    // Bad cells are reported with their line, and nothing is written.
+    let ts = b.app().db().write_log().latest();
+    std::fs::write(&file, "name,count,ratio,flag,note,maybe,tags,meta,mood,data,owner\nx,many,1,true,,,[],{},happy,{},\nshort,1\n")
+        .unwrap();
+    let err = format!("{:#}", export::import_path(b.app(), &file, Some("ops_mixed"), &csv_insert).await.unwrap_err());
+    assert!(err.contains("hand.csv:2") && err.contains("does not match table `ops_mixed`"), "{err}");
+    assert!(err.contains("hand.csv:3") && err.contains("but the header has 11 column(s)"), "{err}");
+    assert_eq!(b.app().db().write_log().latest(), ts);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -634,6 +748,7 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
         redirect: Some("127.0.0.1:0".parse().unwrap()),
         cert: cert_path.clone(),
         key: key_path.clone(),
+        reload_every: None,
     };
     let server = tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
     let (addr, redirect) = (server.addr, server.redirect_addr.unwrap());
@@ -659,8 +774,78 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     // A key that doesn't match the certificate is refused at startup.
     let other = rcgen::KeyPair::generate().unwrap();
     std::fs::write(&key_path, other.serialize_pem()).unwrap();
-    let bad = Listen::CertFiles { https: "127.0.0.1:0".parse().unwrap(), redirect: None, cert: cert_path, key: key_path };
+    let bad =
+        Listen::CertFiles { https: "127.0.0.1:0".parse().unwrap(), redirect: None, cert: cert_path, key: key_path, reload_every: None };
     assert!(tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &bad).await.is_err());
+
+    server.shutdown();
+    tokio::time::timeout(Duration::from_secs(15), server.wait()).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
+    let t = TestApp::new().await.unwrap();
+    let pair = || {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().self_signed(&key).unwrap();
+        (cert, key)
+    };
+    let (first, first_key) = pair();
+    let (second, second_key) = pair();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert_path, first.pem()).unwrap();
+    std::fs::write(&key_path, first_key.serialize_pem()).unwrap();
+    let listen = Listen::CertFiles {
+        https: "127.0.0.1:0".parse().unwrap(),
+        redirect: None,
+        cert: cert_path.clone(),
+        key: key_path.clone(),
+        reload_every: Some(Duration::from_millis(50)),
+    };
+    let server = tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
+    let addr = server.addr;
+    let url = format!("https://localhost:{}/api/health", addr.port());
+    // Trusts both certificates and reports the one the server presented.
+    let client = || {
+        reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(first.pem().as_bytes()).unwrap())
+            .add_root_certificate(reqwest::Certificate::from_pem(second.pem().as_bytes()).unwrap())
+            .resolve("localhost", addr)
+            .tls_info(true)
+            .build()
+            .unwrap()
+    };
+    async fn presented(client: &reqwest::Client, url: &str) -> Vec<u8> {
+        let r = client.get(url).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        r.extensions().get::<reqwest::tls::TlsInfo>().unwrap().peer_certificate().unwrap().to_vec()
+    }
+    let kept_alive = client();
+    assert_eq!(presented(&kept_alive, &url).await, first.der().to_vec());
+
+    // A half-written renewal (the new certificate, the old key) doesn't load: the current certificate stays.
+    std::fs::write(&cert_path, second.pem()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(presented(&client(), &url).await, first.der().to_vec());
+
+    // Once the key is in place too, new connections get the new certificate; the open one keeps working.
+    std::fs::write(&key_path, second_key.serialize_pem()).unwrap();
+    let mut swapped = false;
+    for _ in 0..100 {
+        if presented(&client(), &url).await == second.der().to_vec() {
+            swapped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(swapped, "the new certificate was never served");
+    assert_eq!(presented(&kept_alive, &url).await, first.der().to_vec(), "the kept-alive connection was not dropped");
+
+    // Garbage in the files: still the second certificate.
+    std::fs::write(&cert_path, "not a certificate").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(presented(&client(), &url).await, second.der().to_vec());
 
     server.shutdown();
     tokio::time::timeout(Duration::from_secs(15), server.wait()).await.unwrap().unwrap();
@@ -692,7 +877,12 @@ struct Admin {
 }
 
 async fn admin_setup() -> Admin {
-    let t = TestApp::with_auth(AuthConfig::password().rate_limits(None)).await.unwrap();
+    admin_setup_with(AppOptions::default()).await
+}
+
+async fn admin_setup_with(options: AppOptions) -> Admin {
+    let options = AppOptions { dev: true, auth: AuthConfig::password().rate_limits(None), ..options };
+    let t = TestApp::with_options(options).await.unwrap();
     let base = format!("http://{}", t.serve().await.unwrap());
     let client = reqwest::Client::new();
     let app = t.app().clone();
@@ -745,6 +935,11 @@ async fn ops_admin_endpoints_are_admin_only() {
         (Method::DELETE, "/api/admin/backups/ferrix-x.tar.zst"),
         (Method::GET, "/api/admin/export/ops_docs"),
         (Method::POST, "/api/admin/import/ops_docs"),
+        (Method::POST, "/api/admin/backups/ferrix-x.tar.zst/restore"),
+        (Method::GET, "/api/admin/restore"),
+        (Method::POST, "/api/admin/restore"),
+        (Method::DELETE, "/api/admin/restore"),
+        (Method::POST, "/api/admin/restore/restart"),
     ];
     for (method, path) in &endpoints {
         let r = a.req(method.clone(), path, None).send().await.unwrap();
@@ -761,6 +956,8 @@ async fn ops_admin_endpoints_are_admin_only() {
     // Nothing was created by the refused calls.
     let r: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["backups"], json!([]));
+    assert_eq!((r["pendingRestore"].clone(), r["restart"].clone()), (Value::Null, json!({ "available": false, "exitCode": null })));
+    assert!(!a.t.dir().join(ferrix::ops::restore::MARKER).exists());
 }
 
 #[tokio::test]
@@ -831,5 +1028,226 @@ async fn ops_admin_backup_export_and_import_flows() {
     assert_eq!(r.status(), 400);
     let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=bogus", Some(&a.admin)).body(new_doc).send().await.unwrap();
     assert_eq!(r.status(), 400);
+    // CSV: the exported CSV goes back in (upsert keeps the ids); CSV sent as JSONL is refused.
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert&format=csv", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let report: Value = r.json().await.unwrap();
+    assert_eq!((report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(a.t.query::<docs>(()).await.unwrap().iter().find(|d| d.rank == 3).unwrap().title, "exported, \"quoted\"");
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = a.req(Method::POST, "/api/admin/import/ops_docs?format=xml", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 400);
     verify(a.t.app()).await;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Staged restores
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A backup (with aux.db, a file blob and the secret) of a database with the pair "one", and a data directory
+/// (closed) whose database has "keep me".
+async fn backup_and_other_dir() -> (TestApp, tempfile::TempDir, PathBuf, tempfile::TempDir) {
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_pair>((1, "one".to_string())).await.unwrap();
+    let file = t.action::<store_text>(("restored blob".to_string(),)).await.unwrap();
+    t.mutation::<add_doc>(("with file".to_string(), 1, Some(file), None)).await.unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = BackupTarget::parse(target_dir.path().to_str().unwrap(), t.dir()).unwrap();
+    let spec = BackupSpec { include_aux: true, include_files: true, include_secret: true };
+    let info = backup::create(t.app(), &spec, &target, false).await.unwrap();
+    let archive = archive_path(target_dir.path(), &info);
+    let dest = tempfile::tempdir().unwrap();
+    let other = App::open(dest.path(), AppOptions::default()).await.unwrap();
+    other.mutation::<add_pair>((7, "keep me".to_string())).await.unwrap();
+    drop(other);
+    (t, target_dir, archive, dest)
+}
+
+async fn pair_texts(dir: &Path) -> Vec<String> {
+    let app = App::open(dir, AppOptions::default()).await.unwrap();
+    let texts = app.query::<all_pairs>(()).await.unwrap().into_iter().map(|p| p.value.text).collect();
+    verify(&app).await;
+    texts
+}
+
+#[tokio::test]
+async fn staged_restore_is_applied_at_the_next_start() {
+    use ferrix::ops::restore;
+    let (_t, _target, archive, dest) = backup_and_other_dir().await;
+    let key_before = std::fs::read(dest.path().join("auth_secret.key")).unwrap();
+    {
+        // Staged while a "server" holds the data directory: nothing it uses changes.
+        let _lock = DirLock::acquire(dest.path()).unwrap();
+        let pending = restore::stage(dest.path(), &archive, "the backup", Some("admin-1".into())).await.unwrap();
+        assert!(pending.includes_aux && pending.blobs == 1 && pending.secret_ignored && pending.error.is_none(), "{pending:?}");
+        assert_eq!(restore::pending(dest.path()).unwrap().as_ref(), Some(&pending));
+        assert!(dest.path().join(restore::STAGED_DIR).join("data.db").exists());
+        assert!(!dest.path().join(restore::STAGED_DIR).join("auth_secret.key").exists(), "the key is never staged");
+        // A second staging is refused until the first is canceled.
+        let err = restore::stage(dest.path(), &archive, "again", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("staged already"), "{err:#}");
+    }
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"], "opening the app doesn't apply it");
+
+    // The next start (serve calls this with the lock held, before opening the database).
+    let report = restore::apply_pending(dest.path(), None).unwrap().expect("applied");
+    assert!(report.previous.as_ref().unwrap().join("data.db").exists() && report.blobs_restored == 1);
+    assert!(!dest.path().join(restore::MARKER).exists() && !dest.path().join(restore::STAGED_DIR).exists());
+    assert_eq!(pair_texts(dest.path()).await, ["one a", "one b"]);
+    assert_eq!(std::fs::read(dest.path().join("auth_secret.key")).unwrap(), key_before, "the server's key stays");
+    let app = App::open(dest.path(), AppOptions::default()).await.unwrap();
+    let doc = app.query::<docs>(()).await.unwrap().remove(0);
+    assert_eq!(app.action::<read_text>((doc.file.unwrap(),)).await.unwrap().as_deref(), Some("restored blob"));
+    drop(app);
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none(), "nothing left to apply");
+}
+
+#[tokio::test]
+async fn an_interrupted_staged_restore_is_finished_by_the_next_start() {
+    use ferrix::ops::restore;
+    let (_t, _target, archive, dest) = backup_and_other_dir().await;
+    let pending = restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    // A crash after the old data.db went aside and the restored one moved in, before aux.db and the marker.
+    let previous = dest.path().join(format!("pre-restore-{}", ferrix::ops::file_timestamp(pending.staged_at)));
+    std::fs::create_dir_all(&previous).unwrap();
+    for f in ["data.db", "data.db-wal", "data.db-shm"] {
+        if dest.path().join(f).exists() {
+            std::fs::rename(dest.path().join(f), previous.join(f)).unwrap();
+        }
+    }
+    std::fs::rename(dest.path().join(restore::STAGED_DIR).join("data.db"), dest.path().join("data.db")).unwrap();
+    let report = restore::apply_pending(dest.path(), None).unwrap().expect("finished");
+    assert_eq!(report.previous.as_deref(), Some(previous.as_path()));
+    assert!(previous.join("aux.db").exists() && previous.join("data.db").exists());
+    assert_eq!(pair_texts(dest.path()).await, ["one a", "one b"]);
+}
+
+#[tokio::test]
+async fn staged_restores_cancel_and_refuse_bad_archives() {
+    use ferrix::ops::restore;
+    let (_t, target, archive, dest) = backup_and_other_dir().await;
+    // Canceled: the marker and the files go, the next start changes nothing.
+    restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    assert!(restore::cancel(dest.path()).unwrap());
+    assert!(!restore::cancel(dest.path()).unwrap());
+    assert!(!dest.path().join(restore::MARKER).exists() && !dest.path().join(restore::STAGED_DIR).exists());
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none());
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"]);
+
+    // A corrupt archive is refused when staging: nothing is staged, no temporary files stay.
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xff;
+    let corrupt = target.path().join("ferrix-corrupt.tar.zst");
+    std::fs::write(&corrupt, &bytes).unwrap();
+    let err = restore::stage(dest.path(), &corrupt, "corrupt", None).await.unwrap_err();
+    let user = err.chain().find_map(|c| c.downcast_ref::<ferrix::UserError>()).expect("a user error");
+    assert_eq!(user.code, "invalid_backup");
+    assert!(restore::pending(dest.path()).unwrap().is_none() && !dest.path().join(restore::STAGED_DIR).exists());
+    let leftovers: Vec<String> = std::fs::read_dir(dest.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".ferrix-") || n.starts_with(".pending-restore"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Staged files changed after staging: not applied, the server starts on its data, the marker says why.
+    restore::stage(dest.path(), &archive, "the backup", None).await.unwrap();
+    let staged_db = dest.path().join(restore::STAGED_DIR).join("data.db");
+    let mut db = std::fs::read(&staged_db).unwrap();
+    let last = db.len() - 1;
+    db[last] ^= 1;
+    std::fs::write(&staged_db, db).unwrap();
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none());
+    let marker = restore::pending(dest.path()).unwrap().unwrap();
+    assert!(marker.error.as_deref().unwrap().contains("changed since it was staged"), "{marker:?}");
+    assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"]);
+    assert!(restore::apply_pending(dest.path(), None).unwrap().is_none(), "not retried");
+    assert!(restore::cancel(dest.path()).unwrap());
+}
+
+#[tokio::test]
+async fn staged_restore_over_http() {
+    use ferrix::ops::restore::{self, RestartHandle};
+    use reqwest::Method;
+    let restart = RestartHandle::new(Some(75));
+    let options = AppOptions { ops: OpsOptions { restart: restart.clone(), ..Default::default() }, ..Default::default() };
+    let a = admin_setup_with(options).await;
+    a.t.mutation::<add_pair>((1, "from the backup".to_string())).await.unwrap();
+    let r = a.req(Method::POST, "/api/admin/backups", Some(&a.admin)).json(&json!({})).send().await.unwrap();
+    let name = r.json::<Value>().await.unwrap()["name"].as_str().unwrap().to_string();
+    a.t.mutation::<add_pair>((2, "after the backup".to_string())).await.unwrap();
+
+    // Restart needs a staged restore; unknown backups are 404.
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 409);
+    let r = a.req(Method::POST, "/api/admin/backups/ferrix-nope.tar.zst/restore", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+
+    // Stage a backup of the target: validated, pending, shown in the listing; the server keeps serving its data.
+    let r = a.req(Method::POST, &format!("/api/admin/backups/{name}/restore"), Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["pendingRestore"]["source"], name.as_str());
+    assert_eq!(body["restart"], json!({ "available": true, "exitCode": 75 }));
+    let list: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["pendingRestore"]["source"], name.as_str());
+    assert_eq!(a.t.query::<all_pairs>(()).await.unwrap().len(), 4);
+    let r = a.req(Method::POST, &format!("/api/admin/backups/{name}/restore"), Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 409, "one staged restore at a time");
+
+    // Cancel; canceling again is a 404.
+    let r = a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "canceled": true }));
+    assert_eq!(a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().status(), 404);
+    let state: Value = a.req(Method::GET, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(state["pendingRestore"], Value::Null);
+
+    // Upload: a corrupt archive is refused at once; the real one is staged.
+    let bytes =
+        a.req(Method::GET, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap().bytes().await.unwrap();
+    let mut corrupt = bytes.to_vec();
+    let mid = corrupt.len() / 2;
+    corrupt[mid] ^= 0xff;
+    let r = a.req(Method::POST, "/api/admin/restore?name=mine.tar.zst", Some(&a.admin)).body(corrupt).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "invalid_backup");
+    let r = a.req(Method::POST, "/api/admin/restore", Some(&a.admin)).body(Vec::<u8>::new()).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = a
+        .req(Method::POST, "/api/admin/restore?name=../my%20backup.tar.zst", Some(&a.admin))
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["pendingRestore"]["source"], "..mybackup.tar.zst");
+    assert!(body["pendingRestore"].get("stagedFiles").is_none(), "{body}");
+    assert!(a.t.dir().join(restore::STAGED_DIR).join("data.db").exists());
+
+    // Restart: accepted, then the handle fires (`serve` then shuts down and exits with 75).
+    assert!(!restart.is_requested());
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "restarting": true, "exitCode": 75 }));
+    tokio::time::timeout(Duration::from_secs(5), restart.requested()).await.unwrap();
+    let args = json!({ "paginationOpts": { "numItems": 20, "cursor": null } });
+    let audit = a.t.app().run_query("_system/audit:list", args, &admin_identity(&a.t).await).await;
+    let actions: Vec<String> =
+        audit.result.unwrap()["page"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string()).collect();
+    for action in ["restore_stage", "restore_cancel", "restore_restart"] {
+        assert!(actions.iter().any(|a| a == action), "{action} in {actions:?}");
+    }
+}
+
+/// Without `--restart-exit-code`, restarting is refused.
+#[tokio::test]
+async fn restart_needs_an_exit_code() {
+    use reqwest::Method;
+    let a = admin_setup().await;
+    let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "restart_unavailable");
 }

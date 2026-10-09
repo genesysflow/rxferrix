@@ -45,7 +45,9 @@ if command -v rustup >/dev/null 2>&1; then
   rustup target add "$TARGET" >/dev/null
 fi
 
-# 3. Cross-compile. sqlite-vec declares `uint8_t` & co. through the BSD types `u_int8_t`, which musl's headers only
+# 3. Cross-compile. The bundled SQLite gets its build flags (LIBSQLITE3_FLAGS) from .cargo/config.toml: never set that
+# variable here, it would replace them (and serialize readers again). The CFLAGS below are for sqlite-vec only:
+# sqlite-vec declares `uint8_t` & co. through the BSD types `u_int8_t`, which musl's headers only
 # provide with _BSD_SOURCE; map them to the standard types for the C code of this target.
 target_env="$(echo "$TARGET" | tr '-' '_')"
 export "CFLAGS_${target_env}=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"

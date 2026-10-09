@@ -318,7 +318,7 @@ export const migrations = {
 // ---------------------------------------------------------------------------------------------------------------------
 // Settings (`_system/settings:*`, actions: crates/ferrix/src/settings)
 
-export type OAuthKind = "github" | "google" | "oidc";
+export type OAuthKind = "github" | "google" | "discord" | "apple" | "oidc";
 /** What the server shows in place of a stored secret (and accepts back as "keep it"). */
 export const MASK = "••••";
 
@@ -331,6 +331,9 @@ export interface OAuthProviderView {
   clientSecret: string | null;
   enabled: boolean;
   scopes: string[] | null;
+  /** Apple: the developer team id and the key id (the secret is then the private key). */
+  teamId: string | null;
+  keyId: string | null;
   /** A provider with this id is configured in code: it wins and this entry is ignored. */
   locked: boolean;
 }
@@ -374,6 +377,9 @@ export interface OAuthProviderInput {
   clientSecret?: string | null;
   enabled: boolean;
   scopes?: string[] | null;
+  /** Apple only (required there). */
+  teamId?: string | null;
+  keyId?: string | null;
 }
 
 export interface SmtpInput {
@@ -559,6 +565,39 @@ export interface BackupInfo {
   /** A `ferrix-auto-*` archive from `--backup-every` (only those are rotated). */
   scheduled: boolean;
   ts: number | null;
+}
+
+/** `PendingRestore` (crates/ferrix/src/ops/restore.rs): a backup staged to replace the database at the next start. */
+export interface PendingRestore {
+  /** The backup's name, or the uploaded file's. */
+  source: string;
+  stagedAt: number;
+  stagedBy: string | null;
+  backupCreatedAt: number;
+  /** Commit ts of the backup's snapshot. */
+  ts: number;
+  ferrixVersion: string;
+  includesAux: boolean;
+  blobs: number;
+  bytes: number;
+  /** The archive had `auth_secret.key`; a staged restore never restores it. */
+  secretIgnored: boolean;
+  /** Why the last start didn't apply it (cancel it). */
+  error: string | null;
+}
+
+/** Whether the server can restart itself to apply a staged restore (`--restart-exit-code`). */
+export interface RestartInfo {
+  available: boolean;
+  exitCode: number | null;
+}
+
+/** `GET /api/admin/backups`. */
+export interface BackupListing {
+  target: string;
+  backups: BackupInfo[];
+  pendingRestore: PendingRestore | null;
+  restart: RestartInfo;
 }
 
 export interface ImportReport {

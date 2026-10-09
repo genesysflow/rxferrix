@@ -9,7 +9,9 @@
 # Run CLI commands on the same data as that user, e.g. a backup while it runs:
 #   sudo systemd-run --pipe --wait -p DynamicUser=yes -p StateDirectory=ferrix \
 #     /usr/local/bin/todo-server backup --dir /var/lib/ferrix
-# Restores are offline: `systemctl stop ferrix`, `todo-server restore <archive> --dir /var/lib/ferrix` (as above),
+# Restores: from the dashboard (Backups, "Restore": validated while the server runs, applied when it restarts; the
+# "Restart now" button exits with code 75, which systemd restarts below), or offline: `systemctl stop ferrix`,
+# `todo-server restore <archive> --dir /var/lib/ferrix` (as above),
 # `systemctl start ferrix`.
 
 [Unit]
@@ -28,6 +30,10 @@ ExecStart=/usr/local/bin/todo-server serve --http 127.0.0.1:8090 --dir /var/lib/
 # Secrets and settings (FERRIX_SMTP_URL, AWS_* for S3 storage or backups, FERRIX_METRICS_TOKEN, ...):
 EnvironmentFile=-/etc/ferrix/env
 Environment=RUST_LOG=info
+# Logs are JSON lines (not a terminal); `journalctl -u ferrix -o cat | jq` reads them. FERRIX_LOG_FORMAT=pretty for text.
+# Lets an administrator restart the service from the dashboard to apply a staged restore (exit code 75, restarted
+# by RestartForceExitStatus below).
+Environment=FERRIX_RESTART_EXIT_CODE=75
 # Scheduled backups, e.g. every 6 hours to S3, keeping 28:
 #Environment=FERRIX_BACKUP_TO=s3://my-bucket/backups
 # (and add `--backup-every 6h --backup-keep 28` to ExecStart)
@@ -37,6 +43,7 @@ KillSignal=SIGTERM
 TimeoutStopSec=20
 Restart=on-failure
 RestartSec=2
+RestartForceExitStatus=75
 LimitNOFILE=65536
 
 DynamicUser=yes

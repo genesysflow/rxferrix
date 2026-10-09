@@ -325,6 +325,17 @@ pub(crate) enum ProviderKind {
     Oidc(OidcEndpoints),
     /// Endpoints from `<issuer>/.well-known/openid-configuration`, fetched on first use.
     OidcDiscovery { discovery_url: String },
+    /// Discord: OAuth 2 with the `/users/@me` profile. `base` is `https://discord.com` (or a mock).
+    Discord { base: String },
+    /// Sign in with Apple: a signed client secret, `form_post` callbacks, the ID token as the profile.
+    Apple(Arc<super::apple::AppleConfig>),
+}
+
+impl ProviderKind {
+    /// Whether the provider posts its callback (`response_mode=form_post`) instead of redirecting with a query.
+    pub(crate) fn form_post(&self) -> bool {
+        matches!(self, ProviderKind::Apple(_))
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -347,8 +358,36 @@ impl OAuthProvider {
         self
     }
 
+    /// Point a Discord or Apple preset at another origin than `https://discord.com` / `https://appleid.apple.com`
+    /// (a mock server in tests, or a proxy). For Apple this also becomes the expected issuer of ID tokens and the
+    /// audience of the client secret. Other providers are unchanged (use [`Oidc`] for a custom issuer).
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into().trim_end_matches('/').to_string();
+        self.kind = match self.kind {
+            ProviderKind::Discord { .. } => ProviderKind::Discord { base: url },
+            ProviderKind::Apple(a) => {
+                ProviderKind::Apple(Arc::new(super::apple::AppleConfig::new(a.team_id.clone(), a.key_id.clone(), url)))
+            }
+            other => other,
+        };
+        self
+    }
+
     pub(crate) fn is_configured(&self) -> bool {
-        !self.client_id.is_empty() && !self.client_secret.is_empty()
+        let apple_ids = match &self.kind {
+            ProviderKind::Apple(a) => !a.team_id.is_empty() && !a.key_id.is_empty(),
+            _ => true,
+        };
+        !self.client_id.is_empty() && !self.client_secret.is_empty() && apple_ids
+    }
+
+    /// Problems that make a configured provider unusable (an Apple private key that doesn't parse), for the
+    /// startup log.
+    pub(crate) fn problem(&self) -> Option<String> {
+        match &self.kind {
+            ProviderKind::Apple(_) if self.is_configured() => super::apple::parse_private_key(&self.client_secret).err(),
+            _ => None,
+        }
     }
 }
 
@@ -413,6 +452,75 @@ impl Google {
     /// `FERRIX_AUTH_GOOGLE_CLIENT_ID` / `FERRIX_AUTH_GOOGLE_CLIENT_SECRET`.
     pub fn from_env() -> OAuthProvider {
         Self::new(env("FERRIX_AUTH_GOOGLE_CLIENT_ID"), env("FERRIX_AUTH_GOOGLE_CLIENT_SECRET"))
+    }
+}
+
+/// Discord preset (`/api/auth/oauth/discord`): OAuth 2 with `identify email`; the profile is `/users/@me`, and its
+/// email is used only if Discord has verified it.
+pub struct Discord;
+
+#[allow(clippy::new_ret_no_self)]
+impl Discord {
+    pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>) -> OAuthProvider {
+        OAuthProvider {
+            id: "discord".into(),
+            kind: ProviderKind::Discord { base: "https://discord.com".into() },
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            scopes: vec!["identify".into(), "email".into()],
+        }
+    }
+
+    /// `FERRIX_AUTH_DISCORD_CLIENT_ID` / `FERRIX_AUTH_DISCORD_CLIENT_SECRET`.
+    pub fn from_env() -> OAuthProvider {
+        Self::new(env("FERRIX_AUTH_DISCORD_CLIENT_ID"), env("FERRIX_AUTH_DISCORD_CLIENT_SECRET"))
+    }
+}
+
+/// Sign in with Apple preset (`/api/auth/oauth/apple`), with `name email`.
+///
+/// - `client_id`: the Services ID (e.g. `com.example.web`), with this server's callback URL
+///   (`<public url>/api/auth/oauth/apple/callback`, https) registered as a return URL;
+/// - `team_id`: the Apple developer team id; `key_id`: the id of the Sign in with Apple key;
+/// - `private_key`: that key's `.p8` file contents (PEM). It signs a short-lived client secret (ES256 JWT) that is
+///   generated and rotated automatically; keep it out of source control (environment, a file, or the dashboard's
+///   settings, where it is stored encrypted).
+///
+/// Apple posts the callback (`response_mode=form_post`), sends the user's name only on the first sign-in, and has no
+/// userinfo endpoint: the profile is the ID token, verified against Apple's keys (the `auth::apple` module).
+pub struct Apple;
+
+#[allow(clippy::new_ret_no_self)]
+impl Apple {
+    pub fn new(
+        client_id: impl Into<String>,
+        team_id: impl Into<String>,
+        key_id: impl Into<String>,
+        private_key: impl Into<String>,
+    ) -> OAuthProvider {
+        let apple = super::apple::AppleConfig::new(team_id.into(), key_id.into(), super::apple::APPLE_ORIGIN.into());
+        OAuthProvider {
+            id: "apple".into(),
+            kind: ProviderKind::Apple(Arc::new(apple)),
+            client_id: client_id.into(),
+            client_secret: private_key.into(),
+            scopes: vec!["name".into(), "email".into()],
+        }
+    }
+
+    /// `FERRIX_AUTH_APPLE_CLIENT_ID`, `FERRIX_AUTH_APPLE_TEAM_ID`, `FERRIX_AUTH_APPLE_KEY_ID`, and the private key
+    /// from `FERRIX_AUTH_APPLE_PRIVATE_KEY` (the PEM; `\n` escapes allowed) or the file named by
+    /// `FERRIX_AUTH_APPLE_PRIVATE_KEY_FILE`.
+    pub fn from_env() -> OAuthProvider {
+        let mut key = env("FERRIX_AUTH_APPLE_PRIVATE_KEY");
+        let file = env("FERRIX_AUTH_APPLE_PRIVATE_KEY_FILE");
+        if key.is_empty() && !file.is_empty() {
+            key = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+                tracing::warn!("auth: can't read FERRIX_AUTH_APPLE_PRIVATE_KEY_FILE ({file}): {e}");
+                String::new()
+            });
+        }
+        Self::new(env("FERRIX_AUTH_APPLE_CLIENT_ID"), env("FERRIX_AUTH_APPLE_TEAM_ID"), env("FERRIX_AUTH_APPLE_KEY_ID"), key)
     }
 }
 

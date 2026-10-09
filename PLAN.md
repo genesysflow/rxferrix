@@ -89,7 +89,7 @@ pub async fn summarize(ctx: &ActionCtx, channel: Id<Channel>) -> Result<String> 
 fn main() -> ferrix::Result<()> {
     Ferrix::new()
         .tables(tables![Message, Channel, User])          // or auto-discovered (see §4.2)
-        .cron("cleanup-old-files", "0 0 3 * * *", crate::files::cleanup, ())
+        .cron::<crate::files::cleanup>("cleanup-old-files", "0 0 3 * * *", ())
         .auth(Auth::password().oauth(Google::from_env()).oauth(GitHub::from_env()))
         .static_dir("../web/dist")                        // optional: serve the frontend too
         .routes(axum::Router::new().route("/webhooks/stripe", post(stripe_webhook)))
@@ -424,6 +424,11 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   - **Actions: at most once.** The job is marked `in_progress` before running and set to `failed` if the server restarts mid-run. Opt-in retries with backoff are available.
 - **Cron**: `.cron(name, expr, fn_ref, args)` in `main`, reconciled into `_crons` at startup. The cron task enqueues scheduled jobs, so all execution goes through one path. Missed runs during downtime run once on startup, not N times.
 - Because jobs are ordinary tables, the dashboard shows them live with no extra work.
+- (As built, docs/CONTRACT.md §1.6: the table is `_scheduled_jobs`, states are `pending | inProgress | success |
+  failed | canceled`, the builder is `.cron::<f>(name, expr, args)` with 6-field UTC expressions plus
+  `.interval::<f>(name, every, args)`, and the scheduler wakes on write-log commits to the jobs table instead of an
+  explicit `Notify` from the writer. Mutation jobs run one at a time in the dispatcher, since they serialize on the
+  writer anyway.)
 
 ### 7.4 Text search (SQLite FTS5)
 - `#[search_index(name, search = field, filter = [f1, f2])]` creates an FTS5 table per search index, with filter fields stored as `UNINDEXED` columns.
@@ -542,8 +547,18 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   identity until the access token expires).
 - **Milestone: usable for real apps with users.**
 
-### Phase 6 — Scheduler and cron (M)
-- [ ] `run_after`, `run_at`, `cancel`, the scheduler task, crons, and the dashboard Scheduler page.
+### Phase 6 — Scheduler and cron (M) — done
+- [x] `ctx.scheduler.run_after` / `run_at` / `cancel` in mutations (in the mutation's transaction) and actions
+  (immediately, through internal system mutations); targets must be `SchedulableFunction` (mutations and actions,
+  emitted by the macros), so scheduling a query doesn't compile (docs/CONTRACT.md §1.6).
+- [x] `_scheduled_jobs` with a `(state, runAt, scheduledAt)` index; the runner: bounded concurrency, same-time jobs in
+  scheduling order, woken by write-log commits that touch the jobs table. Mutations exactly once (completion recorded
+  in the job's own transaction), actions at most once (`inProgress` committed first, `failed` after a restart),
+  opt-in action retries with backoff, anonymous identity logged as `scheduler`.
+- [x] Crons and intervals on the `Ferrix` builder, reconciled into `_crons`; missed runs run once; no pile-up.
+- [x] Retention of finished jobs (7 days), the admin-only `_system/scheduler:*` functions and the dashboard Scheduler
+  page; `TestApp::run_due_jobs` / `advance_time` / `restart` with an advanceable clock.
+- [ ] Not yet: canceling a running action, per-cron timezones, a "run cron now" button.
 
 ### Phase 7 — File storage (M)
 - [ ] Upload URLs, serving, the local and S3 backends, and the dashboard Files page.

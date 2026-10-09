@@ -88,6 +88,35 @@ on every use. Email goes through `--smtp-url` (printed to the log in `--dev`). W
 one-time `/_/setup#token=…` link; `admin create <email>` works too. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md)
 ("Auth") and [docs/CONTRACT.md](docs/CONTRACT.md) §1.2, §1.5.
 
+## Scheduler and crons
+
+Mutations and actions can schedule other mutations and actions (internal ones too), and `main` can declare crons:
+
+```rust
+use std::time::Duration;
+use ferrix::scheduler::ScheduledJob;
+
+#[mutation]
+pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> Result<Id<ScheduledJob>> {
+    // Written in this mutation's transaction: scheduled only if it commits. Scheduling a query doesn't compile.
+    ctx.scheduler.run_after::<add>(Duration::from_secs(delay_seconds.into()), (text,)).await
+}
+
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new()
+        .cron::<purge_completed>("purge-completed", "0 0 * * * *", ())   // sec min hour day month weekday, UTC
+        .run()
+}
+```
+
+Also `run_at::<f>(ms, args)`, `cancel(id)`, `with_retries(n)` (actions), and `.interval::<f>(name, Duration, args)`.
+Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see them live). Scheduled mutations run
+**exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
+interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
+them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
+finished jobs are deleted after 7 days. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
+deterministically. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6.
+
 ## Dashboard
 
 Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an
@@ -102,6 +131,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   result, log lines and duration.
 - **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
 - **Users**: users, linked providers, sessions (revoke), delete.
+- **Scheduler**: crons with their schedule, last and next run; scheduled jobs live, by state, with cancel, run now
+  and retry.
 - **Overview**: commit ts, connections and subscriptions, database sizes, busiest and failing functions.
 
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/dashboard:*` functions), so every

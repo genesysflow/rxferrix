@@ -16,6 +16,7 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 use ferrix::prelude::*;
 // prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError,
 //           table, query, mutation, action, internal_query, internal_mutation, internal_action, json!, Ferrix
+use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
 #[index(by_done = [done, created_by])]        // zero or more #[index(name = [rust_field, ...])] attributes
@@ -36,6 +37,7 @@ pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Todo>>> 
 #[mutation]
 pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     if text.is_empty() { return Err(UserError::new("empty", "text is empty").into()); }
+    log::info!(len = text.len(), "adding a todo");   // logLines: "[INFO] adding a todo len=5"
     ctx.db.insert(Todo { text, done: false, created_by: None }).await
 }
 
@@ -102,7 +104,10 @@ pub struct TableDef {
     pub name: &'static str,
     pub indexes: Vec<IndexDef>,
     pub ts: fn() -> String,   // inline TS object type of the table struct, for codegen (`ts_inline::<Self>()`)
-}   // PartialEq compares name, indexes and the rendered `ts()`, never the fn pointer
+    /// Ok iff a stored document (system fields included) deserializes as `Doc<Self>`; Err = the serde error.
+    /// Used by the startup schema check (§1.4). Emitted as `__private::validate_doc::<Self>`.
+    pub validate: fn(&serde_json::Value) -> Result<(), String>,
+}   // PartialEq compares name, indexes and the rendered `ts()`, never the fn pointers
 pub struct IndexDef { pub name: &'static str, pub fields: Vec<&'static str> }   // JSON field names
 
 /// Typed handle for a field (JSON name). V is the Rust value type.
@@ -138,6 +143,10 @@ impl MutationDb {   // MutationDb: Deref<Target = QueryDb>, so reads work identi
     pub async fn patch<T: Table>(&self, id: Id<T>, patch: serde_json::Value) -> Result<()>; // shallow merge of an object; null value = set to null
     pub async fn delete<T: Table>(&self, id: Id<T>) -> Result<()>;
 }
+// Every write is validated before anything is written: the complete new document (system fields included) must
+// deserialize as Doc<T>. For patch this catches wrong types and nulled required fields; for insert/replace it
+// catches a Serialize impl that doesn't round-trip through Deserialize. Failure: an error
+// "<patched|inserted|replaced> document <id> does not match table `<name>`; nothing was written: <serde error>".
 impl<'a, T: Table> Query<'a, T> {
     pub fn with_index(self, index: Index<T>, range: impl FnOnce(IndexRange<T>) -> IndexRange<T>) -> Self; // default: by_creation_time, full range
     pub fn order(self, order: Order) -> Self;                                   // default Asc
@@ -174,6 +183,117 @@ pub trait FunctionRef: Send + Sync + 'static {   // implemented on a type-namesp
 pub trait QueryFunction: FunctionRef {}
 pub trait MutationFunction: FunctionRef {}
 pub trait ActionFunction: FunctionRef {}
+```
+
+### 1.4 Logging, the execution log, and runtime options
+
+**Function log lines.** `ferrix::log` re-exports the `tracing` macros `trace!`, `debug!`, `info!`, `warn!`,
+`error!`. Write `use ferrix::log;` and then `log::info!(...)` (plain `tracing::info!` is the same thing). Events
+emitted while a function runs, at DEBUG and above, are captured per execution as `"[LEVEL] message key=value ..."`
+(at most 256 lines of 4KB each). A nested `ctx.run_*` call's lines are also appended to its caller's. Events from
+tasks the function spawns are not captured. Lines are always stored in the execution log and sent to clients as
+`logLines` only in `--dev`. The events still reach the normal subscriber: `ferrix serve` prints them to stdout,
+filtered by `RUST_LOG`.
+
+*Why not in the prelude:* glob-importing a `log` module or `info!`-style macros is ambiguous (E0659) wherever the app
+also uses the `log` crate or `#[macro_use] extern crate log`, so the prelude leaves them out and the explicit
+`use ferrix::log;` (which shadows the `log` crate cleanly in that file) is the one import to add.
+
+Capture uses a tracing layer, `ferrix::log::layer()`, plus a task-local buffer. `ferrix serve` installs stdout output
+and the layer, each with its own filter. If no global subscriber is set when an `App` opens, ferrix installs one
+with just the layer. An app that installs its own subscriber should add `ferrix::log::layer()` to it, and do so
+before opening the `App`.
+
+**Runtime options.**
+```rust
+pub struct AppOptions {
+    pub dev: bool,                    // real error messages and logLines to clients
+    pub readers: usize,
+    pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
+    pub skip_schema_check: bool,      // `--skip-schema-check`; see below
+    pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
+}
+impl Default for AppOptions { /* the defaults above, dev = false */ }
+```
+- **Mutation timeout.** A mutation still running after `mutation_timeout` is dropped and rolled back, and fails with
+  `ferrix::MutationTimeout { path, timeout }`, a server error (its message reaches clients only in `--dev`). It can
+  only fire at an `.await`: synchronous code in a mutation (a busy loop, blocking I/O) is never preempted and keeps
+  holding the writer lock.
+- **Idempotency.** `App::execute_mutation(path, args, &identity, Some(&IdempotencyKey { session_id, request_id }))`
+  runs a mutation at most once per key and replays the recorded response for repeats. The response is recorded in
+  the mutation's own write transaction, in the raw table `_mutation_dedup` of `data.db`, and kept about 10 minutes.
+  The sync worker uses this for every WS mutation; see PROTOCOL.md guarantee 7.
+- **Startup schema check.** `App::open` fingerprints each table: a hash of its rendered TS type, the TS declarations
+  of the named types it uses, and its index definitions. It re-validates the documents of a table only when the
+  fingerprint differs from the one stored after the last successful check (raw table `_schema_fingerprints`), using
+  `TableDef::validate`. If any document fails, `App::open` returns an error listing, per table, how many documents
+  fail and up to 20 ids with their serde errors, plus how to fix it. Fingerprints are then not updated, so the
+  check runs again next time. With `skip_schema_check` nothing is validated or recorded. The check misses changes
+  that don't show in the TS type (e.g. `u32` → `u8`, or `deny_unknown_fields`); reads of such documents still fail
+  with a clear error.
+
+**Running functions with their log lines** (what the WS worker and the HTTP API use):
+```rust
+impl App {
+    pub async fn run_query(&self, path: &str, args: Value, identity: &Identity) -> QueryRun;  // .result .read_set .ts .log_lines
+    pub async fn execute_mutation(&self, path: &str, args: Value, identity: &Identity,
+                                  idempotency_key: Option<&IdempotencyKey>) -> MutationRun;   // .result: Result<(Value, ts)> .log_lines
+    pub async fn execute_action(&self, path: &str, args: Value, identity: &Identity) -> ActionRun; // .result .log_lines
+    // run_mutation / run_action: same, without log lines or idempotency (unchanged signatures)
+}
+```
+
+**Execution log** (`<dir>/aux.db`, table `_logs`). Every execution is recorded: queries (including subscription
+reruns), mutations, actions, and nested `ctx.run_*` calls. Duplicate mutations answered from the dedup table and
+calls to unknown functions are not recorded. Writes go through a bounded channel (8192 entries) to a background
+thread that inserts in batches. When the channel is full, entries are dropped and counted rather than slowing the
+function down.
+
+```rust
+impl App { pub fn logs(&self) -> &Logs; }
+
+#[derive(Clone)] pub struct Logs { /* … */ }
+impl Logs {
+    pub async fn query(&self, filter: LogFilter) -> Result<Vec<LogEntry>>;   // newest first
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<LogEntry>;   // live tail, after each entry is written
+    pub async fn stats(&self, since_ms: i64) -> Result<Vec<FunctionStats>>;  // per path, sorted by path
+    pub fn dropped(&self) -> u64;                                             // entries dropped since startup
+    pub async fn flush(&self) -> Result<()>;                                  // wait until queued entries are written
+    pub async fn trim_now(&self) -> Result<()>;                               // apply retention now
+}
+
+#[derive(Default, Serialize, Deserialize)] #[serde(rename_all = "camelCase", default)]
+pub struct LogFilter {
+    pub path_prefix: Option<String>,      // e.g. "todos:" or "todos:list"
+    pub kind: Option<FunctionKind>,       // JSON: "query" | "mutation" | "action"
+    pub outcome: Option<LogOutcome>,
+    pub since: Option<i64>,               // ms since the epoch, inclusive
+    pub limit: Option<usize>,             // default 100, max 1000
+    pub before_id: Option<i64>,           // page backwards: pass the last id of the previous page
+}
+
+#[derive(Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+pub struct LogEntry {
+    pub id: i64,                      // increasing
+    pub timestamp: i64,               // start, ms since the epoch
+    pub path: String,
+    pub kind: FunctionKind,           // JSON: "query" | "mutation" | "action"
+    pub identity: Option<String>,     // opaque summary of the caller (None = anonymous)
+    pub duration_us: u64,
+    pub outcome: LogOutcome,          // JSON: "success" | "userError" | "serverError"
+    pub error: Option<String>,        // full message with context (never redacted: server-side data)
+    pub log_lines: Vec<String>,
+    pub args: String,                 // JSON, cut to at most 2048 bytes (then possibly not valid JSON)
+    pub args_truncated: bool,
+}
+pub enum LogOutcome { Success, UserError /* UserError, invalid args */, ServerError /* bugs, panics, timeouts */ }
+
+#[derive(Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+pub struct FunctionStats {
+    pub path: String, pub kind: FunctionKind,
+    pub calls: u64, pub errors: u64, pub user_errors: u64, pub server_errors: u64,
+    pub p50_us: u64, pub p95_us: u64,     // nearest-rank percentiles of duration_us
+}
 ```
 
 ---
@@ -215,6 +335,8 @@ pub fn decode_args<A: DeserializeOwned>(name: &str, args: serde_json::Value) -> 
 pub fn encode_output<O: Serialize>(out: O) -> Result<serde_json::Value>;
 pub fn ts_inline<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::inline(cfg) with the runtime's one ts-rs config
                                                                  // ('static: codegen also walks T's dependencies)
+/// `TableDef::validate` of a table: Ok iff `doc` deserializes as `Doc<T>`; Err = the serde error message.
+pub fn validate_doc<T: Table>(doc: &serde_json::Value) -> Result<(), String>;
 ```
 
 ---
@@ -242,7 +364,8 @@ impl ::ferrix::Table for Todo {
     fn table_def() -> ::ferrix::TableDef {
         ::ferrix::TableDef { name: "todos", indexes: vec![
             ::ferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
-        ], ts: || ::ferrix::__private::ts_inline::<Todo>() }
+        ], ts: || ::ferrix::__private::ts_inline::<Todo>(),
+        validate: ::ferrix::__private::validate_doc::<Todo> }
     }
 }
 

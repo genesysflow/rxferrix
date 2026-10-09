@@ -1,33 +1,28 @@
 //! The per-connection sync worker.
 //!
-//! One task per WebSocket. It owns the connection's query set and decides what to push. Everything a client sees
-//! comes from [`SyncWorker::refresh`]:
+//! One task per WebSocket. It owns the connection's protocol state: the versions it validates (`ModifyQuerySet`,
+//! `Authenticate`), the StateVersion the client holds, the socket's identity and token expiry, mutations and actions,
+//! and pings. Queries are not run here: the worker forwards query-set changes and identity changes to the app's
+//! shared subscription manager ([`super::subscriptions`]), which runs each distinct query once for every socket that
+//! watches it, and receives the results back through the connection's ordered mailbox. Each update from the mailbox
+//! becomes one `Transition`, so all of its results are valid at its `endVersion.ts` (see the manager's docs for why).
 //!
-//! 1. Open ONE read snapshot `S` (at the latest commit).
-//! 2. For each query not yet known to be valid at `S.ts`, look at the commits in `(valid_at, S.ts]` from the write
-//!    log. If any of them wrote a key inside the query's read set (or the log no longer covers that span), rerun the
-//!    query in `S`. Reruns run concurrently, all on the same snapshot.
-//! 3. Every query is now valid at `S.ts`.
-//! 4. Results whose hash changed become modifications.
-//!
-//! Because every query is brought to the *same* ts before anything is sent, all results in a Transition are
-//! consistent with each other ("no tearing"), and transitions move forward in ts.
+//! Read-your-writes: when a mutation commits at ts M and the client has not seen M yet, the worker asks the manager to
+//! cover M; the manager then sends an update (possibly empty) at a ts >= M.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::join_all;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::db::dedup::IdempotencyKey;
-use crate::db::readset::ReadSet;
 use crate::error::ClientError;
 use crate::runtime::{App, Identity};
-use crate::sync::protocol::{
-    ClientMessage, QueryId, QuerySetModification, RequestId, ServerMessage, StateModification, StateVersion,
-};
+use crate::sync::protocol::{ClientMessage, QueryId, QuerySetModification, RequestId, ServerMessage, StateVersion};
+use crate::sync::subscriptions::{Connection, Mailbox, Update};
 
 /// How often the server pings the client.
 pub const PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -38,18 +33,6 @@ pub enum Inbound {
     Message(ClientMessage),
     /// A frame that could not be parsed; the worker answers with `FatalError` and stops.
     Malformed(String),
-}
-
-struct QueryState {
-    path: String,
-    args: Value,
-    /// blake3 of the last result sent (value or error); `None` before the first run.
-    hash: Option<[u8; 32]>,
-    read_set: ReadSet,
-    /// The result is known to be correct at every ts in `[ran_at, valid_at]`.
-    valid_at: u64,
-    /// Must be rerun regardless of the write log (newly added, or identity changed).
-    force: bool,
 }
 
 /// A finished mutation or action. `log_lines` are already empty outside `--dev`.
@@ -76,12 +59,17 @@ pub struct SyncWorker {
     out: mpsc::Sender<ServerMessage>,
     /// The version the client has (the end version of the last Transition sent).
     sent: StateVersion,
+    /// The latest query set version the client asked for (may be ahead of `sent` while the manager answers).
+    query_set: u64,
+    /// The latest identity version the client asked for.
+    identity_version: u64,
+    /// The client's live query ids (to reject duplicates and ignore removals of unknown ids).
+    live: BTreeSet<QueryId>,
     identity: Identity,
     /// From `Connect`; with each mutation's requestId it makes the idempotency key.
     session_id: Option<String>,
-    queries: BTreeMap<QueryId, QueryState>,
-    /// Highest commit ts of a successful mutation response not yet covered by a sent Transition.
-    pending_mutation_ts: Option<u64>,
+    conn: Connection,
+    mailbox: Arc<Mailbox>,
     completions_tx: mpsc::UnboundedSender<Completion>,
     completions_rx: mpsc::UnboundedReceiver<Completion>,
     /// When the current access token expires; the socket then ends with `AuthError` unless the client has sent a
@@ -101,32 +89,35 @@ pub fn spawn(app: App) -> (mpsc::Sender<Inbound>, mpsc::Receiver<ServerMessage>)
 
 /// Run a worker until the input closes, the output is dropped, or a fatal error occurs.
 pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<ServerMessage>) {
+    let (conn, mailbox, doorbell) = match app.subscriptions().connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = out.send(ServerMessage::FatalError { error: e.to_string() }).await;
+            return;
+        }
+    };
     let (completions_tx, completions_rx) = mpsc::unbounded_channel();
     let worker = SyncWorker {
         app,
         out,
         sent: StateVersion::default(),
+        query_set: 0,
+        identity_version: 0,
+        live: BTreeSet::new(),
         identity: Identity::default(),
         session_id: None,
-        queries: BTreeMap::new(),
-        pending_mutation_ts: None,
+        conn,
+        mailbox,
         completions_tx,
         completions_rx,
         auth_expires_at: None,
         auth_error: None,
     };
-    worker.run(inbound).await
-}
-
-impl Drop for SyncWorker {
-    fn drop(&mut self) {
-        self.app.metrics().subscriptions_removed(self.queries.len() as u64);
-    }
+    worker.run(inbound, doorbell).await
 }
 
 impl SyncWorker {
-    async fn run(mut self, mut inbound: mpsc::Receiver<Inbound>) {
-        let mut commits = self.app.db().write_log().subscribe();
+    async fn run(mut self, mut inbound: mpsc::Receiver<Inbound>, mut doorbell: mpsc::Receiver<()>) {
         let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -140,15 +131,7 @@ impl SyncWorker {
                         Some(Inbound::Message(m)) => self.handle_message(m).await?,
                     },
                     Some(done) = self.completions_rx.recv() => self.handle_completion(done).await?,
-                    changed = commits.changed() => {
-                        if changed.is_err() {
-                            return Ok(());
-                        }
-                        // Mark seen before refreshing: commits that land during the refresh trigger another round,
-                        // so bursts of commits coalesce into few refreshes.
-                        commits.borrow_and_update();
-                        self.refresh_and_send().await?;
-                    }
+                    Some(()) = doorbell.recv() => self.deliver().await?,
                     _ = ping.tick() => self.send(ServerMessage::Ping).await?,
                     _ = sleep_until_opt(auth_expiry) => {
                         self.auth_error = Some("access token expired".into());
@@ -167,14 +150,31 @@ impl SyncWorker {
             };
             let _ = self.out.send(msg).await;
         }
+        // Dropping `self.conn` unsubscribes everything.
     }
 
     async fn send(&self, msg: ServerMessage) -> Result<(), Fatal> {
         self.out.send(msg).await.map_err(|_| Fatal("connection closed".into()))
     }
 
-    fn client_error(&self, e: &anyhow::Error) -> ClientError {
-        ClientError::from_anyhow(e, self.app.options().dev)
+    /// Send every update the manager queued, one Transition each.
+    async fn deliver(&mut self) -> Result<(), Fatal> {
+        let (updates, overflowed) = self.mailbox.take();
+        for update in updates {
+            self.send_transition(update).await?;
+        }
+        if overflowed {
+            return Err(Fatal("connection dropped: the client is not keeping up with updates".into()));
+        }
+        Ok(())
+    }
+
+    async fn send_transition(&mut self, update: Update) -> Result<(), Fatal> {
+        let end = StateVersion { query_set: update.query_set, identity: update.identity, ts: update.ts };
+        debug_assert!(end.ts >= self.sent.ts, "transitions must not go back in time");
+        let start = std::mem::replace(&mut self.sent, end);
+        let modifications = update.into_modifications();
+        self.send(ServerMessage::Transition { start_version: start, end_version: end, modifications }).await
     }
 
     async fn handle_message(&mut self, msg: ClientMessage) -> Result<(), Fatal> {
@@ -184,57 +184,44 @@ impl SyncWorker {
                 self.session_id = Some(session_id);
             }
             ClientMessage::ModifyQuerySet { base_version, new_version, modifications } => {
-                if base_version != self.sent.query_set || new_version != base_version + 1 {
+                if base_version != self.query_set || new_version != base_version + 1 {
                     return Err(Fatal(format!(
                         "invalid ModifyQuerySet: server query set version is {}, got baseVersion {base_version} and \
                          newVersion {new_version}",
-                        self.sent.query_set
+                        self.query_set
                     )));
                 }
-                let mut removed = Vec::new();
+                let mut forwarded = Vec::with_capacity(modifications.len());
                 for m in modifications {
-                    match m {
-                        QuerySetModification::Add { query_id, udf_path, args } => {
-                            if self.queries.contains_key(&query_id) {
+                    match &m {
+                        QuerySetModification::Add { query_id, .. } => {
+                            if !self.live.insert(*query_id) {
                                 return Err(Fatal(format!("duplicate queryId {query_id}")));
                             }
-                            let state = QueryState {
-                                path: udf_path,
-                                args,
-                                hash: None,
-                                read_set: ReadSet::new(),
-                                valid_at: 0,
-                                force: true,
-                            };
-                            self.queries.insert(query_id, state);
-                            self.app.metrics().subscriptions_added(1);
+                            forwarded.push(m);
                         }
                         QuerySetModification::Remove { query_id } => {
                             // Removing an id that isn't live is harmless (e.g. a client racing a reconnect); ignore it.
-                            if self.queries.remove(&query_id).is_some() {
-                                self.app.metrics().subscriptions_removed(1);
-                                removed.push(StateModification::QueryRemoved { query_id });
+                            if self.live.remove(query_id) {
+                                forwarded.push(m);
                             }
                         }
                     }
                 }
-                // New queries run at a fresh snapshot S and every other query is aligned to S as well, so the
-                // Transition that answers this ModifyQuerySet is consistent at one ts.
-                let (ts, mut mods) = self.refresh().await?;
-                removed.append(&mut mods);
-                let end = StateVersion { query_set: new_version, ts, ..self.sent };
-                self.send_transition(end, removed).await?;
+                self.query_set = new_version;
+                // The manager answers with an update at querySet = new_version carrying the first results.
+                self.conn.modify(new_version, forwarded).await?;
             }
             ClientMessage::Authenticate { base_version, token } => {
-                if base_version != self.sent.identity {
+                if base_version != self.identity_version {
                     return Err(Fatal(format!(
                         "invalid Authenticate: server identity version is {}, got baseVersion {base_version}",
-                        self.sent.identity
+                        self.identity_version
                     )));
                 }
                 // An invalid, expired or revoked token ends the socket with AuthError (the client refreshes and
-                // reconnects); a valid one becomes this socket's identity until it expires. Everything reruns:
-                // query results may depend on who is asking.
+                // reconnects); a valid one becomes this socket's identity until it expires. Query results may depend
+                // on who is asking: the manager moves every subscription to the shared query for the new identity.
                 let (identity, expires_at) = match token {
                     None => (Identity::default(), None),
                     Some(token) => match self.app.auth().authenticate(&self.app, &token).await {
@@ -245,14 +232,10 @@ impl SyncWorker {
                         }
                     },
                 };
-                self.identity = identity;
+                self.identity = identity.clone();
                 self.auth_expires_at = expires_at;
-                for q in self.queries.values_mut() {
-                    q.force = true;
-                }
-                let (ts, mods) = self.refresh().await?;
-                let end = StateVersion { identity: base_version + 1, ts, ..self.sent };
-                self.send_transition(end, mods).await?;
+                self.identity_version = base_version + 1;
+                self.conn.authenticate(self.identity_version, identity).await?;
             }
             ClientMessage::Mutation { request_id, udf_path, args } => {
                 // Run off the worker task so a slow mutation doesn't block query updates for this socket.
@@ -291,8 +274,7 @@ impl SyncWorker {
                 if let Some(ts) = committed_ts
                     && ts > self.sent.ts
                 {
-                    self.pending_mutation_ts = Some(self.pending_mutation_ts.map_or(ts, |p| p.max(ts)));
-                    self.refresh_and_send().await?;
+                    self.conn.cover(ts).await?;
                 }
             }
             Completion::Action { request_id, result, log_lines } => {
@@ -300,90 +282,6 @@ impl SyncWorker {
             }
         }
         Ok(())
-    }
-
-    /// Bring every query up to the latest ts; send a Transition if anything changed or a mutation response is
-    /// waiting for one. Otherwise the queries' validity advances silently.
-    async fn refresh_and_send(&mut self) -> Result<(), Fatal> {
-        if self.queries.is_empty() && self.pending_mutation_ts.is_none() {
-            return Ok(());
-        }
-        let (ts, mods) = self.refresh().await?;
-        let covers_pending = self.pending_mutation_ts.is_some_and(|p| ts >= p);
-        if !mods.is_empty() || covers_pending {
-            self.send_transition(StateVersion { ts, ..self.sent }, mods).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_transition(&mut self, end: StateVersion, modifications: Vec<StateModification>) -> Result<(), Fatal> {
-        debug_assert!(end.ts >= self.sent.ts, "transitions must not go back in time");
-        let start = self.sent;
-        self.sent = end;
-        if self.pending_mutation_ts.is_some_and(|p| end.ts >= p) {
-            self.pending_mutation_ts = None;
-        }
-        self.send(ServerMessage::Transition { start_version: start, end_version: end, modifications }).await
-    }
-
-    /// The core algorithm; see the module docs. Returns the snapshot ts and the modifications to send.
-    async fn refresh(&mut self) -> Result<(u64, Vec<StateModification>), Fatal> {
-        let db = self.app.db();
-        let snapshot = db.snapshot().await?;
-        let ts = snapshot.ts;
-        // The writer appends to the log right after COMMIT; the snapshot may have seen a commit whose entry isn't
-        // appended yet. Wait so `entries_between` below sees every commit up to `ts`.
-        db.write_log().wait_for(ts).await;
-
-        let mut to_run: Vec<QueryId> = Vec::new();
-        for (id, q) in &self.queries {
-            if q.force {
-                to_run.push(*id);
-            } else if q.valid_at < ts {
-                let invalidated = match db.write_log().entries_between(q.valid_at, ts) {
-                    None => true, // trimmed: we can't tell, so assume it changed
-                    Some(entries) => entries.iter().any(|e| q.read_set.overlaps(e)),
-                };
-                if invalidated {
-                    to_run.push(*id);
-                }
-            }
-        }
-
-        let runs = to_run.iter().map(|id| {
-            let q = &self.queries[id];
-            self.app.query_in_snapshot(&snapshot, &q.path, q.args.clone(), &self.identity, false)
-        });
-        let results = join_all(runs).await;
-        drop(snapshot);
-
-        let mut mods = Vec::new();
-        for (id, run) in to_run.into_iter().zip(results) {
-            // Log lines don't count towards the hash: a rerun with the same result sends nothing.
-            let log_lines = client_log_lines(&self.app, run.log_lines);
-            let (hash, modification) = match run.result {
-                Ok(value) => {
-                    let hash = hash_result(b"ok", &value);
-                    (hash, StateModification::QueryUpdated { query_id: id, value, log_lines })
-                }
-                Err(e) => {
-                    let error = self.client_error(&e);
-                    let hash = hash_result(b"err", &serde_json::json!([error.message, error.data]));
-                    (hash, StateModification::QueryFailed { query_id: id, error, log_lines })
-                }
-            };
-            let q = self.queries.get_mut(&id).expect("query exists");
-            q.read_set = run.read_set;
-            q.force = false;
-            if q.hash != Some(hash) {
-                q.hash = Some(hash);
-                mods.push(modification);
-            }
-        }
-        for q in self.queries.values_mut() {
-            q.valid_at = q.valid_at.max(ts);
-        }
-        Ok((ts, mods))
     }
 }
 
@@ -398,12 +296,4 @@ async fn sleep_until_opt(at: Option<Instant>) {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
-}
-
-fn hash_result(tag: &[u8], value: &Value) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(tag);
-    // serde_json maps are sorted (no `preserve_order`), so equal values serialize identically.
-    h.update(&serde_json::to_vec(value).unwrap_or_default());
-    *h.finalize().as_bytes()
 }

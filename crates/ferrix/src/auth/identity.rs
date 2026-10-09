@@ -1,6 +1,9 @@
 //! Who is calling a function: [`Identity`] (set by the transport from a validated access token) and [`Auth`], its
 //! view inside functions (`ctx.auth`).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::UserError;
 use crate::auth::tables::{Admin, Session, User};
 use crate::db::query::QueryDb;
@@ -69,6 +72,39 @@ impl Identity {
 #[derive(Debug, Clone, Default)]
 pub struct Auth {
     identity: Identity,
+    /// What the function has read of `identity` so far (shared with the runtime, which uses it to decide which
+    /// subscribers can share a query's result).
+    access: Arc<AuthAccess>,
+}
+
+/// How much of the caller's identity a query run depended on. Ordered from least to most specific.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AuthDeps {
+    /// Never looked at `ctx.auth`: the result is the same for every caller.
+    #[default]
+    None,
+    /// Read the user or admin id (`user_id`, `require_user`, `user`, `is_admin`, `admin_id`, `require_admin`).
+    Principal,
+    /// Read the session id or the raw identity.
+    Session,
+}
+
+/// The [`AuthDeps`] of one run, recorded as the function reads `ctx.auth`.
+#[derive(Debug, Default)]
+pub(crate) struct AuthAccess(AtomicU8);
+
+impl AuthAccess {
+    fn mark(&self, deps: AuthDeps) {
+        self.0.fetch_max(deps as u8, Ordering::Relaxed);
+    }
+
+    pub(crate) fn deps(&self) -> AuthDeps {
+        match self.0.load(Ordering::Relaxed) {
+            0 => AuthDeps::None,
+            1 => AuthDeps::Principal,
+            _ => AuthDeps::Session,
+        }
+    }
 }
 
 /// `UserError` code for calls that need a signed-in user (or admin) but have none.
@@ -78,16 +114,25 @@ pub const FORBIDDEN: &str = "forbidden";
 
 impl Auth {
     pub(crate) fn new(identity: Identity) -> Self {
-        Auth { identity }
+        Auth { identity, access: Arc::default() }
+    }
+
+    /// An `Auth` that records what the function reads of it into the returned [`AuthAccess`].
+    pub(crate) fn tracked(identity: Identity) -> (Self, Arc<AuthAccess>) {
+        let auth = Auth::new(identity);
+        let access = auth.access.clone();
+        (auth, access)
     }
 
     /// The raw identity.
     pub fn identity(&self) -> &Identity {
+        self.access.mark(AuthDeps::Session);
         &self.identity
     }
 
     /// The signed-in user's id, if any. `None` for anonymous callers and for admin sessions.
     pub fn user_id(&self) -> Option<Id<User>> {
+        self.access.mark(AuthDeps::Principal);
         self.identity.user_id.as_deref().and_then(|s| s.parse().ok())
     }
 
@@ -108,6 +153,7 @@ impl Auth {
 
     /// The session id of the access token, if signed in.
     pub fn session_id(&self) -> Option<Id<Session>> {
+        self.access.mark(AuthDeps::Session);
         self.identity.session_id.as_deref().and_then(|s| s.parse().ok())
     }
 
@@ -118,11 +164,13 @@ impl Auth {
 
     /// The admin's id for admin sessions.
     pub fn admin_id(&self) -> Option<Id<Admin>> {
+        self.access.mark(AuthDeps::Principal);
         self.identity.admin_id.as_deref().and_then(|s| s.parse().ok())
     }
 
     /// The admin's id, or a `UserError`: `"unauthenticated"` when nobody is signed in, `"forbidden"` otherwise.
     pub fn require_admin(&self) -> crate::Result<Id<Admin>> {
+        self.access.mark(AuthDeps::Principal);
         match self.admin_id() {
             Some(id) => Ok(id),
             None if self.identity.is_anonymous() => {

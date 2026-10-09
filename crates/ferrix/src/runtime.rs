@@ -18,6 +18,7 @@ use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
 use crate::error::{FunctionNotFound, MutationTimeout};
 use crate::exec_log::{LogRetention, Logs};
+use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
 use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, TABLES, Visibility};
 use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 
@@ -27,6 +28,7 @@ use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 
 // `Identity` (who is calling) and `Auth` (`ctx.auth`) live in the auth module.
 pub use crate::auth::{Auth, Identity};
+use crate::auth::identity::AuthDeps;
 
 /// Context of a query: read-only access to one consistent snapshot.
 pub struct QueryCtx {
@@ -188,6 +190,14 @@ pub struct QueryRun {
     pub read_set: ReadSet,
     pub ts: u64,
     pub log_lines: Vec<String>,
+    /// How much of the caller's identity the run read through `ctx.auth` (decides who may share the result).
+    pub(crate) auth_deps: AuthDeps,
+}
+
+impl QueryRun {
+    fn not_run(e: anyhow::Error, ts: u64) -> QueryRun {
+        QueryRun { result: Err(e), read_set: ReadSet::new(), ts, log_lines: Vec::new(), auth_deps: AuthDeps::None }
+    }
 }
 
 /// The result of running a mutation: `(value, commit ts)` or the error, and its log lines.
@@ -215,15 +225,24 @@ struct AppInner {
     auth: crate::auth::AuthService,
     logs: Logs,
     dir: PathBuf,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
     started_at: f64,
+    /// Started on first use (it needs a tokio runtime).
+    subscriptions: OnceLock<SubscriptionManager>,
 }
 
-/// Live counters for the dashboard's overview (`App::metrics`). Updated by the WebSocket server and sync workers.
+/// Live counters for the dashboard's overview (`App::metrics`). Sockets are counted by the WebSocket server; the
+/// subscription counts are published by the subscription manager (`crate::sync::subscriptions`).
 #[derive(Debug, Default)]
 pub struct Metrics {
     sockets: AtomicU64,
+    connections: AtomicU64,
     subscriptions: AtomicU64,
+    shared_queries: AtomicU64,
+    index_ranges: AtomicU64,
+    rounds: AtomicU64,
+    reruns: AtomicU64,
+    last_round_reruns: AtomicU64,
 }
 
 impl Metrics {
@@ -232,9 +251,27 @@ impl Metrics {
         self.sockets.load(Ordering::Relaxed)
     }
 
-    /// Live query subscriptions across all connections.
+    /// Live query subscriptions across all connections (`(connection, queryId)` pairs).
     pub fn subscriptions(&self) -> u64 {
         self.subscriptions.load(Ordering::Relaxed)
+    }
+
+    /// Distinct shared queries: each runs once per invalidation, however many subscriptions it serves.
+    pub fn shared_queries(&self) -> u64 {
+        self.shared_queries.load(Ordering::Relaxed)
+    }
+
+    /// All subscription manager counters.
+    pub fn subscription_stats(&self) -> SubscriptionStats {
+        SubscriptionStats {
+            connections: self.connections.load(Ordering::Relaxed),
+            shared_queries: self.shared_queries(),
+            subscriptions: self.subscriptions(),
+            index_ranges: self.index_ranges.load(Ordering::Relaxed),
+            rounds: self.rounds.load(Ordering::Relaxed),
+            reruns: self.reruns.load(Ordering::Relaxed),
+            last_round_reruns: self.last_round_reruns.load(Ordering::Relaxed),
+        }
     }
 
     pub(crate) fn socket_opened(&self) {
@@ -245,12 +282,27 @@ impl Metrics {
         self.sockets.fetch_sub(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn subscriptions_added(&self, n: u64) {
-        self.subscriptions.fetch_add(n, Ordering::Relaxed);
+    pub(crate) fn set_subscription_counts(&self, connections: u64, shared_queries: u64, subscriptions: u64, ranges: u64) {
+        self.connections.store(connections, Ordering::Relaxed);
+        self.shared_queries.store(shared_queries, Ordering::Relaxed);
+        self.subscriptions.store(subscriptions, Ordering::Relaxed);
+        self.index_ranges.store(ranges, Ordering::Relaxed);
     }
 
-    pub(crate) fn subscriptions_removed(&self, n: u64) {
-        self.subscriptions.fetch_sub(n, Ordering::Relaxed);
+    pub(crate) fn record_round(&self, reruns: u64) {
+        self.rounds.fetch_add(1, Ordering::Relaxed);
+        self.reruns.fetch_add(reruns, Ordering::Relaxed);
+        self.last_round_reruns.store(reruns, Ordering::Relaxed);
+    }
+}
+
+/// A weak reference to an [`App`] (held by its background tasks so they don't keep it alive).
+#[derive(Clone)]
+pub(crate) struct WeakApp(std::sync::Weak<AppInner>);
+
+impl WeakApp {
+    pub(crate) fn upgrade(&self) -> Option<App> {
+        self.0.upgrade().map(|inner| App { inner })
     }
 }
 
@@ -275,8 +327,11 @@ impl App {
         })
         .await??;
         let started_at = crate::db::wall_clock_ms();
-        let metrics = Metrics::default();
-        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at }) })
+        let metrics = Arc::new(Metrics::default());
+        let subscriptions = OnceLock::new();
+        Ok(App {
+            inner: Arc::new(AppInner { db, registry, options, auth, logs, dir: data_dir, metrics, started_at, subscriptions }),
+        })
     }
 
     /// The data directory (`data.db`, `aux.db`, `auth_secret.key`).
@@ -287,6 +342,20 @@ impl App {
     /// Connection and subscription counters.
     pub fn metrics(&self) -> &Metrics {
         &self.inner.metrics
+    }
+
+    /// The shared subscription manager behind every sync connection (started on first use).
+    pub fn subscriptions(&self) -> &SubscriptionManager {
+        self.inner.subscriptions.get_or_init(|| SubscriptionManager::spawn(self, self.inner.metrics.clone()))
+    }
+
+    /// The subscription manager's counters: connections, shared queries, subscriptions, rounds and reruns.
+    pub fn subscription_stats(&self) -> SubscriptionStats {
+        self.inner.metrics.subscription_stats()
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakApp {
+        WeakApp(Arc::downgrade(&self.inner))
     }
 
     /// When this `App` was opened (ms since the epoch).
@@ -404,7 +473,7 @@ impl App {
     pub(crate) async fn call_query(&self, path: &str, args: Value, identity: &Identity, allow_internal: bool) -> QueryRun {
         let snapshot = match self.db().snapshot().await {
             Ok(s) => s,
-            Err(e) => return QueryRun { result: Err(e), read_set: ReadSet::new(), ts: 0, log_lines: Vec::new() },
+            Err(e) => return QueryRun::not_run(e, 0),
         };
         self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await
     }
@@ -421,17 +490,18 @@ impl App {
         let ts = snapshot.ts;
         let def = match self.lookup(path, FunctionKind::Query, allow_internal) {
             Ok(d) => d,
-            Err(e) => return QueryRun { result: Err(e), read_set: ReadSet::new(), ts, log_lines: Vec::new() },
+            Err(e) => return QueryRun::not_run(e, ts),
         };
         let Handler::Query(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
         let read_set = db.read_set_handle();
-        let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), now: snapshot.time };
+        let (auth, auth_access) = Auth::tracked(identity.clone());
+        let ctx = QueryCtx { db, auth, now: snapshot.time };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self.logs(), &result, &log_lines);
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
-        QueryRun { result, read_set, ts, log_lines }
+        QueryRun { result, read_set, ts, log_lines, auth_deps: auth_access.deps() }
     }
 
     pub(crate) async fn call_mutation(

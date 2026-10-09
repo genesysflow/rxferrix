@@ -8,7 +8,7 @@
 //! - [`runtime`]: function registry, contexts and [`App`].
 //! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
 //!   `aux.db` ([`App::logs`]).
-//! - [`sync`]: WebSocket protocol messages and the per-connection sync worker.
+//! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, admins, and `ctx.auth`.
 //! - [`dashboard`]: the admin dashboard's system functions, `/api/admin/*` endpoints and embedded SPA (`/_/`).
 //! - [`server`], [`cli`]: axum server and command line. [`testing`]: `TestApp`.

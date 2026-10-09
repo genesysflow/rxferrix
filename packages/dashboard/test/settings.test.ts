@@ -28,7 +28,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
 const stored = view({
   smtp: { url: "smtps://me@mail.example.com:465", from: "App <a@example.com>", password: MASK },
   oauth: [
-    { id: "github", kind: "github", issuer: null, clientId: "abc", clientSecret: MASK, enabled: true, scopes: null, locked: false },
+    { id: "github", kind: "github", issuer: null, clientId: "abc", clientSecret: MASK, enabled: true, scopes: null, teamId: null, keyId: null, locked: false },
   ],
   redirectUrls: ["https://app.example.com/"],
   sessionTtlSecs: 3600,
@@ -71,7 +71,7 @@ describe("settings form", () => {
     // Changing another provider field keeps the stored client secret.
     form.oauth[0]!.clientId = "xyz";
     expect(buildUpdate(stored, form).update.oauth).toEqual([
-      { id: "github", kind: "github", issuer: null, clientId: "xyz", clientSecret: MASK, enabled: true, scopes: null },
+      { id: "github", kind: "github", issuer: null, clientId: "xyz", clientSecret: MASK, enabled: true, scopes: null, teamId: null, keyId: null },
     ]);
   });
 
@@ -108,9 +108,36 @@ describe("settings form", () => {
       clientSecret: "g-secret",
       enabled: true,
       scopes: ["openid", "email", "profile"],
+      teamId: null,
+      keyId: null,
     });
     form.oauth = [];
     expect(buildUpdate(stored, form)).toMatchObject({ update: { clear: ["oauth"] }, changed: ["oauth"] });
+  });
+
+  it("configures Sign in with Apple with its team id, key id and private key", () => {
+    const form = formFromView(stored);
+    const apple = newProvider("apple");
+    expect(apple.id).toBe("apple");
+    apple.clientId = "com.example.web";
+    apple.secret.value = "not a pem";
+    form.oauth.push(apple);
+    expect(Object.keys(validate(form, stored)).sort()).toEqual(["oauth.1.keyId", "oauth.1.secret", "oauth.1.teamId"]);
+    apple.teamId = " TEAMID1234 ";
+    apple.keyId = "KEYID12345";
+    apple.secret.value = "-----BEGIN PRIVATE KEY-----\nMIGT…\n-----END PRIVATE KEY-----";
+    expect(validate(form, stored)).toEqual({});
+    expect(buildUpdate(stored, form).update.oauth?.[1]).toMatchObject({
+      kind: "apple",
+      clientSecret: apple.secret.value,
+      teamId: "TEAMID1234",
+      keyId: "KEYID12345",
+    });
+    // A stored Apple provider round-trips without changes (the key stays masked).
+    const withApple = view({
+      oauth: [{ id: "apple", kind: "apple", issuer: null, clientId: "c", clientSecret: MASK, enabled: true, scopes: null, teamId: "T1", keyId: "K1", locked: false }],
+    });
+    expect(buildUpdate(withApple, formFromView(withApple))).toEqual({ update: {}, changed: [] });
   });
 
   it("never sends locked fields", () => {

@@ -6,6 +6,7 @@
 import { FerrixError, type FerrixAuth } from "@ferrix/client";
 import type {
   BackupInfo,
+  BackupListing,
   ExportFormat,
   Impersonation,
   ImportMode,
@@ -162,27 +163,84 @@ export function exportTable(auth: FerrixAuth, table: string, format: ExportForma
   return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}`, `${table}.${format}`);
 }
 
-/** `POST /api/admin/import/{table}?mode=…` with a JSONL body. */
+/** `POST /api/admin/import/{table}?mode=…&format=…` with a JSONL or CSV body (CSV as exported, with a header). */
 export async function importTable(
   auth: FerrixAuth,
   table: string,
   mode: ImportMode,
   body: Blob | string,
+  format: ExportFormat = "jsonl",
 ): Promise<ImportReport> {
-  const res = await adminFetch(auth, `/api/admin/import/${encodeURIComponent(table)}?mode=${mode}`, {
+  const res = await adminFetch(auth, `/api/admin/import/${encodeURIComponent(table)}?mode=${mode}&format=${format}`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-ndjson" },
+    headers: { "Content-Type": format === "csv" ? "text/csv" : "application/x-ndjson" },
     body,
   });
   return (await res.json()) as ImportReport;
 }
 
+/** The import format a file name suggests: `.csv` is CSV, anything else JSONL. */
+export function importFormatOf(name: string): ExportFormat {
+  return /\.csv$/i.test(name) ? "csv" : "jsonl";
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Backups
 
-export async function listBackups(auth: FerrixAuth): Promise<{ target: string; backups: BackupInfo[] }> {
+export async function listBackups(auth: FerrixAuth): Promise<BackupListing> {
   const res = await adminFetch(auth, "/api/admin/backups");
-  return (await res.json()) as { target: string; backups: BackupInfo[] };
+  const r = (await res.json()) as Partial<BackupListing> & { target: string; backups: BackupInfo[] };
+  return { pendingRestore: null, restart: { available: false, exitCode: null }, ...r };
+}
+
+/** The pending restore and restart availability, as the staging endpoints answer. */
+export type RestoreState = Pick<BackupListing, "pendingRestore" | "restart">;
+
+/**
+ * `POST /api/admin/backups/{name}/restore`: validate a stored backup completely (checksums, SQLite integrity, schema,
+ * indexes) and stage it to replace the database at the next start. Throws with the reason when it can't be restored.
+ */
+export async function stageRestore(auth: FerrixAuth, name: string): Promise<RestoreState> {
+  const res = await adminFetch(auth, `/api/admin/backups/${encodeURIComponent(name)}/restore`, { method: "POST" });
+  return (await res.json()) as RestoreState;
+}
+
+/** `POST /api/admin/restore?name=…` with an archive from this computer: the same validation and staging. */
+export async function uploadRestore(auth: FerrixAuth, file: Blob, name: string): Promise<RestoreState> {
+  const res = await adminFetch(auth, `/api/admin/restore?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/zstd" },
+    body: file,
+  });
+  return (await res.json()) as RestoreState;
+}
+
+/** `DELETE /api/admin/restore`: cancel the staged restore. */
+export async function cancelRestore(auth: FerrixAuth): Promise<void> {
+  await adminFetch(auth, "/api/admin/restore", { method: "DELETE" });
+}
+
+/** `POST /api/admin/restore/restart`: the server shuts down gracefully and exits for its supervisor to restart it. */
+export async function restartServer(auth: FerrixAuth): Promise<{ restarting: boolean; exitCode: number }> {
+  const res = await adminFetch(auth, "/api/admin/restore/restart", { method: "POST" });
+  return (await res.json()) as { restarting: boolean; exitCode: number };
+}
+
+/** Resolves once `GET /api/health` answers again after it stopped answering (or after `timeoutMs`: `false`). */
+export async function waitForRestart(timeoutMs = 120_000, interval = 500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let wentDown = false;
+  while (Date.now() < deadline) {
+    try {
+      const ok = (await fetch("/api/health", { cache: "no-store" })).ok;
+      if (ok && wentDown) return true;
+      if (!ok) wentDown = true;
+    } catch {
+      wentDown = true;
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  return false;
 }
 
 export async function createBackup(

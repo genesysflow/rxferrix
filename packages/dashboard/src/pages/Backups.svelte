@@ -2,14 +2,36 @@
   import { FerrixError } from "@ferrix/client";
   import { useMutation, useQuery } from "@ferrix/svelte";
   import { onMount } from "svelte";
-  import { scheduler, type BackupInfo, type ExportFormat, type ImportMode, type ImportReport } from "../lib/api.js";
-  import { createBackup, deleteBackup, downloadBackup, exportTable, importTable, listBackups, saveBlob } from "../lib/admin.js";
+  import {
+    scheduler,
+    type BackupInfo,
+    type ExportFormat,
+    type ImportMode,
+    type ImportReport,
+    type PendingRestore,
+    type RestartInfo,
+  } from "../lib/api.js";
+  import {
+    cancelRestore,
+    createBackup,
+    deleteBackup,
+    downloadBackup,
+    exportTable,
+    importFormatOf,
+    importTable,
+    listBackups,
+    restartServer,
+    saveBlob,
+    stageRestore,
+    uploadRestore,
+    waitForRestart,
+  } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatRelative, formatTime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
 
-  /** Backups (`/api/admin/backups*`), per-table export and JSONL import (`/api/admin/export|import/{table}`). */
+  /** Backups (`/api/admin/backups*`), per-table export and JSONL/CSV import (`/api/admin/export|import/{table}`). */
   const ctx = dashboardContext();
   const crons = useQuery(scheduler.crons, () => ({}));
   const runCronNow = useMutation(scheduler.runCronNow);
@@ -29,12 +51,20 @@
   /** Snapshot ts of the backups created from this page (the listing doesn't know them). */
   let knownTs = $state<Record<string, number>>({});
   let now = $state(Date.now());
+  // Staged restores (docs/CONTRACT.md §4.4): validated now, applied when the server starts next.
+  let pending = $state<PendingRestore | null>(null);
+  let restartInfo = $state<RestartInfo>({ available: false, exitCode: null });
+  let restoreError = $state<string | null>(null);
+  let staging = $state<string | null>(null);
+  let restarting = $state<"waiting" | "timeout" | null>(null);
 
   async function refresh() {
     try {
       const r = await listBackups(ctx.auth);
       target = r.target;
       backups = r.backups;
+      pending = r.pendingRestore;
+      restartInfo = r.restart;
       listError = null;
     } catch (e) {
       listError = e instanceof Error ? e.message : String(e);
@@ -102,6 +132,70 @@
     }
   }
 
+  const restoreWarning =
+    "It replaces ALL data (users, sessions, administrators and settings included) the next time the server starts; " +
+    "the current database files are kept in pre-restore-<time>/ in the data directory. The backup is checked " +
+    "completely first.";
+
+  async function restore(label: string, stage: () => Promise<{ pendingRestore: PendingRestore | null; restart: RestartInfo }>) {
+    restoreError = null;
+    staging = label;
+    try {
+      const r = await stage();
+      pending = r.pendingRestore;
+      restartInfo = r.restart;
+      ctx.toast(`${label} checked and staged; it is restored at the next start`);
+    } catch (e) {
+      restoreError = e instanceof Error ? e.message : String(e);
+    } finally {
+      staging = null;
+    }
+  }
+
+  function restoreBackup(b: BackupInfo) {
+    if (!confirm(`Restore ${b.name}?\n\n${restoreWarning}`)) return;
+    void restore(b.name, () => stageRestore(ctx.auth, b.name));
+  }
+
+  function restoreUpload(e: Event & { currentTarget: HTMLInputElement }) {
+    const input = e.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!confirm(`Restore ${file.name} (${formatBytes(file.size)}) from this computer?\n\n${restoreWarning}`)) return;
+    void restore(file.name, () => uploadRestore(ctx.auth, file, file.name));
+  }
+
+  async function cancelPending() {
+    if (!pending || !confirm(`Cancel the restore of ${pending.source}? The current data stays.`)) return;
+    try {
+      await cancelRestore(ctx.auth);
+      ctx.toast("Restore canceled");
+    } catch (e) {
+      ctx.toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    await refresh();
+  }
+
+  async function restartNow() {
+    if (!pending) return;
+    const ok = confirm(
+      `Restart the server now to restore ${pending.source}?\n\nOpen requests finish, then the server exits with code ` +
+        `${restartInfo.exitCode} for its supervisor to start it again. Everyone is disconnected for a few seconds, and ` +
+        "sessions that aren't in the backup end (you may have to sign in again).",
+    );
+    if (!ok) return;
+    try {
+      await restartServer(ctx.auth);
+    } catch (e) {
+      ctx.toast(e instanceof Error ? e.message : String(e), "error");
+      return;
+    }
+    restarting = "waiting";
+    if (await waitForRestart()) location.reload();
+    else restarting = "timeout";
+  }
+
   // Export
   const tables = $derived(ctx.tables ?? []);
   const appTables = $derived(tables.filter((t) => !t.system));
@@ -130,6 +224,7 @@
   let importName = $state("");
   let importMode = $state<ImportMode>("insert");
   let importFile = $state<File | null>(null);
+  let importFormat = $state<ExportFormat>("jsonl");
   let importing = $state(false);
   let importResult = $state<{ ok: true; report: ImportReport } | { ok: false; error: string } | null>(null);
   $effect(() => {
@@ -143,7 +238,7 @@
     importing = true;
     importResult = null;
     try {
-      const report = await importTable(ctx.auth, importName, importMode, importFile);
+      const report = await importTable(ctx.auth, importName, importMode, importFile, importFormat);
       importResult = { ok: true, report };
       ctx.toast(`Imported into ${importName}`);
     } catch (e) {
@@ -193,9 +288,55 @@
       </dl>
       <p class="faint small">
         A backup is a consistent snapshot taken while the server runs (writes are not blocked). It never contains
-        <code>auth_secret.key</code>: settings secrets restore only with the same key file. Restore with
-        <code>ferrix restore &lt;archive&gt;</code> while the server is stopped.
+        <code>auth_secret.key</code>: settings secrets restore only with the same key file. <strong>Restore</strong>
+        checks a backup completely and stages it; it replaces the database when the server starts next (or use
+        <code>ferrix restore &lt;archive&gt;</code> while the server is stopped).
       </p>
+      {#if pending}
+        <div class="pending" class:failed={pending.error} role="status" data-testid="pending-restore">
+          <div>
+            {#if pending.error}
+              <strong>The staged restore of <span class="mono">{pending.source}</span> could not be applied.</strong>
+              <div class="error-text" data-testid="pending-restore-error">{pending.error}</div>
+              <div>The server started on its current data. Cancel it, then restore again.</div>
+            {:else}
+              <strong>Restore pending:</strong> <span class="mono">{pending.source}</span> (snapshot ts {pending.ts}, taken
+              {formatTime(pending.backupCreatedAt)}{pending.includesAux ? ", with the execution log" : ""}{pending.blobs
+                ? `, ${pending.blobs} file${pending.blobs === 1 ? "" : "s"}`
+                : ""}, {formatBytes(pending.bytes)}) passed every check. It replaces the current data
+              <strong>the next time the server starts</strong>; the current files are kept in
+              <code>pre-restore-…/</code>.
+              {#if pending.secretIgnored}<div class="faint">The archive's <code>auth_secret.key</code> is not restored (only <code>ferrix restore</code> restores it).</div>{/if}
+              {#if restarting === "waiting"}
+                <div data-testid="restarting">Restarting… this page reloads when the server is back.</div>
+              {:else if restarting === "timeout"}
+                <div class="error-text">The server hasn't come back yet. Check its supervisor (systemd, Docker).</div>
+              {:else if !restartInfo.available}
+                <div class="faint" data-testid="restart-hint">
+                  Restart the server to apply it. (Started with <code>--restart-exit-code 75</code> under systemd or Docker, it
+                  can restart itself from here.)
+                </div>
+              {/if}
+            {/if}
+          </div>
+          <div class="pending-actions">
+            {#if !pending.error && restartInfo.available && !restarting}
+              <button class="primary" onclick={restartNow} data-testid="restart-now">Restart now</button>
+            {/if}
+            <button class="danger" onclick={cancelPending} disabled={restarting === "waiting"} data-testid="cancel-restore">Cancel restore</button>
+          </div>
+        </div>
+      {/if}
+      {#if staging}
+        <div class="faint" role="status" data-testid="restore-checking">Checking {staging}… (extracting, integrity check, schema, indexes)</div>
+      {/if}
+      {#if restoreError}
+        <div class="alert" role="alert" data-testid="restore-error">Not restored: {restoreError}</div>
+      {/if}
+      <div class="row upload">
+        <label class="inline faint small" for="restore-file">Restore an archive from this computer:</label>
+        <input id="restore-file" type="file" accept=".zst,.tar.zst,application/zstd" onchange={restoreUpload} disabled={!!pending || !!staging} />
+      </div>
       {#if listError}
         <div class="alert" role="alert">{listError}</div>
       {:else if backups === null}
@@ -215,6 +356,11 @@
                 <td class="mono faint">{b.ts ?? knownTs[b.name] ?? "—"}</td>
                 <td class="actions">
                   <button class="small" onclick={() => download(b)} disabled={busyName === b.name}>Download</button>
+                  <button
+                    class="small"
+                    onclick={() => restoreBackup(b)}
+                    disabled={busyName === b.name || !!pending || !!staging}
+                    title={pending ? "A restore is pending" : "Check this backup and restore it at the next start"}>Restore</button>
                   <button class="small danger" onclick={() => remove(b)} disabled={busyName === b.name}>Delete</button>
                 </td>
               </tr>
@@ -248,8 +394,9 @@
       <section class="card section" aria-labelledby="i-head">
         <h2 id="i-head">Import into a table</h2>
         <p class="muted small">
-          JSONL, one document per line (as exported). Every line is validated against the table before anything is
-          written; ids and creation times are kept.
+          JSONL (one document per line) or CSV with a header row, as exported; CSV cells are typed with the table's
+          fields. Every document is validated against the table before anything is written; ids and creation times
+          are kept.
         </p>
         <div class="form">
           <label for="import-table">Table</label>
@@ -269,9 +416,17 @@
           <input
             id="import-file"
             type="file"
-            accept=".jsonl,.ndjson,application/x-ndjson,application/json,text/plain"
-            onchange={(e) => (importFile = e.currentTarget.files?.[0] ?? null)}
+            accept=".jsonl,.ndjson,.csv,application/x-ndjson,application/json,text/csv,text/plain"
+            onchange={(e) => {
+              importFile = e.currentTarget.files?.[0] ?? null;
+              if (importFile) importFormat = importFormatOf(importFile.name);
+            }}
           />
+          <label for="import-format">Format</label>
+          <select id="import-format" bind:value={importFormat}>
+            <option value="jsonl">JSONL</option>
+            <option value="csv">CSV</option>
+          </select>
         </div>
         <div class="row">
           <button class="primary" onclick={runImport} disabled={importing || !importFile || !importName}>
@@ -362,5 +517,29 @@
   }
   .alert {
     margin-top: 10px;
+  }
+  .pending {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin: 10px 0;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--warn-soft);
+    border: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .pending.failed {
+    background: var(--err-soft);
+  }
+  .pending-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .upload {
+    margin: 8px 0;
+    gap: 8px;
   }
 </style>

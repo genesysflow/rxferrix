@@ -25,7 +25,9 @@
 //! `integrity_check`, opens the database with this binary's tables (schema check) and runs `verify_indexes`. Only then
 //! does it move the current `data.db` (with its `-wal`/`-shm`), `aux.db` and, if the archive has one,
 //! `auth_secret.key` into `<dir>/pre-restore-<time>/` and the restored files into place. Blobs are added to the local
-//! storage directory (existing ones are kept).
+//! storage directory (existing ones are kept). The two halves are [`prepare`] (extract and check, anywhere) and
+//! [`apply_staged`] (swap, offline); `super::restore` uses them to stage a restore from the dashboard while the server
+//! runs and apply it at the next start.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -633,6 +635,16 @@ fn extract(archive: &Path, staging: &Path) -> crate::Result<Manifest> {
             if result != "ok" {
                 bail!("{db} in the archive fails SQLite's integrity check: {result}");
             }
+            // Ferrix never creates triggers or views; one in a backup was put there by hand, and would run (or be
+            // read) with every later write.
+            let extra: Option<String> = conn
+                .query_row("SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'view') LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(extra) = extra {
+                bail!("{db} in the archive contains a {extra}, which ferrix never creates: refusing it");
+            }
         }
     }
     Ok(manifest)
@@ -677,76 +689,101 @@ async fn verify(staging: &Path) -> crate::Result<()> {
     .await?
 }
 
-/// Restore `archive` into the data directory `dir` (offline). See the module docs.
-pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> crate::Result<RestoreReport> {
-    let _lock = super::DirLock::acquire(dir)?;
-    let staging = tempfile::Builder::new().prefix(".ferrix-restore-").tempdir_in(dir)?;
-    let (archive2, staging2) = (archive.to_path_buf(), staging.path().to_path_buf());
+/// Extract `archive` into the empty directory `staging` and check it: the manifest (every entry's size and SHA-256,
+/// nothing missing or extra), SQLite's `integrity_check`, no hand-made triggers or views, and (unless `skip_verify`)
+/// opening it with this binary's tables and `verify_indexes`. Leaves `staging/data.db` in WAL mode, ready to be moved
+/// into a data directory by [`apply_staged`]. Doesn't touch any data directory: safe while a server runs.
+pub async fn prepare(archive: &Path, staging: &Path, skip_verify: bool) -> crate::Result<Manifest> {
+    let (archive2, staging2) = (archive.to_path_buf(), staging.to_path_buf());
     let manifest = tokio::task::spawn_blocking(move || extract(&archive2, &staging2)).await??;
-    if !options.skip_verify {
-        verify(staging.path()).await?;
+    if !skip_verify {
+        verify(staging).await?;
     }
     // WAL mode again, as ferrix opens it (the next open would switch anyway).
-    {
-        let conn = Connection::open(staging.path().join("data.db"))?;
+    let path = staging.join("data.db");
+    tokio::task::spawn_blocking(move || -> crate::Result<()> {
+        let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL").context("switching the restored database to WAL")?;
-    }
+        Ok(())
+    })
+    .await??;
+    Ok(manifest)
+}
 
-    // Move the current files aside, then the restored ones in.
-    let has = |name: &str| manifest.files.iter().any(|f| f.path == name);
+/// Move the files [`prepare`] checked in `staging` into the data directory `dir`, the current ones aside into
+/// `previous` (blocking; `dir` must be locked, no server may have the database open).
+///
+/// Every step can be repeated after a crash: a current file is moved aside only while its restored counterpart is
+/// still in `staging` (so a restored file already in place is never moved aside), and a restored file is moved only
+/// if it is still in `staging`. Running it again finishes what an interrupted run started.
+pub fn apply_staged(
+    staging: &Path,
+    dir: &Path,
+    manifest: Manifest,
+    storage_dir: Option<PathBuf>,
+    previous: &Path,
+) -> crate::Result<RestoreReport> {
+    let staged = |name: &str| staging.join(name).exists();
     let mut moved_aside = Vec::new();
-    let mut aside_names: Vec<String> =
-        ["data.db", "data.db-wal", "data.db-shm", "data.db-journal", "aux.db", "aux.db-wal", "aux.db-shm", "aux.db-journal"]
-            .map(String::from)
-            .into();
-    if has(SECRET_FILE) {
-        aside_names.push(SECRET_FILE.into());
-    }
-    // Persisted HNSW vector indexes (`vector_index_<id>.hnsw`) describe the old database: rebuilt from the restored
-    // one at startup.
-    for entry in std::fs::read_dir(dir)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if name.starts_with("vector_index_") && name.ends_with(".hnsw") {
-            aside_names.push(name);
+    let mut aside_names: Vec<String> = Vec::new();
+    if staged("data.db") {
+        aside_names.extend(["data.db", "data.db-wal", "data.db-shm", "data.db-journal"].map(String::from));
+        // Persisted HNSW vector indexes (`vector_index_<id>.hnsw`) describe the old database: rebuilt from the
+        // restored one at startup.
+        for entry in std::fs::read_dir(dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with("vector_index_") && name.ends_with(".hnsw") {
+                aside_names.push(name);
+            }
         }
     }
-    let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
+    if staged("aux.db") {
+        aside_names.extend(["aux.db", "aux.db-wal", "aux.db-shm", "aux.db-journal"].map(String::from));
+    }
+    if staged(SECRET_FILE) {
+        aside_names.push(SECRET_FILE.into());
+    }
     for name in aside_names {
         let path = dir.join(&name);
         if path.exists() {
-            std::fs::create_dir_all(&previous)?;
+            std::fs::create_dir_all(previous)?;
             std::fs::rename(&path, previous.join(&name)).with_context(|| format!("moving {} aside", path.display()))?;
             moved_aside.push(name);
         }
     }
-    let mut restored = vec!["data.db"];
-    if has("aux.db") {
-        restored.push("aux.db");
-    }
-    if has(SECRET_FILE) {
-        restored.push(SECRET_FILE);
-    }
-    for name in restored {
-        std::fs::rename(staging.path().join(name), dir.join(name)).with_context(|| format!("restoring {name}"))?;
+    for name in ["data.db", "aux.db", SECRET_FILE] {
+        if staged(name) {
+            std::fs::rename(staging.join(name), dir.join(name)).with_context(|| format!("restoring {name}"))?;
+        }
     }
     let mut blobs_restored = 0;
     let blobs: Vec<&ManifestFile> = manifest.files.iter().filter(|f| f.path.starts_with("storage/")).collect();
     if !blobs.is_empty() {
-        let storage = options.storage_dir.clone().unwrap_or_else(|| dir.join("storage"));
+        let storage = storage_dir.unwrap_or_else(|| dir.join("storage"));
         std::fs::create_dir_all(&storage)?;
         for blob in blobs {
             let name = &blob.path["storage/".len()..];
-            let dest = storage.join(name);
-            if !dest.exists() {
-                std::fs::rename(staging.path().join(&blob.path), &dest)
-                    .or_else(|_| std::fs::copy(staging.path().join(&blob.path), &dest).map(|_| ()))
+            let (src, dest) = (staging.join(&blob.path), storage.join(name));
+            if src.exists() && !dest.exists() {
+                std::fs::rename(&src, &dest)
+                    .or_else(|_| std::fs::copy(&src, &dest).map(|_| ()))
                     .with_context(|| format!("restoring the blob {name}"))?;
                 blobs_restored += 1;
             }
         }
     }
-    Ok(RestoreReport { manifest, previous: (!moved_aside.is_empty()).then_some(previous), blobs_restored })
+    let previous = (!moved_aside.is_empty() || previous.exists()).then(|| previous.to_path_buf());
+    Ok(RestoreReport { manifest, previous, blobs_restored })
+}
+
+/// Restore `archive` into the data directory `dir` (offline). See the module docs.
+pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> crate::Result<RestoreReport> {
+    let _lock = super::DirLock::acquire(dir)?;
+    let staging = tempfile::Builder::new().prefix(".ferrix-restore-").tempdir_in(dir)?;
+    let manifest = prepare(archive, staging.path(), options.skip_verify).await?;
+    let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
+    apply_staged(staging.path(), dir, manifest, options.storage_dir.clone(), &previous)
 }
 
 #[cfg(test)]
@@ -769,5 +806,46 @@ mod tests {
         assert_eq!(entry_kind("storage/../data.db"), None);
         assert_eq!(entry_kind("/etc/passwd"), None);
         assert_eq!(entry_kind("data.db"), Some("file"));
+    }
+
+    /// An archive whose (otherwise valid) database has a trigger, which ferrix never creates, is refused.
+    #[test]
+    fn databases_with_triggers_are_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let db = work.path().join("data.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (id BLOB PRIMARY KEY, json TEXT);
+             CREATE TABLE stolen (json TEXT);
+             CREATE TRIGGER copy_out AFTER INSERT ON documents BEGIN INSERT INTO stolen VALUES (new.json); END;",
+        )
+        .unwrap();
+        drop(conn);
+        let archive = work.path().join("ferrix-x.tar.zst");
+        {
+            let out = std::fs::File::create(&archive).unwrap();
+            let mut tar = tar::Builder::new(zstd::Encoder::new(out, 3).unwrap());
+            let file = append_file(&mut tar, &db, "data.db", 0).unwrap();
+            let manifest = Manifest {
+                format: MANIFEST_FORMAT.into(),
+                version: MANIFEST_VERSION,
+                created_at: 0.0,
+                ferrix_version: "test".into(),
+                ts: 0,
+                storage: "excluded".into(),
+                missing_blobs: 0,
+                files: vec![file],
+            };
+            let json = serde_json::to_vec(&manifest).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(json.len() as u64);
+            header.set_mode(0o600);
+            header.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut header, "manifest.json", json.as_slice()).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let staging = work.path().join("staging");
+        let err = extract(&archive, &staging).unwrap_err().to_string();
+        assert!(err.contains("trigger copy_out") && err.contains("refusing"), "{err}");
     }
 }

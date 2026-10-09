@@ -37,6 +37,9 @@ export interface ProviderForm {
   id: string;
   kind: OAuthKind;
   issuer: string;
+  /** Apple: the developer team id and the private key's id. */
+  teamId: string;
+  keyId: string;
   clientId: string;
   secret: SecretField;
   enabled: boolean;
@@ -70,6 +73,8 @@ export function newProvider(kind: OAuthKind = "github"): ProviderForm {
     id: kind === "oidc" ? "" : kind,
     kind,
     issuer: "",
+    teamId: "",
+    keyId: "",
     clientId: "",
     secret: { mode: "replace", value: "", stored: false },
     enabled: true,
@@ -95,6 +100,8 @@ export function formFromView(view: SettingsView): SettingsForm {
       id: p.id,
       kind: p.kind,
       issuer: p.issuer ?? "",
+      teamId: p.teamId ?? "",
+      keyId: p.keyId ?? "",
       clientId: p.clientId,
       secret: secret(p.clientSecret != null),
       enabled: p.enabled,
@@ -174,8 +181,15 @@ export function validate(form: SettingsForm, view: SettingsView): Record<string,
     seen.add(p.id);
     if (p.clientId.trim() === "") at("clientId", "Required");
     if (p.kind === "oidc" && !httpUrl(p.issuer.trim())) at("issuer", "OIDC needs the issuer URL (https)");
+    if (p.kind === "apple") {
+      if (!/^[A-Za-z0-9]{1,64}$/.test(p.teamId.trim())) at("teamId", "The Apple developer team id (letters and digits)");
+      if (!/^[A-Za-z0-9]{1,64}$/.test(p.keyId.trim())) at("keyId", "The id of the Sign in with Apple key");
+      if (p.secret.mode === "replace" && p.secret.value !== "" && !p.secret.value.includes("PRIVATE KEY"))
+        at("secret", "Paste the whole .p8 file (-----BEGIN PRIVATE KEY----- …)");
+    }
     const hasSecret = p.secret.mode === "replace" ? p.secret.value !== "" : p.secret.stored;
-    if (p.enabled && !hasSecret) at("secret", "A client secret is required to enable the provider");
+    const secretName = p.kind === "apple" ? "The private key" : "A client secret";
+    if (p.enabled && !hasSecret) at("secret", `${secretName} is required to enable the provider`);
     if (p.secret.mode === "replace" && p.secret.value === "" && p.secret.stored) at("secret", "Type the new secret, or keep the current one");
   });
   return errors;
@@ -203,6 +217,8 @@ function providerInput(p: ProviderForm): OAuthProviderInput {
     clientSecret: secretInput(p.secret, false),
     enabled: p.enabled,
     scopes: scopes.length ? scopes : null,
+    teamId: p.kind === "apple" ? p.teamId.trim() || null : null,
+    keyId: p.kind === "apple" ? p.keyId.trim() || null : null,
   };
 }
 
@@ -265,6 +281,8 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
       clientSecret: p.clientSecret === null ? null : MASK,
       enabled: p.enabled,
       scopes: p.scopes && p.scopes.length ? p.scopes : null,
+      teamId: p.teamId ?? null,
+      keyId: p.keyId ?? null,
     }));
     if (JSON.stringify(want) !== JSON.stringify(before)) set("oauth", want.length ? want : null);
   }

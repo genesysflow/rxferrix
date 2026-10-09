@@ -349,6 +349,11 @@ impl JwtVerifier {
 
     /// Verify an external token (`now_s`: seconds since the epoch).
     pub async fn verify(&self, token: &str, now_s: u64) -> Result<ExternalClaims, TokenError> {
+        self.verify_with_claims(token, now_s).await.map(|(c, _)| c)
+    }
+
+    /// [`Self::verify`], also returning the whole verified claim set (e.g. for a `nonce`, `super::apple`).
+    pub async fn verify_with_claims(&self, token: &str, now_s: u64) -> Result<(ExternalClaims, Value), TokenError> {
         let mut parts = token.split('.');
         let (Some(header), Some(payload), Some(sig), None) = (parts.next(), parts.next(), parts.next(), parts.next())
         else {
@@ -385,7 +390,8 @@ impl JwtVerifier {
         if !candidates.iter().any(|k| k.key.verify(signing_input, &signature)) {
             return Err(TokenError::BadSignature);
         }
-        check_claims(cfg, &claims, now_s)
+        let checked = check_claims(cfg, &claims, now_s)?;
+        Ok((checked, claims))
     }
 
     /// The provider's keys: cached, refreshed after the TTL, or refetched now (`unknown_kid`, rate limited).

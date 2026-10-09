@@ -138,6 +138,11 @@ impl AuthService {
         for p in config.oauth.iter().filter(|p| !p.is_configured()) {
             tracing::warn!("auth: OAuth provider `{}` has no client id/secret configured; it is disabled", p.id);
         }
+        for p in &config.oauth {
+            if let Some(problem) = p.problem() {
+                tracing::error!("auth: OAuth provider `{}` can't sign anyone in: {problem}", p.id);
+            }
+        }
         let config_mailer = super::effective::config_mailer(&config)?;
         // Settings are loaded once the database is open (`start`); until then the configuration alone applies.
         let effective = Effective::build(&config, dev, config_mailer.clone(), &StoredSettings::default(), 0)?;

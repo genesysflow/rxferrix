@@ -1,13 +1,20 @@
 import type { FerrixAuth } from "@ferrix/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelRestore,
   createBackup,
   exportTable,
   fetchTimeseries,
   filenameFromDisposition,
   impersonate,
+  importFormatOf,
   importTable,
+  listBackups,
+  restartServer,
   saveBlob,
+  stageRestore,
+  uploadRestore,
+  waitForRestart,
 } from "../src/lib/admin.js";
 
 /** A fake auth whose tokens are `t0`, `t1`, …: a new one on each forced refresh. */
@@ -102,9 +109,75 @@ describe("other admin endpoints", () => {
     const fetch = mockFetch(new Response(JSON.stringify(report)));
     expect(await importTable(fakeAuth(), "todos", "upsert", "{}\n{}\n")).toEqual(report);
     const [url, init] = fetch.mock.calls[0]!;
-    expect(url).toBe("/api/admin/import/todos?mode=upsert");
+    expect(url).toBe("/api/admin/import/todos?mode=upsert&format=jsonl");
     expect(init?.method).toBe("POST");
     expect(header(init, "content-type")).toBe("application/x-ndjson");
+  });
+
+  it("imports CSV with the format, inferred from the file name", async () => {
+    const report = { tables: [], files: 0, missingFiles: 0, remappedIds: false };
+    const fetch = mockFetch(new Response(JSON.stringify(report)));
+    await importTable(fakeAuth(), "todos", "insert", "_id,text\r\n", importFormatOf("todos.CSV"));
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe("/api/admin/import/todos?mode=insert&format=csv");
+    expect(header(init, "content-type")).toBe("text/csv");
+    expect(importFormatOf("todos.jsonl")).toBe("jsonl");
+    expect(importFormatOf("data.ndjson")).toBe("jsonl");
+  });
+
+  it("stages, uploads, cancels and restarts restores", async () => {
+    const state = { pendingRestore: { source: "ferrix-1.tar.zst" }, restart: { available: true, exitCode: 75 } };
+    const fetch = mockFetch(
+      new Response(JSON.stringify(state)),
+      new Response(JSON.stringify(state)),
+      new Response(JSON.stringify({ canceled: true })),
+      new Response(JSON.stringify({ restarting: true, exitCode: 75 }), { status: 202 }),
+    );
+    expect(await stageRestore(fakeAuth(), "ferrix-1.tar.zst")).toEqual(state);
+    expect(fetch.mock.calls[0]![0]).toBe("/api/admin/backups/ferrix-1.tar.zst/restore");
+    expect(fetch.mock.calls[0]![1]?.method).toBe("POST");
+    const file = new Blob([new Uint8Array([0x28, 0xb5, 0x2f, 0xfd])]);
+    await uploadRestore(fakeAuth(), file, "my backup.tar.zst");
+    expect(fetch.mock.calls[1]![0]).toBe("/api/admin/restore?name=my%20backup.tar.zst");
+    expect(header(fetch.mock.calls[1]![1], "content-type")).toBe("application/zstd");
+    expect(fetch.mock.calls[1]![1]?.body).toBe(file);
+    await cancelRestore(fakeAuth());
+    expect(fetch.mock.calls[2]![1]?.method).toBe("DELETE");
+    expect(await restartServer(fakeAuth())).toEqual({ restarting: true, exitCode: 75 });
+    expect(fetch.mock.calls[3]![0]).toBe("/api/admin/restore/restart");
+  });
+
+  it("reports a refused restore with the server's reason", async () => {
+    const body = { status: "error", errorMessage: "This backup can't be restored: corrupt", errorData: { code: "invalid_backup" } };
+    mockFetch(new Response(JSON.stringify(body), { status: 400 }));
+    await expect(stageRestore(fakeAuth(), "ferrix-1.tar.zst")).rejects.toThrow("This backup can't be restored: corrupt");
+  });
+
+  it("lists backups with the restore state (defaults for older servers)", async () => {
+    mockFetch(new Response(JSON.stringify({ target: "/data/backups", backups: [] })));
+    expect(await listBackups(fakeAuth())).toEqual({
+      target: "/data/backups",
+      backups: [],
+      pendingRestore: null,
+      restart: { available: false, exitCode: null },
+    });
+  });
+
+  it("waits for the server to go down and come back", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n++;
+        if (n === 1) return new Response("ok");
+        if (n === 2) throw new TypeError("connection refused");
+        return new Response("ok");
+      }),
+    );
+    expect(await waitForRestart(5_000, 1)).toBe(true);
+    expect(n).toBe(3);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    expect(await waitForRestart(20, 1)).toBe(false);
   });
 
   it("creates backups with the options", async () => {

@@ -63,6 +63,9 @@ pub struct OAuthProviderView {
     pub client_secret: Option<String>,
     pub enabled: bool,
     pub scopes: Option<Vec<String>>,
+    /// Apple: the developer team id and the private key's id (`clientSecret` is then the masked private key).
+    pub team_id: Option<String>,
+    pub key_id: Option<String>,
     /// A provider with this id is configured in code (it wins; this entry is ignored).
     pub locked: bool,
 }
@@ -120,10 +123,13 @@ pub struct OAuthProviderInput {
     pub kind: OAuthKind,
     pub issuer: Option<String>,
     pub client_id: String,
-    /// Omitted, null or `"••••"`: keep the stored secret of this id.
+    /// Omitted, null or `"••••"`: keep the stored secret of this id. For Apple: the `.p8` private key (PEM).
     pub client_secret: Option<String>,
     pub enabled: bool,
     pub scopes: Option<Vec<String>>,
+    /// Apple only (required there): the developer team id and the key id.
+    pub team_id: Option<String>,
+    pub key_id: Option<String>,
 }
 
 /// SMTP for `update` and `send_test_email`.
@@ -288,6 +294,8 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
                 client_secret: mask_secret(&p.client_secret),
                 enabled: p.enabled,
                 scopes: p.scopes.clone(),
+                team_id: p.team_id.clone(),
+                key_id: p.key_id.clone(),
                 locked: locked.contains(&format!("oauth.{}", p.id)),
             })
             .collect(),
@@ -428,19 +436,46 @@ impl Changes {
                 };
                 let stored_secret = before.oauth.iter().find(|o| o.id == id).and_then(|o| o.client_secret.as_ref());
                 let client_secret = secret_from_input(p.client_secret, stored_secret);
-                if client_secret.as_ref().is_some_and(|s| s.len() > 1024) {
+                let max_secret = if p.kind == OAuthKind::Apple { 4096 } else { 1024 };
+                if client_secret.as_ref().is_some_and(|s| s.len() > max_secret) {
                     return Err(invalid(format!("OAuth provider `{id}`: client secret is too long")));
                 }
                 if p.enabled && client_secret.is_none() {
                     return Err(invalid(format!("OAuth provider `{id}`: a client secret is required to enable it")));
                 }
+                // Apple: the team and key ids (10 characters, letters and digits), and a private key that loads.
+                let apple_id = |what: &str, v: Option<String>| -> Result<Option<String>> {
+                    match v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                        Some(v) if v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric()) => Ok(Some(v)),
+                        Some(v) => Err(invalid(format!("OAuth provider `{id}`: invalid {what} `{v}`"))),
+                        None => Err(invalid(format!("OAuth provider `{id}`: Sign in with Apple needs the {what}"))),
+                    }
+                };
+                let (team_id, key_id) = if p.kind == OAuthKind::Apple {
+                    if let Some(key) = &client_secret {
+                        crate::auth::apple::parse_private_key(key).map_err(|e| invalid(format!("OAuth provider `{id}`: {e}")))?;
+                    }
+                    (apple_id("team id", p.team_id)?, apple_id("key id", p.key_id)?)
+                } else {
+                    (None, None)
+                };
                 let scopes = match p.scopes {
                     Some(scopes) if scopes.len() > 20 || scopes.iter().any(|s| s.is_empty() || s.len() > 100 || s.contains(char::is_whitespace)) => {
                         return Err(invalid(format!("OAuth provider `{id}`: invalid scopes")));
                     }
                     other => other.filter(|s| !s.is_empty()),
                 };
-                out.push(StoredOAuth { id, kind: p.kind, issuer, client_id, enabled: p.enabled, scopes, client_secret });
+                out.push(StoredOAuth {
+                    id,
+                    kind: p.kind,
+                    issuer,
+                    client_id,
+                    enabled: p.enabled,
+                    scopes,
+                    team_id,
+                    key_id,
+                    client_secret,
+                });
             }
             s.oauth = out;
         }

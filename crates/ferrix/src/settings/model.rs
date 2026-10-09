@@ -45,6 +45,9 @@ pub const KEYS: &[&str] = &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SES
 pub enum OAuthKind {
     Github,
     Google,
+    Discord,
+    /// Sign in with Apple; needs `teamId` and `keyId`, and its secret is the `.p8` private key.
+    Apple,
     /// Generic OpenID Connect; needs `issuer` (discovery).
     Oidc,
 }
@@ -61,7 +64,12 @@ pub struct StoredOAuth {
     pub enabled: bool,
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
-    /// Decrypted; never serialized into the row's `value`.
+    /// Apple: the developer team id and the key id of the private key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// Decrypted; never serialized into the row's `value`. For Apple, the private key (PEM).
     #[serde(skip)]
     pub client_secret: Option<String>,
 }

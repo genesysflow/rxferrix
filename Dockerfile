@@ -26,6 +26,8 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
 RUN cargo install --locked cargo-zigbuild --version "${ZIGBUILD_VERSION}"
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /src
+# The context includes .cargo/config.toml, which gives the bundled SQLite its build flags (LIBSQLITE3_FLAGS; don't set
+# that variable here or in --build-arg: it would replace them).
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

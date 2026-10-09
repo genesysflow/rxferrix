@@ -17,8 +17,8 @@
 //!
 //! Some queries are artificially slow (`fns::slow_group` sleeps between its reads and depends on every commit), so
 //! their reruns overlap later commits and generations: runs finish already invalidated, results are sent at the ts of
-//! an older run, and clients holding several of them become starving and get their queries parked (the test checks
-//! that these paths ran).
+//! an older run, and clients holding several of them become starving, which holds new generations until they are
+//! served (the test checks that runs finished stale).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};

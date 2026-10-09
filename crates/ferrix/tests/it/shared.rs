@@ -598,7 +598,7 @@ async fn connection_with_misaligned_slow_queries_still_gets_updates() {
         }
     }
     writer.await.unwrap();
-    assert!(during >= 5, "only {during} transitions while commits went on (from ts {start_ts} to {})", c.version.ts);
+    assert!(during >= 5, "only {during} transitions while commits went on (from ts {start_ts} to {}; latest {}; {:?})", c.version.ts, app.db().write_log().latest(), app.subscription_stats());
     let final_ts = app.db().write_log().latest();
     c.until(|c| c.version.ts >= final_ts).await;
     let n = app.run_query(&fns::everyone::path(), json!({}), &Identity::default()).await.result.unwrap();

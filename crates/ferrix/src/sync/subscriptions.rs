@@ -25,8 +25,8 @@
 //! ## Generations
 //!
 //! The manager keeps a ts, `self.ts` (the *frontier*): the write log has been checked up to it. A query whose newest
-//! version is open is *current* (valid at the frontier); every other query is *in flight* (queued or running), or,
-//! rarely, *parked* (see Liveness). When commits land, a new generation starts:
+//! version is open is *current* (valid at the frontier); every other query is *in flight* (queued or running). When
+//! commits land, a new generation starts (unless generations are held, see Liveness):
 //!
 //! 1. open a snapshot `S` and wait until the write log has every commit up to `S.ts`;
 //! 2. close the version of every current query whose read set contains a key written in `(self.ts, S.ts]`, at the
@@ -59,11 +59,13 @@
 //! ## Liveness
 //!
 //! A connection whose queries are invalidated together gets an update when the last of them finishes. Only runs at
-//! different generations can keep it from ever having all of its queries valid at one ts: two slow queries that commits
-//! keep invalidating while they run, each re-queued when it finishes at a later generation than the other. So a
-//! connection one of whose queries finished twice since its last update is marked *starving*. Its queries that finish
-//! stale are then parked instead of queued again while another of its queries is in flight; when none is, they are
-//! queued together, run at one generation, and the connection gets its update there.
+//! different generations can keep it from ever having all of its queries valid at one ts: queries that commits keep
+//! invalidating while they run (slow ones, or any under heavy load), each queued again when it finishes, at another
+//! generation than the others. So a connection one of whose queries finished stale twice since its last update is
+//! marked *starving*, and while a starving connection has a query in flight, no new generation starts: the frontier
+//! stays put, every query queued meanwhile runs at it and finishes valid at it, so within at most two runs of each of
+//! its queries the connection has all of them valid at the frontier and gets its update. (Other connections wait for
+//! that hold too, so it is a last resort: a single slow query is served by updates at its runs' ts instead.)
 //!
 //! ## Commands and ordering
 //!
@@ -355,8 +357,8 @@ pub struct SubscriptionStats {
     pub last_round_reruns: u64,
     /// Runs that finished after a commit had already invalidated their result (queued again), since start.
     pub stale_runs: u64,
-    /// Of those, the ones held back for a starving connection (see `sync::subscriptions`).
-    pub parked: u64,
+    /// Times new generations were held for a starving connection (see `sync::subscriptions`, Liveness).
+    pub holds: u64,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -440,14 +442,12 @@ struct SharedQuery {
     ranges: Vec<(IndexId, Interval)>,
     /// Queued or running, since a generation at this ts.
     in_flight: Option<u64>,
-    /// Stale, but held back until a starving subscriber has nothing else in flight (see the module docs).
-    parked: bool,
     /// Moving average of its run time, µs.
     cost_us: u64,
 }
 
 impl SharedQuery {
-    /// Is the newest result valid at the manager's ts? Every query that is not is in flight or parked.
+    /// Is the newest result valid at the manager's ts? Every query that is not is in flight.
     fn is_current(&self) -> bool {
         self.versions.back().is_some_and(|v| v.through == OPEN)
     }
@@ -466,7 +466,7 @@ struct Sub {
     shared: SharedId,
     /// Run ts and hash of the version last put in this connection's mailbox; `None` before the first.
     sent: Option<(u64, Hash)>,
-    /// Runs of its query finished since the connection's last update: `(Conn::updates then, count)`.
+    /// Runs of its query that finished stale since the connection's last update: `(Conn::updates then, count)`.
     runs: (u64, u32),
 }
 
@@ -490,7 +490,7 @@ struct Conn {
     deferred: VecDeque<Command>,
     /// How many times every query of the set was valid at one ts (an update was due, whether or not anything changed).
     updates: u64,
-    /// A query of its set finished twice without an update in between (see the module docs).
+    /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
     starving: bool,
 }
 
@@ -569,8 +569,10 @@ struct Manager {
     conns: HashMap<ConnId, Conn>,
     /// Connections with a `cover` ts.
     covering: BTreeSet<ConnId>,
-    /// Parked queries.
-    parked: BTreeSet<SharedId>,
+    /// Starving connections (see the module docs, Liveness).
+    starving: BTreeSet<ConnId>,
+    /// New generations are held for them.
+    holding: bool,
     subscriptions: u64,
     /// Commits (or a `Cover` ts) not covered by the frontier yet: a new generation is due.
     need_round: bool,
@@ -634,7 +636,8 @@ impl Manager {
             index: IntervalIndex::new(),
             conns: HashMap::new(),
             covering: BTreeSet::new(),
-            parked: BTreeSet::new(),
+            starving: BTreeSet::new(),
+            holding: false,
             subscriptions: 0,
             need_round: false,
             retry: false,
@@ -827,7 +830,6 @@ impl Manager {
         for (index_id, interval) in &q.ranges {
             self.index.remove(*index_id, interval, id);
         }
-        self.parked.remove(&id);
     }
 
     /// Move a subscription to another shared query (current, or in flight).
@@ -887,7 +889,6 @@ impl Manager {
             deps: AuthDeps::None,
             ranges: Vec::new(),
             in_flight: None,
-            parked: false,
             cost_us: 0,
         };
         self.queries.insert(id, q);
@@ -900,6 +901,7 @@ impl Manager {
             self.detach(c, qid, sub.shared);
         }
         self.covering.remove(&c);
+        self.starving.remove(&c);
     }
 
     /// Drop a connection that can't keep up; its worker sends `FatalError`.
@@ -926,7 +928,9 @@ impl Manager {
         self.flush(c, ts);
         let Some(conn) = self.conns.get_mut(&c) else { return true }; // dropped: too slow
         conn.updates += 1;
-        conn.starving = false;
+        if std::mem::take(&mut conn.starving) {
+            self.starving.remove(&c);
+        }
         if conn.waiting {
             self.resume(c);
         }
@@ -1005,9 +1009,6 @@ impl Manager {
                 continue;
             }
             q.in_flight = Some(self.ts);
-            if std::mem::take(&mut q.parked) {
-                self.parked.remove(&id);
-            }
             let seq = self.next_job;
             self.next_job += 1;
             self.in_flight.insert(seq, self.ts);
@@ -1063,9 +1064,7 @@ impl Manager {
 
     /// Start a generation if one is due and allowed, and make sure queued jobs have runners.
     async fn pump(&mut self, app: &App) {
-        if !self.parked.is_empty() {
-            self.unpark();
-        }
+        self.update_hold();
         if self.in_flight.is_empty() {
             // Idle: don't pin a WAL snapshot.
             self.gen_snapshot = None;
@@ -1075,7 +1074,7 @@ impl Manager {
             // A new generation waits until the current one's fast lane is empty (or has no runner): queries invalidated
             // together then run at one ts, and commits landing meanwhile are coalesced. It waits neither for running
             // queries nor for queries known to be slow, which have a lane (and runners) of their own.
-            if self.need_round && !advanced && (self.queued(FAST) == 0 || self.runners[FAST] == 0) {
+            if self.need_round && !advanced && !self.holding && (self.queued(FAST) == 0 || self.runners[FAST] == 0) {
                 if self.queries.is_empty() && self.covering.is_empty() {
                     // Nothing to bring up to date. (`self.ts` stays: with no queries, any committed ts is consistent.)
                     self.need_round = false;
@@ -1269,8 +1268,7 @@ impl Manager {
     }
 
     /// A run of `id` finished: record its result as the newest version, re-key it, and try to send their update to the
-    /// connections it serves (at the frontier, or at the run's ts). A result that is stale already is queued again
-    /// (or parked).
+    /// connections it serves (at the frontier, or at the run's ts). A result that is stale already is queued again.
     fn finish_run(&mut self, id: SharedId, run: QueryRun) {
         let Some(q) = self.queries.get(&id) else { return }; // dropped meanwhile
         if q.in_flight.is_none() {
@@ -1283,14 +1281,15 @@ impl Manager {
             subscribers.entry(c).or_default().push(qid);
         }
         self.apply_run(id, run);
+        let stale = self.queries.get(&id).is_some_and(|q| !q.is_current());
         let mut split = Vec::new();
         self.settle_key(id, &mut split);
         self.launch(split);
         for (c, qids) in subscribers {
-            if self.try_flush(c, &[self.ts, s]) {
+            if self.try_flush(c, &[self.ts, s]) || !stale {
                 continue;
             }
-            // Not every query of `c` is valid at one ts yet. Count the runs, to notice misaligned ones.
+            // Not every query of `c` is valid at one ts, and this one is stale already: count, to notice misalignment.
             let Some(conn) = self.conns.get_mut(&c) else { continue };
             let updates = conn.updates;
             for qid in qids {
@@ -1299,39 +1298,34 @@ impl Manager {
                     sub.runs = (updates, 0);
                 }
                 sub.runs.1 += 1;
-                conn.starving |= sub.runs.1 >= 2;
+                if sub.runs.1 >= 2 && !conn.starving {
+                    conn.starving = true;
+                    self.starving.insert(c);
+                }
             }
         }
         if let Some(q) = self.queries.get(&id)
             && !q.is_current()
             && q.in_flight.is_none()
         {
-            let park = self.held_back(id);
-            self.metrics.record_stale_run(park);
-            if park {
-                self.queries.get_mut(&id).expect("checked").parked = true;
-                self.parked.insert(id);
-            } else {
-                self.launch([id]);
-            }
+            self.metrics.record_stale_run();
+            self.launch([id]);
         }
     }
 
-    /// Should stale `id` wait (parked) rather than run now: does a starving subscriber still have a query in flight?
-    fn held_back(&self, id: SharedId) -> bool {
-        let Some(q) = self.queries.get(&id) else { return false };
-        q.subscribers.iter().any(|(c, _)| {
-            self.conns.get(c).is_some_and(|conn| {
-                conn.starving
-                    && conn.subs.values().any(|sub| self.queries.get(&sub.shared).is_some_and(|o| o.in_flight.is_some()))
+    /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness).
+    fn update_hold(&mut self) {
+        let conns = &self.conns;
+        let queries = &self.queries;
+        let holding = self.starving.iter().any(|c| {
+            conns.get(c).is_some_and(|conn| {
+                conn.subs.values().any(|sub| queries.get(&sub.shared).is_some_and(|q| q.in_flight.is_some()))
             })
-        })
-    }
-
-    /// Queue the parked queries no starving connection holds back any more, together (so they run at one ts).
-    fn unpark(&mut self) {
-        let ready: Vec<SharedId> = self.parked.iter().copied().filter(|id| !self.held_back(*id)).collect();
-        self.launch(ready);
+        });
+        if holding && !self.holding {
+            self.metrics.record_hold();
+        }
+        self.holding = holding;
     }
 
     /// Record a run of `id` as its newest version. Its validity ends at the first commit after the run's ts (up to the
@@ -1478,9 +1472,7 @@ impl Manager {
         for (id, q) in &self.queries {
             assert_eq!(self.by_key.get(&q.key), Some(id), "by_key out of sync");
             assert!(!q.subscribers.is_empty(), "shared query without subscribers");
-            assert!(q.is_current() || q.in_flight.is_some() || q.parked, "stale query neither in flight nor parked");
-            assert!(!(q.parked && q.in_flight.is_some()), "parked and in flight");
-            assert_eq!(q.parked, self.parked.contains(id), "parked set out of sync");
+            assert!(q.is_current() || q.in_flight.is_some(), "stale query not in flight");
             for (i, v) in q.versions.iter().enumerate() {
                 assert!(v.ts <= v.through && v.ts <= self.ts, "version past the frontier");
                 assert!(i + 1 == q.versions.len() || (v.through != OPEN && v.through < q.versions[i + 1].ts));

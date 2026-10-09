@@ -272,7 +272,7 @@ pub struct Metrics {
     reruns: AtomicU64,
     last_round_reruns: AtomicU64,
     stale_runs: AtomicU64,
-    parked: AtomicU64,
+    holds: AtomicU64,
 }
 
 impl Metrics {
@@ -302,7 +302,7 @@ impl Metrics {
             reruns: self.reruns.load(Ordering::Relaxed),
             last_round_reruns: self.last_round_reruns.load(Ordering::Relaxed),
             stale_runs: self.stale_runs.load(Ordering::Relaxed),
-            parked: self.parked.load(Ordering::Relaxed),
+            holds: self.holds.load(Ordering::Relaxed),
         }
     }
 
@@ -332,10 +332,14 @@ impl Metrics {
         self.last_round_reruns.store(reruns, Ordering::Relaxed);
     }
 
-    /// A run finished with a result that commits had invalidated meanwhile (`parked`: and was held back).
-    pub(crate) fn record_stale_run(&self, parked: bool) {
+    /// A run finished with a result that commits had invalidated meanwhile.
+    pub(crate) fn record_stale_run(&self) {
         self.stale_runs.fetch_add(1, Ordering::Relaxed);
-        self.parked.fetch_add(u64::from(parked), Ordering::Relaxed);
+    }
+
+    /// New generations are held for a starving connection.
+    pub(crate) fn record_hold(&self) {
+        self.holds.fetch_add(1, Ordering::Relaxed);
     }
 }
 

@@ -20,6 +20,7 @@
       _creationTime: Date.now(),
       text: args.text.trim(),
       done: false,
+      completedAt: null,
     } as Doc<"todos">;
     store.setQuery(api.todos.list, {}, [temp, ...current]);
   });

@@ -7,6 +7,7 @@ import type { Doc, Id } from "./dataModel";
 export const api = {
   todos: {
     add: makeFunctionReference<"mutation", { text: string, }, Id<"todos">>("mutation", "todos:add"),
+    add_later: makeFunctionReference<"mutation", { text: string, delaySeconds: number, }, Id<"_scheduled_jobs">>("mutation", "todos:add_later"),
     add_samples: makeFunctionReference<"action", { count: number, }, number>("action", "todos:add_samples"),
     clear_completed: makeFunctionReference<"mutation", Record<string, never>, number>("mutation", "todos:clear_completed"),
     list: makeFunctionReference<"query", { done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:list"),

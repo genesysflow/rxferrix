@@ -8,5 +8,8 @@
 mod todos;
 
 fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new().run()
+    ferrix::Ferrix::new()
+        // Every hour, on the hour (UTC): delete todos completed more than a day ago.
+        .cron::<todos::purge_completed>("purge-completed", "0 0 * * * *", ())
+        .run()
 }

@@ -4,14 +4,20 @@ import type { Id as GenericId } from "@ferrix/client";
 
 /** Every table, mapped to the type of its documents (without the system fields). */
 export type DataModel = {
-  "todos": { text: string, done: boolean, };
+  "todos": { text: string, done: boolean, completedAt: number | null, };
+};
+
+/** Built-in ferrix tables that app documents may reference, e.g. `Id<"_users">`. */
+export type SystemDataModel = {
+  "_scheduled_jobs": { path: string, kind: "mutation" | "action", args: any, runAt: number, state: "pending" | "inProgress" | "success" | "failed" | "canceled", attempts: number, maxAttempts: number, result: string | null, error: string | null, scheduledAt: number, startedAt: number | null, completedAt: number | null, origin: string | null, };
+  "_users": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };
 };
 
 /** The name of a table. */
 export type TableNames = keyof DataModel;
 
-/** A document id of table `T`. At runtime a plain string. */
-export type Id<T extends TableNames> = GenericId<T>;
+/** A document id of table `T` (an app table, or a system table from `SystemDataModel`). At runtime a plain string. */
+export type Id<T extends TableNames | keyof SystemDataModel> = GenericId<T>;
 
 /** A stored document of table `T`, with its system fields. */
-export type Doc<T extends TableNames> = DataModel[T] & { _id: Id<T>; _creationTime: number };
+export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };

@@ -141,7 +141,7 @@ fn file_size(path: &std::path::Path) -> u64 {
 }
 
 /// Pending and in-progress scheduled jobs, counted on the `(state, runAt, scheduledAt)` index.
-async fn scheduler_counts(app: &App) -> crate::Result<(u64, u64)> {
+pub(crate) async fn scheduler_counts(app: &App) -> crate::Result<(u64, u64)> {
     let catalog = app.db().catalog().clone();
     let Ok(table) = catalog.table(crate::scheduler::ScheduledJob::NAME) else { return Ok((0, 0)) };
     let Some(index) = table.index("by_state_run_at") else { return Ok((0, 0)) };

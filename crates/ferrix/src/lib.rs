@@ -61,7 +61,7 @@ pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
 pub use error::{Error, MutationTimeout, Result, UserError};
-pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs};
+pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use private::FunctionKind;
 pub use id::Id;
 pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};

@@ -1,4 +1,6 @@
-//! Mutation idempotency: `(session_id, request_id) → response`, in a raw SQLite table of `data.db`.
+//! Mutation idempotency: `(session_id, request_id) → response`, in a raw SQLite table of `data.db`. The stored
+//! `session_id` is scoped to the caller's identity ([`IdempotencyKey::scoped_to`]), so one identity can never be
+//! handed another identity's recorded response.
 //!
 //! The TS client resends unacknowledged mutations after a reconnect with the same `(sessionId, requestId)`. The
 //! runtime looks the key up *inside* the mutation's write transaction (so a concurrent duplicate waits for the writer
@@ -37,6 +39,15 @@ CREATE INDEX IF NOT EXISTS _mutation_dedup_by_created ON _mutation_dedup (create
 pub struct IdempotencyKey {
     pub session_id: String,
     pub request_id: u64,
+}
+
+impl IdempotencyKey {
+    /// The key as stored: the caller's principal (`user:<id>`, `admin:<id>` or `anonymous`) is prefixed to the
+    /// session id, so a recorded response is only ever replayed to the identity that ran the mutation. The runtime
+    /// applies this itself; callers pass the plain key.
+    pub fn scoped_to(&self, identity: &crate::auth::Identity) -> IdempotencyKey {
+        IdempotencyKey { session_id: format!("{}|{}", identity.principal_key(), self.session_id), request_id: self.request_id }
+    }
 }
 
 /// What is stored per key.

@@ -151,7 +151,18 @@ fn generates_from_the_real_registry() {
     assert!(dm.contains("  \"todos\": { text: string, done: boolean, createdBy: string | null, };\n"), "{dm}");
     // One config everywhere: i64 is a number, not a bigint.
     assert!(dm.contains("  \"items\": { group: number, score: number, name: string, };\n"), "{dm}");
-    assert!(dm.contains("export type Doc<T extends TableNames> = DataModel[T] & { _id: Id<T>; _creationTime: number };"));
+    assert!(dm.contains(
+        "export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };"
+    ));
+    // `_users` may be referenced by app tables; other system tables are left out entirely.
+    assert!(
+        dm.contains("export type SystemDataModel = {\n  \"_users\": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };\n};\n"),
+        "{dm}"
+    );
+    for internal in ["_sessions", "_credentials", "_admins", "_accounts", "passwordHash", "refreshTokenHash"] {
+        assert!(!dm.contains(internal), "{internal} must not be emitted");
+    }
+    assert!(!api.contains("_system"), "system functions are not emitted");
     assert!(dm.contains("/**\n * How urgent a task is.\n */\nexport type Priority = \"low\" | \"high\";\n"), "{dm}");
     assert!(dm.contains("export type Color = \"Red\" | \"Green\" | { \"Custom\": { hex: string, } };\n"), "{dm}");
     assert!(dm.contains("export type Label = { name: string, color: Color, };\n"), "{dm}");

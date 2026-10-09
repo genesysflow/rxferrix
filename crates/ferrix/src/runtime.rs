@@ -24,28 +24,8 @@ use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 // Identity and contexts
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Who is calling. Phase 0: always anonymous.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Identity {
-    pub user_id: Option<String>,
-}
-
-/// Authentication info available to functions.
-#[derive(Debug, Clone, Default)]
-pub struct Auth {
-    identity: Identity,
-}
-
-impl Auth {
-    pub(crate) fn new(identity: Identity) -> Self {
-        Auth { identity }
-    }
-
-    /// The authenticated user's id, if any (phase 0: always `None`).
-    pub fn user_id(&self) -> Option<&str> {
-        self.identity.user_id.as_deref()
-    }
-}
+// `Identity` (who is calling) and `Auth` (`ctx.auth`) live in the auth module.
+pub use crate::auth::{Auth, Identity};
 
 /// Context of a query: read-only access to one consistent snapshot.
 pub struct QueryCtx {
@@ -174,6 +154,8 @@ pub struct AppOptions {
     pub dev: bool,
     /// Number of read-only connections.
     pub readers: usize,
+    /// Sign-in methods, token lifetimes, email and OAuth settings (`crate::auth`).
+    pub auth: crate::auth::AuthConfig,
     /// A mutation still running after this long is rolled back with a [`MutationTimeout`] error. Default: 5s. Only
     /// checked at `.await` points: synchronous code is never preempted.
     pub mutation_timeout: Duration,
@@ -191,6 +173,7 @@ impl Default for AppOptions {
         AppOptions {
             dev: false,
             readers: crate::db::DEFAULT_READERS,
+            auth: Default::default(),
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             skip_schema_check: false,
             log_retention: LogRetention::default(),
@@ -228,6 +211,7 @@ struct AppInner {
     db: Database,
     registry: &'static Registry,
     options: AppOptions,
+    auth: crate::auth::AuthService,
     logs: Logs,
 }
 
@@ -240,6 +224,7 @@ impl App {
         let registry = registry()?;
         let tables = registered_tables();
         let dir = dir.as_ref().to_path_buf();
+        let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
         let open_options =
             crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
         let retention = options.log_retention.clone();
@@ -249,7 +234,7 @@ impl App {
             Ok((db, logs))
         })
         .await??;
-        Ok(App { inner: Arc::new(AppInner { db, registry, options, logs }) })
+        Ok(App { inner: Arc::new(AppInner { db, registry, options, auth, logs }) })
     }
 
     pub fn db(&self) -> &Database {
@@ -267,6 +252,11 @@ impl App {
 
     pub fn registry(&self) -> &'static Registry {
         self.inner.registry
+    }
+
+    /// Auth state and operations (token validation, sign-in, admins).
+    pub fn auth(&self) -> &crate::auth::AuthService {
+        &self.inner.auth
     }
 
     /// Look up a function of `kind`. Internal functions are only found when `allow_internal`.
@@ -401,6 +391,10 @@ impl App {
             Err(e) => return not_run(e),
         };
         let Handler::Mutation(handler) = def.handler else { unreachable!("kind checked by lookup") };
+        // Responses are stored per identity: a caller who learns (or guesses) another client's session id can't
+        // replay that client's responses, nor can a socket that changed identity see its earlier identity's.
+        let scoped_key = idempotency_key.map(|k| k.scoped_to(identity));
+        let idempotency_key = scoped_key.as_ref();
         let txn = match self.db().begin_write().await {
             Ok(t) => t,
             Err(e) => return not_run(e),
@@ -513,14 +507,11 @@ impl Execution {
     }
 }
 
-/// The execution log's summary of who called. `Identity` is treated as opaque here (its Debug form), so changes
-/// to it don't ripple into the log; the anonymous identity logs as `None`.
+/// The execution log's summary of who called (`Identity::log_summary`: `user:<id>` / `admin:<id>`, never a token or
+/// session id); the anonymous identity logs as `None`.
 fn identity_summary(identity: &Identity) -> Option<String> {
     const MAX: usize = 256;
-    if *identity == Identity::default() {
-        return None;
-    }
-    let mut s = format!("{identity:?}");
+    let mut s = identity.log_summary()?;
     if s.len() > MAX {
         let mut cut = MAX;
         while !s.is_char_boundary(cut) {

@@ -1,5 +1,5 @@
-//! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]]`, `ferrix functions` and
-//! `ferrix codegen [--out DIR]`.
+//! Command line: `ferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]`,
+//! `ferrix functions`, `ferrix codegen [--out DIR]` and `ferrix admin create|reset-password <email>`.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::util::SubscriberInitExt as _;
 
+use crate::auth::{AuthConfig, SmtpConfig};
 use crate::runtime::{App, AppOptions, registry};
 
 #[derive(Parser, Debug)]
@@ -28,6 +29,28 @@ enum Command {
     Functions,
     /// Write the TypeScript bindings (api.ts, dataModel.ts, index.ts) for the client packages.
     Codegen(CodegenArgs),
+    /// Manage dashboard administrators.
+    #[command(subcommand)]
+    Admin(AdminCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminCommand {
+    /// Create an administrator. Asks for the password (read from stdin) unless --password is given.
+    Create(AdminArgs),
+    /// Set an administrator's password and end their sessions.
+    ResetPassword(AdminArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct AdminArgs {
+    email: String,
+    /// The password. It ends up in shell history and process lists; prefer the prompt.
+    #[arg(long)]
+    password: Option<String>,
+    /// Data directory.
+    #[arg(long, default_value = "fx_data")]
+    dir: PathBuf,
 }
 
 /// Environment variable naming the codegen output directory for `serve --dev` (same as `--codegen-out`).
@@ -55,6 +78,24 @@ struct ServeArgs {
     /// FERRIX_CODEGEN_OUT environment variable; without either, no codegen runs.
     #[arg(long, value_name = "DIR", requires = "dev")]
     codegen_out: Option<PathBuf>,
+    /// Public base URL of this server, used for OAuth callback URLs and the admin setup link
+    /// (default: http://<--http address>).
+    #[arg(long, env = "FERRIX_PUBLIC_URL", value_name = "URL")]
+    public_url: Option<String>,
+    /// App URL that auth may redirect to after OAuth sign-in and from email links (repeatable; an origin allows all
+    /// of its paths). The first one is the default target.
+    #[arg(long = "auth-redirect-url", env = "FERRIX_AUTH_REDIRECT_URLS", value_delimiter = ',', value_name = "URL")]
+    auth_redirect_urls: Vec<String>,
+    /// SMTP server for auth emails, e.g. smtps://user:pass@smtp.example.com:465. In --dev without SMTP, emails are
+    /// printed to the log instead.
+    #[arg(long, env = "FERRIX_SMTP_URL", value_name = "URL", hide_env_values = true)]
+    smtp_url: Option<String>,
+    /// Sender address for auth emails, e.g. "My App <noreply@example.com>".
+    #[arg(long, env = "FERRIX_SMTP_FROM", value_name = "ADDRESS")]
+    smtp_from: Option<String>,
+    /// Take client IPs (for rate limiting) from the last X-Forwarded-For entry. Only behind a reverse proxy.
+    #[arg(long, env = "FERRIX_TRUST_PROXY")]
+    trust_proxy: bool,
     /// Roll back mutations still running after this long, e.g. `5s`, `500ms`, `2m` (a bare number is seconds).
     /// Only enforced at `.await` points.
     #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
@@ -84,12 +125,19 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 /// Entry point for application binaries: `fn main() -> ferrix::Result<()> { Ferrix::new().run() }`.
 #[derive(Debug, Default)]
 pub struct Ferrix {
-    _private: (),
+    auth: AuthConfig,
 }
 
 impl Ferrix {
     pub fn new() -> Self {
         Ferrix::default()
+    }
+
+    /// Configure authentication: `Ferrix::new().auth(AuthConfig::password().oauth(GitHub::from_env()))`.
+    /// Command line flags (`--public-url`, `--auth-redirect-url`, `--smtp-url`, ...) add to or override it.
+    pub fn auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// Parse the command line and run it. Builds its own tokio runtime.
@@ -98,8 +146,9 @@ impl Ferrix {
         match cli.command {
             Some(Command::Functions) => print_functions(),
             Some(Command::Codegen(args)) => codegen(&args.out),
-            Some(Command::Serve(args)) => serve(args),
-            None => serve(cli.serve),
+            Some(Command::Admin(cmd)) => admin(cmd, self.auth),
+            Some(Command::Serve(args)) => serve(args, self.auth),
+            None => serve(cli.serve, self.auth),
         }
     }
 }
@@ -117,7 +166,79 @@ fn codegen(out: &Path) -> crate::Result<()> {
     Ok(())
 }
 
-fn serve(args: ServeArgs) -> crate::Result<()> {
+fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
+    let (args, create) = match cmd {
+        AdminCommand::Create(a) => (a, true),
+        AdminCommand::ResetPassword(a) => (a, false),
+    };
+    let password = match args.password {
+        Some(p) => p,
+        None => read_password()?,
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let app = App::open(&args.dir, AppOptions { auth, ..Default::default() }).await?;
+        let email = crate::auth::normalize_email(&args.email)?;
+        if create {
+            app.auth().create_admin(&app, &email, password).await?;
+            println!("Created administrator {email}");
+        } else {
+            app.auth().reset_admin_password(&app, &email, password).await?;
+            println!("Updated the password of {email} and ended their sessions");
+        }
+        Ok(())
+    })
+}
+
+/// Read a password from stdin (one line). Prompts on stderr when stdin is a terminal (the input is echoed).
+fn read_password() -> crate::Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprint!("Password: ");
+        std::io::stderr().flush()?;
+    }
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let password = line.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        anyhow::bail!("no password given");
+    }
+    Ok(password)
+}
+
+/// The builder's auth config with the command line's options applied on top.
+fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
+    let public_url = args.public_url.clone().or_else(|| auth.public_url.clone()).unwrap_or_else(|| {
+        let addr = if args.http.ip().is_unspecified() {
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), args.http.port())
+        } else {
+            args.http
+        };
+        format!("http://{addr}")
+    });
+    auth.public_url = Some(public_url);
+    for url in args.auth_redirect_urls.iter().map(|u| u.trim()).filter(|u| !u.is_empty()) {
+        if !auth.redirect_urls.iter().any(|u| u == url) {
+            auth.redirect_urls.push(url.to_string());
+        }
+    }
+    let smtp = args.smtp_url.clone().map(|url| {
+        let from = args.smtp_from.clone().or_else(|| auth.smtp.as_ref().map(|s| s.from.clone()));
+        SmtpConfig::new(url, from.unwrap_or_else(|| "ferrix <noreply@localhost>".into()))
+    });
+    if smtp.is_some() {
+        auth.smtp = smtp;
+    } else if let (Some(from), Some(s)) = (&args.smtp_from, auth.smtp.as_mut()) {
+        s.from = from.clone();
+    }
+    if args.trust_proxy {
+        auth.trust_proxy = true;
+    }
+    auth
+}
+
+fn serve(args: ServeArgs, auth: AuthConfig) -> crate::Result<()> {
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,ferrix=info".into());
@@ -131,10 +252,13 @@ fn serve(args: ServeArgs) -> crate::Result<()> {
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
+        let auth = auth_config(&args, auth);
+        let public_url = auth.public_url.clone().unwrap_or_default();
         let options = AppOptions {
             dev: args.dev,
             mutation_timeout: args.mutation_timeout,
             skip_schema_check: args.skip_schema_check,
+            auth,
             ..Default::default()
         };
         let app = App::open(&args.dir, options).await?;
@@ -145,6 +269,14 @@ fn serve(args: ServeArgs) -> crate::Result<()> {
             args.dir.display(),
             args.dev
         );
+        if let Some(token) = app.auth().create_setup_token(&app).await? {
+            // Printed to the console rather than logged: a one-time secret, valid until used or until restart.
+            println!(
+                "\nNo administrator exists yet. Create one at:\n\n    {}/_/setup#token={token}\n\n\
+                 (or run `admin create <email>`). The link works once and only until the server restarts.\n",
+                public_url.trim_end_matches('/')
+            );
+        }
         crate::server::serve_with_shutdown(listener, app, async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
@@ -167,6 +299,34 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Codegen(ref a)) if a.out == Path::new("ferrix-generated")));
         let cli = parse(&["codegen", "--out", "../web/src/ferrix"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Codegen(ref a)) if a.out == Path::new("../web/src/ferrix")));
+    }
+
+    #[test]
+    fn admin_and_auth_args() {
+        let cli = parse(&["admin", "create", "a@b.c", "--password", "pw", "--dir", "d"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::Create(ref a)))
+            if a.email == "a@b.c" && a.password.as_deref() == Some("pw") && a.dir == Path::new("d")));
+        let cli = parse(&["admin", "reset-password", "a@b.c"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::ResetPassword(ref a))) if a.password.is_none()));
+
+        let cli = parse(&[
+            "serve",
+            "--auth-redirect-url",
+            "http://a.test",
+            "--auth-redirect-url",
+            "http://b.test/x",
+            "--public-url",
+            "https://api.test",
+        ])
+        .unwrap();
+        let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
+        let auth = auth_config(&args, AuthConfig::password().redirect_url("http://a.test"));
+        assert_eq!(auth.redirect_urls, vec!["http://a.test".to_string(), "http://b.test/x".to_string()]);
+        assert_eq!(auth.public_url.as_deref(), Some("https://api.test"));
+
+        let cli = parse(&["serve", "--http", "0.0.0.0:9000"]).unwrap();
+        let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
+        assert_eq!(auth_config(&args, AuthConfig::default()).public_url.as_deref(), Some("http://127.0.0.1:9000"));
     }
 
     #[test]

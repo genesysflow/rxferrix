@@ -2,6 +2,7 @@
 
 mod common;
 
+mod auth;
 mod catalog;
 mod codegen;
 mod contract;

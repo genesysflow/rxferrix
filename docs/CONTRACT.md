@@ -131,8 +131,32 @@ pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, /* private */ }
 pub struct ActionCtx   { pub auth: Auth, /* private: runtime handle */ }
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit.
 
-pub struct Auth { /* phase 0: always unauthenticated */ }
-impl Auth { pub fn user_id(&self) -> Option<&str>; }
+// ctx.auth: the caller, from a validated access token (WS `Authenticate` or HTTP `Authorization: Bearer`).
+// Identity flows unchanged into every `ctx.run_*` call an action makes.
+pub struct Auth { /* identity */ }                      // ferrix::Auth = ferrix::auth::Auth
+impl Auth {
+    pub fn user_id(&self) -> Option<Id<User>>;          // None when anonymous or for admin sessions
+    pub fn require_user(&self) -> Result<Id<User>>;     // else UserError { code: "unauthenticated" }
+    pub async fn user(&self, db: &QueryDb) -> Result<Option<Doc<User>>>; // `ctx.auth.user(&ctx.db)`: a tracked read,
+                                                        // so a query reruns when the profile changes
+    pub fn is_admin(&self) -> bool;
+    pub fn admin_id(&self) -> Option<Id<Admin>>;
+    pub fn require_admin(&self) -> Result<Id<Admin>>;   // "unauthenticated" when anonymous, "forbidden" for users
+    pub fn session_id(&self) -> Option<Id<Session>>;
+    pub fn identity(&self) -> &Identity;
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Identity {                                   // ferrix::Identity = ferrix::auth::Identity
+    pub user_id: Option<String>, pub admin_id: Option<String>, pub session_id: Option<String>,  // string ids, no tokens
+}
+impl Identity {
+    pub fn anonymous() -> Self; pub fn user(Id<User>, Option<Id<Session>>) -> Self; pub fn admin(Id<Admin>, Option<Id<Session>>) -> Self;
+    pub fn log_summary(&self) -> Option<String>;        // "user:<id>" | "admin:<id>" (execution log), None = anonymous
+    pub fn principal_key(&self) -> String;              // log_summary or "anonymous" (scopes mutation dedup keys)
+}
+// `ferrix::auth::User` is the `_users` table type: { email: Option<String>, email_verified: bool, name: Option<String>,
+// image: Option<String> } (creation time = `_creationTime`). Reference it from app tables as `Id<User>`; codegen
+// emits it as `Id<"_users">` (declared in `SystemDataModel`). It never contains secrets.
 
 impl QueryDb {
     pub async fn get<T: Table>(&self, id: Id<T>) -> Result<Option<Doc<T>>>;
@@ -275,6 +299,7 @@ pub struct AppOptions {
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
+    pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
@@ -285,7 +310,9 @@ impl Default for AppOptions { /* the defaults above, dev = false */ }
 - **Idempotency.** `App::execute_mutation(path, args, &identity, Some(&IdempotencyKey { session_id, request_id }))`
   runs a mutation at most once per key and replays the recorded response for repeats. The response is recorded in
   the mutation's own write transaction, in the raw table `_mutation_dedup` of `data.db`, and kept about 10 minutes.
-  The sync worker uses this for every WS mutation; see PROTOCOL.md guarantee 7.
+  The sync worker uses this for every WS mutation; see PROTOCOL.md guarantee 7. The runtime scopes the stored key
+  to the caller (`IdempotencyKey::scoped_to(identity)`, prefixing `Identity::principal_key()`), so a response is
+  only ever replayed to the identity that ran the mutation.
 - **Startup schema check.** `App::open` fingerprints each table: a hash of its rendered TS type, the TS declarations
   of the named types it uses, and its index definitions. It re-validates the documents of a table only when the
   fingerprint differs from the one stored after the last successful check (raw table `_schema_fingerprints`), using
@@ -341,7 +368,7 @@ pub struct LogEntry {
     pub timestamp: i64,               // start, ms since the epoch
     pub path: String,
     pub kind: FunctionKind,           // JSON: "query" | "mutation" | "action"
-    pub identity: Option<String>,     // opaque summary of the caller (None = anonymous)
+    pub identity: Option<String>,     // Identity::log_summary(): "user:<id>" | "admin:<id>"; None = anonymous
     pub duration_us: u64,
     pub outcome: LogOutcome,          // JSON: "success" | "userError" | "serverError"
     pub error: Option<String>,        // full message with context (never redacted: server-side data)
@@ -358,6 +385,46 @@ pub struct FunctionStats {
     pub p50_us: u64, pub p95_us: u64,     // nearest-rank percentiles of duration_us
 }
 ```
+
+### 1.5 Auth configuration and services
+
+```rust
+use ferrix::auth::{AuthConfig, GitHub, Google, Oidc, SmtpConfig};
+fn main() -> ferrix::Result<()> {
+    ferrix::Ferrix::new()
+        .auth(AuthConfig::password()                // email + password (verification and reset included)
+            .magic_link()                           // magic link + 6-digit code by email
+            .oauth(GitHub::from_env())              // FERRIX_AUTH_GITHUB_CLIENT_ID / _SECRET (skipped with a warning if unset)
+            .oauth(Google::from_env())              // FERRIX_AUTH_GOOGLE_CLIENT_ID / _SECRET
+            .oauth(Oidc::new("corp", "https://idp.example.com", "client-id", "secret"))   // discovery
+            .redirect_url("https://app.example.com")) // allowlist for OAuth redirects and email links
+        .run()
+}
+```
+`AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
+builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
+`session_ttl` (30 days, sliding), `refresh_reuse_grace` (10 s), `public_url`, `smtp(SmtpConfig)`,
+`mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`.
+CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
+`FERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`FERRIX_SMTP_URL`, `FERRIX_SMTP_FROM`),
+`--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
+(the password is read from stdin when omitted).
+
+`App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
+`sign_in_as(app, user)`, `create_admin`, `reset_admin_password`, `create_setup_token`, ...). `TestApp::with_auth(cfg)`
+and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests.
+
+**System tables** (all defined with `#[table]` in `ferrix::auth::tables`): `_users` (`User`), `_credentials`
+(argon2id password hash per user), `_accounts` (provider + provider account id), `_sessions` (user or admin, keyed
+hash of the current refresh token, sliding `expires_at`, user agent, ip, `last_used_at`), `_used_refresh_tokens`
+(rotated refresh token hashes, for reuse detection; deleted with their session), `_verification_codes` (keyed hashes
+of a 6-digit code and a link token, purpose, expiry, attempts), `_admins` (email, argon2id hash). The auth code
+reads and writes them directly through `QueryDb` / `MutationDb` (not through registered functions), so hashes never
+appear in function args or the execution log.
+
+**System functions**: `_system/auth:me` (query: the signed-in `Doc<User>` or null) and `_system/auth:update_profile`
+(mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@ferrix/client` exports hand-written references
+as `systemApi.auth.me` / `systemApi.auth.updateProfile`.
 
 ---
 
@@ -519,7 +586,9 @@ ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping)
 
 - **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
   in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
-  of `DataModel`.
+  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`, today just `_users`)
+  are declared in a separate `SystemDataModel`, and the generated `Id<T>` / `Doc<T>` accept
+  `TableNames | keyof SystemDataModel`.
 - **System functions** get paths under `_system/` (`function_path` maps crate `ferrix` to `_system`), e.g.
   `ferrix::auth::api::sign_in` → `"_system/auth/api:sign_in"`. Use `__private::is_system_path(path)` to test for
   them. Codegen leaves them out of the app's `api`. Who may call a public system function from a client (anyone, a

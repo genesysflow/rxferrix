@@ -20,7 +20,16 @@ function assertType<T extends true>(): T | undefined {
 
 export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: Id<"notes">): Promise<void> {
   // Tables and documents.
-  assertType<Equals<TableNames, "items" | "lossy" | "notes" | "tasks" | "todos">>();
+  assertType<Equals<TableNames, "items" | "lossy" | "notes" | "private_notes" | "tasks" | "todos">>();
+  // App tables may reference the built-in `_users` table (auth); its documents carry no secrets.
+  assertType<Equals<DataModel["private_notes"]["owner"], Id<"_users">>>();
+  const user = {} as Doc<"_users">;
+  assertType<Equals<typeof user._id, Id<"_users">>>();
+  assertType<Equals<typeof user.email, string | null>>();
+  // @ts-expect-error no password hash on users
+  void user.passwordHash;
+  // @ts-expect-error other system tables are not exposed
+  void ({} as Id<"_sessions">);
   assertType<Equals<DataModel["tasks"]["priority"], Priority>>();
   assertType<Equals<Priority, "low" | "high">>();
   const doc = {} as Doc<"tasks">;

@@ -401,6 +401,7 @@ pub struct AppOptions {
     pub dev: bool,                    // real error messages and logLines to clients
     pub readers: usize,
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
+    pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with ferrix::QueryTimeout
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
     pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons (§1.7)
@@ -412,6 +413,9 @@ pub struct AppOptions {
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
+- **Query timeout.** A query still running after `query_timeout` fails with `ferrix::QueryTimeout { path, timeout }`
+  (a server error; checked at `.await` points only). A stuck query would otherwise keep a reader connection, and the
+  older results its subscribers' other queries are kept at, for good.
 - **Slow mutations.** A mutation that holds the database writer for 100 ms or more (`ferrix::db::WARN_WRITE`) is
   logged as a warning, at most once a minute per path: every other write waited for it.
 - **Mutation timeout.** A mutation still running after `mutation_timeout` is dropped and rolled back, and fails with

@@ -185,6 +185,18 @@ Nothing here changes the messages or the guarantees above; it describes how the 
   `Authenticate` still gets its own Transition (guarantee 3). A socket with more than 1024 of those unanswered is
   closed with `FatalError`.
 
+## Limits
+
+So that no client can grow the server's memory without bound:
+
+- At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`.
+- At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server stops reading the socket
+  until one finishes (they queue in the client and TCP rather than in the server).
+- A socket the client has sent nothing on for 45 seconds is closed with `FatalError` (`SILENCE_LIMIT`; the server
+  pings every 15 s and a client answers every `Ping` with `Pong`). A frame that takes over 30 s to send (a client that
+  stopped reading) closes the socket too.
+- A query running longer than the server's `query_timeout` (default 30 s) fails.
+
 ## Client rules
 
 - **On reconnect**, the client creates a fresh server state (versions start at 0). It sends `Connect`, then

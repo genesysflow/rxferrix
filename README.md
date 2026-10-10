@@ -575,6 +575,9 @@ scheduler queue depth, dropped log entries and, with `--replicate-to`, the repli
 
 ## Things to know
 
+- **Limits per connection and per run.** A socket may have 1024 live queries and 64 running mutations/actions;
+  queries time out after 30 s (`--query-timeout`), mutations after 5 s; a client silent for 45 s (it answers pings)
+  is disconnected. They bound the server's memory whatever a client does (docs/PROTOCOL.md, Limits).
 - **Query results are cached while nothing they read changes.** Every subscriber of a query shares one result; after
   the last one leaves it stays cached (up to 30 minutes, 64 MiB in all: `--query-cache-ttl`, `--query-cache-size`)
   and answers the next subscriber, HTTP query or `ctx.run_query` without running, until a write touches what it read.

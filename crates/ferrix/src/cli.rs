@@ -155,6 +155,9 @@ struct ServeArgs {
     /// Only enforced at `.await` points.
     #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
     mutation_timeout: Duration,
+    /// Fail queries still running after this long, e.g. `30s`. Only enforced at `.await` points.
+    #[arg(long, value_name = "DURATION", default_value = "30s", value_parser = parse_duration)]
+    query_timeout: Duration,
     /// Memory for cached results of queries nobody watches any more, e.g. `64MB`, `1GB` (0 keeps none). They answer
     /// the next subscriber, HTTP query or `ctx.run_query` without running, until a write changes them.
     #[arg(long, env = "FERRIX_QUERY_CACHE_SIZE", value_name = "SIZE", default_value = "64MB")]
@@ -588,6 +591,7 @@ fn serve(
         let mut options = AppOptions {
             dev: args.dev,
             mutation_timeout: args.mutation_timeout,
+            query_timeout: args.query_timeout,
             skip_schema_check: args.skip_schema_check,
             query_cache: crate::runtime::QueryCacheOptions {
                 idle_ttl: args.query_cache_ttl,

@@ -62,7 +62,7 @@ pub use ferrix_macros::{
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
-pub use error::{Error, MutationTimeout, Result, UserError};
+pub use error::{Error, MutationTimeout, QueryTimeout, Result, UserError};
 pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use private::FunctionKind;
 pub use id::Id;

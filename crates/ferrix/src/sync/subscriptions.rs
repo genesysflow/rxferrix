@@ -523,6 +523,8 @@ pub struct SubscriptionStats {
     pub cache_misses: u64,
     /// Idle queries dropped for the memory budget or their age (not for being invalidated), since start.
     pub cache_evictions: u64,
+    /// Query runs queued or running.
+    pub jobs: u64,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -874,8 +876,8 @@ impl Manager {
                     self.need_round = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.retry => self.retry = false,
-                // Idle queries expire even when nothing else happens.
-                _ = tokio::time::sleep(Duration::from_secs(60)), if !self.idle.is_empty() => {}
+                // Idle queries expire, and the write log is trimmed, even when nothing else happens.
+                _ = tokio::time::sleep(Duration::from_secs(30)) => self.write_log.trim(),
             }
             self.expire_idle();
             // Take whatever else is waiting, so that one pass (and one generation) serves all of it.
@@ -905,6 +907,7 @@ impl Manager {
             self.index.len() as u64,
         );
         self.metrics.set_idle_cache(self.idle.len() as u64, self.idle_bytes as u64);
+        self.metrics.set_jobs(self.in_flight.len() as u64);
     }
 
     // ---- commands ----
@@ -1111,9 +1114,19 @@ impl Manager {
         self.metrics.record_cache_evictions(evicted);
     }
 
-    /// Forget a query. A job of it that is in flight still runs; its result is ignored.
+    /// Forget a query. Its queued job is dropped too (a client adding and removing queries would otherwise grow the
+    /// queue without bound); one that is already running finishes, and its result is ignored.
     fn drop_query(&mut self, id: SharedId) {
         let Some(q) = self.queries.remove(&id) else { return };
+        if q.in_flight.is_some() {
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            for lane in &mut queue.lanes {
+                if let Some(at) = lane.iter().position(|(job, ..)| *job == id) {
+                    let (_, seq, _) = lane.remove(at).expect("found");
+                    self.in_flight.remove(&seq);
+                }
+            }
+        }
         if let Some(idle) = &q.idle {
             self.idle.remove(&idle.seq);
             self.idle_bytes -= idle.bytes;

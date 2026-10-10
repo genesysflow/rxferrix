@@ -16,7 +16,7 @@ use crate::db::dedup::{self, IdempotencyKey};
 use crate::db::query::{MutationDb, QueryDb, Source};
 use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
-use crate::error::{FunctionNotFound, MutationTimeout};
+use crate::error::{FunctionNotFound, MutationTimeout, QueryTimeout};
 use crate::exec_log::{LogRetention, Logs};
 use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
 use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, TABLES, Visibility};
@@ -202,6 +202,9 @@ pub struct AppOptions {
     /// A mutation still running after this long is rolled back with a [`MutationTimeout`] error. Default: 5s. Only
     /// checked at `.await` points: synchronous code is never preempted.
     pub mutation_timeout: Duration,
+    /// A query still running after this long fails with a [`QueryTimeout`] error. Default: 30s. Only checked at
+    /// `.await` points.
+    pub query_timeout: Duration,
     /// Open even if existing documents may not match changed table types (see `db::schema_check`).
     pub skip_schema_check: bool,
     /// Retention of the execution log in `aux.db`. Default: 7 days or 200k rows.
@@ -241,6 +244,8 @@ impl Default for QueryCacheOptions {
 
 /// Default [`AppOptions::mutation_timeout`].
 pub const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default [`AppOptions::query_timeout`].
+pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Default for AppOptions {
     fn default() -> Self {
@@ -249,6 +254,7 @@ impl Default for AppOptions {
             readers: crate::db::DEFAULT_READERS,
             auth: Default::default(),
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
+            query_timeout: DEFAULT_QUERY_TIMEOUT,
             skip_schema_check: false,
             log_retention: LogRetention::default(),
             storage: Default::default(),
@@ -346,6 +352,7 @@ pub struct Metrics {
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
     cache_evictions: AtomicU64,
+    jobs: AtomicU64,
     /// Request and execution counters for `/metrics` (`crate::ops::metrics`).
     pub(crate) ops: crate::ops::metrics::Counters,
 }
@@ -383,6 +390,7 @@ impl Metrics {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             cache_evictions: self.cache_evictions.load(Ordering::Relaxed),
+            jobs: self.jobs.load(Ordering::Relaxed),
         }
     }
 
@@ -409,6 +417,10 @@ impl Metrics {
     pub(crate) fn record_cache_lookup(&self, hit: bool) {
         let counter = if hit { &self.cache_hits } else { &self.cache_misses };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_jobs(&self, jobs: u64) {
+        self.jobs.store(jobs, Ordering::Relaxed);
     }
 
     pub(crate) fn record_cache_evictions(&self, n: u64) {
@@ -717,7 +729,14 @@ impl App {
         let (auth, auth_access) = Auth::tracked(identity.clone());
         let ctx = QueryCtx { db, auth, storage, dev: self.options().dev };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
-        let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
+        let timeout = self.options().query_timeout;
+        let run = async {
+            match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(QueryTimeout { path: path.to_string(), timeout }.into()),
+            }
+        };
+        let (result, log_lines) = crate::log::capture(run).await;
         exec.finish(self, &result, &log_lines);
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
         QueryRun { result, read_set, ts, log_lines, auth_deps: auth_access.deps() }

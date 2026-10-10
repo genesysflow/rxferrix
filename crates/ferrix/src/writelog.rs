@@ -20,12 +20,23 @@ pub struct CommitEntry {
     pub writes: Vec<(IndexId, Vec<u8>)>,
 }
 
-/// Retention limits.
+/// Retention limits: the oldest entries go once any is passed. Readers that need trimmed entries treat everything as
+/// changed (the subscription manager reruns, the HNSW indexes rescan, ...), so these trade memory for occasional extra
+/// work: commits are normally consumed within milliseconds, or seconds behind a slow query.
 const MAX_ENTRIES: usize = 100_000;
-const MAX_AGE: Duration = Duration::from_secs(5 * 60);
+const MAX_AGE: Duration = Duration::from_secs(60);
+/// Estimated memory of the retained entries (a bulk write can put megabytes of index keys in one entry).
+pub const MAX_BYTES: usize = 32 << 20;
+
+/// Estimated memory of an entry.
+fn entry_bytes(entry: &CommitEntry) -> usize {
+    128 + entry.writes.iter().map(|(_, key)| key.len() + 40).sum::<usize>()
+}
 
 struct Inner {
     entries: VecDeque<(Instant, Arc<CommitEntry>)>,
+    /// [`entry_bytes`] of `entries`.
+    bytes: usize,
     /// Every commit with ts > `complete_after` is in `entries` (or not yet appended). Commits at or before it may
     /// have been trimmed.
     complete_after: u64,
@@ -42,7 +53,7 @@ impl WriteLog {
     pub fn new(ts: u64) -> Self {
         let (latest_tx, _) = watch::channel(ts);
         WriteLog {
-            inner: Mutex::new(Inner { entries: VecDeque::new(), complete_after: ts, latest: ts }),
+            inner: Mutex::new(Inner { entries: VecDeque::new(), bytes: 0, complete_after: ts, latest: ts }),
             latest_tx,
         }
     }
@@ -53,19 +64,24 @@ impl WriteLog {
         {
             let mut inner = self.inner.lock().unwrap();
             debug_assert!(ts > inner.latest, "write log entries must be appended in ts order");
-            let now = Instant::now();
-            inner.entries.push_back((now, Arc::new(entry)));
+            inner.bytes += entry_bytes(&entry);
+            inner.entries.push_back((Instant::now(), Arc::new(entry)));
             inner.latest = ts;
-            while let Some((at, front)) = inner.entries.front() {
-                if inner.entries.len() > MAX_ENTRIES || now.duration_since(*at) > MAX_AGE {
-                    inner.complete_after = front.ts;
-                    inner.entries.pop_front();
-                } else {
-                    break;
-                }
-            }
+            inner.trim();
         }
         self.latest_tx.send_replace(ts);
+    }
+
+    /// Drop entries past the retention limits. Appending does this too; this is for when commits stop (the
+    /// subscription manager calls it periodically), so an idle server doesn't keep the last burst's entries.
+    pub fn trim(&self) {
+        self.inner.lock().unwrap().trim();
+    }
+
+    /// Estimated memory of the retained entries, and how many there are.
+    pub fn retained(&self) -> (usize, usize) {
+        let inner = self.inner.lock().unwrap();
+        (inner.bytes, inner.entries.len())
     }
 
     /// The latest appended ts.
@@ -108,6 +124,25 @@ impl WriteLog {
     }
 }
 
+impl Inner {
+    fn trim(&mut self) {
+        let now = Instant::now();
+        while let Some((at, front)) = self.entries.front() {
+            let over = self.entries.len() > MAX_ENTRIES || self.bytes > MAX_BYTES || now.duration_since(*at) > MAX_AGE;
+            if !over {
+                break;
+            }
+            self.complete_after = front.ts;
+            self.bytes -= entry_bytes(front);
+            self.entries.pop_front();
+        }
+        // After a burst, give the queue's own memory back too.
+        if self.entries.capacity() > 4 * self.entries.len() + 1024 {
+            self.entries.shrink_to_fit();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +160,19 @@ mod tests {
         assert_eq!(log.entries_between(10, 15).unwrap().len(), 5);
         assert_eq!(log.entries_between(14, 16), None, "not yet appended");
         assert_eq!(log.latest(), 15);
+    }
+
+    #[test]
+    fn retention_is_bounded_by_bytes() {
+        let log = WriteLog::new(0);
+        // 1 MB of keys per commit: the byte cap, not the entry count, trims.
+        for ts in 1..=100 {
+            log.append(CommitEntry { ts, writes: vec![(1, vec![0u8; 1 << 20])] });
+        }
+        let (bytes, entries) = log.retained();
+        assert!(bytes <= MAX_BYTES && entries < 40, "{bytes} bytes in {entries} entries");
+        assert_eq!(log.entries_between(0, 100), None, "trimmed entries are reported as unknown");
+        assert_eq!(log.entries_between(99, 100).map(|e| e.len()), Some(1));
     }
 
     #[tokio::test]

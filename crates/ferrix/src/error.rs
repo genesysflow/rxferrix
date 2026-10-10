@@ -88,6 +88,27 @@ impl std::fmt::Display for MutationTimeout {
 
 impl std::error::Error for MutationTimeout {}
 
+/// A query ran longer than `AppOptions::query_timeout`. A server error. Like [`MutationTimeout`], it can only fire at
+/// an `.await`. Without it, a stuck query would hold a reader connection, and the results its connections need, for
+/// good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryTimeout {
+    pub path: String,
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Display for QueryTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "query `{}` timed out after {:?} (limit: AppOptions::query_timeout, `--query-timeout` on the command line)",
+            self.path, self.timeout
+        )
+    }
+}
+
+impl std::error::Error for QueryTimeout {}
+
 /// How an error is classified at the client boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {

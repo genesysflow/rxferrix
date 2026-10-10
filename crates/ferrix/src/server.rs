@@ -104,6 +104,9 @@ pub async fn serve_with_shutdown(
 // WebSocket
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// How long one WebSocket frame may take to send before the connection is given up.
+pub const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn sync_handler(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(app, socket))
 }
@@ -124,11 +127,18 @@ async fn handle_socket(app: App, socket: WebSocket) {
 
     let mut writer = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
-            if sink.send(Message::Text(msg.to_text().into())).await.is_err() {
-                return;
+            // A client that stops reading (while its TCP stack still acknowledges) would otherwise keep this task,
+            // its worker and their queues alive for good.
+            match tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Text(msg.to_text().into()))).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return,
+                Err(_) => {
+                    tracing::debug!("closing a WebSocket whose client stopped reading");
+                    return;
+                }
             }
         }
-        let _ = sink.send(Message::Close(None)).await;
+        let _ = tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Close(None))).await;
     });
 
     let reader = async {

@@ -20,6 +20,7 @@
 //! | `ferrix_shared_queries` | gauge | distinct queries the server reruns |
 //! | `ferrix_subscription_rounds_total`, `ferrix_query_reruns_total` | counter | invalidation rounds and query reruns |
 //! | `ferrix_query_cache_entries`, `ferrix_query_cache_bytes` | gauge | cached results nobody watches; their size |
+//! | `ferrix_query_jobs` | gauge | query runs queued or running |
 //! | `ferrix_query_cache_hits_total`, `_misses_total` | counter | HTTP queries and `ctx.run_query`: cached, or run |
 //! | `ferrix_query_cache_evictions_total` | counter | cached results dropped for the memory budget or their age |
 //! | `ferrix_db_file_bytes` | gauge | `file` (`data.db`, `data.db-wal`, `aux.db`, `aux.db-wal`) |
@@ -233,13 +234,14 @@ pub async fn render(app: &App) -> crate::Result<String> {
 
     let m = app.metrics();
     let stats = m.subscription_stats();
-    let gauges: [(&str, &str, u64); 6] = [
+    let gauges: [(&str, &str, u64); 7] = [
         ("ferrix_websocket_connections", "Open WebSocket connections.", m.sockets()),
         ("ferrix_sync_connections", "Connections known to the subscription manager.", stats.connections),
         ("ferrix_subscriptions", "Live (connection, queryId) subscriptions.", stats.subscriptions),
         ("ferrix_shared_queries", "Distinct shared queries the server reruns.", stats.shared_queries),
         ("ferrix_query_cache_entries", "Cached results of queries nobody watches.", stats.idle_queries),
         ("ferrix_query_cache_bytes", "Estimated memory of the cached results.", stats.idle_bytes),
+        ("ferrix_query_jobs", "Query runs queued or running.", stats.jobs),
     ];
     for (name, help, v) in gauges {
         header(&mut out, name, "gauge", help);

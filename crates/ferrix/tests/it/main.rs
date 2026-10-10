@@ -17,6 +17,7 @@ mod group_commit;
 mod hardening;
 mod index_order;
 mod jwt;
+mod limits;
 mod macros;
 mod migrations;
 mod model;

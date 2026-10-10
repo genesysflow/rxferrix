@@ -69,6 +69,8 @@ s3 = ["object_store/aws"]
 dashboard = []
 
 [dev-dependencies]
+# Paused time in tests (`#[tokio::test(start_paused = true)]`).
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # A failing `ObjectStore` wrapper in the replication tests (the trait is an `async_trait`).
 async-trait = "0.1.92"
 proptest = "1.11.0"

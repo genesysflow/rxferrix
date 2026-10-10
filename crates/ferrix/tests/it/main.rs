@@ -15,6 +15,7 @@ mod diff_fixtures;
 mod dx;
 mod group_commit;
 mod hardening;
+mod fuzz;
 mod index_order;
 mod jwt;
 mod limits;

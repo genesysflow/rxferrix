@@ -201,14 +201,24 @@ async fn a_waiter_that_gives_up_is_not_handed_the_batch() {
     let quitter = tokio::spawn(call("quitter", 0));
     std::thread::sleep(Duration::from_micros(300));
     quitter.abort();
-    assert!(quitter.await.unwrap_err().is_cancelled());
+    // On a loaded machine the quitter can get the writer first and finish before the abort: then this round didn't set
+    // the scenario up, but the holder must still finish.
+    let quit = match quitter.await {
+        Err(e) => {
+            assert!(e.is_cancelled());
+            true
+        }
+        Ok(_) => false,
+    };
     tokio::time::timeout(Duration::from_secs(10), holder)
         .await
         .expect("the holder's batch was left for a cancelled waiter")
         .unwrap()
         .unwrap();
     assert_eq!(count(&t, "holder").await, 1);
-    assert_eq!(count(&t, "quitter").await, 0);
+    if quit {
+        assert_eq!(count(&t, "quitter").await, 0);
+    }
 }
 
 /// Checkpoints run off the commit path (`ferrix::db::checkpoint`), but the WAL must still start over regularly: under

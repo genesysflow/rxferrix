@@ -24,6 +24,12 @@ function isObject(v: Json): v is Record<string, Json> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Sets `key` as a plain own property: `out[key] = value` would set the prototype for `"__proto__"` (a key data can
+ * have, e.g. in a map keyed by user input). */
+function setOwn(out: Record<string, Json>, key: string, value: Json): void {
+  Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 export function applyDiff(old: Json, diff: Json): Json {
   if (!isObject(diff)) throw new DiffMismatch("a diff must be an object");
   if ("$r" in diff) return diff.$r;
@@ -60,19 +66,19 @@ export function applyDiff(old: Json, diff: Json): Json {
     if (o.d !== undefined) {
       if (!Array.isArray(o.d)) throw new DiffMismatch("bad deleted keys");
       for (const key of o.d) {
-        if (typeof key !== "string" || !(key in out)) throw new DiffMismatch(`deleting missing key ${String(key)}`);
+        if (typeof key !== "string" || !Object.hasOwn(out, key)) throw new DiffMismatch(`deleting missing key ${String(key)}`);
         delete out[key];
       }
     }
     if (o.s !== undefined) {
       if (!isObject(o.s)) throw new DiffMismatch("bad set keys");
-      for (const [key, value] of Object.entries(o.s)) out[key] = value;
+      for (const [key, value] of Object.entries(o.s)) setOwn(out, key, value);
     }
     if (o.p !== undefined) {
       if (!isObject(o.p)) throw new DiffMismatch("bad patched keys");
       for (const [key, sub] of Object.entries(o.p)) {
-        if (!(key in old)) throw new DiffMismatch(`patching missing key ${key}`);
-        out[key] = applyDiff(old[key], sub);
+        if (!Object.hasOwn(old, key)) throw new DiffMismatch(`patching missing key ${key}`);
+        setOwn(out, key, applyDiff(old[key], sub));
       }
     }
     return out;

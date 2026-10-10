@@ -96,6 +96,11 @@ fn cases() -> Vec<Value> {
         pairs.push((Value::Array(list.clone()), Value::Array(new)));
     }
     pairs.push((json!({ "page": list.clone(), "isDone": false }), json!({ "page": list[1..].to_vec(), "isDone": true })));
+    // Keys that mean something to JavaScript objects (user data can have them, e.g. a map keyed by user input): set,
+    // patched and deleted, they must stay plain keys.
+    pairs.push((json!({ "a": 1 }), json!({ "a": 1, "__proto__": { "x": 1 }, "toString": 2, "constructor": [3] })));
+    pairs.push((json!({ "__proto__": { "x": 1, "y": [1, 2] }, "toString": 1 }), json!({ "__proto__": { "x": 2, "y": [1, 2] } })));
+    pairs.push((json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 8] } }), json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 9] } })));
     let mut rng = StdRng::seed_from_u64(7);
     let mut cases = Vec::new();
     let add = |old: Value, new: Value, cases: &mut Vec<Value>| {

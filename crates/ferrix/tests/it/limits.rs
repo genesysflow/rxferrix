@@ -19,7 +19,11 @@ async fn queries_added_and_removed_leave_no_queued_runs() {
     let mut c = Client::new(&app).await;
     // Each slow query is queued when added; removing it at once must take its queued run along.
     for i in 0..300u64 {
-        let add = QuerySetModification::Add { query_id: i, udf_path: fns::slow_count::path(), args: json!({ "ms": 500 + i }) };
+        let add = QuerySetModification::Add {
+            query_id: i,
+            udf_path: fns::slow_count::path(),
+            args: json!({ "ms": 500 + i }),
+        };
         c.modify(vec![add, QuerySetModification::Remove { query_id: i }]).await;
     }
     let s = app.subscription_stats();

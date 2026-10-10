@@ -940,6 +940,9 @@ async fn ops_admin_endpoints_are_admin_only() {
         (Method::POST, "/api/admin/restore"),
         (Method::DELETE, "/api/admin/restore"),
         (Method::POST, "/api/admin/restore/restart"),
+        (Method::POST, "/api/admin/restore/point-in-time"),
+        (Method::GET, "/api/admin/replication"),
+        (Method::POST, "/api/admin/replication/snapshot"),
     ];
     for (method, path) in &endpoints {
         let r = a.req(method.clone(), path, None).send().await.unwrap();

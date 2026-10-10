@@ -6,6 +6,8 @@
 //! - [`export`]: JSONL and CSV export of tables, and JSONL and CSV import through the normal write path ([`csv`]:
 //!   reading CSV with the table's types).
 //! - [`restore`]: staged restores (validated while the server runs, applied at the next start) and restart requests.
+//! - [`replicate`]: continuous replication (the change journal shipped as segments, periodic snapshots, retention)
+//!   and point-in-time restores.
 //! - [`metrics`]: counters and the Prometheus text format of `GET /metrics`.
 //! - [`http`]: the admin endpoints (`/api/admin/backups*`, `/api/admin/export/{table}`, `/api/admin/import/{table}`)
 //!   and `/metrics`.
@@ -22,6 +24,7 @@ pub mod export;
 pub mod http;
 pub mod lock;
 pub mod metrics;
+pub mod replicate;
 pub mod restore;
 pub mod tls;
 pub mod web;
@@ -45,6 +48,9 @@ pub struct OpsOptions {
     /// Whether (and with which exit code) an administrator may ask the server to restart to apply a staged restore
     /// (`--restart-exit-code`; [`restore`]).
     pub restart: restore::RestartHandle,
+    /// Continuous replication and point-in-time restores (`--replicate-to`; [`replicate`]). Turns the change journal
+    /// on from the first commit.
+    pub replication: Option<replicate::ReplicationOptions>,
 }
 
 /// `"500ms"`, `"30s"`, `"5m"`, `"6h"`, `"7d"`, or a bare number of seconds.
@@ -73,6 +79,23 @@ pub fn file_timestamp(ms: f64) -> String {
     dt.format("%Y%m%dT%H%M%S%.3fZ").to_string()
 }
 
+/// The inverse of [`file_timestamp`] (ms since the epoch).
+pub fn parse_file_timestamp(s: &str) -> Option<f64> {
+    let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S%.3fZ").ok()?;
+    Some(dt.and_utc().timestamp_millis() as f64)
+}
+
+/// An RFC 3339 time (`2026-10-09T12:00:00Z`, `2026-10-09T14:00:00.250+02:00`) or ms since the epoch, as ms.
+pub fn parse_time(s: &str) -> Result<f64, String> {
+    let s = s.trim();
+    if let Ok(ms) = s.parse::<f64>() {
+        return Ok(ms);
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|t| t.timestamp_millis() as f64)
+        .map_err(|e| format!("invalid time `{s}` (RFC 3339, e.g. 2026-10-09T12:00:00Z): {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +109,10 @@ mod tests {
         assert!(parse_duration("3w").is_err() && parse_duration("soon").is_err());
         assert_eq!(file_timestamp(0.0), "19700101T000000.000Z");
         assert_eq!(file_timestamp(1_760_011_200_123.0), "20251009T120000.123Z");
+        assert_eq!(parse_file_timestamp("20251009T120000.123Z"), Some(1_760_011_200_123.0));
+        assert_eq!(parse_file_timestamp("nope"), None);
+        assert_eq!(parse_time("2025-10-09T14:00:00.123+02:00").unwrap(), 1_760_011_200_123.0);
+        assert_eq!(parse_time("1760011200123").unwrap(), 1_760_011_200_123.0);
+        assert!(parse_time("yesterday").is_err());
     }
 }

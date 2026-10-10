@@ -113,6 +113,9 @@ pub struct Manifest {
     pub ferrix_version: String,
     /// The commit ts of the `data.db` snapshot.
     pub ts: u64,
+    /// The wall-clock ms of that commit (`_meta.time`; 0 in archives written before it was recorded).
+    #[serde(default)]
+    pub commit_time: f64,
     /// `"included"`, `"excluded"` or `"remote"` (S3 storage, never copied).
     pub storage: String,
     /// `_storage` documents whose blob was missing when the backup was taken.
@@ -211,9 +214,20 @@ fn stored_file_ids(db: &Path) -> crate::Result<Vec<DocId>> {
     Ok(crate::db::storage::table_documents(&conn, number)?.into_iter().map(|(id, _)| DocId(id)).collect())
 }
 
-fn read_meta_ts(db: &Path) -> crate::Result<u64> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    crate::db::storage::read_meta_u64(&conn, crate::db::storage::META_TS)
+/// The commit ts and time of a snapshot copy, after removing its replication journal and state
+/// (`crate::db::journal::scrub`): a backup describes the data, not a replication stream, and a database restored from
+/// it starts a new replication generation.
+fn prepare_copy(db: &Path) -> crate::Result<(u64, f64)> {
+    let conn = Connection::open(db)?;
+    let ts = crate::db::storage::read_meta_u64(&conn, crate::db::storage::META_TS)?;
+    let time = crate::db::storage::read_meta_f64(&conn, crate::db::storage::META_TIME)?;
+    let journaled = crate::db::journal::stats(&conn).ok().flatten().is_some();
+    crate::db::journal::scrub(&conn)?;
+    if journaled {
+        // Unshipped journal rows can be large: don't archive their free pages.
+        conn.execute_batch("VACUUM")?;
+    }
+    Ok((ts, time))
 }
 
 /// Write a backup archive of `source` to `out` (blocking). The archive is written to a temporary file next to `out`
@@ -224,7 +238,7 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
     let work = tempfile::Builder::new().prefix(".ferrix-backup-").tempdir_in(&source.dir)?;
     let data = work.path().join("data.db");
     snapshot_db(&source.dir.join("data.db"), &data)?;
-    let ts = read_meta_ts(&data)?;
+    let (ts, commit_time) = prepare_copy(&data)?;
     let aux_src = source.dir.join("aux.db");
     let aux = if spec.include_aux && aux_src.exists() {
         let aux = work.path().join("aux.db");
@@ -277,6 +291,7 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
         created_at: now_ms,
         ferrix_version: env!("CARGO_PKG_VERSION").into(),
         ts,
+        commit_time,
         storage: storage.into(),
         missing_blobs,
         files,
@@ -346,6 +361,18 @@ impl BackupTarget {
 
     fn path(&self, name: &str) -> ObjectPath {
         if self.prefix.is_empty() { ObjectPath::from(name) } else { ObjectPath::from(format!("{}/{name}", self.prefix)) }
+    }
+
+    /// The same store with archives under `<prefix>/<sub>` (replication keeps each generation's snapshots there).
+    pub fn child(&self, sub: &str) -> BackupTarget {
+        let sub = sub.trim_matches('/');
+        let prefix = if self.prefix.is_empty() { sub.to_string() } else { format!("{}/{sub}", self.prefix) };
+        BackupTarget { store: self.store.clone(), location: format!("{}/{sub}", self.location.trim_end_matches('/')), prefix }
+    }
+
+    /// The object store and the path of `rel` under the prefix (`crate::ops::replicate`).
+    pub(crate) fn raw(&self, rel: &str) -> (&Arc<dyn ObjectStore>, ObjectPath) {
+        (&self.store, self.path(rel))
     }
 
     /// Upload a finished archive file as `name`.
@@ -493,6 +520,16 @@ static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Take a backup of `app` while it runs and store it in `target`. Writes keep committing meanwhile.
 pub async fn create(app: &App, spec: &BackupSpec, target: &BackupTarget, scheduled: bool) -> crate::Result<BackupInfo> {
+    Ok(create_with_manifest(app, spec, target, scheduled).await?.0)
+}
+
+/// [`create`], also returning the archive's manifest.
+pub(crate) async fn create_with_manifest(
+    app: &App,
+    spec: &BackupSpec,
+    target: &BackupTarget,
+    scheduled: bool,
+) -> crate::Result<(BackupInfo, Manifest)> {
     let _one = RUNNING.lock().await;
     let now = app.db().clock().now_ms();
     let name = archive_name(now, scheduled);
@@ -505,7 +542,7 @@ pub async fn create(app: &App, spec: &BackupSpec, target: &BackupTarget, schedul
     let name = archive_name_with_ts(now, scheduled, manifest.ts);
     target.upload_file(&local, &name).await.with_context(|| format!("storing the backup in {}", target.location))?;
     tracing::info!(name, bytes, ts = manifest.ts, target = %target.location, "backup written");
-    Ok(BackupInfo { name, bytes, created_at: now, scheduled, ts: Some(manifest.ts) })
+    Ok((BackupInfo { name, bytes, created_at: now, scheduled, ts: Some(manifest.ts) }, manifest))
 }
 
 /// The settings of scheduled backups: the args of the [`run_scheduled`] cron.
@@ -651,7 +688,7 @@ fn extract(archive: &Path, staging: &Path) -> crate::Result<Manifest> {
 }
 
 /// Open the restored database with this binary's tables and check every index. Leaves no `-wal`/`-shm` behind.
-async fn verify(staging: &Path) -> crate::Result<()> {
+pub(crate) async fn verify(staging: &Path) -> crate::Result<()> {
     let tables = crate::runtime::registered_tables();
     let dir = staging.to_path_buf();
     let db = tokio::task::spawn_blocking(move || crate::db::Database::open_with(&dir, &tables, &Default::default()))
@@ -695,7 +732,13 @@ async fn verify(staging: &Path) -> crate::Result<()> {
 /// into a data directory by [`apply_staged`]. Doesn't touch any data directory: safe while a server runs.
 pub async fn prepare(archive: &Path, staging: &Path, skip_verify: bool) -> crate::Result<Manifest> {
     let (archive2, staging2) = (archive.to_path_buf(), staging.to_path_buf());
-    let manifest = tokio::task::spawn_blocking(move || extract(&archive2, &staging2)).await??;
+    let manifest = tokio::task::spawn_blocking(move || -> crate::Result<Manifest> {
+        let manifest = extract(&archive2, &staging2)?;
+        // Archives are written without replication state; one added by hand must not leak into the restored database.
+        crate::db::journal::scrub(&Connection::open(staging2.join("data.db"))?)?;
+        Ok(manifest)
+    })
+    .await??;
     if !skip_verify {
         verify(staging).await?;
     }
@@ -832,6 +875,7 @@ mod tests {
                 created_at: 0.0,
                 ferrix_version: "test".into(),
                 ts: 0,
+                commit_time: 0.0,
                 storage: "excluded".into(),
                 missing_blobs: 0,
                 files: vec![file],

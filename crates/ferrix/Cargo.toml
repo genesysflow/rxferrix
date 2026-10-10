@@ -68,6 +68,8 @@ s3 = ["object_store/aws"]
 dashboard = []
 
 [dev-dependencies]
+# A failing `ObjectStore` wrapper in the replication tests (the trait is an `async_trait`).
+async-trait = "0.1.92"
 proptest = "1.11.0"
 tokio-tungstenite = "0.30.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "crypto"] }

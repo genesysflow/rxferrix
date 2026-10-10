@@ -23,6 +23,19 @@
 //! | `ferrix_scheduler_queue_depth` | gauge | pending scheduled jobs (due or not) |
 //! | `ferrix_scheduler_running_jobs` | gauge | actions in progress |
 //! | `ferrix_exec_log_dropped_total` | counter | execution log entries dropped because the log writer fell behind |
+//!
+//! With `--replicate-to` (`super::replicate`):
+//!
+//! | Metric | Type | |
+//! |---|---|---|
+//! | `ferrix_replication_shipped_ts` | gauge | the newest commit ts stored in the replication target |
+//! | `ferrix_replication_lag_commits` | gauge | commits not shipped yet |
+//! | `ferrix_replication_lag_seconds` | gauge | age of the oldest unshipped commit (0 when caught up) |
+//! | `ferrix_replication_pending_bytes` | gauge | journal bytes kept locally |
+//! | `ferrix_replication_journaling` | gauge | 1 while commits are journaled (0 after the journal was dropped) |
+//! | `ferrix_replication_failures` | gauge | consecutive failed attempts (0 when healthy) |
+//! | `ferrix_replication_segments_shipped_total`, `ferrix_replication_snapshots_total` | counter | since the start |
+//! | `ferrix_replication_last_snapshot_timestamp_seconds` | gauge | when the newest snapshot of the current generation was taken |
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -245,6 +258,27 @@ pub async fn render(app: &App) -> crate::Result<String> {
 
     header(&mut out, "ferrix_exec_log_dropped_total", "counter", "Execution log entries dropped because the writer fell behind.");
     let _ = writeln!(out, "ferrix_exec_log_dropped_total {}", app.logs().dropped());
+
+    if let Some(replicator) = app.replication() {
+        let st = replicator.status(app).await;
+        let gauges: [(&str, &str, &str, f64); 8] = [
+            ("ferrix_replication_shipped_ts", "gauge", "The newest commit ts stored in the replication target.", st.shipped_ts as f64),
+            ("ferrix_replication_lag_commits", "gauge", "Commits not shipped to the replication target yet.", st.lag_commits as f64),
+            ("ferrix_replication_lag_seconds", "gauge", "Age of the oldest unshipped commit (0 when caught up).", st.lag_ms / 1000.0),
+            ("ferrix_replication_pending_bytes", "gauge", "Journal bytes kept locally until shipped.", st.pending_bytes as f64),
+            ("ferrix_replication_journaling", "gauge", "1 while commits are journaled.", if st.journaling { 1.0 } else { 0.0 }),
+            ("ferrix_replication_failures", "gauge", "Consecutive failed replication attempts.", st.failures as f64),
+            ("ferrix_replication_segments_shipped_total", "counter", "Journal segments shipped since the start.", st.segments_shipped as f64),
+            ("ferrix_replication_snapshots_total", "counter", "Snapshots stored since the start.", st.snapshots_taken as f64),
+        ];
+        for (name, kind, help, v) in gauges {
+            header(&mut out, name, kind, help);
+            let _ = writeln!(out, "{name} {v}");
+        }
+        header(&mut out, "ferrix_replication_last_snapshot_timestamp_seconds", "gauge", "When the newest snapshot was taken.");
+        let last = st.last_snapshot.map(|s| s.created_at / 1000.0).unwrap_or(0.0);
+        let _ = writeln!(out, "ferrix_replication_last_snapshot_timestamp_seconds {last:.3}");
+    }
     Ok(out)
 }
 

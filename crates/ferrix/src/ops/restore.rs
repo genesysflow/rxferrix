@@ -19,6 +19,11 @@
 //!    were changed or damaged since staging, nothing is replaced: the server starts on the current database and the
 //!    marker records the error (shown on the dashboard) until it is canceled.
 //!
+//! **Point in time** ([`stage_point_in_time`], `POST /api/admin/restore/point-in-time`): the same, with the staging
+//! directory filled by `super::replicate::prepare_point_in_time` (a snapshot of the replication target plus the
+//! replayed journal, checked like an archive) instead of an archive; the marker records what was restored
+//! (`PendingRestore::point_in_time`).
+//!
 //! **Cancel** ([`cancel`], `DELETE /api/admin/restore`, `ferrix restore --cancel`): removes the marker, then the
 //! staged files. **Restart** (`POST /api/admin/restore/restart`): only when the server runs with
 //! `--restart-exit-code N` (under systemd with `Restart=on-failure` or `RestartForceExitStatus=N`, or Docker with a

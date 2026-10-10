@@ -549,7 +549,8 @@ struct State {
     shipped_time: f64,
     last_segment: Option<ShippedSegment>,
     last_snapshot: Option<SnapshotInfo>,
-    generations: Vec<Generation>,
+    /// The target's generations, kept up to date while shipping (summaries: a week of segments is a long list).
+    generations: Vec<GenerationSummary>,
     segments_shipped: u64,
     snapshots_taken: u64,
     last_success_at: Option<f64>,
@@ -613,6 +614,20 @@ async fn run(replicator: Arc<Replicator>, weak: WeakApp) {
             let failures = replicator.state.lock().unwrap_or_else(|e| e.into_inner()).failures.min(16);
             (every * 2u32.saturating_pow(failures)).min(MAX_BACKOFF.max(every))
         };
+    }
+}
+
+fn summarize(g: &Generation) -> GenerationSummary {
+    GenerationSummary {
+        id: g.id.clone(),
+        created_at: g.created_at,
+        current: false,
+        snapshots: g.snapshots.clone(),
+        segments: g.segments.len(),
+        from_ts: g.oldest_ts(),
+        to_ts: g.newest_ts(),
+        from_time: g.snapshots.first().map(|s| s.created_at),
+        to_time: None,
     }
 }
 
@@ -797,10 +812,10 @@ impl Replicator {
                 st.generation = Some(generation);
                 st.shipped_ts = shipped_ts;
                 st.shipped_time = shipped_time;
-                st.generations = generations;
+                st.generations = generations.iter().map(summarize).collect();
             }
             Resume::NewGeneration(why) => {
-                self.state().generations = generations;
+                self.state().generations = generations.iter().map(summarize).collect();
                 self.new_generation(app, &why).await?;
             }
         }
@@ -824,7 +839,17 @@ impl Replicator {
         app.db().journal().set_pending_bytes(pending_bytes);
         tracing::info!(generation = id, ts, reason = why, "replication: started a new generation");
         let mut st = self.state();
-        st.generations.push(Generation { id: id.clone(), created_at: now, snapshots: vec![snapshot.clone()], segments: Vec::new() });
+        st.generations.push(GenerationSummary {
+            id: id.clone(),
+            created_at: now,
+            current: false,
+            snapshots: vec![snapshot.clone()],
+            segments: 0,
+            from_ts: Some(ts),
+            to_ts: Some(ts),
+            from_time: Some(snapshot.created_at),
+            to_time: None,
+        });
         st.generation = Some(id);
         st.shipped_ts = ts;
         st.shipped_time = time;
@@ -848,7 +873,8 @@ impl Replicator {
             let mut st = self.state();
             if let Some(g) = st.generations.iter_mut().find(|g| g.id == generation) {
                 g.snapshots.push(snapshot.clone());
-                g.sort();
+                g.snapshots.sort_by(|a, b| (a.ts, &a.name).cmp(&(b.ts, &b.name)));
+                g.to_ts = g.to_ts.max(Some(snapshot.ts));
             }
             st.last_snapshot = Some(snapshot.clone());
             st.snapshots_taken += 1;
@@ -879,7 +905,7 @@ impl Replicator {
             );
             without(&mut generations, &plan);
         }
-        self.state().generations = generations;
+        self.state().generations = generations.iter().map(summarize).collect();
         Ok(())
     }
 
@@ -923,7 +949,8 @@ impl Replicator {
             st.last_segment =
                 Some(ShippedSegment { name: segment_name(from, to), from, to, entries: count, bytes: size, shipped_at: now });
             if let Some(g) = st.generations.iter_mut().find(|g| g.id == generation) {
-                g.segments.push(SegmentInfo { from, to, bytes: size });
+                g.segments += 1;
+                g.to_ts = g.to_ts.max(Some(to));
             }
         }
     }
@@ -989,20 +1016,11 @@ impl Replicator {
             (_, None) => (now - shipped_time.max(current_time)).max(0.0),
         };
         let summaries = generations
-            .iter()
-            .map(|g| {
-                let current = generation.as_deref() == Some(g.id.as_str());
-                GenerationSummary {
-                    id: g.id.clone(),
-                    created_at: g.created_at,
-                    current,
-                    snapshots: g.snapshots.clone(),
-                    segments: g.segments.len(),
-                    from_ts: g.oldest_ts(),
-                    to_ts: g.newest_ts(),
-                    from_time: g.snapshots.first().map(|s| s.created_at),
-                    to_time: current.then_some(shipped_time),
-                }
+            .into_iter()
+            .map(|mut g| {
+                g.current = generation.as_deref() == Some(g.id.as_str());
+                g.to_time = g.current.then_some(shipped_time);
+                g
             })
             .collect();
         let (segments_shipped, snapshots_taken, last_success_at, last_error, last_error_at, failures) = counters;

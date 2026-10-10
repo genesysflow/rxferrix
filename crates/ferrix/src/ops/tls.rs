@@ -290,6 +290,27 @@ pub async fn shutdown_signal() {
     }
 }
 
+/// An `axum_server` acceptor that sets `TCP_NODELAY` on each connection, then hands it to `A` (the TLS handshake):
+/// see [`crate::server::nodelay`].
+#[derive(Clone)]
+struct NoDelay<A>(A);
+
+impl<A, S> axum_server::accept::Accept<tokio::net::TcpStream, S> for NoDelay<A>
+where
+    A: axum_server::accept::Accept<tokio::net::TcpStream, S>,
+{
+    type Stream = A::Stream;
+    type Service = A::Service;
+    type Future = A::Future;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        if let Err(e) = stream.set_nodelay(true) {
+            tracing::debug!("could not set TCP_NODELAY: {e}");
+        }
+        self.0.accept(stream, service)
+    }
+}
+
 fn std_listener(addr: SocketAddr) -> crate::Result<std::net::TcpListener> {
     let listener = std::net::TcpListener::bind(addr).with_context(|| format!("listening on {addr}"))?;
     listener.set_nonblocking(true)?;
@@ -298,7 +319,7 @@ fn std_listener(addr: SocketAddr) -> crate::Result<std::net::TcpListener> {
 
 fn spawn_plain(listener: tokio::net::TcpListener, router: Router, stop: Stop) -> tokio::task::JoinHandle<crate::Result<()>> {
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+        axum::serve(crate::server::nodelay(listener), router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { stopped(&stop).await })
             .await?;
         Ok(())
@@ -331,7 +352,7 @@ pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServ
             let addr = listener.local_addr()?;
             let handle = axum_server::Handle::new();
             let serve = axum_server::from_tcp(listener)?
-                .acceptor(acceptor)
+                .acceptor(NoDelay(acceptor))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
             start_tls(serve, handle, addr, *redirect, acme.domains.clone(), stop).await
@@ -346,7 +367,7 @@ pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServ
             }
             let handle = axum_server::Handle::new();
             let serve = axum_server::from_tcp(listener)?
-                .acceptor(axum_server::tls_rustls::RustlsAcceptor::new(rustls))
+                .acceptor(NoDelay(axum_server::tls_rustls::RustlsAcceptor::new(rustls)))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
             start_tls(serve, handle, addr, *redirect, Vec::new(), stop).await
@@ -389,6 +410,33 @@ async fn start_tls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pair of connected streams, and the accepted (server) side.
+    async fn accepted() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (client, accepted) = tokio::join!(client, listener.accept());
+        (client.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn plain_listeners_set_nodelay() {
+        use axum::serve::Listener;
+        let mut listener = crate::server::nodelay(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (client, (stream, _)) = tokio::join!(client, listener.accept());
+        client.unwrap();
+        assert!(stream.nodelay().unwrap(), "TCP_NODELAY on accepted connections");
+    }
+
+    #[tokio::test]
+    async fn tls_acceptors_set_nodelay() {
+        use axum_server::accept::{Accept, DefaultAcceptor};
+        let (_client, stream) = accepted().await;
+        assert!(!stream.nodelay().unwrap());
+        let (stream, ()) = NoDelay(DefaultAcceptor::new()).accept(stream, ()).await.unwrap();
+        assert!(stream.nodelay().unwrap(), "TCP_NODELAY before the inner (TLS) acceptor");
+    }
 
     #[test]
     fn acme_settings() {

@@ -101,7 +101,7 @@ use crate::db::catalog::IndexId;
 use crate::error::ClientError;
 use crate::runtime::{App, Identity, Metrics, QueryRun, WeakApp};
 use crate::sync::interval::{Interval, IntervalIndex};
-use crate::sync::protocol::{QueryId, QuerySetModification, StateModification};
+use crate::sync::protocol::{QueryId, QuerySetModification, QueryValue, StateModification};
 use crate::writelog::WriteLog;
 
 /// Identifies one connection (socket) to the manager.
@@ -404,7 +404,7 @@ struct QueryKey {
 /// A query result as computed. Log lines are already filtered for clients (empty outside `--dev`).
 struct CachedResult {
     hash: Hash,
-    outcome: Result<Value, ClientError>,
+    outcome: Result<QueryValue, ClientError>,
     log_lines: Vec<String>,
 }
 
@@ -605,10 +605,10 @@ fn canonical_args(args: &Value) -> String {
     serde_json::to_string(args).unwrap_or_default()
 }
 
-fn hash_result(tag: &[u8], value: &Value) -> Hash {
+fn hash_bytes(tag: &[u8], bytes: &[u8]) -> Hash {
     let mut h = blake3::Hasher::new();
     h.update(tag);
-    h.update(&serde_json::to_vec(value).unwrap_or_default());
+    h.update(bytes);
     *h.finalize().as_bytes()
 }
 
@@ -1347,11 +1347,15 @@ impl Manager {
         let dev = self.dev;
         let Some(q) = self.queries.get_mut(&id) else { return };
         let log_lines = crate::log::for_client(dev, run.log_lines);
-        let outcome = run.result.map_err(|e| ClientError::from_anyhow(&e, dev));
+        // Serialized here, once: the hash and every subscriber's frame use this text.
+        let outcome = run.result.map(QueryValue::new).map_err(|e| ClientError::from_anyhow(&e, dev));
         // Log lines don't count towards the hash: a rerun with the same result sends nothing.
         let hash = match &outcome {
-            Ok(value) => hash_result(b"ok", value),
-            Err(e) => hash_result(b"err", &serde_json::json!([e.message, e.data])),
+            Ok(value) => hash_bytes(b"ok", value.json().as_bytes()),
+            Err(e) => {
+                let error = serde_json::to_vec(&serde_json::json!([e.message, e.data])).unwrap_or_default();
+                hash_bytes(b"err", &error)
+            }
         };
         let ranges: BTreeSet<(IndexId, Interval)> =
             run.read_set.ranges().map(|(index_id, range)| (index_id, Interval::from_range(range))).collect();
@@ -1518,7 +1522,9 @@ mod tests {
     fn update(query_set: u64, ts: u64, removed: Vec<QueryId>, changed: &[(QueryId, i64)]) -> Update {
         let changed = changed
             .iter()
-            .map(|(q, v)| (*q, StateModification::QueryUpdated { query_id: *q, value: json!(v), log_lines: vec![] }))
+            .map(|(q, v)| {
+                (*q, StateModification::QueryUpdated { query_id: *q, value: json!(v).into(), log_lines: vec![] })
+            })
             .collect();
         Update { query_set, identity: 0, ts, removed, changed }
     }
@@ -1539,8 +1545,8 @@ mod tests {
             updates[0].clone().into_modifications(),
             vec![
                 StateModification::QueryRemoved { query_id: 3 },
-                StateModification::QueryUpdated { query_id: 1, value: json!(11), log_lines: vec![] },
-                StateModification::QueryUpdated { query_id: 2, value: json!(21), log_lines: vec![] },
+                StateModification::QueryUpdated { query_id: 1, value: json!(11).into(), log_lines: vec![] },
+                StateModification::QueryUpdated { query_id: 2, value: json!(21).into(), log_lines: vec![] },
             ]
         );
         assert!(mailbox.is_empty());

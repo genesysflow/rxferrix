@@ -1,5 +1,7 @@
 //! Wire messages of the sync protocol (docs/PROTOCOL.md). JSON text frames, one message each, tagged by `"type"`.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -72,10 +74,62 @@ pub struct StateVersion {
     pub ts: u64,
 }
 
+/// A query result as sent to clients: the value and its JSON text, serialized once when the result is computed and
+/// shared by every subscriber of the query (cloning is an `Arc` clone). Each client's `Transition` frame splices the
+/// text in ([`ServerMessage::to_text`]) instead of serializing the value again per client.
+#[derive(Clone)]
+pub struct QueryValue(Arc<QueryValueInner>);
+
+struct QueryValueInner {
+    value: Value,
+    json: Box<str>,
+}
+
+impl QueryValue {
+    pub fn new(value: Value) -> QueryValue {
+        let json = serde_json::to_string(&value).expect("a JSON value serializes").into_boxed_str();
+        QueryValue(Arc::new(QueryValueInner { value, json }))
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.0.value
+    }
+
+    /// The value as compact JSON.
+    pub fn json(&self) -> &str {
+        &self.0.json
+    }
+}
+
+impl std::ops::Deref for QueryValue {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.0.value
+    }
+}
+
+impl From<Value> for QueryValue {
+    fn from(value: Value) -> QueryValue {
+        QueryValue::new(value)
+    }
+}
+
+impl PartialEq for QueryValue {
+    fn eq(&self, other: &QueryValue) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.value == other.0.value
+    }
+}
+
+impl std::fmt::Debug for QueryValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.value.fmt(f)
+    }
+}
+
 /// `log_lines` are the function's captured log lines; the server fills them only in `--dev`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateModification {
-    QueryUpdated { query_id: QueryId, value: Value, log_lines: Vec<String> },
+    QueryUpdated { query_id: QueryId, value: QueryValue, log_lines: Vec<String> },
     QueryFailed { query_id: QueryId, error: ClientError, log_lines: Vec<String> },
     QueryRemoved { query_id: QueryId },
 }
@@ -92,13 +146,29 @@ impl StateModification {
     fn to_json(&self) -> Value {
         match self {
             StateModification::QueryUpdated { query_id, value, log_lines } => {
-                json!({ "type": "QueryUpdated", "queryId": query_id, "value": value, "logLines": log_lines })
+                json!({ "type": "QueryUpdated", "queryId": query_id, "value": value.value(), "logLines": log_lines })
             }
             StateModification::QueryFailed { query_id, error, log_lines } => json!({
                 "type": "QueryFailed", "queryId": query_id, "errorMessage": error.message,
                 "errorData": error.data, "logLines": log_lines
             }),
             StateModification::QueryRemoved { query_id } => json!({ "type": "QueryRemoved", "queryId": query_id }),
+        }
+    }
+
+    /// Append the JSON form ([`StateModification::to_json`]) to `out`, splicing in a result's shared text.
+    fn write_json(&self, out: &mut String) {
+        match self {
+            StateModification::QueryUpdated { query_id, value, log_lines } => {
+                out.push_str(r#"{"type":"QueryUpdated","queryId":"#);
+                out.push_str(&query_id.to_string());
+                out.push_str(r#","value":"#);
+                out.push_str(value.json());
+                out.push_str(r#","logLines":"#);
+                out.push_str(&serde_json::to_string(log_lines).expect("strings serialize"));
+                out.push('}');
+            }
+            other => out.push_str(&other.to_json().to_string()),
         }
     }
 }
@@ -148,8 +218,37 @@ impl ServerMessage {
         }
     }
 
+    /// The JSON text of [`ServerMessage::to_json`]. A `Transition` is written directly, with each result's shared
+    /// JSON spliced in: with many subscribers, serializing every result again per client was most of the server's
+    /// work.
     pub fn to_text(&self) -> String {
-        self.to_json().to_string()
+        match self {
+            ServerMessage::Transition { start_version, end_version, modifications } => {
+                let values: usize = modifications
+                    .iter()
+                    .map(|m| match m {
+                        StateModification::QueryUpdated { value, .. } => value.json().len() + 64,
+                        _ => 64,
+                    })
+                    .sum();
+                let mut out = String::with_capacity(160 + values);
+                let version = |v: &StateVersion| serde_json::to_string(v).expect("a version serializes");
+                out.push_str(r#"{"type":"Transition","startVersion":"#);
+                out.push_str(&version(start_version));
+                out.push_str(r#","endVersion":"#);
+                out.push_str(&version(end_version));
+                out.push_str(r#","modifications":["#);
+                for (i, m) in modifications.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    m.write_json(&mut out);
+                }
+                out.push_str("]}");
+                out
+            }
+            other => other.to_json().to_string(),
+        }
     }
 }
 
@@ -187,11 +286,50 @@ mod tests {
     }
 
     #[test]
+    fn transition_text_splices_shared_results() {
+        let text = "quote \" backslash \\ é ✓ \n";
+        let value = QueryValue::new(json!([{ "_id": "a", "text": text, "n": 1.5, "nested": { "x": null } }]));
+        let t = ServerMessage::Transition {
+            start_version: StateVersion { query_set: 1, identity: 2, ts: 3 },
+            end_version: StateVersion { query_set: 4, identity: 5, ts: 6 },
+            modifications: vec![
+                StateModification::QueryUpdated {
+                    query_id: 7,
+                    value: value.clone(),
+                    log_lines: vec!["[INFO] \"hi\"".into()],
+                },
+                StateModification::QueryUpdated { query_id: 8, value: json!(null).into(), log_lines: vec![] },
+                StateModification::QueryFailed {
+                    query_id: 9,
+                    error: ClientError {
+                        kind: crate::error::ErrorKind::User,
+                        message: "boom".into(),
+                        data: Some(json!({ "code": 1 })),
+                    },
+                    log_lines: vec![],
+                },
+                StateModification::QueryRemoved { query_id: 10 },
+            ],
+        };
+        let parsed: Value = serde_json::from_str(&t.to_text()).unwrap();
+        assert_eq!(parsed, t.to_json());
+        let empty = ServerMessage::Transition {
+            start_version: StateVersion::default(),
+            end_version: StateVersion::default(),
+            modifications: vec![],
+        };
+        assert_eq!(serde_json::from_str::<Value>(&empty.to_text()).unwrap(), empty.to_json());
+        // Cloning shares the serialized text.
+        assert!(std::ptr::eq(value.json(), value.clone().json()));
+    }
+
+    #[test]
     fn server_message_shapes() {
         let v = ServerMessage::MutationResponse { request_id: 1, result: Ok((Value::Null, 5)), log_lines: vec![] }
             .to_json();
         assert_eq!(v, json!({"type":"MutationResponse","requestId":1,"success":true,"result":null,"ts":5,"logLines":[]}));
-        let m = StateModification::QueryUpdated { query_id: 2, value: json!(1), log_lines: vec!["[INFO] x".into()] };
+        let log_lines = vec!["[INFO] x".to_string()];
+        let m = StateModification::QueryUpdated { query_id: 2, value: json!(1).into(), log_lines };
         assert_eq!(m.to_json()["logLines"], json!(["[INFO] x"]));
         let t = ServerMessage::Transition {
             start_version: StateVersion::default(),

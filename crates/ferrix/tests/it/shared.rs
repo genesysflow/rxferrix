@@ -101,7 +101,7 @@ impl Client {
                     for m in modifications {
                         match m {
                             StateModification::QueryUpdated { query_id, value, .. } => {
-                                self.results.insert(*query_id, Ok(value.clone()));
+                                self.results.insert(*query_id, Ok(value.value().clone()));
                             }
                             StateModification::QueryFailed { query_id, error, .. } => {
                                 self.results.insert(*query_id, Err(error.message.clone()));

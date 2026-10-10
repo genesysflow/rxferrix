@@ -324,6 +324,9 @@ impl Logs {
         anyhow::ensure!(mode.eq_ignore_ascii_case("wal"), "could not enable WAL mode on aux.db (got {mode})");
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A trim deletes many rows at once, growing the WAL well past the automatic checkpoint's 4 MB; without a limit
+        // the file stays that size after the WAL restarts (112 MB after an hour of heavy traffic).
+        conn.pragma_update(None, "journal_size_limit", 16i64 << 20)?;
         conn.execute_batch(DDL)?;
         trim(&conn, &retention)?;
 

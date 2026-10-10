@@ -502,6 +502,7 @@ impl App {
             storage_config,
             public_url.as_deref(),
             *auth.keys.storage_key(),
+            db.shared_clock(),
         )?;
         let storage = Arc::new(storage);
         let app = App {

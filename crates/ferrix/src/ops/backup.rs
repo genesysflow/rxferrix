@@ -335,7 +335,7 @@ impl BackupTarget {
     pub fn parse(location: &str, data_dir: &Path) -> crate::Result<BackupTarget> {
         let backend = StorageBackend::parse(location).context("invalid backup target")?;
         let config = StorageConfig { backend, ..Default::default() };
-        let (store, prefix) = config.build_store(data_dir)?;
+        let (store, prefix, _) = config.build_store(data_dir)?;
         Ok(BackupTarget { store, prefix, location: location.to_string() })
     }
 

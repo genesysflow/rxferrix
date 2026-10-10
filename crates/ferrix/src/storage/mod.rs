@@ -33,9 +33,9 @@ pub mod thumbs;
 
 pub use axum::body::Bytes;
 pub use config::{StorageBackend, StorageConfig};
-pub use ctx::{ActionStorage, MutationStorage, QueryStorage};
+pub use ctx::{ActionStorage, DownloadOptions, MutationStorage, QueryStorage};
 pub use object_store;
-pub use service::{StorageService, SweepStats};
+pub use service::{MAX_DIRECT_URL_TTL, StorageService, SweepStats};
 
 use serde::{Deserialize, Serialize};
 

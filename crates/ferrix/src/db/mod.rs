@@ -73,7 +73,7 @@ pub struct Database {
     readers: Arc<ReaderPool>,
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
-    clock: Clock,
+    clock: Arc<Clock>,
     /// The change journal's switch (`journal`; on with `serve --replicate-to`).
     journal: Arc<journal::Journal>,
     writer: Arc<WriterShared>,
@@ -169,7 +169,7 @@ impl Database {
             }),
             catalog: Arc::new(catalog),
             write_log,
-            clock: Clock::default(),
+            clock: Arc::new(Clock::default()),
             ann,
             _checkpointer: checkpointer,
         })
@@ -183,6 +183,11 @@ impl Database {
     /// The clock that write transactions (`MutationCtx::now`) and the scheduler read. Tests can move it forward.
     pub fn clock(&self) -> &Clock {
         &self.clock
+    }
+
+    /// The same clock, for services that outlive a borrow of the database (file storage's URL expiries).
+    pub(crate) fn shared_clock(&self) -> Arc<Clock> {
+        self.clock.clone()
     }
 
     pub fn catalog(&self) -> &Arc<Catalog> {

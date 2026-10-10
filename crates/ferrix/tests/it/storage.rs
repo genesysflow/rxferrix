@@ -2,7 +2,8 @@
 //! the size limit (413, streamed), serving (ETag/304, ranges, multipart/byteranges over a raw socket, safe headers),
 //! signed URLs and private mode, thumbnails (cache, invalidation, decompression bombs), transactional deletes,
 //! actions' `store`/`get`, reactivity of `get_url`, the dashboard's admin-only functions, the orphan sweep (and its
-//! system cron), rate limits, and an in-memory `object_store` backend under a prefix (the same code path as S3).
+//! system cron), rate limits, an in-memory `object_store` backend under a prefix (the same code path as S3), and
+//! direct downloads: presigned URLs to an S3-compatible server (a fake that checks SigV4 signatures).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,6 +37,30 @@ pub mod app {
     #[mutation]
     pub async fn upload_url(ctx: &MutationCtx) -> Result<String> {
         ctx.storage.generate_upload_url().await
+    }
+
+    #[query]
+    pub async fn download_url_q(ctx: &QueryCtx, file: Id<StoredFile>, ttl_seconds: u32) -> Result<Option<String>> {
+        ctx.storage.get_download_url(file, std::time::Duration::from_secs(ttl_seconds.into())).await
+    }
+
+    /// From a mutation; with `attachment`, as a download.
+    #[mutation]
+    pub async fn download_url_m(
+        ctx: &MutationCtx,
+        file: Id<StoredFile>,
+        ttl_seconds: u32,
+        attachment: bool,
+    ) -> Result<Option<String>> {
+        let ttl = std::time::Duration::from_secs(ttl_seconds.into());
+        let options = ferrix::storage::DownloadOptions::default();
+        let options = if attachment { options.attachment() } else { options };
+        ctx.storage.get_download_url_with(file, ttl, options).await
+    }
+
+    #[internal_action]
+    pub async fn download_url_a(ctx: &ActionCtx, file: Id<StoredFile>, ttl_seconds: u32) -> Result<Option<String>> {
+        ctx.storage.get_download_url(file, std::time::Duration::from_secs(ttl_seconds.into())).await
     }
 
     #[mutation]
@@ -812,6 +837,20 @@ async fn signed_urls_expire_and_are_tamper_proof() {
     assert_eq!(s.t.action::<app::signed_url_a>((other, 60)).await.unwrap(), None);
 }
 
+/// A query's signed URL counts from now, not from the snapshot's last commit: on a database nobody has written to for
+/// hours, a fresh URL must still be valid for at least its TTL.
+#[tokio::test]
+async fn signed_urls_in_queries_are_valid_after_a_quiet_spell() {
+    let s = server().await;
+    let id = s.upload(b"quiet", "text/plain", None).await;
+    s.t.app().db().clock().advance(Duration::from_secs(3 * 3600)); // no commits meanwhile
+    let url = s.abs(&s.t.query::<app::signed_url_q>((id, 3600)).await.unwrap().unwrap());
+    let exp = exp_of(&url);
+    let now = now_s(&s.t);
+    assert!(exp >= now + 3600, "expires at {exp}, {}s from now", exp as i64 - now as i64);
+    assert_eq!(s.get_url(&url, &[]).await.status(), 200);
+}
+
 #[tokio::test]
 async fn signed_urls_in_queries_are_stable_within_a_bucket() {
     let s = server().await;
@@ -1250,4 +1289,276 @@ async fn deleted_files_are_kept_for_keep_deleted_then_swept() {
     assert_eq!(stats.kept, 0, "{stats:?}");
     assert!(!blob.exists());
     assert!(!deletion_recorded(s.t.dir(), id));
+}
+
+// ----------------------------------------------------------------------------- direct downloads (presigned URLs)
+
+/// A tiny S3-compatible server: stores objects in memory (path-style, no auth on the API calls), and serves
+/// **presigned** GETs only if their SigV4 signature checks out and they haven't expired, applying the
+/// `response-*` header overrides the way S3 does.
+mod fake_s3 {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+    use axum::response::{IntoResponse, Response};
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::{Digest, Sha256};
+
+    pub const KEY_ID: &str = "AKIDEXAMPLE";
+    pub const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    pub const REGION: &str = "eu-central-1";
+    const XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+
+    #[derive(Default)]
+    pub struct Fake {
+        pub objects: Mutex<HashMap<String, Bytes>>,
+        /// Presigned GETs served (signature valid, not expired).
+        pub served: Mutex<usize>,
+    }
+
+    pub async fn start() -> (String, Arc<Fake>) {
+        let fake = Arc::new(Fake::default());
+        let app = axum::Router::new().fallback(handle).with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), fake)
+    }
+
+    async fn handle(
+        State(fake): State<Arc<Fake>>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let path = uri.path().to_string();
+        let presigned = uri.query().is_some_and(|q| q.contains("X-Amz-Signature="));
+        let mut objects = fake.objects.lock().unwrap();
+        match method {
+            Method::PUT => {
+                objects.insert(path, body);
+                (StatusCode::OK, [("etag", "\"fake\"")]).into_response()
+            }
+            Method::DELETE => {
+                objects.remove(&path);
+                StatusCode::NO_CONTENT.into_response()
+            }
+            // DeleteObjects (`<Delete><Object><Key>k</Key></Object>…</Delete>`), how object_store deletes.
+            Method::POST if uri.query() == Some("delete") => {
+                let body = String::from_utf8_lossy(&body);
+                let bucket = path.trim_end_matches('/');
+                let mut deleted = String::new();
+                for key in body.split("<Key>").skip(1).filter_map(|k| k.split("</Key>").next()) {
+                    objects.remove(&format!("{bucket}/{key}"));
+                    deleted.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>"));
+                }
+                format!("{XML}<DeleteResult>{deleted}</DeleteResult>").into_response()
+            }
+            // ListObjectsV2, prefix only (thumbnails of a file).
+            Method::GET if uri.query().is_some_and(|q| q.contains("list-type=2")) => {
+                let url = url::Url::parse(&format!("http://h{uri}")).unwrap();
+                let prefix = url.query_pairs().find(|(k, _)| k == "prefix").map(|(_, v)| v.into_owned());
+                let prefix = prefix.unwrap_or_default();
+                let bucket = format!("{}/", path.trim_end_matches('/'));
+                let contents: String = objects
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.strip_prefix(&bucket)?, v)))
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(k, v)| {
+                        let modified = "<LastModified>2026-01-01T00:00:00.000Z</LastModified>";
+                        let size = v.len();
+                        format!("<Contents><Key>{k}</Key>{modified}<ETag>\"fake\"</ETag><Size>{size}</Size></Contents>")
+                    })
+                    .collect();
+                let list = format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>");
+                format!("{XML}{list}").into_response()
+            }
+            Method::GET if presigned => {
+                let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
+                if let Err(why) = verify(&uri, host) {
+                    return (StatusCode::FORBIDDEN, why).into_response();
+                }
+                let Some(object) = objects.get(&path).cloned() else { return StatusCode::NOT_FOUND.into_response() };
+                *fake.served.lock().unwrap() += 1;
+                let mut response = object.into_response();
+                let url = url::Url::parse(&format!("http://h{uri}")).unwrap();
+                for (k, v) in url.query_pairs() {
+                    if let Some(header) = k.strip_prefix("response-") {
+                        let name = axum::http::HeaderName::from_bytes(header.as_bytes()).unwrap();
+                        response.headers_mut().insert(name, HeaderValue::from_str(&v).unwrap());
+                    }
+                }
+                response
+            }
+            _ => {
+                eprintln!("fake S3: unhandled {method} {uri}");
+                StatusCode::NOT_IMPLEMENTED.into_response()
+            }
+        }
+    }
+
+    /// RFC 3986 encoding as SigV4 wants it: everything but unreserved characters, uppercase hex.
+    fn encode(s: &str) -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    }
+
+    fn hmac(key: &[u8], data: &str) -> Vec<u8> {
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).unwrap();
+        mac.update(data.as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Check a presigned URL the way S3 does (AWS Signature Version 4, query-string auth).
+    fn verify(uri: &Uri, host: &str) -> Result<(), String> {
+        let url = url::Url::parse(&format!("http://{host}{uri}")).map_err(|e| e.to_string())?;
+        let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).ok_or(format!("no {k}"));
+        if get("X-Amz-Algorithm")? != "AWS4-HMAC-SHA256" || get("X-Amz-SignedHeaders")? != "host" {
+            return Err("unexpected algorithm or signed headers".into());
+        }
+        let amz_date = get("X-Amz-Date")?;
+        let date = &amz_date[..8];
+        let scope = format!("{date}/{REGION}/s3/aws4_request");
+        if get("X-Amz-Credential")? != format!("{KEY_ID}/{scope}") {
+            return Err("wrong credential".into());
+        }
+        let signed_at = chrono::NaiveDateTime::parse_from_str(&amz_date, "%Y%m%dT%H%M%SZ").map_err(|e| e.to_string())?;
+        let expires: i64 = get("X-Amz-Expires")?.parse().map_err(|_| "bad X-Amz-Expires")?;
+        if expires > 604_800 {
+            return Err("X-Amz-Expires must be at most 7 days".into());
+        }
+        if chrono::Utc::now().naive_utc() > signed_at + chrono::Duration::seconds(expires) {
+            return Err("Request has expired".into());
+        }
+        let mut query: Vec<(String, String)> =
+            pairs.iter().filter(|(k, _)| k != "X-Amz-Signature").map(|(k, v)| (encode(k), encode(v))).collect();
+        query.sort();
+        let query = query.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+        let canonical = format!("GET\n{}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD", url.path());
+        let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex(&Sha256::digest(canonical.as_bytes())));
+        let key = ["s3", "aws4_request"].iter().fold(
+            hmac(&hmac(format!("AWS4{SECRET}").as_bytes(), date), REGION),
+            |key, part| hmac(&key, part),
+        );
+        if hex(&hmac(&key, &to_sign)) != get("X-Amz-Signature")? {
+            return Err("SignatureDoesNotMatch".into());
+        }
+        Ok(())
+    }
+}
+
+/// A served app whose files live in the fake S3 bucket, under `uploads/`.
+async fn s3_server(private: bool) -> (Server, Arc<fake_s3::Fake>, String) {
+    use ferrix::storage::object_store::aws::AmazonS3Builder;
+    let (endpoint, fake) = fake_s3::start().await;
+    let s3 = Arc::new(
+        AmazonS3Builder::new()
+            .with_bucket_name("bucket")
+            .with_region(fake_s3::REGION)
+            .with_access_key_id(fake_s3::KEY_ID)
+            .with_secret_access_key(fake_s3::SECRET)
+            .with_endpoint(&endpoint)
+            .with_allow_http(true)
+            .build()
+            .unwrap(),
+    );
+    let storage = StorageConfig::object_store(s3.clone(), "uploads").signer(s3).private(private);
+    (server_with(storage).await, fake, endpoint)
+}
+
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).unwrap();
+    url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_urls_go_straight_to_s3_signed_and_expiring() {
+    let (s, fake, endpoint) = s3_server(true).await;
+    assert!(s.t.app().storage().presigns_downloads());
+    let data = b"report contents".to_vec();
+    let id = s.upload(&data, "text/plain", Some("Q3 report.txt")).await;
+    assert!(fake.objects.lock().unwrap().contains_key(&format!("/bucket/uploads/{id}")), "the blob is in the bucket");
+
+    // From a query: a presigned URL to the bucket, valid for between ttl and 2·ttl, with S3's header overrides.
+    let url = s.t.query::<app::download_url_q>((id, 600)).await.unwrap().unwrap();
+    assert!(url.starts_with(&format!("{endpoint}/bucket/uploads/{id}?")), "{url}");
+    let expires: u64 = query_param(&url, "X-Amz-Expires").unwrap().parse().unwrap();
+    assert!((600..=1200).contains(&expires), "{expires}");
+    let res = s.client.get(&url).send().await.unwrap();
+    assert_eq!(res.status(), 200, "{}", res.text().await.unwrap());
+    let res = s.client.get(&url).send().await.unwrap();
+    assert_eq!(res.headers()["content-type"], "text/plain");
+    let disposition = res.headers()["content-disposition"].to_str().unwrap().to_string();
+    assert!(disposition.starts_with("inline; filename=\"Q3 report.txt\""), "{disposition}");
+    assert!(res.headers()["cache-control"].to_str().unwrap().starts_with("private, max-age="));
+    assert_eq!(res.bytes().await.unwrap().as_ref(), data.as_slice());
+    assert_eq!(*fake.served.lock().unwrap(), 2);
+    // The signature covers everything: changing an override, the file or the lifetime is refused (by "S3").
+    let other = s.upload(b"other", "text/html", None).await;
+    for tampered in [
+        url.replace("response-content-type=text%2Fplain", "response-content-type=text%2Fhtml"),
+        url.replace(&id.to_string(), &other.to_string()),
+        url.replace(&format!("X-Amz-Expires={expires}"), "X-Amz-Expires=604800"),
+    ] {
+        assert_ne!(tampered, url);
+        assert_eq!(s.client.get(&tampered).send().await.unwrap().status(), 403, "{tampered}");
+    }
+
+    // From a mutation: exactly the ttl. Unsafe types and `attachment` are downloads.
+    let html = s.t.mutation::<app::download_url_m>((other, 120, false)).await.unwrap().unwrap();
+    assert_eq!(query_param(&html, "X-Amz-Expires").as_deref(), Some("120"));
+    let res = s.client.get(&html).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "text/html");
+    assert_eq!(res.headers()["content-disposition"], "attachment");
+    let save = s.t.mutation::<app::download_url_m>((id, 120, true)).await.unwrap().unwrap();
+    let res = s.client.get(&save).send().await.unwrap();
+    let disposition = res.headers()["content-disposition"].to_str().unwrap().to_string();
+    assert!(disposition.starts_with("attachment; filename=\"Q3 report.txt\""), "{disposition}");
+    let from_action = s.t.action::<app::download_url_a>((id, 60)).await.unwrap().unwrap();
+    assert_eq!(query_param(&from_action, "X-Amz-Expires").as_deref(), Some("60"));
+
+    // TTLs: 1 second to 7 days (S3's limit), and missing files.
+    for ttl in [0, 7 * 86_400 + 1] {
+        let err = s.t.action::<app::download_url_a>((id, ttl)).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<UserError>().map(|e| e.code.as_str()), Some("invalid_ttl"), "{ttl}: {err}");
+    }
+    s.t.mutation::<app::delete_file>((other, false)).await.unwrap();
+    assert_eq!(s.t.action::<app::download_url_a>((other, 60)).await.unwrap(), None);
+    // The deleted file's blob goes (after the commit), and with it what the earlier URL pointed at.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while s.client.get(&html).send().await.unwrap().status() != 404 {
+        assert!(std::time::Instant::now() < deadline, "the blob was not deleted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn download_urls_fall_back_to_signed_urls_without_a_presigning_backend() {
+    let s = server().await;
+    assert!(!s.t.app().storage().presigns_downloads());
+    let id = s.upload(b"local", "text/plain", None).await;
+    let url = s.abs(&s.t.mutation::<app::download_url_m>((id, 60, false)).await.unwrap().unwrap());
+    assert!(url.contains(&format!("/api/storage/{id}?exp=")) && url.contains("&sig="), "{url}");
+    assert!(exp_of(&url).abs_diff(now_s(&s.t) + 60) <= 1);
+    assert_eq!(s.get_url(&url, &[]).await.status(), 200);
+    let save = s.abs(&s.t.mutation::<app::download_url_m>((id, 60, true)).await.unwrap().unwrap());
+    assert!(save.ends_with("&download=1"), "{save}");
+    let res = s.get_url(&save, &[]).await;
+    assert!(res.headers()["content-disposition"].to_str().unwrap().starts_with("attachment"));
+    // Local storage has no S3 limit: the configured maximum applies (7 days by default).
+    s.t.action::<app::download_url_a>((id, 7 * 86_400)).await.unwrap().unwrap();
 }

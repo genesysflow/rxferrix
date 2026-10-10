@@ -271,7 +271,7 @@ impl BlobStore {
     }
 
     pub fn from_config(config: &crate::storage::StorageConfig, data_dir: &Path) -> crate::Result<BlobStore> {
-        let (store, prefix) = config.build_store(data_dir)?;
+        let (store, prefix, _) = config.build_store(data_dir)?;
         Ok(BlobStore { store, prefix })
     }
 

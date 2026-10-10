@@ -13,6 +13,7 @@ use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use futures::{Stream, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use object_store::path::Path as ObjectPath;
+use object_store::signer::{SignedUrlOptions, Signer};
 use object_store::{GetOptions, GetRange, GetResult, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -147,11 +148,18 @@ pub struct SweepStats {
     pub kept: u64,
 }
 
+/// The longest a direct download URL (`get_download_url` with a presigning backend) can last: S3's limit.
+pub const MAX_DIRECT_URL_TTL: Duration = Duration::from_secs(7 * 86_400);
+
 /// File storage of an [`App`]: get it with `app.storage()`.
 pub struct StorageService {
     pub(crate) config: StorageConfig,
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    /// Presigns direct download URLs (`get_download_url`): the S3 store itself, or `StorageConfig::signer`.
+    signer: Option<Arc<dyn Signer>>,
+    /// The app's clock (the test clock in tests): URL expiries count from it.
+    clock: Arc<crate::db::Clock>,
     key: [u8; 32],
     /// Signs file URLs (`get_signed_url`); derived from `key`.
     file_url_key: [u8; 32],
@@ -197,8 +205,9 @@ impl StorageService {
         config: StorageConfig,
         public_url: Option<&str>,
         key: [u8; 32],
+        clock: Arc<crate::db::Clock>,
     ) -> crate::Result<StorageService> {
-        let (store, prefix) = config.build_store(data_dir)?;
+        let (store, prefix, signer) = config.build_store(data_dir)?;
         let base_url =
             config.public_url.as_deref().or(public_url).map(|u| u.trim_end_matches('/').to_string()).unwrap_or_default();
         let file_url_key = blake3::derive_key("ferrix storage v1 signed file url HMAC key", &key);
@@ -207,6 +216,8 @@ impl StorageService {
             config,
             store,
             prefix,
+            signer,
+            clock,
             key,
             file_url_key,
             base_url,
@@ -245,6 +256,43 @@ impl StorageService {
     /// signature covers the file and the expiry, not the variant.
     pub fn signed_url(&self, id: &str, expires: u64) -> String {
         format!("{}?exp={expires}&sig={}", self.file_url(id), self.file_signature(id, expires))
+    }
+
+    /// Now, in ms since the epoch, by the app's clock.
+    pub(crate) fn now_ms(&self) -> f64 {
+        self.clock.now_ms()
+    }
+
+    /// Whether [`StorageService::direct_url`] can presign URLs to the backend (S3, or a store with a
+    /// `StorageConfig::signer`). Without, `get_download_url` falls back to a signed URL of this server.
+    pub fn presigns_downloads(&self) -> bool {
+        self.signer.is_some()
+    }
+
+    /// A presigned `GET` URL of the file's blob, straight from the backend, valid for `expires_in` (at most
+    /// [`MAX_DIRECT_URL_TTL`], S3's limit). The response headers S3 lets a URL override are set the way this server
+    /// serves files: the file's content type, `inline` only for types safe to show (else `attachment`, or always
+    /// with `attachment`), the original file name, and caching for at most the URL's lifetime. `None` without a
+    /// signer.
+    pub(crate) async fn direct_url(
+        &self,
+        id: &str,
+        file: &StoredFile,
+        expires_in: Duration,
+        attachment: bool,
+    ) -> crate::Result<Option<String>> {
+        let Some(signer) = &self.signer else { return Ok(None) };
+        let content_type = file.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string());
+        let inline = !attachment && super::http::inline_safe(Some(&content_type));
+        let disposition = super::http::content_disposition(inline, file.filename.as_deref());
+        let cache = format!("private, max-age={}", expires_in.as_secs());
+        let options = SignedUrlOptions::default().with_query([
+            ("response-cache-control", cache.as_str()),
+            ("response-content-disposition", disposition.as_str()),
+            ("response-content-type", content_type.as_str()),
+        ]);
+        let url = signer.signed_url_opts(axum::http::Method::GET, &self.blob_path(id), expires_in, &options).await?;
+        Ok(Some(url.to_string()))
     }
 
     fn file_mac(&self, id: &str, expires: u64) -> Hmac<Sha256> {

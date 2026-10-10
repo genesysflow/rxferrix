@@ -220,6 +220,21 @@ pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<S
 }
 ```
 
+With S3, `get_download_url` hands out a **presigned URL to the bucket**: the file downloads straight from S3 (not
+through the server), the bucket stays private, and S3 refuses the URL once it expires:
+
+```rust
+#[mutation]
+pub async fn download_report(ctx: &MutationCtx, file: Id<StoredFile>) -> Result<Option<String>> {
+    ctx.auth.require_user()?;   // decide who may see it
+    ctx.storage.get_download_url_with(file, Duration::from_secs(15 * 60), DownloadOptions::default().attachment()).await
+}
+```
+
+S3 serves it with the file's content type and name (unsafe types as attachments). The URL lasts at most 7 days, and
+`?thumb=` doesn't work on it (use `get_signed_url` for thumbnails). With local storage the same call returns a signed
+URL of the server, so the code works in development too.
+
 Blobs left without a document (a crash mid-upload) and stale thumbnails are removed by the `_storage_sweep` system
 cron (every 6 hours). Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.6 and [docs/PROTOCOL.md](docs/PROTOCOL.md)
 ("File storage"). The todo example attaches images to todos.

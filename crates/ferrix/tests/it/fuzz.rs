@@ -346,7 +346,9 @@ async fn random_http_requests_always_get_an_answer() {
         "/",
         "/nope",
     ];
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    // A fresh connection per request: reusing one the server is closing (it may answer before reading a body it
+    // won't use, then close) fails on the client's side, and isn't the server not answering.
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).pool_max_idle_per_host(0).build().unwrap();
     let mut server_errors = Vec::new();
     for i in 0..400 * scale() {
         let route = *pick(&mut rng, &routes);

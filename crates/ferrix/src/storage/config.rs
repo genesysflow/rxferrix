@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use object_store::ObjectStore;
+use object_store::signer::Signer;
 
 
 /// Default [`StorageConfig::max_upload_size`]: 100 MiB.
@@ -101,10 +102,14 @@ pub struct StorageConfig {
     pub orphan_grace: Duration,
     /// Keep the blob of a deleted file this long after the deletion (the orphan sweep removes it then), so restores to
     /// a point before the deletion (point-in-time restores, archive backups without files) find it. The file is gone
-    /// for everything else at once: its document is deleted, so it can't be read or downloaded. Default: off (blobs
+    /// for everything else at once: its document is deleted, so it can't be read or downloaded (except through a
+    /// direct download URL, `get_download_url`, handed out earlier: until it expires). Default: off (blobs
     /// are deleted right after the commit), or `--replicate-keep` when replicating (`--replicate-to`);
     /// `--storage-keep-deleted`.
     pub keep_deleted: Option<Duration>,
+    /// Presigns direct download URLs for a custom store ([`StorageConfig::signer`]). The S3 backend signs by itself;
+    /// set, this replaces its signer.
+    pub signer: Option<Arc<dyn Signer>>,
     /// Private mode (`--storage-private`): `GET /api/storage/{id}` without a valid signature is refused (403), so
     /// files are only reachable through `ctx.storage.get_signed_url(id, ttl)`, and `get_url` fails. Default off
     /// (file URLs are unguessable capability URLs).
@@ -136,6 +141,7 @@ impl Default for StorageConfig {
             sweep_interval: Some(Duration::from_secs(6 * 3600)),
             orphan_grace: Duration::from_secs(3600),
             keep_deleted: None,
+            signer: None,
             private: false,
             max_signed_url_ttl: DEFAULT_MAX_SIGNED_URL_TTL,
             thumbnail_max_dimension: DEFAULT_THUMBNAIL_MAX_DIMENSION,
@@ -206,13 +212,20 @@ impl StorageConfig {
         self
     }
 
-    /// Private mode: see [`StorageConfig::private`].
     /// See [`StorageConfig::keep_deleted`].
     pub fn keep_deleted(mut self, keep: Option<Duration>) -> Self {
         self.keep_deleted = keep;
         self
     }
 
+    /// Presign direct download URLs (`ctx.storage.get_download_url`) with `signer`: for a custom object store that
+    /// can (`object_store`'s GCS, Azure, or an S3 store built by hand). The S3 backend signs by itself.
+    pub fn signer(mut self, signer: Arc<dyn Signer>) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// Private mode: see [`StorageConfig::private`].
     pub fn private(mut self, private: bool) -> Self {
         self.private = private;
         self
@@ -245,23 +258,31 @@ impl StorageConfig {
     }
 
     /// Build the object store and the key prefix blobs live under.
-    pub(crate) fn build_store(&self, data_dir: &std::path::Path) -> crate::Result<(Arc<dyn ObjectStore>, String)> {
+    /// The object store, the blobs' prefix in it, and what presigns direct download URLs (S3 itself; else
+    /// [`StorageConfig::signer`]).
+    pub(crate) fn build_store(&self, data_dir: &std::path::Path) -> crate::Result<BuiltStore> {
         match &self.backend {
             StorageBackend::Local(dir) => {
                 let dir = dir.clone().unwrap_or_else(|| data_dir.join("storage"));
                 std::fs::create_dir_all(&dir).with_context(|| format!("creating storage dir {}", dir.display()))?;
                 let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)
                     .with_context(|| format!("opening storage dir {}", dir.display()))?;
-                Ok((Arc::new(store), String::new()))
+                Ok((Arc::new(store), String::new(), self.signer.clone()))
             }
-            StorageBackend::S3 { bucket, prefix } => Ok((build_s3(bucket)?, prefix.clone())),
-            StorageBackend::Custom { store, prefix } => Ok((store.clone(), prefix.clone())),
+            StorageBackend::S3 { bucket, prefix } => {
+                let (store, signer) = build_s3(bucket)?;
+                Ok((store, prefix.clone(), self.signer.clone().or(Some(signer))))
+            }
+            StorageBackend::Custom { store, prefix } => Ok((store.clone(), prefix.clone(), self.signer.clone())),
         }
     }
 }
 
+/// What [`StorageConfig::build_store`] returns.
+pub(crate) type BuiltStore = (Arc<dyn ObjectStore>, String, Option<Arc<dyn Signer>>);
+
 #[cfg(feature = "s3")]
-fn build_s3(bucket: &str) -> crate::Result<Arc<dyn ObjectStore>> {
+fn build_s3(bucket: &str) -> crate::Result<(Arc<dyn ObjectStore>, Arc<dyn Signer>)> {
     // `from_env` reads AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION / AWS_DEFAULT_REGION,
     // AWS_ENDPOINT_URL (R2, MinIO), AWS_ALLOW_HTTP, AWS_VIRTUAL_HOSTED_STYLE_REQUEST, ...
     let mut builder = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -270,12 +291,12 @@ fn build_s3(bucket: &str) -> crate::Result<Arc<dyn ObjectStore>> {
     {
         builder = builder.with_region(region);
     }
-    let store = builder.build().with_context(|| format!("configuring S3 bucket `{bucket}`"))?;
-    Ok(Arc::new(store))
+    let store = Arc::new(builder.build().with_context(|| format!("configuring S3 bucket `{bucket}`"))?);
+    Ok((store.clone(), store))
 }
 
 #[cfg(not(feature = "s3"))]
-fn build_s3(bucket: &str) -> crate::Result<Arc<dyn ObjectStore>> {
+fn build_s3(bucket: &str) -> crate::Result<(Arc<dyn ObjectStore>, Arc<dyn Signer>)> {
     bail!("S3 storage (bucket `{bucket}`) needs ferrix's `s3` cargo feature")
 }
 
@@ -308,8 +329,11 @@ mod tests {
     fn s3_store_builds_offline() {
         // Building the client makes no request; credentials are resolved lazily.
         let config = StorageConfig::s3("my-bucket", "/uploads/");
-        let (store, prefix) = config.build_store(std::path::Path::new("/nonexistent")).unwrap();
+        let (store, prefix, signer) = config.build_store(std::path::Path::new("/nonexistent")).unwrap();
         assert_eq!(prefix, "uploads");
         assert!(store.to_string().contains("my-bucket"), "{store}");
+        assert!(signer.is_some(), "S3 presigns download URLs by itself");
+        let local = StorageConfig::local("/tmp/x").build_store(std::path::Path::new("/nonexistent"));
+        assert!(local.is_ok_and(|(_, _, signer)| signer.is_none()), "local storage doesn't");
     }
 }

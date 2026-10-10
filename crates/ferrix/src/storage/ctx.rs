@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 
 use super::StoredFile;
-use super::service::StorageService;
+use super::service::{MAX_DIRECT_URL_TTL, StorageService};
 use crate::db::query::{MutationDb, QueryDb};
 use crate::id::Id;
 use crate::runtime::{App, Identity};
@@ -27,19 +27,60 @@ enum Expiry {
     Bucketed,
 }
 
-/// The expiry (seconds since the epoch) of a URL signed at `now_ms` for `ttl`.
-fn expiry(service: &StorageService, now_ms: f64, ttl: Duration, mode: Expiry) -> Result<u64> {
+/// The expiry of a URL signed now for `ttl`, and now (both in seconds since the epoch, by the app's clock). Not the
+/// time of a query's snapshot: that is the last commit's, possibly hours ago on a quiet database.
+fn expiry(service: &StorageService, ttl: Duration, mode: Expiry) -> Result<(u64, u64)> {
     let max = service.config.max_signed_url_ttl;
     if ttl < Duration::from_secs(1) || ttl > max {
         let message = format!("A signed URL's TTL must be between 1 second and {max:?} (got {ttl:?})");
         return Err(UserError::new("invalid_ttl", message).into());
     }
-    let now = (now_ms / 1000.0).floor() as u64;
+    let now = (service.now_ms() / 1000.0).floor() as u64;
     let ttl = ttl.as_secs();
-    Ok(match mode {
+    let expires = match mode {
         Expiry::Exact => now + ttl,
         Expiry::Bucketed => (now + ttl).div_ceil(ttl) * ttl,
-    })
+    };
+    Ok((expires, now))
+}
+
+/// Options of `get_download_url_with`.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadOptions {
+    attachment: bool,
+}
+
+impl DownloadOptions {
+    /// Make the browser save the file rather than show it (`Content-Disposition: attachment`, with its name).
+    pub fn attachment(mut self) -> Self {
+        self.attachment = true;
+        self
+    }
+}
+
+/// A download URL for `file` (see [`QueryStorage::get_download_url`]): presigned to the backend when it can, else a
+/// signed URL of this server.
+async fn download_url(
+    service: &StorageService,
+    file: Option<Doc<StoredFile>>,
+    ttl: Duration,
+    mode: Expiry,
+    options: &DownloadOptions,
+) -> Result<Option<String>> {
+    let (expires, now) = expiry(service, ttl, mode)?;
+    let direct = service.presigns_downloads();
+    if direct && ttl > MAX_DIRECT_URL_TTL {
+        let message = format!("A direct download URL lasts at most {MAX_DIRECT_URL_TTL:?}, S3's limit (got {ttl:?})");
+        return Err(UserError::new("invalid_ttl", message).into());
+    }
+    let Some(file) = file else { return Ok(None) };
+    let id = file.id.as_str();
+    if direct {
+        let expires_in = Duration::from_secs((expires - now).min(MAX_DIRECT_URL_TTL.as_secs()));
+        return service.direct_url(&id, &file, expires_in, options.attachment).await;
+    }
+    let url = service.signed_url(&id, expires);
+    Ok(Some(if options.attachment { format!("{url}&download=1") } else { url }))
 }
 
 /// `get_url` in private mode.
@@ -48,7 +89,9 @@ fn private_storage() -> crate::Error {
 }
 
 async fn signed_url(db: &QueryDb, service: &StorageService, id: Id<StoredFile>, ttl: Duration, mode: Expiry) -> Result<Option<String>> {
-    let expires = expiry(service, db.time(), ttl, mode)?;
+    // Reading the time makes a query's result time-dependent: never answered from the query cache.
+    let _ = db.time();
+    let (expires, _) = expiry(service, ttl, mode)?;
     Ok(db.get(id).await?.map(|_| service.signed_url(&id.as_str(), expires)))
 }
 
@@ -75,13 +118,42 @@ impl QueryStorage {
     /// kind of URL that works in private mode. `ttl` is at least 1 second and at most
     /// `StorageConfig::max_signed_url_ttl` (7 days), else the user error `invalid_ttl`.
     ///
-    /// **Determinism.** A query's result must not depend on when it runs, so here the expiry is the query's
-    /// snapshot time plus `ttl`, **rounded up to a multiple of `ttl`**: every rerun within one `ttl` window returns
-    /// the same URL (browsers cache it), and it stays valid for between `ttl` and `2·ttl`. A subscription is only
+    /// **Determinism.** Here the expiry is now plus `ttl`, **rounded up to a multiple of `ttl`**: every rerun within
+    /// one `ttl` window returns the same URL (browsers cache it), and it stays valid for between `ttl` and `2·ttl`.
+    /// The result depends on the time, so the query is never answered from the query cache. A subscription is only
     /// rerun when data it read changes, not when the URL expires, so choose a `ttl` longer than the page will show
     /// the result, or get fresh URLs from a mutation or an action (exact expiry there).
     pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
         signed_url(&self.db, &self.service, id, ttl, Expiry::Bucketed).await
+    }
+
+    /// A temporary URL that downloads the file **straight from the storage backend**, or `None` if the file doesn't
+    /// exist. With S3 (or a custom store with a [`StorageConfig::signer`](super::StorageConfig::signer)) it is a
+    /// presigned URL to the bucket: the bytes don't go through this server, and the bucket can stay private. S3
+    /// serves it with the file's content type and name, `inline` only for types safe to show (like this server),
+    /// and refuses it once it expires. With local storage it is the same as [`QueryStorage::get_signed_url`], so
+    /// app code works with either backend.
+    ///
+    /// Valid for at least `ttl` (1 second to 7 days, S3's limit: else the user error `invalid_ttl`); in a query, up
+    /// to `2·ttl` as with `get_signed_url`. Unlike a signed URL of this server, a presigned URL embeds the time it
+    /// was signed, so in a query it changes with every rerun, and the query is never answered from the query cache.
+    /// Variants such as `?thumb=` can't be appended to it (the signature covers the whole URL): use `get_signed_url`
+    /// for thumbnails. Deleting the file makes the URL fail (404) once its blob is deleted (right after the commit;
+    /// with `keep_deleted`, only when the blob is swept: until then a URL handed out earlier keeps working).
+    /// With temporary credentials (an STS session, an instance role), the URL stops working when they expire.
+    pub async fn get_download_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        self.get_download_url_with(id, ttl, DownloadOptions::default()).await
+    }
+
+    /// [`QueryStorage::get_download_url`] with options: `DownloadOptions::default().attachment()`.
+    pub async fn get_download_url_with(
+        &self,
+        id: Id<StoredFile>,
+        ttl: Duration,
+        options: DownloadOptions,
+    ) -> Result<Option<String>> {
+        let _ = self.db.time();
+        download_url(&self.service, self.db.get(id).await?, ttl, Expiry::Bucketed, &options).await
     }
 
     /// The file's `_storage` document (sha256, size, content type, ...), or `None`.
@@ -96,8 +168,9 @@ impl QueryStorage {
             return self.service.file_url(id);
         }
         let ttl = Duration::from_secs(3600).min(self.service.config.max_signed_url_ttl).max(Duration::from_secs(1));
-        match expiry(&self.service, self.db.time(), ttl, Expiry::Bucketed) {
-            Ok(expires) => self.service.signed_url(id, expires),
+        let _ = self.db.time();
+        match expiry(&self.service, ttl, Expiry::Bucketed) {
+            Ok((expires, _)) => self.service.signed_url(id, expires),
             Err(_) => self.service.file_url(id),
         }
     }
@@ -138,10 +211,25 @@ impl MutationStorage {
         get_url(&self.db, &self.service, id).await
     }
 
-    /// A signed URL valid for exactly `ttl` from this mutation's `now()`, or `None` if the file doesn't exist. See
+    /// A signed URL valid for exactly `ttl` from now, or `None` if the file doesn't exist. See
     /// [`QueryStorage::get_signed_url`].
     pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
         signed_url(&self.db, &self.service, id, ttl, Expiry::Exact).await
+    }
+
+    /// A download URL valid for exactly `ttl` from now: see [`QueryStorage::get_download_url`].
+    pub async fn get_download_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        self.get_download_url_with(id, ttl, DownloadOptions::default()).await
+    }
+
+    /// See [`QueryStorage::get_download_url_with`].
+    pub async fn get_download_url_with(
+        &self,
+        id: Id<StoredFile>,
+        ttl: Duration,
+        options: DownloadOptions,
+    ) -> Result<Option<String>> {
+        download_url(&self.service, self.db.get(id).await?, ttl, Expiry::Exact, &options).await
     }
 
     /// See [`QueryStorage::get_metadata`].
@@ -203,8 +291,23 @@ impl ActionStorage {
     /// A signed URL valid for exactly `ttl` from now, or `None` if the file doesn't exist. See
     /// [`QueryStorage::get_signed_url`].
     pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
-        let expires = expiry(self.service(), self.app.db().clock().now_ms(), ttl, Expiry::Exact)?;
+        let (expires, _) = expiry(self.service(), ttl, Expiry::Exact)?;
         Ok(self.metadata(id).await?.map(|_| self.service().signed_url(&id.as_str(), expires)))
+    }
+
+    /// A download URL valid for exactly `ttl` from now: see [`QueryStorage::get_download_url`].
+    pub async fn get_download_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>> {
+        self.get_download_url_with(id, ttl, DownloadOptions::default()).await
+    }
+
+    /// See [`QueryStorage::get_download_url_with`].
+    pub async fn get_download_url_with(
+        &self,
+        id: Id<StoredFile>,
+        ttl: Duration,
+        options: DownloadOptions,
+    ) -> Result<Option<String>> {
+        download_url(self.service(), self.metadata(id).await?, ttl, Expiry::Exact, &options).await
     }
 
     /// See [`QueryStorage::get_metadata`] (read at the latest snapshot).

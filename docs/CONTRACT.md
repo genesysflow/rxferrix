@@ -690,13 +690,16 @@ Files page).
 impl QueryStorage {      // deterministic, tracked reads: a query reruns when the file is deleted
     pub async fn get_url(&self, id: Id<StoredFile>) -> Result<Option<String>>;           // None if no such file
     pub async fn get_signed_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>>; // expiry bucketed
+    pub async fn get_download_url(&self, id: Id<StoredFile>, ttl: Duration) -> Result<Option<String>>; // presigned S3
+    pub async fn get_download_url_with(&self, id: Id<StoredFile>, ttl: Duration, options: DownloadOptions)
+        -> Result<Option<String>>;                    // DownloadOptions::default().attachment()
     pub async fn get_metadata(&self, id: Id<StoredFile>) -> Result<Option<Doc<StoredFile>>>;
 }
-impl MutationStorage {   // the same reads (get_signed_url: exactly ttl from `now()`), in the mutation's transaction, plus:
+impl MutationStorage {   // the same reads (signed and download URLs: exactly ttl from now), in the mutation's transaction, plus:
     pub async fn generate_upload_url(&self) -> Result<String>;   // single-use, signed, upload_url_ttl (1h)
     pub async fn delete(&self, id: Id<StoredFile>) -> Result<()>; // transactional; UserError "not_found" if missing
 }
-impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact), get_metadata (latest snapshot),
+impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_download_url(_with) (exact), get_metadata (latest snapshot),
                          // delete (own transaction), plus:
     pub async fn store(&self, bytes: impl Into<Bytes>, content_type: Option<&str>) -> Result<Id<StoredFile>>;
     pub async fn get(&self, id: Id<StoredFile>) -> Result<Option<Bytes>>;   // None if no such file
@@ -718,11 +721,27 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact)
   key)`. The server checks them in constant time against its clock (`Database::clock`); `thumb`, `fit` and
   `download` may be appended (the signature covers the file and the expiry, not the variant). `ttl` is 1 s to
   `max_signed_url_ttl` (7 days), else the user error `invalid_ttl`; `None` if the file doesn't exist.
-  **Determinism:** in mutations and actions the expiry is exactly `now + ttl`. In a **query** it is the snapshot
-  time plus `ttl` **rounded up to a multiple of `ttl`**: every run within one `ttl` window (aligned to the epoch)
-  returns the same URL, so results stay deterministic per ts and browsers can cache the file; the URL is valid for
-  between `ttl` and `2·ttl`. A subscription reruns only when its data changes, not when a URL expires: pick a `ttl`
-  longer than the result will be shown, or fetch fresh URLs from a mutation or action.
+  **Expiry:** in mutations and actions it is exactly `now + ttl`. In a **query** it is `now + ttl` **rounded up to a
+  multiple of `ttl`** (now by the app's clock, not the snapshot's time, which is the last commit's and can be hours
+  old on a quiet database): every run within one `ttl` window (aligned to the epoch) returns the same URL, so
+  browsers can cache the file; the URL is valid for between `ttl` and `2·ttl`. The result depends on the time, so the
+  query is never answered from the query cache. A subscription reruns only when its data changes, not when a URL
+  expires: pick a `ttl` longer than the result will be shown, or fetch fresh URLs from a mutation or action.
+- **Direct download URLs** (`get_download_url(id, ttl)`, `get_download_url_with(.., DownloadOptions)`): with the S3
+  backend (or a custom store with `StorageConfig::signer(Arc<dyn object_store::signer::Signer>)`), a **presigned
+  SigV4 URL to the bucket** (`<endpoint>/<bucket>/<prefix>/<id>?X-Amz-…`), so the bytes don't go through ferrix and
+  the bucket stays private. It carries signed `response-content-type` (the file's), `response-content-disposition`
+  (`inline` for the types ferrix serves inline, else `attachment`; always `attachment` with `.attachment()`; with
+  the file name) and `response-cache-control` (`private, max-age=<lifetime>`). S3 can't add `nosniff` or the CSP
+  ferrix sends; unsafe types are attachments, on the bucket's origin, not the app's. `ttl` is 1 s to 7 days (S3's
+  limit, `MAX_DIRECT_URL_TTL`), else `invalid_ttl`; lifetime exactly `ttl` in mutations and actions, `ttl` to
+  `2·ttl` (at most 7 days) in queries, where the URL also changes with every run (it embeds the signing time).
+  `?thumb=` can't be appended (the signature covers the whole URL): thumbnails use signed URLs of ferrix. Once the
+  file is deleted its blob goes after the commit and the URL fails (404), except with `keep_deleted`, where the blob
+  (and so an earlier URL) lasts until the sweep or the URL's expiry. Temporary credentials (STS, instance roles) end
+  a URL early when they expire. **Without a presigning backend** (local storage) `get_download_url` is
+  `get_signed_url` (plus `&download=1` with `.attachment()`), so the same code works in development.
+  `StorageService::presigns_downloads()` tells which.
 - **Private mode** (`StorageConfig::private(true)`, `--storage-private` / `FERRIX_STORAGE_PRIVATE`): `GET
   /api/storage/<id>` without `exp`/`sig` is 403 `signature_required` (for unknown ids too), so only signed URLs
   work; `get_url` fails with `storage_private`. The dashboard's file list returns signed URLs (an hour, bucketed).
@@ -767,6 +786,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact)
       pub sweep_interval: Option<Duration>,     // Some(6 h): the `_storage_sweep` system cron; None = none
       pub orphan_grace: Duration,               // 1 h
       pub keep_deleted: Option<Duration>,       // None, or --replicate-keep when replicating
+      pub signer: Option<Arc<dyn Signer>>,      // presigns get_download_url for custom stores; S3 signs by itself
       pub private: bool,                        // false; `--storage-private`
       pub max_signed_url_ttl: Duration,         // 7 days
       pub thumbnail_max_dimension: u32,         // 1024 (W and H in 1..=this) unless:

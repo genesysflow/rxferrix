@@ -208,9 +208,13 @@ async fn a_pool_runs_at_most_max_parallelism_actions_and_doesnt_hold_up_others()
     for id in &ids {
         assert_eq!(job(&t, *id).await.state, JobState::Success);
     }
-    // In order within the pool.
-    let starts: Vec<_> = ORDER.lock().unwrap().iter().filter(|e| e.starts_with("start")).cloned().collect();
-    assert_eq!(starts, (0..6).map(|i| format!("start io{i}")).collect::<Vec<_>>());
+    // Claimed in order within the pool (the claim commits `startedAt`; the spawned tasks themselves may begin in
+    // any order).
+    let mut started = vec![];
+    for id in &ids {
+        started.push(job(&t, *id).await.started_at.unwrap());
+    }
+    assert!(started.windows(2).all(|w| w[0] <= w[1]), "{started:?}");
 
     // A full pool doesn't hold up the default pool or another pool.
     reset();

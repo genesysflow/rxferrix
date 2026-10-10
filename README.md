@@ -617,5 +617,9 @@ cd examples/todo/web && bun e2e/two-tabs.ts                     # needs the back
 bun e2e/reconnect.ts ../../../target/debug/todo-server <data dir>  # Vite running, backend NOT running
 ```
 
+Benchmarks (release builds; ignored by default): `cargo test --release -p ferrix --test it bench_ -- --ignored
+--nocapture` runs the subscription fan-out, parallel-read and write benchmarks (`bench_writes`: throughput under
+concurrent writers, group commit).
+
 `bun e2e/dashboard.ts [binary] [screenshot dir]` takes the todo-server binary (default `target/debug/todo-server`)
 and optionally saves screenshots of each page (named `$SCREENSHOT_PREFIX<page>.png`, default prefix `dashboard-`).

@@ -288,6 +288,14 @@ The write log is a ring buffer of recent commits (100k entries or 5 minutes).
 
 **Determinism contract.** Queries must be pure functions of (DB snapshot, args, identity). In Rust this can't be enforced the way a V8 sandbox enforces it, so it is a documented contract. To make it easy to follow, `QueryCtx` exposes no network, `ctx.now()` returns the snapshot's commit time, and there is no randomness API.
 
+**Fan-out cost (measured 2026-10-10).** Each result is serialized once,
+when computed (the text also feeds the change hash), and every subscriber's `Transition` frame splices that shared
+text in: serializing per subscriber had been 70% of the server's CPU (100 subscribers, 100 writes/s: 9.0 s of CPU
+before, 0.9 s after). Accepted connections set `TCP_NODELAY`: without it Nagle's algorithm and
+delayed ACKs held updates back (p99 35 ms before, 2.3 ms after). Still expensive with many
+subscribers of large results, since the whole result goes to each one: diffs of list results or permessage-deflate
+are the next steps.
+
 ### 4.6 WebSocket protocol (v1: JSON frames)
 
 The protocol is small: JSON frames over one WebSocket per client.

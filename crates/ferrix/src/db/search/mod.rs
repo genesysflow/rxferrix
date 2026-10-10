@@ -880,7 +880,7 @@ mod tests {
     async fn insert(db: &Database, doc: Value) -> String {
         let txn = db.begin_write().await.unwrap();
         let id = MutationDb::new(txn.clone()).insert_raw("vt", doc).await.unwrap();
-        txn.commit_with(|_, _| Ok(())).unwrap();
+        txn.commit_with(|_, _| Ok(())).await.unwrap();
         id
     }
 
@@ -888,7 +888,7 @@ mod tests {
         let txn = db.begin_write().await?;
         let result = MutationDb::new(txn.clone()).patch_raw(id, patch).await;
         match result {
-            Ok(()) => txn.commit_with(|_, _| Ok(())).map(drop),
+            Ok(()) => txn.commit_with(|_, _| Ok(())).await.map(drop),
             Err(e) => {
                 txn.rollback();
                 Err(e)

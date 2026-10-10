@@ -528,7 +528,7 @@ impl StorageService {
         })?;
         match inserted {
             Ok(()) => {
-                txn.commit_with(|_, _| Ok(())).context("committing the file's document")?;
+                txn.commit_with(|_, _| Ok(())).await.context("committing the file's document")?;
                 Ok(Ok(Id::from_doc_id(id)))
             }
             Err(problem) => {
@@ -656,7 +656,7 @@ pub(crate) async fn ensure_schema(app: &App) -> crate::Result<()> {
         ))?;
         Ok(())
     })?;
-    txn.commit_with(|_, _| Ok(()))?;
+    txn.commit_with(|_, _| Ok(())).await?;
     Ok(())
 }
 

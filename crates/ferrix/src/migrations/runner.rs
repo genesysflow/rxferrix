@@ -442,7 +442,7 @@ pub(super) async fn recover_interrupted(app: &App) -> crate::Result<usize> {
     .await;
     match result {
         Ok(n) => {
-            txn.commit_with(|_, _| Ok(()))?;
+            txn.commit_with(|_, _| Ok(())).await?;
             Ok(n)
         }
         Err(e) => {

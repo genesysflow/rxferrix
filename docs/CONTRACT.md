@@ -1326,6 +1326,15 @@ pub struct MigrationReport {   // camelCase JSON
   changes, never because time passes, so a result computed from `now()` ("expired", "5 minutes ago") goes stale.
   Store the state and change it at the right time with a scheduled mutation (`run_at` an `expire` job, as the chat
   example does for typing indicators), and format relative times in the client.
+- **Mutations commit in groups.** Mutations that queue for the writer share one SQLite transaction, each in its own
+  savepoint: one that fails rolls back alone, and every mutation still gets its own ts (consecutive across those that
+  write). A caller gets its result only after the shared `COMMIT`; if that commit fails, every mutation in it fails
+  and nothing of them is kept. Two consequences: a mutation whose caller goes away after it finished but before the
+  commit is still committed (its idempotency record too, so a retry replays its response), and a duplicate request
+  waits for the original's commit before replaying. A mutation that recently took over 0.5 ms (tracked per path)
+  commits the open group before it starts, so fast mutations are not held back by a slow one queued behind them;
+  the slow one still blocks every write while it runs (`ferrix::db` module docs, `MAX_BATCH`, `MAX_BATCH_AGE`,
+  `SLOW_WRITE`).
 - **Invalidation is by index range, so writes are coarse.** Any write to a document (even one that leaves it
   unchanged) invalidates every query that read it through any index, and an insert invalidates every query whose
   range covers its keys. Tips: skip no-op writes (check first; `mark_read` only patches when something is new, since
@@ -1947,8 +1956,8 @@ for the supervisor to start it again (`deploy/ferrix.service` sets 75 with `Rest
 s3://bucket/prefix> [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d] [--replicate-max-pending 1GB]`,
 env `FERRIX_REPLICATE_TO`; `AppOptions::ops.replication`). *Journal*: with replication configured the database opens
 with journaling on, and every write transaction that commits documents inserts one row into the raw SQLite table
-`_journal (ts INTEGER PRIMARY KEY, time REAL, changes TEXT)` right before `COMMIT`, in the same transaction as its
-writes and the `_meta.ts` bump: `changes` is `[[table, id, document | null], …]`, the final state of every document
+`_journal (ts INTEGER PRIMARY KEY, time REAL, changes TEXT)` when it finishes, in the same SQLite transaction as its
+writes and the `_meta.ts` bump (a group-commit batch, §1.10): `changes` is `[[table, id, document | null], …]`, the final state of every document
 written (user and system tables; a document created and deleted by the same transaction is left out, and such a
 commit journals `[]`). Index entries, full-text and vector tables and HNSW files are not journaled. So the journal
 holds every committed ts exactly once (consecutive), and nothing rolled back; whether a transaction journals is decided

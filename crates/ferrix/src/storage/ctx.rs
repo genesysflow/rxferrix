@@ -237,7 +237,7 @@ impl ActionStorage {
             return Err(not_found(id));
         }
         db.delete(id).await?;
-        txn.commit_with(|_, _| Ok(()))?;
+        txn.commit_with(|_, _| Ok(())).await?;
         self.service().delete_blob(&id.as_str()).await
     }
 }

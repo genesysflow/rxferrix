@@ -3,8 +3,15 @@
 //! ## Concurrency model
 //!
 //! * **Writes** are serialized through a single read-write connection behind a `tokio::sync::Mutex`. A mutation holds
-//!   the lock for its whole duration and runs inside `BEGIN IMMEDIATE`, so mutations are serializable without any
-//!   conflict detection or retries. Its reads go through the same connection and therefore see its own writes.
+//!   the lock for its whole duration, so mutations are serializable without any conflict detection or retries. Its
+//!   reads go through the same connection and therefore see its own writes.
+//! * **Group commit.** Mutations that queue for the writer share one SQLite transaction (a *batch*): each runs in its
+//!   own savepoint (rolled back alone if it fails), and whoever releases the lock commits the batch unless another
+//!   write is already waiting to continue it (up to [`MAX_BATCH`] mutations or [`MAX_BATCH_AGE`]). A mutation's caller
+//!   gets its result only after the batch commits, and every mutation still gets its own ts; the commit, the `_meta`
+//!   update and the page writes to the WAL are paid once per batch instead of once per mutation. A mutation known to
+//!   be slow (over [`SLOW_WRITE`] lately, per path) commits the batch before it starts instead of joining it, so it
+//!   doesn't hold the others' results back. See [`WriterShared`].
 //! * **Reads** use read-only connections. A [`Snapshot`] is a read transaction: `BEGIN` followed by a read of
 //!   `_meta.ts`. The first read pins the WAL snapshot, and because the writer updates `_meta.ts` in the same transaction
 //!   as the data, the value read is exactly the commit ts the snapshot reflects. One snapshot can serve several
@@ -25,7 +32,9 @@ pub mod search;
 pub mod storage;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use rusqlite::Connection;
@@ -41,6 +50,15 @@ use crate::writelog::{CommitEntry, WriteLog};
 /// Default number of reader connections.
 pub const DEFAULT_READERS: usize = 6;
 
+/// Group commit: the most mutations one batch takes before it commits, even with more waiting.
+pub const MAX_BATCH: usize = 64;
+/// Group commit: a batch older than this (since its first mutation began) commits at the next release, so the first
+/// mutation's caller isn't kept waiting by a long queue.
+pub const MAX_BATCH_AGE: Duration = Duration::from_millis(2);
+/// Group commit: a write transaction whose label (the mutation's path) has recently taken longer than this commits
+/// the open batch before it starts, so the mutations already in the batch don't wait for it.
+pub const SLOW_WRITE: Duration = Duration::from_micros(500);
+
 /// Fields drop in order: the HNSW thread is stopped (and its connection closed) first, the writer closes last, so
 /// the read-write connection is the last one and checkpoints the WAL when the database is dropped.
 pub struct Database {
@@ -52,7 +70,7 @@ pub struct Database {
     clock: Clock,
     /// The change journal's switch (`journal`; on with `serve --replicate-to`).
     journal: Arc<journal::Journal>,
-    writer: Arc<tokio::sync::Mutex<Connection>>,
+    writer: Arc<WriterShared>,
 }
 
 /// Options for [`Database::open_with`].
@@ -116,8 +134,14 @@ impl Database {
             journal.set_pending_bytes(journal::stats(&writer)?.map(|s| s.3).unwrap_or(0));
         }
         Ok(Database {
+            writer: Arc::new(WriterShared {
+                lock: Arc::new(tokio::sync::Mutex::new(Writer { conn: writer, batch: None })),
+                waiting: AtomicUsize::new(0),
+                durations: Mutex::new(std::collections::HashMap::new()),
+                write_log: write_log.clone(),
+                journal: journal.clone(),
+            }),
             journal,
-            writer: Arc::new(tokio::sync::Mutex::new(writer)),
             readers: Arc::new(ReaderPool {
                 path,
                 conns: Mutex::new(Vec::new()),
@@ -158,21 +182,23 @@ impl Database {
     /// no mutation is in flight), committed if `f` succeeds. For bookkeeping outside the document model that must
     /// not race with commits (the replicator's trims and `_meta` keys, switching the journal). Doesn't bump the ts.
     pub(crate) async fn with_writer<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
-        let guard = self.writer.clone().lock_owned().await;
+        let mut guard = self.writer.lock().await;
+        // A batch of mutations left for this holder to continue: commit it first.
+        let finished = self.writer.commit_batch(&mut guard);
+        finish_members(finished);
         if !guard.is_autocommit() {
             guard.execute_batch("ROLLBACK")?;
         }
         guard.execute_batch("BEGIN IMMEDIATE")?;
-        match f(&guard) {
-            Ok(r) => {
-                guard.execute_batch("COMMIT")?;
-                Ok(r)
-            }
+        let result = match f(&guard) {
+            Ok(r) => guard.execute_batch("COMMIT").map(|()| r).map_err(Into::into),
             Err(e) => {
                 let _ = guard.execute_batch("ROLLBACK");
                 Err(e)
             }
-        }
+        };
+        self.writer.release(guard);
+        result
     }
 
     /// Re-apply one journal entry ([`journal`]) as its own commit, with its ts and time: the documents are written
@@ -208,7 +234,7 @@ impl Database {
             }
             Ok(())
         })?;
-        let ts = txn.commit_with(|_, _| Ok(()))?;
+        let ts = txn.commit_with(|_, _| Ok(())).await?;
         anyhow::ensure!(ts == entry.ts, "replaying journal entry ts {} committed ts {ts}", entry.ts);
         Ok(ts)
     }
@@ -300,32 +326,41 @@ impl Database {
         })
     }
 
-    /// Lock the writer and begin a write transaction.
+    /// Lock the writer and begin a write transaction: a savepoint in the open batch, or in a new one (group commit).
     pub async fn begin_write(&self) -> anyhow::Result<Arc<WriteTxn>> {
-        let guard = self.writer.clone().lock_owned().await;
-        // A previous transaction can only still be open if its future was dropped mid-flight *and* the rollback in
-        // `WriteState::drop` failed; be defensive anyway.
-        if !guard.is_autocommit() {
-            guard.execute_batch("ROLLBACK")?;
-        }
-        storage::exec_cached(&guard, "BEGIN IMMEDIATE")?;
-        let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
-            Ok((
-                storage::read_meta_u64(&guard, storage::META_TS)?,
-                storage::read_meta_f64(&guard, storage::META_TIME)?,
-                storage::read_meta_f64(&guard, storage::META_LAST_CREATION_TIME)?,
-            ))
-        })();
-        let (prev_ts, last_time, last_creation_time) = match begun {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = guard.execute_batch("ROLLBACK");
-                return Err(e);
-            }
+        self.begin_write_as("").await
+    }
+
+    /// [`Database::begin_write`] for a mutation: `label` (its path) keys how long its transactions take, so a slow
+    /// one commits the open batch first instead of joining it ([`SLOW_WRITE`]).
+    pub async fn begin_write_as(&self, label: &str) -> anyhow::Result<Arc<WriteTxn>> {
+        let guard = self.writer.lock().await;
+        let mut conn = WriterGuard {
+            guard: Some(guard),
+            shared: self.writer.clone(),
+            undo: Undo::Nothing,
+            label: label.to_string(),
+            began: Instant::now(),
         };
+        if conn.writer().batch.is_some() && self.writer.expected(label) > SLOW_WRITE {
+            let finished = self.writer.commit_batch(conn.writer_mut());
+            finish_members(finished);
+        }
+        if conn.writer().batch.is_none() {
+            let batch = conn.writer().begin_batch()?;
+            conn.writer_mut().batch = Some(batch);
+            // Nothing else is in the batch yet: undoing this transaction is rolling back the whole SQLite transaction,
+            // which spares the savepoint's two statements when there is no queue to batch with.
+            conn.undo = Undo::Transaction;
+        } else {
+            storage::exec_cached(&conn, "SAVEPOINT mutation")?;
+            conn.undo = Undo::Savepoint;
+        }
+        let batch = conn.writer().batch.as_ref().expect("a batch is open");
+        let (prev_ts, last_time, last_creation_time) = (batch.ts, batch.time, batch.last_creation_time);
         let now = self.clock.now_ms().max(last_time);
         let state = WriteState {
-            conn: guard,
+            conn,
             prev_ts,
             now,
             last_creation_time,
@@ -338,10 +373,312 @@ impl Database {
         Ok(Arc::new(WriteTxn {
             state: Mutex::new(Some(state)),
             catalog: self.catalog.clone(),
-            write_log: self.write_log.clone(),
-            journal: self.journal.clone(),
             on_commit: Mutex::new(Vec::new()),
         }))
+    }
+}
+
+/// The writer connection, and the batch of mutations it has open (group commit).
+pub(crate) struct Writer {
+    conn: Connection,
+    batch: Option<Batch>,
+}
+
+impl std::ops::Deref for Writer {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Writer {
+    fn begin_batch(&self) -> anyhow::Result<Batch> {
+        // Open only if a previous holder's commit and its rollback both failed; be defensive anyway.
+        if !self.conn.is_autocommit() {
+            self.conn.execute_batch("ROLLBACK")?;
+        }
+        storage::exec_cached(&self.conn, "BEGIN IMMEDIATE")?;
+        let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
+            Ok((
+                storage::read_meta_u64(&self.conn, storage::META_TS)?,
+                storage::read_meta_f64(&self.conn, storage::META_TIME)?,
+                storage::read_meta_f64(&self.conn, storage::META_LAST_CREATION_TIME)?,
+            ))
+        })();
+        match begun {
+            Ok((ts, time, last_creation_time)) => {
+                Ok(Batch { begin_ts: ts, ts, time, last_creation_time, started: Instant::now(), members: Vec::new() })
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // A batch nobody committed (only if a release path failed): undo it; its callers already got an error.
+        if self.batch.is_some() && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+/// An open SQLite transaction holding the mutations that finished in it but aren't committed yet.
+struct Batch {
+    /// `_meta.ts` when the batch began.
+    begin_ts: u64,
+    /// The ts, commit time and last creation time after the last mutation in the batch: what the next one continues
+    /// from, and what `_meta` gets at commit.
+    ts: u64,
+    time: f64,
+    last_creation_time: f64,
+    started: Instant,
+    members: Vec<Member>,
+}
+
+/// A mutation waiting for its batch to commit.
+struct Member {
+    /// Its write-log entry (None if it wrote nothing), appended once the batch commits.
+    entry: Option<CommitEntry>,
+    journaled: u64,
+    on_commit: Vec<Box<dyn FnOnce() + Send>>,
+    done: tokio::sync::oneshot::Sender<Result<(), String>>,
+    /// Set by [`WriterShared::commit_batch`].
+    result: Result<(), String>,
+}
+
+/// The writer lock, and who is waiting for it. Group commit's rule: a holder releasing the lock commits the open batch
+/// unless another write is already waiting for the lock (and the batch is below [`MAX_BATCH`] and [`MAX_BATCH_AGE`]);
+/// then that one continues it. A waiter that gives up (its future dropped), or a release that races with one, commits
+/// a batch nobody will continue ([`WriterShared::commit_orphaned`]).
+pub(crate) struct WriterShared {
+    lock: Arc<tokio::sync::Mutex<Writer>>,
+    /// Tasks between asking for the lock and getting it.
+    waiting: AtomicUsize,
+    /// A moving average of how long each label's write transactions hold the lock (µs).
+    durations: Mutex<std::collections::HashMap<String, f64>>,
+    write_log: Arc<WriteLog>,
+    journal: Arc<journal::Journal>,
+}
+
+impl WriterShared {
+    /// How long a write transaction labelled `label` is expected to take (zero if never seen).
+    fn expected(&self, label: &str) -> Duration {
+        let durations = self.durations.lock().unwrap_or_else(|e| e.into_inner());
+        Duration::from_secs_f64(durations.get(label).copied().unwrap_or(0.0) / 1e6)
+    }
+
+    fn record_duration(&self, label: &str, took: Duration) {
+        let mut durations = self.durations.lock().unwrap_or_else(|e| e.into_inner());
+        let micros = took.as_secs_f64() * 1e6;
+        match durations.get_mut(label) {
+            // Weighted towards recent runs, so a function that got slow (or fast) is noticed within a few calls.
+            Some(avg) => *avg += (micros - *avg) / 4.0,
+            None => {
+                durations.insert(label.to_string(), micros);
+            }
+        }
+    }
+
+    async fn lock(self: &Arc<Self>) -> OwnedMutexGuard<Writer> {
+        struct Waiting<'a> {
+            shared: &'a WriterShared,
+            acquired: bool,
+        }
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.shared.waiting.fetch_sub(1, Ordering::SeqCst);
+                if !self.acquired {
+                    // Given up: a holder may have left its batch open for us.
+                    self.shared.commit_orphaned();
+                }
+            }
+        }
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let mut waiting = Waiting { shared: self, acquired: false };
+        let guard = self.lock.clone().lock_owned().await;
+        waiting.acquired = true;
+        guard
+    }
+
+    /// End a turn at the writer: commit the batch, or leave it open for a waiting write to continue.
+    fn release(&self, mut guard: OwnedMutexGuard<Writer>) {
+        let young = |b: &Batch| b.members.len() < MAX_BATCH && b.started.elapsed() < MAX_BATCH_AGE;
+        let continue_batch = guard.batch.as_ref().is_some_and(young) && self.waiting.load(Ordering::SeqCst) > 0;
+        if !continue_batch {
+            let finished = self.commit_batch(&mut guard);
+            drop(guard);
+            finish_members(finished);
+            return;
+        }
+        drop(guard);
+        // The waiter may have given up between our check and the release.
+        self.commit_orphaned();
+    }
+
+    /// Commit an open batch if nobody is waiting to continue it and the lock is free.
+    fn commit_orphaned(&self) {
+        if self.waiting.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.lock.clone().try_lock_owned()
+            && guard.batch.is_some()
+        {
+            let finished = self.commit_batch(&mut guard);
+            drop(guard);
+            finish_members(finished);
+        }
+    }
+
+    /// Commit the open batch (if any): `_meta` gets the batch's last ts, then `COMMIT`; the members' write-log entries
+    /// are appended in ts order, still under the lock. On failure the whole batch rolls back and every member gets the
+    /// error. Returns the members, for [`finish_members`] (after releasing the lock).
+    fn commit_batch(&self, writer: &mut Writer) -> Vec<Member> {
+        let Some(mut batch) = writer.batch.take() else { return Vec::new() };
+        let committed = (|| -> anyhow::Result<()> {
+            if batch.ts != batch.begin_ts {
+                storage::write_meta(&writer.conn, storage::META_TS, (batch.ts as i64).into())?;
+                storage::write_meta(&writer.conn, storage::META_TIME, batch.time.into())?;
+                storage::write_meta(&writer.conn, storage::META_LAST_CREATION_TIME, batch.last_creation_time.into())?;
+            }
+            storage::exec_cached(&writer.conn, "COMMIT")
+        })();
+        match committed {
+            Ok(()) => {
+                for member in &mut batch.members {
+                    self.journal.add_pending_bytes(member.journaled);
+                    if let Some(entry) = member.entry.take() {
+                        self.write_log.append(entry);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("commit failed: {e:#}");
+                if !writer.conn.is_autocommit()
+                    && let Err(e) = writer.conn.execute_batch("ROLLBACK")
+                {
+                    tracing::error!("rollback after a failed commit failed: {e}");
+                }
+                for member in &mut batch.members {
+                    member.result = Err(format!("commit failed: {e:#}"));
+                    member.on_commit.clear();
+                }
+            }
+        }
+        batch.members
+    }
+}
+
+/// Run committed members' `on_commit` hooks and wake every member's caller.
+fn finish_members(members: Vec<Member>) {
+    for member in members {
+        if member.result.is_ok() {
+            for hook in member.on_commit {
+                hook();
+            }
+        }
+        // The caller may be gone (its future dropped while waiting); its writes are committed regardless.
+        let _ = member.done.send(member.result);
+    }
+}
+
+/// The writer lock as held by one write transaction, with its savepoint. Dropped without [`WriterGuard::finish`]
+/// (an error, a panic, the mutation future dropped), it rolls back to the savepoint, undoing only this transaction,
+/// and releases the lock ([`WriterShared::release`]).
+pub(crate) struct WriterGuard {
+    guard: Option<OwnedMutexGuard<Writer>>,
+    shared: Arc<WriterShared>,
+    undo: Undo,
+    /// For [`WriterShared::record_duration`].
+    label: String,
+    began: Instant,
+}
+
+/// How a [`WriterGuard`] undoes its transaction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Undo {
+    /// Finished (or nothing to undo).
+    Nothing,
+    /// `ROLLBACK TO` its savepoint: earlier mutations in the batch stay.
+    Savepoint,
+    /// It began the batch: `ROLLBACK` the SQLite transaction (and close the batch).
+    Transaction,
+}
+
+impl std::ops::Deref for WriterGuard {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.writer().conn
+    }
+}
+
+impl WriterGuard {
+    fn writer(&self) -> &Writer {
+        self.guard.as_ref().expect("held until dropped")
+    }
+
+    fn writer_mut(&mut self) -> &mut Writer {
+        self.guard.as_mut().expect("held until dropped")
+    }
+
+    /// Undo this transaction's writes (only them: earlier mutations in the batch stay).
+    fn rollback_savepoint(&mut self) {
+        match std::mem::replace(&mut self.undo, Undo::Nothing) {
+            Undo::Nothing => {}
+            Undo::Transaction => {
+                let writer = self.writer_mut();
+                writer.batch = None;
+                if let Err(e) = writer.conn.execute_batch("ROLLBACK") {
+                    tracing::error!("rollback failed: {e}");
+                }
+            }
+            Undo::Savepoint => {
+                let undone = storage::exec_cached(self, "ROLLBACK TO mutation")
+                    .and_then(|()| storage::exec_cached(self, "RELEASE mutation"));
+                if let Err(e) = undone {
+                    // The batch's transaction is in an unknown state: roll all of it back (its members get the error).
+                    tracing::error!("rollback to savepoint failed: {e:#}");
+                    let writer = self.writer_mut();
+                    let _ = writer.conn.execute_batch("ROLLBACK");
+                    if let Some(batch) = writer.batch.take() {
+                        for mut member in batch.members {
+                            member.result = Err(format!("rolled back: {e:#}"));
+                            member.on_commit.clear();
+                            finish_members(vec![member]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Keep this transaction's writes: release the savepoint into the batch, add the member, and release the lock.
+    fn finish(mut self, member: Member, ts: u64, time: f64, last_creation_time: f64) -> anyhow::Result<()> {
+        if self.undo == Undo::Savepoint {
+            storage::exec_cached(&self, "RELEASE mutation")?;
+        }
+        self.undo = Undo::Nothing;
+        let batch = self.writer_mut().batch.as_mut().expect("a batch is open");
+        if member.entry.is_some() {
+            batch.ts = ts;
+            batch.time = time;
+            batch.last_creation_time = last_creation_time;
+        }
+        batch.members.push(member);
+        Ok(())
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        self.rollback_savepoint();
+        self.shared.record_duration(&self.label, self.began.elapsed());
+        if let Some(guard) = self.guard.take() {
+            self.shared.release(guard);
+        }
     }
 }
 
@@ -448,14 +785,13 @@ impl Drop for Snapshot {
 pub struct WriteTxn {
     state: Mutex<Option<WriteState>>,
     pub(crate) catalog: Arc<Catalog>,
-    write_log: Arc<WriteLog>,
-    journal: Arc<journal::Journal>,
     /// Run after a successful `COMMIT`, dropped on rollback (see [`WriteTxn::on_commit`]).
     on_commit: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(crate) struct WriteState {
-    conn: OwnedMutexGuard<Connection>,
+    /// The writer lock and this transaction's savepoint; dropping the state rolls back to it.
+    conn: WriterGuard,
     prev_ts: u64,
     now: f64,
     last_creation_time: f64,
@@ -466,17 +802,6 @@ pub(crate) struct WriteState {
     journal: Option<journal::Changes>,
     /// Commit a new ts even without writes (a replayed journal entry whose writes cancel out here).
     force_ts_bump: bool,
-}
-
-impl Drop for WriteState {
-    fn drop(&mut self) {
-        // Reached without commit on error, panic, or when the mutation future is dropped: undo everything.
-        if !self.conn.is_autocommit()
-            && let Err(e) = self.conn.execute_batch("ROLLBACK")
-        {
-            tracing::error!("rollback failed: {e}");
-        }
-    }
 }
 
 impl WriteTxn {
@@ -498,49 +823,47 @@ impl WriteTxn {
         self.on_commit.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
     }
 
-    fn run_on_commit(&self) {
-        let hooks = std::mem::take(&mut *self.on_commit.lock().unwrap_or_else(|e| e.into_inner()));
-        for hook in hooks {
-            hook();
-        }
-    }
-
-    /// Commit, running `before_commit(conn, commit_ts)` inside the transaction right before `COMMIT` (used to record
-    /// the mutation's response for idempotency atomically with its writes). Returns the new ts, or the current ts
-    /// if no document was written (then ts is not bumped).
-    pub(crate) fn commit_with(
+    /// Commit, running `before_commit(conn, commit_ts)` inside the transaction first (used to record the mutation's
+    /// response for idempotency atomically with its writes). Returns the new ts, or the current ts if no document
+    /// was written (then ts is not bumped), once the batch holding this transaction has committed (group commit:
+    /// see the module docs). If that commit fails, so does this, and nothing of this transaction is kept.
+    pub(crate) async fn commit_with(
         &self,
         before_commit: impl FnOnce(&Connection, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<u64> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut state = state.context("the mutation's transaction has already finished")?;
-        if state.writes.is_empty() && !state.force_ts_bump {
+        let (done, committed) = tokio::sync::oneshot::channel();
+        let on_commit = std::mem::take(&mut *self.on_commit.lock().unwrap_or_else(|e| e.into_inner()));
+        let ts = if state.writes.is_empty() && !state.force_ts_bump {
             before_commit(&state.conn, state.prev_ts)?;
-            storage::exec_cached(&state.conn, "COMMIT")?;
-            self.run_on_commit();
-            return Ok(state.prev_ts);
-        }
-        let ts = state.prev_ts + 1;
-        before_commit(&state.conn, ts)?;
-        storage::write_meta(&state.conn, storage::META_TS, (ts as i64).into())?;
-        storage::write_meta(&state.conn, storage::META_TIME, state.now.into())?;
-        storage::write_meta(&state.conn, storage::META_LAST_CREATION_TIME, state.last_creation_time.into())?;
-        // In the same SQLite transaction as the writes and the ts bump: journaled exactly once, or not at all.
-        let journaled = match state.journal.take() {
-            Some(changes) => {
-                let encoded = changes.encode();
-                journal::insert(&state.conn, ts, state.now, &encoded)?;
-                encoded.len() as u64
-            }
-            None => 0,
+            let member = Member { entry: None, journaled: 0, on_commit, done, result: Ok(()) };
+            let (ts, now, lct) = (state.prev_ts, state.now, state.last_creation_time);
+            state.take_conn().finish(member, ts, now, lct)?;
+            ts
+        } else {
+            let ts = state.prev_ts + 1;
+            before_commit(&state.conn, ts)?;
+            // In the same SQLite transaction as the writes and the ts bump: journaled exactly once, or not at all.
+            let journaled = match state.journal.take() {
+                Some(changes) => {
+                    let encoded = changes.encode();
+                    journal::insert(&state.conn, ts, state.now, &encoded)?;
+                    encoded.len() as u64
+                }
+                None => 0,
+            };
+            let entry = Some(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
+            let member = Member { entry, journaled, on_commit, done, result: Ok(()) };
+            let (now, lct) = (state.now, state.last_creation_time);
+            state.take_conn().finish(member, ts, now, lct)?;
+            ts
         };
-        storage::exec_cached(&state.conn, "COMMIT")?;
-        self.journal.add_pending_bytes(journaled);
-        // Still holding the writer lock (inside `state.conn`), so log entries are appended in ts order.
-        self.write_log.append(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
-        drop(state);
-        self.run_on_commit();
-        Ok(ts)
+        match committed.await {
+            Ok(Ok(())) => Ok(ts),
+            Ok(Err(e)) => bail!("{e}"),
+            Err(_) => bail!("the write batch was dropped before it committed"),
+        }
     }
 
     /// Roll back (also happens implicitly on drop).
@@ -548,13 +871,12 @@ impl WriteTxn {
         drop(self.state.lock().unwrap_or_else(|e| e.into_inner()).take());
     }
 
-    /// Roll back, then run `f` in autocommit mode while still holding the writer lock.
+    /// Roll back, then run `f` while still holding the writer lock. `f`'s writes are kept: they commit with the
+    /// batch (or at once, if this transaction began it), without waiting for it here.
     pub(crate) fn rollback_then(&self, f: impl FnOnce(&Connection) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let state = state.context("the mutation's transaction has already finished")?;
-        if !state.conn.is_autocommit() {
-            state.conn.execute_batch("ROLLBACK")?;
-        }
+        let mut state = state.context("the mutation's transaction has already finished")?;
+        state.conn.rollback_savepoint();
         f(&state.conn)
     }
 }
@@ -562,6 +884,11 @@ impl WriteTxn {
 impl WriteState {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// The writer guard, for [`WriterGuard::finish`]; this state is spent.
+    fn take_conn(self) -> WriterGuard {
+        self.conn
     }
 
     fn next_creation_time(&mut self) -> f64 {

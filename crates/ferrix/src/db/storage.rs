@@ -68,6 +68,9 @@ pub fn open_writer(path: &Path) -> anyhow::Result<Connection> {
     let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
     anyhow::ensure!(mode.eq_ignore_ascii_case("wal"), "could not enable WAL mode (got {mode})");
     apply_pragmas(&conn)?;
+    // Group commit runs each mutation in a savepoint, whose journal (the original of every page the savepoint
+    // changes) spills to a temporary file past 64 KiB by default: keep temporary files in memory.
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.execute_batch(DDL)?;
     conn.set_prepared_statement_cache_capacity(64);
     Ok(conn)

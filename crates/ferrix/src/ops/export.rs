@@ -665,7 +665,7 @@ async fn delete_all(app: &App, table: &Arc<TableInfo>, batch_size: usize) -> cra
             }
             Ok(ids.len())
         })?;
-        txn.commit_with(|_, _| Ok(()))?;
+        txn.commit_with(|_, _| Ok(())).await?;
         deleted += n as u64;
         if n < batch_size {
             return Ok(deleted);
@@ -739,7 +739,7 @@ pub async fn import_file(
             }
             Ok(replaced)
         })?;
-        txn.commit_with(|_, _| Ok(()))?;
+        txn.commit_with(|_, _| Ok(())).await?;
         result.replaced += replaced;
     }
     Ok(result)

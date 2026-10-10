@@ -671,7 +671,7 @@ impl App {
         // replay that client's responses, nor can a socket that changed identity see its earlier identity's.
         let scoped_key = idempotency_key.map(|k| k.scoped_to(identity));
         let idempotency_key = scoped_key.as_ref();
-        let txn = match self.db().begin_write().await {
+        let txn = match self.db().begin_write_as(path).await {
             Ok(t) => t,
             Err(e) => return not_run(e),
         };
@@ -680,7 +680,11 @@ impl App {
             match txn.with_state(|s| dedup::lookup(s.conn(), key)) {
                 Ok(None) => {}
                 Ok(Some(stored)) => {
-                    txn.rollback();
+                    // Not before the original's batch has committed (group commit): if that commit failed, the
+                    // stored response would describe writes that never happened.
+                    if let Err(e) = txn.commit_with(|_, _| Ok(())).await {
+                        return not_run(e);
+                    }
                     tracing::debug!(path, session = %key.session_id, request_id = key.request_id, "duplicate mutation; replaying its response");
                     return MutationRun { result: stored.into_result(), log_lines: Vec::new() };
                 }
@@ -727,6 +731,7 @@ impl App {
                             Some(key) => dedup::record_success(conn, key, &value, ts),
                             None => Ok(()),
                         })
+                        .await
                         .context("commit failed")?;
                     Ok((value, ts))
                 }

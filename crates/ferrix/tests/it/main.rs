@@ -12,6 +12,7 @@ mod codegen;
 mod contract;
 mod dashboard;
 mod dx;
+mod group_commit;
 mod hardening;
 mod index_order;
 mod jwt;

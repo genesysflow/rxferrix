@@ -22,6 +22,7 @@
 //! for the duration of synchronous SQLite calls, never across an `.await`.
 
 pub mod catalog;
+pub mod checkpoint;
 pub mod dedup;
 pub mod journal;
 pub mod pagination;
@@ -67,6 +68,8 @@ pub const WARN_WRITE: Duration = Duration::from_millis(100);
 pub struct Database {
     /// HNSW vector indexes (in-memory graphs following the write log).
     ann: search::ann::AnnIndexes,
+    /// Checkpoints the WAL off the commit path; stopped before the writer closes.
+    _checkpointer: checkpoint::Checkpointer,
     readers: Arc<ReaderPool>,
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
@@ -143,9 +146,15 @@ impl Database {
             // Rows a previous run didn't ship count towards the bound from the start.
             journal.set_pending_bytes(journal::stats(&writer)?.map(|s| s.3).unwrap_or(0));
         }
+        let checkpointer = checkpoint::Checkpointer::start(&path)?;
+        checkpoint::install_hook(&writer, checkpointer.signal());
         Ok(Database {
             writer: Arc::new(WriterShared {
-                lock: Arc::new(tokio::sync::Mutex::new(Writer { conn: writer, batch: None })),
+                lock: Arc::new(tokio::sync::Mutex::new(Writer {
+                    conn: writer,
+                    batch: None,
+                    checkpoint: checkpointer.signal().clone(),
+                })),
                 waiting: AtomicUsize::new(0),
                 durations: Mutex::new(std::collections::HashMap::new()),
                 write_log: write_log.clone(),
@@ -162,6 +171,7 @@ impl Database {
             write_log,
             clock: Clock::default(),
             ann,
+            _checkpointer: checkpointer,
         })
     }
 
@@ -366,6 +376,10 @@ impl Database {
             storage::exec_cached(&conn, "SAVEPOINT mutation")?;
             conn.undo = Undo::Savepoint;
         }
+        // Timed from here: committing the batch before it (above), beginning a new one and finishing a checkpoint
+        // are not this transaction's work, and counting them would make a fast mutation look slow (and the rule
+        // above commit every batch before it, which, timed in, would keep it looking slow).
+        conn.began = Instant::now();
         let batch = conn.writer().batch.as_ref().expect("a batch is open");
         let (prev_ts, last_time, last_creation_time) = (batch.ts, batch.time, batch.last_creation_time);
         let now = self.clock.now_ms().max(last_time);
@@ -392,6 +406,8 @@ impl Database {
 pub(crate) struct Writer {
     conn: Connection,
     batch: Option<Batch>,
+    /// What the connection's WAL hook nudges ([`checkpoint::install_hook`]); dropped after `conn`.
+    checkpoint: Arc<checkpoint::Signal>,
 }
 
 impl std::ops::Deref for Writer {
@@ -406,6 +422,13 @@ impl Writer {
         // Open only if a previous holder's commit and its rollback both failed; be defensive anyway.
         if !self.conn.is_autocommit() {
             self.conn.execute_batch("ROLLBACK")?;
+        }
+        // The checkpoint thread copied most of the WAL; with no write in progress, this one completes, so the
+        // transaction below starts the WAL over (`checkpoint`, module docs).
+        if self.checkpoint.take_finish()
+            && let Err(e) = self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+        {
+            tracing::warn!("finishing a WAL checkpoint failed: {e}");
         }
         storage::exec_cached(&self.conn, "BEGIN IMMEDIATE")?;
         let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
@@ -433,6 +456,7 @@ impl Drop for Writer {
         if self.batch.is_some() && !self.conn.is_autocommit() {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
+        checkpoint::remove_hook(&self.conn);
     }
 }
 
@@ -1178,6 +1202,48 @@ mod tests {
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert_eq!(out.matches("held the database writer").count(), 1, "{out}");
         assert!(out.contains("app:slow") && out.contains("150 ms"), "{out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wal_is_checkpointed_off_the_commit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(dir.path(), &[], &OpenOptions::default()).unwrap();
+        let autocheckpoint: i64 =
+            db.with_writer(|c| Ok(c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(autocheckpoint, 0, "the writer never checkpoints itself");
+        // ~3 pages per commit: the WAL passes the hook's threshold several times.
+        for i in 0..600i64 {
+            // Different all through each time, so all of its overflow pages are rewritten.
+            let pad = format!("{i:08}").repeat(1_000);
+            db.with_writer(|c| {
+                storage::write_meta(c, "pad", pad.into())?;
+                storage::write_meta(c, "probe", i.into())
+            })
+            .await
+            .unwrap();
+        }
+        // Nothing checkpoints on the commit path, so only the background thread can have moved commits into the main
+        // file: read a copy of it alone (without the WAL).
+        let copy = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            std::fs::copy(dir.path().join("data.db"), copy.path().join("main.db")).unwrap();
+            let main = Connection::open(copy.path().join("main.db")).unwrap();
+            let in_main = storage::read_meta_u64(&main, "probe").unwrap_or(0);
+            if in_main >= 300 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the main file has only commits up to probe = {in_main}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let wal = std::fs::metadata(dir.path().join("data.db-wal")).map_or(0, |m| m.len());
+        assert!(wal <= 2 * 1000 * 4096 + 64 * 1024, "the WAL grew to {wal} bytes");
+        // Closing still checkpoints and removes the WAL (the writer closes last), and the data is all there.
+        drop(db);
+        assert!(!dir.path().join("data.db-wal").exists(), "WAL left behind");
+        let db = Database::open_with(dir.path(), &[], &OpenOptions::default()).unwrap();
+        let v = db.with_writer(|c| storage::read_meta_u64(c, "probe")).await.unwrap();
+        assert_eq!(v, 599);
     }
 
     #[tokio::test]

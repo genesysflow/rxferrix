@@ -465,8 +465,9 @@ exists.
 **Durability.** By default SQLite runs in WAL mode with `synchronous = NORMAL`: a crash of the process loses nothing,
 but a power loss or OS crash may lose the last commits. `--fsync-commits` (`AppOptions::fsync_commits`) makes every
 commit wait for the disk; group commit shares one fsync across the mutations waiting at that moment, so it costs most
-when writes come one at a time. Measured on an NVMe SSD (btrfs, encrypted), one-insert mutations: 5.8k/s with 1
-writer, 9.7k/s with 16 and 11.6k/s with 64 by default; 1.1k/s, 6.3k/s and 9.3k/s with `--fsync-commits`.
+when writes come one at a time. WAL checkpoints run on a background thread, not inside commits. Measured on an NVMe
+SSD (btrfs, encrypted), one-insert mutations: 8.9k/s with 1 writer, 16.2k/s with 16 and 18.7k/s with 64 by default
+(p99 0.2 / 3.5 / 11 ms); 1.1k/s, 7.3k/s and 12.5k/s with `--fsync-commits`.
 
 **Release binary.** `scripts/release.sh` builds the web app and a static `x86_64-unknown-linux-musl` binary of
 `todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 20 MB). C code is

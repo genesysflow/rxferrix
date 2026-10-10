@@ -210,3 +210,38 @@ async fn a_waiter_that_gives_up_is_not_handed_the_batch() {
     assert_eq!(count(&t, "holder").await, 1);
     assert_eq!(count(&t, "quitter").await, 0);
 }
+
+/// Checkpoints run off the commit path (`ferrix::db::checkpoint`), but the WAL must still start over regularly: under
+/// constant writes from many tasks it stays bounded (unbounded, it grew by hundreds of MB per second).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_wal_stays_bounded_under_constant_writes() {
+    let t = TestApp::new().await.unwrap();
+    let stop = Instant::now() + Duration::from_secs(3);
+    let tasks: Vec<_> = (0..16)
+        .map(|w| {
+            let app = t.app().clone();
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                while Instant::now() < stop {
+                    let args = json!({ "marker": format!("w{w}"), "fail": false });
+                    app.execute_mutation(&fns::gc_pair::path(), args, &Identity::default(), None).await.result.unwrap();
+                    n += 1;
+                }
+                n
+            })
+        })
+        .collect();
+    let mut largest = 0;
+    while Instant::now() < stop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        largest = largest.max(std::fs::metadata(t.dir().join("data.db-wal")).map_or(0, |m| m.len()));
+    }
+    let mut commits = 0;
+    for task in tasks {
+        commits += task.await.unwrap();
+    }
+    // The writer finishes a checkpoint past 16000 pages (64 MiB), and the WAL restarts; writes landing meanwhile add a
+    // little. Unbounded, it passed 250 MiB within these 3 seconds.
+    assert!(largest <= 160 << 20, "the WAL reached {} MiB over {commits} commits", largest >> 20);
+    assert!(commits > 1000, "only {commits} commits: the test didn't load the writer");
+}

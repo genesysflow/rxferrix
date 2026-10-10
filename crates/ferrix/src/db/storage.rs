@@ -57,6 +57,18 @@ fn open_retrying(mut open: impl FnMut() -> rusqlite::Result<Connection>) -> rusq
     }
 }
 
+/// Open the connection the checkpoint thread uses (`super::checkpoint`); the database exists already.
+pub fn open_checkpointer(path: &Path) -> anyhow::Result<Connection> {
+    let conn = open_retrying(|| {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        Ok(conn)
+    })
+    .with_context(|| format!("opening {} for checkpoints", path.display()))?;
+    apply_pragmas(&conn)?;
+    Ok(conn)
+}
+
 /// Open (creating if needed) the read-write connection and ensure the schema exists.
 pub fn open_writer(path: &Path) -> anyhow::Result<Connection> {
     let conn = open_retrying(|| {
@@ -71,6 +83,9 @@ pub fn open_writer(path: &Path) -> anyhow::Result<Connection> {
     // Group commit runs each mutation in a savepoint, whose journal (the original of every page the savepoint
     // changes) spills to a temporary file past 64 KiB by default: keep temporary files in memory.
     conn.pragma_update(None, "temp_store", "MEMORY")?;
+    // Checkpoints run on a thread of their own, not inside this connection's commits (`super::checkpoint`).
+    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    conn.pragma_update(None, "journal_size_limit", super::checkpoint::WAL_SIZE_LIMIT)?;
     conn.execute_batch(DDL)?;
     conn.set_prepared_statement_cache_capacity(64);
     Ok(conn)

@@ -7,7 +7,7 @@ WebSocket and get updated results automatically whenever a write affects them.
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
 Phase 9 (operations) is built: data migrations (`#[migration]`), backups and restores (also from the dashboard),
-JSONL/CSV export and import, metrics, JSON logs, TLS (with certificate reload), frontend serving, release builds and a
+continuous replication with point-in-time restores, JSONL/CSV export and import, metrics, JSON logs, TLS (with certificate reload), frontend serving, release builds and a
 CI workflow for the binary and the Docker image (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
 example found (index order, codegen names, `#[object]`, dev mode, storage URLs in dev; see
 [Things to know](#things-to-know)).
@@ -387,8 +387,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
 - **Backups**: create (optionally with `aux.db` and files), download, delete and **restore** backups (a stored one
   or an archive from your computer: checked completely, then applied at the next start; cancel, or "Restart now"
-  under systemd/Docker); the target and the `--backup-every` schedule; export a table (JSONL/CSV) and import JSONL or
-  CSV (insert, upsert or replace).
+  under systemd/Docker); the target and the `--backup-every` schedule; with `--replicate-to`, the replication status
+  (target, lag, last segment and snapshot, generations) and a point-in-time restore picker (a time or a commit ts);
+  export a table (JSONL/CSV) and import JSONL or CSV (insert, upsert or replace).
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
   sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.
@@ -503,11 +504,35 @@ offers "Restart now": a graceful shutdown and an exit with that code, for system
 Without it, restart the server yourself. A staged restore never restores `auth_secret.key` (only `restore` does), and
 it replaces everything else, administrators and sessions included: whoever is signed in may have to sign in again.
 
-**Litestream.** `data.db` is a normal SQLite database in WAL mode, so [Litestream](https://litestream.io) can
-replicate it continuously next to the server (`litestream replicate fx_data/data.db s3://bucket/data.db`); restore
-with `litestream restore` into an empty data directory before starting the server. Replicate `data.db` only (`aux.db`
-is the execution log), and keep `auth_secret.key` and local file blobs (`storage/`) backed up separately (or keep
-files in S3 with `--storage s3://…`). Archive backups and Litestream can be used together.
+**Continuous replication and point-in-time restore.** `serve --replicate-to s3://bucket/prefix` (or a directory)
+loses at most about a second of commits and can restore any moment of the last week:
+
+```sh
+todo-server serve --replicate-to s3://bucket/replica [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d]
+todo-server restore --from s3://bucket/replica --list                          # generations and restorable ranges
+todo-server restore --from s3://bucket/replica --to-time 2026-10-09T12:00:00Z  # or --to-ts N; default: the newest
+```
+
+Every commit writes its document changes to a journal table in `data.db` *in the same SQLite transaction* (so the
+journal never misses a commit nor holds a rolled-back one); every `--replicate-every` the new entries are shipped as a
+checksummed, compressed segment named by its ts range, then deleted locally. A snapshot (an ordinary backup archive)
+is taken when replication starts and every `--snapshot-every`; snapshots and segments older than `--replicate-keep`
+are deleted, except what the oldest restorable point still needs. A restore takes the newest snapshot before the
+point and replays the journal up to it through the normal write path (indexes, search and vector indexes are
+rebuilt), then checks it like any restore. From the dashboard (Backups, "Restore to this point") it is staged and
+applied at the next start, like an archive. If the target is unreachable, commits pile up locally (lag in
+`GET /api/admin/replication`, `/metrics` and the dashboard) and are shipped when it is back; past
+`--replicate-max-pending` (1 GB) the local journal is dropped and replication starts over with a new snapshot. A
+restored database, or one that was written without replication (e.g. `import` offline), starts a new *generation*
+next to the old ones, so history is never overwritten. The journal holds documents, not file blobs: keep files in S3
+(`--storage s3://…`) or back up `storage/` separately, and keep a copy of `auth_secret.key`. The cost is one extra row
+per commit: about 5% fewer commits per second in a sequential benchmark (docs/CONTRACT.md §4.4).
+
+**Litestream** works too, as an alternative: `data.db` is a normal SQLite database in WAL mode, so
+[Litestream](https://litestream.io) can replicate its pages next to the server (`litestream replicate
+fx_data/data.db s3://bucket/data.db`; `litestream restore` into an empty data directory before starting the server).
+Replicate `data.db` only (`aux.db` is the execution log), with the same caveats for blobs and `auth_secret.key`.
+Archive backups, `--replicate-to` and Litestream can be combined.
 
 **Export and import.** `todo-server export [--tables a,b] [--format jsonl|csv] [--out dir]` writes tables from one
 consistent snapshot; `todo-server import <dir|file.jsonl|file.csv> [--format jsonl|csv] [--mode
@@ -520,7 +545,7 @@ and objects, an empty cell is `null` (or `""` for a non-optional string). Admins
 
 **Metrics.** `serve --metrics [--metrics-token T]` exposes Prometheus metrics at `/metrics`: requests by route and
 status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,
-scheduler queue depth and dropped log entries.
+scheduler queue depth, dropped log entries and, with `--replicate-to`, the replication lag.
 
 ## Things to know
 

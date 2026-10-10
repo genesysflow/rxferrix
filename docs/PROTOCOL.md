@@ -276,6 +276,12 @@ Operations endpoints, with the same admin bearer auth (docs/CONTRACT.md ยง4.2, ย
   `GET /api/admin/restore` (also part of `GET /api/admin/backups`) shows it, `DELETE /api/admin/restore` cancels it,
   `POST /api/admin/restore/restart` (only with `--restart-exit-code`) shuts the server down gracefully for its
   supervisor to restart it. Open sockets are closed by the shutdown; clients reconnect as after any restart.
+- Continuous replication (`serve --replicate-to`): `GET /api/admin/replication` (`{ enabled: false }`, or the status:
+  target, generation, shipped and current ts, lag in commits and ms, local journal size, last segment and snapshot,
+  errors, the generations and their restorable ranges; also as `replication` in `GET /api/admin/backups`),
+  `POST /api/admin/replication/snapshot` (a snapshot now), and `POST /api/admin/restore/point-in-time` with
+  `{ toTs?, toTime?, generation? }`: the state at that commit ts or time is rebuilt from the replication target,
+  checked, and staged exactly like an archive (then `restart` or the next start applies it).
 
 `GET /metrics` (Prometheus text) exists only when the server runs with `--metrics`; with `--metrics-token` it needs
 `Authorization: Bearer <token>` (a fixed token, not an access token).

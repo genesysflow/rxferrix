@@ -22,8 +22,10 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 
 ```jsonc
 // First message on every socket. sessionId is a UUID that stays stable for the life of the client object across
-// reconnects. connectionCount is 0 for the first socket and incremented on each reconnect.
-{ "type": "Connect", "sessionId": "8f1c…", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" }
+// reconnects. connectionCount is 0 for the first socket and incremented on each reconnect. features (optional)
+// lists protocol features the client supports: "diffs" (results may arrive as diffs, see "Result diffs").
+{ "type": "Connect", "sessionId": "8f1c…", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0",
+  "features": ["diffs"] }
 
 // Add or remove subscriptions. baseVersion must equal the server's current querySet version for this socket, and
 // newVersion = baseVersion + 1. queryId is chosen by the client, is unique per client, and is never reused.
@@ -59,6 +61,7 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
   "endVersion":   { "querySet": 1, "identity": 0, "ts": 42 },
   "modifications": [
     { "type": "QueryUpdated", "queryId": 0, "value": [/* fn result */], "logLines": [] },
+    { "type": "QueryUpdated", "queryId": 2, "diff": {"$a": [[/* new doc */], 19, -1]}, "logLines": [] },
     { "type": "QueryFailed",  "queryId": 1, "errorMessage": "…", "errorData": null, "logLines": [] },
     { "type": "QueryRemoved", "queryId": 3 }
   ] }
@@ -122,6 +125,29 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
    those of functions an action called. They are sent **only in `--dev`**; otherwise they are always `[]` (the server
    still keeps them in its execution log). A query rerun whose result didn't change sends nothing, so its new log
    lines aren't sent either.
+
+## Result diffs
+
+A client that sends `"features": ["diffs"]` in `Connect` may receive a `QueryUpdated` with `diff` instead of `value`:
+the new result as a change to **the result this socket last received for that queryId** (in a `QueryUpdated`, as a
+value or a diff). The server tracks exactly that per socket, so the client stays in sync with nothing more than
+applying each diff to its copy of the server's result (not to an optimistically updated view). The server sends
+`value` instead whenever the diff wouldn't be clearly smaller, and always for a query's first result on a socket and
+after a `QueryFailed`. A new socket starts over: every first result is a `value`.
+
+A diff is a JSON object, applied to the previous result:
+
+- `{"$r": value}`: replace it with `value`.
+- `{"$a": [op, …]}`: edit an array. The ops walk the old array from the start: a positive integer `n` keeps the next
+  `n` elements, a negative integer `-n` deletes them, an array inserts its elements, and `{"$p": diff}` patches the
+  next element with `diff`. Elements after the last op are kept.
+- `{"$o": {"s": {key: value, …}, "d": [key, …], "p": {key: diff, …}}}`: edit an object: set keys, delete keys and
+  patch keys (each part optional).
+
+A diff that doesn't fit (an op past the end, a missing key, an array diff for a non-array) means the client's copy
+isn't what the server diffed against: the client drops the whole Transition (nothing applied) and reconnects, which
+starts over from full values. The reference implementations are `ferrix::sync::diff::apply` and
+`packages/client/src/diff.ts`; `crates/ferrix/tests/it/diff_fixtures.rs` checks they agree.
 
 ## Clarifications (resolved while building the client)
 

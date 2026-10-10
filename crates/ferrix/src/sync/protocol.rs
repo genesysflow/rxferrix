@@ -26,6 +26,9 @@ pub enum ClientMessage {
         last_close_reason: Option<String>,
         #[serde(default)]
         client_version: Option<String>,
+        /// Optional protocol features the client supports: `"diffs"` (result diffs, see [`QueryValue::diff_from`]).
+        #[serde(default)]
+        features: Vec<String>,
     },
     ModifyQuerySet {
         base_version: u64,
@@ -76,19 +79,48 @@ pub struct StateVersion {
 
 /// A query result as sent to clients: the value and its JSON text, serialized once when the result is computed and
 /// shared by every subscriber of the query (cloning is an `Arc` clone). Each client's `Transition` frame splices the
-/// text in ([`ServerMessage::to_text`]) instead of serializing the value again per client.
+/// text in ([`ServerMessage::to_text`]) instead of serializing the value again per client, or splices a diff from the
+/// result that client has ([`QueryValue::diff_from`]), computed once per pair of results.
 #[derive(Clone)]
 pub struct QueryValue(Arc<QueryValueInner>);
 
 struct QueryValueInner {
+    /// Unique per computed result: the key of `diffs`.
+    id: u64,
     value: Value,
     json: Box<str>,
+    /// Diffs to this result from earlier ones (by their id), as JSON text; `None` where sending the value is better.
+    diffs: std::sync::Mutex<Vec<(u64, Option<Arc<str>>)>>,
 }
+
+/// How many diffs (from distinct earlier results) a result keeps: clients are almost always one result behind.
+const DIFFS_KEPT: usize = 8;
 
 impl QueryValue {
     pub fn new(value: Value) -> QueryValue {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let json = serde_json::to_string(&value).expect("a JSON value serializes").into_boxed_str();
-        QueryValue(Arc::new(QueryValueInner { value, json }))
+        QueryValue(Arc::new(QueryValueInner { id, value, json, diffs: std::sync::Mutex::new(Vec::new()) }))
+    }
+
+    /// The diff ([`crate::sync::diff`]) that turns `base` into this result, as JSON text: computed by the first
+    /// connection that needs it and shared by every other client that has the same `base`. `None` if sending the value
+    /// is better (the diff isn't clearly smaller).
+    pub fn diff_from(&self, base: &QueryValue) -> Option<Arc<str>> {
+        let mut diffs = self.0.diffs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, cached)) = diffs.iter().find(|(id, _)| *id == base.0.id) {
+            return cached.clone();
+        }
+        let text = crate::sync::diff::diff(&base.0.value, &self.0.value)
+            .map(|d| serde_json::to_string(&d).expect("a JSON value serializes"))
+            .filter(|d| d.len() * 10 < self.0.json.len() * 7)
+            .map(Arc::<str>::from);
+        if diffs.len() >= DIFFS_KEPT {
+            diffs.remove(0);
+        }
+        diffs.push((base.0.id, text.clone()));
+        text
     }
 
     pub fn value(&self) -> &Value {
@@ -129,7 +161,10 @@ impl std::fmt::Debug for QueryValue {
 /// `log_lines` are the function's captured log lines; the server fills them only in `--dev`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateModification {
-    QueryUpdated { query_id: QueryId, value: QueryValue, log_lines: Vec<String> },
+    /// `base`: the result the client has for this query, when it accepts diffs (set by the sync worker). The text form
+    /// then carries a diff from it instead of the value where that is smaller; [`StateModification::to_json`] always
+    /// carries the value.
+    QueryUpdated { query_id: QueryId, value: QueryValue, base: Option<QueryValue>, log_lines: Vec<String> },
     QueryFailed { query_id: QueryId, error: ClientError, log_lines: Vec<String> },
     QueryRemoved { query_id: QueryId },
 }
@@ -145,7 +180,7 @@ impl StateModification {
 
     fn to_json(&self) -> Value {
         match self {
-            StateModification::QueryUpdated { query_id, value, log_lines } => {
+            StateModification::QueryUpdated { query_id, value, log_lines, .. } => {
                 json!({ "type": "QueryUpdated", "queryId": query_id, "value": value.value(), "logLines": log_lines })
             }
             StateModification::QueryFailed { query_id, error, log_lines } => json!({
@@ -159,11 +194,19 @@ impl StateModification {
     /// Append the JSON form ([`StateModification::to_json`]) to `out`, splicing in a result's shared text.
     fn write_json(&self, out: &mut String) {
         match self {
-            StateModification::QueryUpdated { query_id, value, log_lines } => {
+            StateModification::QueryUpdated { query_id, value, base, log_lines } => {
                 out.push_str(r#"{"type":"QueryUpdated","queryId":"#);
                 out.push_str(&query_id.to_string());
-                out.push_str(r#","value":"#);
-                out.push_str(value.json());
+                match base.as_ref().and_then(|base| value.diff_from(base)) {
+                    Some(diff) => {
+                        out.push_str(r#","diff":"#);
+                        out.push_str(&diff);
+                    }
+                    None => {
+                        out.push_str(r#","value":"#);
+                        out.push_str(value.json());
+                    }
+                }
                 out.push_str(r#","logLines":"#);
                 out.push_str(&serde_json::to_string(log_lines).expect("strings serialize"));
                 out.push('}');
@@ -296,9 +339,10 @@ mod tests {
                 StateModification::QueryUpdated {
                     query_id: 7,
                     value: value.clone(),
+                    base: None,
                     log_lines: vec!["[INFO] \"hi\"".into()],
                 },
-                StateModification::QueryUpdated { query_id: 8, value: json!(null).into(), log_lines: vec![] },
+                StateModification::QueryUpdated { query_id: 8, value: json!(null).into(), base: None, log_lines: vec![] },
                 StateModification::QueryFailed {
                     query_id: 9,
                     error: ClientError {
@@ -329,7 +373,7 @@ mod tests {
             .to_json();
         assert_eq!(v, json!({"type":"MutationResponse","requestId":1,"success":true,"result":null,"ts":5,"logLines":[]}));
         let log_lines = vec!["[INFO] x".to_string()];
-        let m = StateModification::QueryUpdated { query_id: 2, value: json!(1).into(), log_lines };
+        let m = StateModification::QueryUpdated { query_id: 2, value: json!(1).into(), base: None, log_lines };
         assert_eq!(m.to_json()["logLines"], json!(["[INFO] x"]));
         let t = ServerMessage::Transition {
             start_version: StateVersion::default(),

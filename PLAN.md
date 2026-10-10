@@ -292,9 +292,11 @@ The write log is a ring buffer of recent commits (100k entries or 5 minutes).
 when computed (the text also feeds the change hash), and every subscriber's `Transition` frame splices that shared
 text in: serializing per subscriber had been 70% of the server's CPU (100 subscribers, 100 writes/s: 9.0 s of CPU
 before, 0.9 s after). Accepted connections set `TCP_NODELAY`: without it Nagle's algorithm and
-delayed ACKs held updates back (p99 35 ms before, 2.3 ms after). Still expensive with many
-subscribers of large results, since the whole result goes to each one: diffs of list results or permessage-deflate
-are the next steps.
+delayed ACKs held updates back (p99 35 ms before, 2.3 ms after). Clients that opt in get **result diffs** (docs/PROTOCOL.md):
+the sync worker records the result each socket last received per query, and an update is sent as a diff from it when
+that is clearly smaller, computed once per pair of results and shared by every socket with the same base (Myers over
+array elements, patches for changed elements and keys). A new post at the top of a 20-post list is ~250 bytes instead
+of 5.5 KB; at 1,000 subscribers delivery went from p50 9.9 / p99 21 ms to 5.6 / 11 ms.
 
 ### 4.6 WebSocket protocol (v1: JSON frames)
 

@@ -193,6 +193,7 @@ export class WebSocketManager {
         connectionCount: this._connectionCount,
         lastCloseReason: this.lastCloseReason,
         clientVersion: CLIENT_VERSION,
+        features: ["diffs"],
       });
       if (!this.paused) {
         this.initialized = true;

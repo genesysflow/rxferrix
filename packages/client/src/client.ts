@@ -32,6 +32,7 @@ import {
   type PaginatedQueryOptions,
   type PaginatedQueryReference,
 } from "./paginated_query.js";
+import { DiffMismatch } from "./diff.js";
 import { RemoteQuerySet, TransitionVersionMismatch } from "./remote_query_set.js";
 import { RequestManager, type SettledMutation } from "./request_manager.js";
 import { WebSocketManager } from "./web_socket_manager.js";
@@ -569,6 +570,12 @@ export class FerrixClient {
       if (e instanceof TransitionVersionMismatch) {
         this.logger.warn(e.message);
         this.ws.reconnect("TransitionVersionMismatch");
+        return;
+      }
+      if (e instanceof DiffMismatch) {
+        // A new connection starts from full results.
+        this.logger.warn(e.message);
+        this.ws.reconnect("DiffMismatch");
         return;
       }
       throw e;

@@ -78,6 +78,7 @@ describe("connection", () => {
         connectionCount: 0,
         lastCloseReason: null,
         clientVersion: "0.1.0",
+        features: ["diffs"],
       },
       {
         type: "ModifyQuerySet",
@@ -280,6 +281,37 @@ describe("transitions", () => {
     server.transition({ ts: 2 }, [{ type: "QueryUpdated", queryId: 0, value: { n: [1] } }]);
     expect(cb).toHaveBeenCalledTimes(1);
     expect(watch.localQueryState()).toBe(first); // referentially stable snapshot
+  });
+
+  it("applies result diffs to the server's result", async () => {
+    const watch = client.watchQuery(api.todos.list, {});
+    const seen: unknown[] = [];
+    watch.onUpdate(() => seen.push(watch.localQueryResult()));
+    await openAndDrain();
+    const a = { _id: "a", text: "first" };
+    const b = { _id: "b", text: "second" };
+    server.transition({ querySet: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: [a, b] }]);
+    // A new todo at the top, and b's text changed.
+    server.transition({ ts: 2 }, [
+      { type: "QueryUpdated", queryId: 0, diff: { $a: [[{ _id: "c", text: "new" }], 1, { $p: { $o: { s: { text: "2nd" } } } }] } },
+    ]);
+    const result = watch.localQueryResult()!;
+    expect(result).toEqual([{ _id: "c", text: "new" }, a, { _id: "b", text: "2nd" }]);
+    expect(result[1]).toBe(seen[0] && (seen[0] as Todo[])[0]); // unchanged elements are reused, not copied
+  });
+
+  it("reconnects for full results when a diff doesn't fit", async () => {
+    const watch = client.watchQuery(api.todos.count);
+    watch.onUpdate(() => {});
+    await openAndDrain();
+    server.transition({ querySet: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: 3 }]);
+    // An array diff for a number: the client's copy isn't what the server diffed against.
+    server.transition({ ts: 2 }, [{ type: "QueryUpdated", queryId: 0, diff: { $a: [1] } }]);
+    expect(watch.localQueryResult()).toBe(3); // nothing applied
+    expect(server.sockets[0]!.closedByClient).toBe(true);
+    vi.advanceTimersByTime(20_000);
+    const sent = await openAndDrain();
+    expect(sent[0]).toMatchObject({ type: "Connect", connectionCount: 1, lastCloseReason: "DiffMismatch" });
   });
 
   it("treats a startVersion mismatch as a protocol error and reconnects", async () => {
@@ -557,6 +589,7 @@ describe("reconnect", () => {
         connectionCount: 1,
         lastCloseReason: "1006: network",
         clientVersion: "0.1.0",
+        features: ["diffs"],
       },
       {
         type: "ModifyQuerySet",

@@ -62,3 +62,32 @@ macro_rules! expand_fn {
         };
     };
 }
+
+/// Checks a `Transition`'s wire form (the text a socket sends) against its values: every result diff, applied to what
+/// the client had (`results`, before this Transition), must give the new value. Returns how many diffs it carried.
+pub fn check_wire_diffs(
+    msg: &ferrix::sync::protocol::ServerMessage,
+    results: &std::collections::BTreeMap<u64, Result<serde_json::Value, String>>,
+) -> usize {
+    use ferrix::sync::protocol::{ServerMessage, StateModification};
+    let ServerMessage::Transition { modifications, .. } = msg else { return 0 };
+    let wire: serde_json::Value = serde_json::from_str(&msg.to_text()).expect("a Transition is valid JSON");
+    let mut diffs = 0;
+    for (m, w) in modifications.iter().zip(wire["modifications"].as_array().expect("modifications")) {
+        let StateModification::QueryUpdated { query_id, value, .. } = m else { continue };
+        assert_eq!(w["queryId"], serde_json::json!(query_id));
+        match w.get("diff") {
+            Some(diff) => {
+                let Some(Ok(had)) = results.get(query_id) else {
+                    panic!("query {query_id}: a diff, but the client has no result to apply it to")
+                };
+                let applied = ferrix::sync::diff::apply(had, diff)
+                    .unwrap_or_else(|e| panic!("query {query_id}: diff {diff} doesn't apply to {had}: {e}"));
+                assert_eq!(&applied, value.value(), "query {query_id}: diff {diff} applied to {had}");
+                diffs += 1;
+            }
+            None => assert_eq!(&w["value"], value.value(), "query {query_id}: value on the wire"),
+        }
+    }
+    diffs
+}

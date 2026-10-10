@@ -21,7 +21,9 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::db::dedup::IdempotencyKey;
 use crate::error::ClientError;
 use crate::runtime::{App, Identity};
-use crate::sync::protocol::{ClientMessage, QueryId, QuerySetModification, RequestId, ServerMessage, StateVersion};
+use crate::sync::protocol::{
+    ClientMessage, QueryId, QuerySetModification, QueryValue, RequestId, ServerMessage, StateModification, StateVersion,
+};
 use crate::sync::subscriptions::{Connection, Mailbox, Update};
 
 /// How often the server pings the client.
@@ -68,6 +70,11 @@ pub struct SyncWorker {
     identity: Identity,
     /// From `Connect`; with each mutation's requestId it makes the idempotency key.
     session_id: Option<String>,
+    /// The client accepts result diffs (`Connect` with `features: ["diffs"]`).
+    diffs: bool,
+    /// With `diffs`: the result each live query last got on this connection, i.e. what the client has. Updates are
+    /// diffed against it ([`StateModification::QueryUpdated`]'s `base`).
+    bases: std::collections::HashMap<QueryId, QueryValue>,
     conn: Connection,
     mailbox: Arc<Mailbox>,
     completions_tx: mpsc::UnboundedSender<Completion>,
@@ -109,6 +116,8 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         live: BTreeSet::new(),
         identity: Identity::default(),
         session_id: None,
+        diffs: false,
+        bases: std::collections::HashMap::new(),
         conn,
         mailbox,
         completions_tx,
@@ -182,15 +191,30 @@ impl SyncWorker {
         let end = StateVersion { query_set: update.query_set, identity: update.identity, ts: update.ts };
         debug_assert!(end.ts >= self.sent.ts, "transitions must not go back in time");
         let start = std::mem::replace(&mut self.sent, end);
-        let modifications = update.into_modifications();
+        let mut modifications = update.into_modifications();
+        if self.diffs {
+            // Every modification reaches the client in order on this connection, so after this Transition the client
+            // has exactly the values recorded here.
+            for m in &mut modifications {
+                match m {
+                    StateModification::QueryUpdated { query_id, value, base, .. } => {
+                        *base = self.bases.insert(*query_id, value.clone());
+                    }
+                    StateModification::QueryFailed { query_id, .. } | StateModification::QueryRemoved { query_id } => {
+                        self.bases.remove(query_id);
+                    }
+                }
+            }
+        }
         self.send(ServerMessage::Transition { start_version: start, end_version: end, modifications }).await
     }
 
     async fn handle_message(&mut self, msg: ClientMessage) -> Result<(), Fatal> {
         match msg {
-            ClientMessage::Connect { session_id, connection_count, .. } => {
-                tracing::debug!(%session_id, connection_count, "sync client connected");
+            ClientMessage::Connect { session_id, connection_count, features, .. } => {
+                tracing::debug!(%session_id, connection_count, ?features, "sync client connected");
                 self.session_id = Some(session_id);
+                self.diffs = features.iter().any(|f| f == "diffs");
             }
             ClientMessage::ModifyQuerySet { base_version, new_version, modifications } => {
                 if base_version != self.query_set || new_version != base_version + 1 {

@@ -29,6 +29,8 @@ export interface ConnectMessage {
   connectionCount: number;
   lastCloseReason: string | null;
   clientVersion: string;
+  /** Optional protocol features this client supports: `"diffs"` (results may arrive as diffs, see `diff.ts`). */
+  features?: string[];
 }
 
 export type QuerySetModification =
@@ -79,6 +81,8 @@ export type ClientMessage =
 
 export type StateModification =
   | { type: "QueryUpdated"; queryId: QueryId; value: unknown; logLines?: string[] }
+  /** The new result as a diff from the result this connection last received for the query (`diff.ts`). */
+  | { type: "QueryUpdated"; queryId: QueryId; diff: unknown; logLines?: string[] }
   | {
       type: "QueryFailed";
       queryId: QueryId;

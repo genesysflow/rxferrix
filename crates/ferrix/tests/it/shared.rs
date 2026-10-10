@@ -74,14 +74,31 @@ pub struct Client {
     query_set: u64,
     identity: u64,
     pub transitions: usize,
+    /// Results that arrived as diffs.
+    pub diffs: usize,
 }
 
 impl Client {
     pub async fn new(app: &App) -> Client {
         let (tx, rx) = worker::spawn(app.clone());
-        let c = Client { tx, rx, version: StateVersion::default(), results: BTreeMap::new(), query_set: 0, identity: 0, transitions: 0 };
-        c.send(ClientMessage::Connect { session_id: "s".into(), connection_count: 0, last_close_reason: None, client_version: None })
-            .await;
+        let c = Client {
+            tx,
+            rx,
+            version: StateVersion::default(),
+            results: BTreeMap::new(),
+            query_set: 0,
+            identity: 0,
+            transitions: 0,
+            diffs: 0,
+        };
+        c.send(ClientMessage::Connect {
+            session_id: "s".into(),
+            connection_count: 0,
+            last_close_reason: None,
+            client_version: None,
+            features: vec!["diffs".into()],
+        })
+        .await;
         c
     }
 
@@ -93,6 +110,7 @@ impl Client {
     pub async fn recv(&mut self) -> ServerMessage {
         loop {
             let msg = tokio::time::timeout(Duration::from_secs(10), self.rx.recv()).await.expect("timed out").expect("worker stopped");
+            self.diffs += crate::common::check_wire_diffs(&msg, &self.results);
             match &msg {
                 ServerMessage::Ping => continue,
                 ServerMessage::Transition { start_version, end_version, modifications } => {

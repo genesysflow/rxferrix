@@ -412,7 +412,7 @@ impl CachedResult {
     fn modification(&self, query_id: QueryId) -> StateModification {
         let log_lines = self.log_lines.clone();
         match &self.outcome {
-            Ok(value) => StateModification::QueryUpdated { query_id, value: value.clone(), log_lines },
+            Ok(value) => StateModification::QueryUpdated { query_id, value: value.clone(), base: None, log_lines },
             Err(error) => StateModification::QueryFailed { query_id, error: error.clone(), log_lines },
         }
     }
@@ -1523,7 +1523,7 @@ mod tests {
         let changed = changed
             .iter()
             .map(|(q, v)| {
-                (*q, StateModification::QueryUpdated { query_id: *q, value: json!(v).into(), log_lines: vec![] })
+                (*q, StateModification::QueryUpdated { query_id: *q, value: json!(v).into(), base: None, log_lines: vec![] })
             })
             .collect();
         Update { query_set, identity: 0, ts, removed, changed }
@@ -1545,8 +1545,8 @@ mod tests {
             updates[0].clone().into_modifications(),
             vec![
                 StateModification::QueryRemoved { query_id: 3 },
-                StateModification::QueryUpdated { query_id: 1, value: json!(11).into(), log_lines: vec![] },
-                StateModification::QueryUpdated { query_id: 2, value: json!(21).into(), log_lines: vec![] },
+                StateModification::QueryUpdated { query_id: 1, value: json!(11).into(), base: None, log_lines: vec![] },
+                StateModification::QueryUpdated { query_id: 2, value: json!(21).into(), base: None, log_lines: vec![] },
             ]
         );
         assert!(mailbox.is_empty());

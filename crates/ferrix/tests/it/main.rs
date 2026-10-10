@@ -11,6 +11,7 @@ mod catalog;
 mod codegen;
 mod contract;
 mod dashboard;
+mod diff_fixtures;
 mod dx;
 mod group_commit;
 mod hardening;

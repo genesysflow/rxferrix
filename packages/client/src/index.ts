@@ -23,6 +23,7 @@ export {
   type QueryWatch,
 } from "./client.js";
 export { FerrixError, CONNECTION_LOST, CLIENT_CLOSED } from "./errors.js";
+export { applyDiff, DiffMismatch } from "./diff.js";
 export {
   FerrixAuth,
   getAuth,

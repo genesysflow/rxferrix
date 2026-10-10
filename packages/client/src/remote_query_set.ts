@@ -1,8 +1,10 @@
+import { applyDiff, DiffMismatch } from "./diff.js";
 import { FerrixError } from "./errors.js";
 import {
   formatVersion,
   versionsEqual,
   type QueryId,
+  type StateModification,
   type StateVersion,
   type TransitionMessage,
 } from "./protocol.js";
@@ -39,11 +41,21 @@ export class RemoteQuerySet {
   /**
    * Applies a transition. Modifications for queries that `isKnown` rejects (removed locally while the transition was
    * in flight) are ignored. Throws {@link TransitionVersionMismatch} without changing anything when the transition
-   * does not start at the current version.
+   * does not start at the current version, and {@link DiffMismatch} when a result diff doesn't fit the result held.
    */
   transition(message: TransitionMessage, isKnown: (queryId: QueryId) => boolean): TransitionResult {
     if (!versionsEqual(message.startVersion, this._version)) {
       throw new TransitionVersionMismatch(this._version, message.startVersion);
+    }
+    // Diffs are applied first, against the results as they were: if one doesn't fit, nothing changes.
+    const diffed = new Map<StateModification, unknown>();
+    for (const modification of message.modifications ?? []) {
+      if (modification.type !== "QueryUpdated" || !("diff" in modification) || !isKnown(modification.queryId)) continue;
+      const current = this.results.get(modification.queryId);
+      if (current?.status !== "success") {
+        throw new DiffMismatch(`query ${modification.queryId} has no result to apply a diff to`);
+      }
+      diffed.set(modification, applyDiff(current.value, modification.diff));
     }
     const changed: QueryId[] = [];
     const logLines: TransitionResult["logLines"] = [];
@@ -52,7 +64,10 @@ export class RemoteQuerySet {
       if (!isKnown(queryId)) continue;
       switch (modification.type) {
         case "QueryUpdated":
-          this.results.set(queryId, { status: "success", value: modification.value });
+          this.results.set(queryId, {
+            status: "success",
+            value: "diff" in modification ? diffed.get(modification) : modification.value,
+          });
           break;
         case "QueryFailed":
           this.results.set(queryId, {

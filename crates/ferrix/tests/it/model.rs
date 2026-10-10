@@ -216,6 +216,8 @@ struct ClientLog {
     final_results: BTreeMap<u64, QResult>,
     response_first: usize,
     transition_first: usize,
+    /// Results that arrived as diffs (each checked against the value: `check_wire_diffs`).
+    diffs: usize,
 }
 
 struct Client {
@@ -269,6 +271,7 @@ impl Client {
                 final_results: BTreeMap::new(),
                 response_first: 0,
                 transition_first: 0,
+                diffs: 0,
             },
             dumps,
         }
@@ -332,6 +335,7 @@ impl Client {
     }
 
     fn handle(&mut self, msg: ServerMessage) {
+        self.log.diffs += crate::common::check_wire_diffs(&msg, &self.results);
         match msg {
             ServerMessage::Transition { start_version, end_version, modifications } => {
                 assert_eq!(start_version, self.version, "client {}: startVersion must equal current version", self.id);
@@ -408,6 +412,7 @@ async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_don
         connection_count: 0,
         last_close_reason: None,
         client_version: Some("test".into()),
+        features: vec!["diffs".into()],
     })
     .await;
     // Start with two slow queries of different durations (later steps may remove them).
@@ -511,7 +516,7 @@ async fn model_based_reactivity() {
     // Every state a client ever held must equal the model at that Transition's ts.
     let final_ts = app.db().write_log().latest();
     let mut transitions = 0;
-    let (mut response_first, mut transition_first) = (0, 0);
+    let (mut response_first, mut transition_first, mut diffs) = (0, 0, 0);
     for (i, log) in logs.iter().enumerate() {
         for (ts, results) in &log.states {
             let model = dumps.at(*ts);
@@ -527,11 +532,13 @@ async fn model_based_reactivity() {
         }
         response_first += log.response_first;
         transition_first += log.transition_first;
+        diffs += log.diffs;
     }
     println!(
         "verified {transitions} transitions over {final_ts} commits; mutation responses: {response_first} before \
-         their covering transition, {transition_first} after"
+         their covering transition, {transition_first} after; {diffs} results arrived as diffs"
     );
+    assert!(diffs > 0, "result diffs were exercised");
     assert!(final_ts > (WRITERS * WRITER_STEPS / 2) as u64, "enough commits happened");
     assert!(response_first > 0, "the response-before-transition order was exercised");
     assert!(transitions > CLIENTS * 20);

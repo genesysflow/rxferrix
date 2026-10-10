@@ -14,7 +14,8 @@
 // delete; the scheduled backup cron), export and import (2000 seeded todos), the virtualized grid scrolled to the
 // end, the search box, a migration (dry run, run), "Run now" on a cron, the latency charts, "open app as user" and
 // live session revocation, the command palette. A second server with private storage checks thumbnails and
-// downloads of signed URLs; a third, with a fresh data dir, the printed /_/setup#token=… flow.
+// downloads of signed URLs; others a staged restore with "Restart now", continuous replication (the status card and
+// a point-in-time restore by commit ts), and, with a fresh data dir, the printed /_/setup#token=… flow.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -840,6 +841,83 @@ try {
     await p.getByTestId("backups").waitFor();
     if (await p.getByTestId("pending-restore").count()) throw new Error("still pending after the restart");
     tolerated = null;
+    await p.close();
+  });
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Continuous replication on a server of its own (it restarts): the status card (target, healthy, caught up, last
+  // segment and snapshot), then a point-in-time restore picked by commit ts: checked, staged, "Restart now", and the
+  // server comes back with the data of that point; the restored database ships as a new generation.
+  await step("replication: status and a point-in-time restore", async () => {
+    const rdir = tempDir();
+    const replica = tempDir();
+    const made = Bun.spawnSync([bin, "admin", "create", EMAIL, "--password", PASSWORD, "--dir", rdir]);
+    if (made.exitCode !== 0) throw new Error(`admin create failed: ${made.stderr.toString()}`);
+    const args = () => ["--replicate-to", replica, "--replicate-every", "1s", "--restart-exit-code", "75"];
+    const rs = await startServer(rdir, args);
+    const token = await adminToken(rs.base);
+    const auth = { authorization: `Bearer ${token}` };
+    const status = async (base: string, t = token) =>
+      (await fetch(`${base}/api/admin/replication`, { headers: { authorization: `Bearer ${t}` } }).then((r) => r.json())) as {
+        enabled: boolean;
+        lagCommits: number;
+        shippedTs: number;
+        generation: string | null;
+        generations: unknown[];
+      };
+    const added = await call(rs.base, "mutation", "todos:add", { text: "before the point" });
+    const point = added.body.ts as number;
+    for (let i = 0; i < 100 && (await status(rs.base)).shippedTs < point; i++) await Bun.sleep(100);
+    if ((await status(rs.base)).shippedTs < point) throw new Error("the point was never shipped");
+    await call(rs.base, "mutation", "todos:add", { text: "after the point" });
+    const firstGeneration = (await status(rs.base)).generation;
+
+    const p = await newPage(browser!);
+    await signIn(p, rs.base);
+    await nav(p, "Backups").click();
+    const card = p.getByTestId("replication");
+    await card.getByTestId("replication-target").getByText(replica).waitFor();
+    await card.getByTestId("replication-health").getByText("healthy").waitFor({ timeout: 10_000 });
+    await card.getByTestId("replication-lag").getByText(/caught up/).waitFor({ timeout: 10_000 });
+    await card.getByTestId("replication-last-snapshot").getByText(/ferrix-auto-/).waitFor();
+    await card.getByTestId("replication-last-segment").getByText(/shipped/).waitFor();
+    await card.getByTestId("replication-generations").getByText("current").waitFor();
+    await shot(p, "replication");
+
+    // Pick the point by commit ts and restore it: checked and staged, the server keeps its data meanwhile.
+    await card.getByLabel("at a commit ts").check();
+    await card.getByLabel("Restore commit ts").fill(String(point));
+    await card.getByRole("button", { name: "Restore to this point" }).click();
+    const banner = p.getByTestId("pending-restore");
+    await banner.getByText(/Restore pending:/).waitFor({ timeout: 30_000 });
+    await banner.getByText(new RegExp(`point in time: ts ${point}`)).waitFor();
+    await banner.getByText(/replayed commit/).waitFor();
+    await shot(p, "pitr-pending");
+    const listed = await fetch(`${rs.base}/api/admin/restore`, { headers: auth }).then((r) => r.json());
+    if (listed.pendingRestore?.pointInTime?.ts !== point) throw new Error(`staged: ${JSON.stringify(listed)}`);
+
+    tolerated = /ERR_CONNECTION_REFUSED|ERR_EMPTY_RESPONSE|WebSocket|status of 40[13]/;
+    await banner.getByRole("button", { name: "Restart now" }).click();
+    await p.getByTestId("restarting").waitFor();
+    const code = await Promise.race([rs.exited, Bun.sleep(30_000).then(() => -1)]);
+    if (code !== 75) throw new Error(`exit code ${code}, expected 75:\n${rs.output()}`);
+    const again = await startServer(rdir, args, rs.port);
+    const list = await call(again.base, "query", "todos:list", {});
+    const texts = (list.body.value as { text: string }[]).map((t) => t.text);
+    if (!texts.includes("before the point") || texts.includes("after the point")) throw new Error(`after the restore: ${texts}`);
+    // This browser's session was made after the point: sign in again. The restored database replicates as a new
+    // generation next to the first one.
+    await p.getByLabel("Email").waitFor({ timeout: 30_000 });
+    await signIn(p, again.base);
+    await nav(p, "Backups").click();
+    await p.getByTestId("replication-generations").waitFor();
+    tolerated = null;
+    const fresh = await adminToken(again.base);
+    for (let i = 0; i < 100 && (await status(again.base, fresh)).generations.length < 2; i++) await Bun.sleep(100);
+    const after = await status(again.base, fresh);
+    if (after.generations.length !== 2 || after.generation === firstGeneration) throw new Error(`generations: ${JSON.stringify(after)}`);
+    await p.getByTestId("replication-generations").locator("tbody tr").nth(1).waitFor({ timeout: 10_000 });
+    if (await p.getByTestId("pending-restore").count()) throw new Error("still pending after the restart");
     await p.close();
   });
 

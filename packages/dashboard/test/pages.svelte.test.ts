@@ -8,6 +8,7 @@ import type { Command } from "../src/lib/commands.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
 import CommandPalette from "../src/components/CommandPalette.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
+import Backups from "../src/pages/Backups.svelte";
 import Settings from "../src/pages/Settings.svelte";
 
 let target: HTMLElement;
@@ -157,6 +158,123 @@ describe("Settings page", () => {
     button("Discard").click();
     flushSync();
     expect(target.querySelector("input[aria-label='SMTP password (stored, hidden)']")).not.toBeNull();
+  });
+});
+
+describe("Backups page", () => {
+  let server: FakeServer;
+  let client: FerrixClient;
+  const toast = vi.fn();
+  const ctx: DashboardContext = {
+    auth: { getAccessToken: async () => "token" } as unknown as DashboardContext["auth"],
+    tables: [],
+    tableByNumber: () => undefined,
+    toast,
+  };
+  const replication = {
+    target: "s3://bucket/replica",
+    everyMs: 1000,
+    snapshotEveryMs: 86_400_000,
+    keepMs: 604_800_000,
+    generation: "20261010T120000.000Z-0000beef",
+    currentTs: 120,
+    currentTime: Date.now(),
+    shippedTs: 117,
+    shippedTime: Date.now() - 2000,
+    lagCommits: 3,
+    lagMs: 2500,
+    pendingBytes: 4096,
+    maxPendingBytes: 1 << 30,
+    journaling: true,
+    lastSegment: { name: "x.zst", from: 110, to: 117, entries: 8, bytes: 900, shippedAt: Date.now() - 1000 },
+    lastSnapshot: { name: "ferrix-auto-20261010T120000.000Z-ts100.tar.zst", ts: 100, createdAt: Date.now() - 60_000, bytes: 2048 },
+    nextSnapshotAt: Date.now() + 3_600_000,
+    segmentsShipped: 4,
+    snapshotsTaken: 1,
+    lastSuccessAt: Date.now() - 1000,
+    lastError: null,
+    lastErrorAt: null,
+    failures: 0,
+    generations: [
+      {
+        id: "20261010T120000.000Z-0000beef",
+        createdAt: Date.now() - 60_000,
+        current: true,
+        snapshots: [],
+        segments: 4,
+        fromTs: 100,
+        toTs: 117,
+        fromTime: Date.now() - 60_000,
+        toTime: Date.now() - 2000,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    server = new FakeServer();
+    client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    toast.mockClear();
+  });
+  afterEach(() => client.close());
+
+  it("shows the replication status and stages a point-in-time restore", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const pendingRestore = {
+      source: "point in time: ts 110 of generation g",
+      stagedAt: 1,
+      stagedBy: null,
+      backupCreatedAt: 1,
+      ts: 110,
+      ferrixVersion: "0.1.0",
+      includesAux: false,
+      blobs: 0,
+      bytes: 4096,
+      secretIgnored: false,
+      error: null,
+      pointInTime: { generation: "g", snapshot: "s", snapshotTs: 100, requestedTs: 110, requestedTime: null, ts: 110, time: 5, replayed: 10, segments: 2, reached: true },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        if (url === "/api/admin/restore/point-in-time") {
+          return new Response(JSON.stringify({ pendingRestore, restart: { available: false, exitCode: null } }));
+        }
+        return new Response(JSON.stringify({ target: "/data/backups", backups: [], pendingRestore: null, restart: { available: false, exitCode: null }, replication }));
+      }),
+    );
+    vi.stubGlobal("confirm", () => true);
+    mounted = mount(Backups, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@ferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await settle();
+    const text = (id: string) => target.querySelector(`[data-testid=${id}]`)?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    expect(text("replication-target")).toBe("s3://bucket/replica");
+    expect(text("replication-health")).toContain("healthy");
+    expect(text("replication-lag")).toContain("3 commits behind");
+    expect(text("replication-lag")).toContain("117");
+    expect(text("replication-last-segment")).toContain("110–117");
+    expect(text("replication-last-snapshot")).toContain("ts100.tar.zst");
+    expect(text("replication-generations")).toContain("current");
+
+    // By commit ts: the picker starts at the newest shipped ts.
+    const byTs = [...target.querySelectorAll<HTMLInputElement>("[data-testid=pitr] input[type=radio]")].find((r) => r.value === "ts")!;
+    byTs.click();
+    flushSync();
+    const ts = target.querySelector<HTMLInputElement>("input[aria-label='Restore commit ts']")!;
+    expect(ts.value).toBe("117");
+    type(ts, "110");
+    button("Restore to this point").click();
+    await settle();
+    const staged = calls.find((c) => c.url === "/api/admin/restore/point-in-time")!;
+    expect(JSON.parse(staged.init!.body as string)).toEqual({ toTs: 110 });
+    expect(text("pending-restore")).toContain("plus 10 replayed commits");
+    expect(button("Restore to this point").disabled).toBe(true);
   });
 });
 

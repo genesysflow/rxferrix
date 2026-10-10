@@ -1,0 +1,4 @@
+/target/
+/fx_data/
+node_modules/
+/web/dist/

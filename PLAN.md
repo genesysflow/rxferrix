@@ -766,6 +766,10 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   staged `POST /api/admin/restore/point-in-time`, the lag in `GET /api/admin/replication`, `/metrics` and the
   dashboard (docs/CONTRACT.md §4.4). Litestream remains an alternative.
 - [x] An interval-tree invalidation index (done in Phase 2).
+- [x] `ferrix new` (`crates/ferrix-cli`, the `ferrix` command): creates an app (crate, sample table and functions,
+  React/Svelte/no web app) whose `.cargo/config.toml` carries the SQLite build flags, since a dependency can't set
+  them. Depends on the checkout it was built from (path dependency, @ferrix packages packed into `web/vendor`) or on
+  the published versions. Tested end to end by `cargo test -p ferrix-cli --test new -- --ignored`.
 
 ---
 
@@ -779,7 +783,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 | **Holding the writer lock during an async mutation.** | No network in `MutationCtx`, a timeout, and per-mutation duration metrics in the dashboard. The OCC upgrade path stays open. |
 | **Reactive pagination correctness.** | Pin each page's end cursor and cover it with model-based tests. |
 | **Schema evolution** with existing data. | Validate at startup and refuse to start on mismatch. Provide `#[migration]` batches and dev-mode dashboard links to bad documents. |
-| **SQLite build flags.** rusqlite's bundled SQLite (`SQLITE_ENABLE_MEMORY_MANAGEMENT`, memstatus on) serializes reader connections on global mutexes. | The workspace sets `LIBSQLITE3_FLAGS` in `.cargo/config.toml`; apps built outside it must set it too (ferrix logs a warning at startup otherwise). |
+| **SQLite build flags.** rusqlite's bundled SQLite (`SQLITE_ENABLE_MEMORY_MANAGEMENT`, memstatus on) serializes reader connections on global mutexes. | The workspace sets `LIBSQLITE3_FLAGS` in `.cargo/config.toml`, and `ferrix new` gives every app the same file (a dependency can't set it for them); memstatus is also turned off at runtime. Apps created otherwise must add it (ferrix logs a warning at startup). A runtime-only fix would be a custom page cache (`SQLITE_CONFIG_PCACHE2`), or upstreaming a feature to `libsqlite3-sys`. |
 | Write-log and subscription memory growth. | Trim the log to the oldest in-flight `ts`. Cap result sizes (for example, 8MB per query) and documents scanned per query. |
 
 **Defaults I chose; easy to revisit:**

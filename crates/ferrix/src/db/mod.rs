@@ -352,7 +352,7 @@ impl Database {
 /// `SQLITE_ENABLE_MEMORY_MANAGEMENT` (rusqlite's bundled build defines it), the page cache that all connections then
 /// share. With both, N readers ran no faster than one. Memory statistics are turned off here (if SQLite is not
 /// initialized yet; the workspace also builds it with `SQLITE_DEFAULT_MEMSTATUS=0`); the shared page cache can only
-/// be avoided at build time, so its presence is logged (see `.cargo/config.toml`).
+/// be avoided at build time, so its presence is logged (see `.cargo/config.toml`, which `ferrix new` gives every app).
 fn configure_sqlite() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -367,8 +367,8 @@ fn configure_sqlite() {
             tracing::warn!(
                 "SQLite was built with SQLITE_ENABLE_MEMORY_MANAGEMENT: its reader connections share one page cache behind \
                  a global mutex, so queries won't run faster in parallel. Build with \
-                 LIBSQLITE3_FLAGS=\"-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0\" (as this repository's \
-                 .cargo/config.toml does)."
+                 LIBSQLITE3_FLAGS=\"-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0\": apps created with \
+                 `ferrix new` set it in their .cargo/config.toml; copy that file into this app's directory."
             );
         }
     });

@@ -19,6 +19,7 @@ example found (index order, codegen names, `#[object]`, dev mode, storage URLs i
 |---|---|
 | `crates/ferrix` | The runtime: SQLite storage, query engine, read sets, write log, sync worker, axum server, CLI, codegen, `TestApp`. |
 | `crates/ferrix-macros` | `#[table]`, `#[object]`, `#[query]`, `#[mutation]`, `#[action]`, `#[internal_*]`, `#[migration]`. |
+| `crates/ferrix-cli` | The `ferrix` command: `ferrix new` creates an app from its `templates/`. |
 | `packages/client` | `@ferrix/client`: framework-agnostic TS client (sync protocol, optimistic updates, reconnect). |
 | `packages/react` | `@ferrix/react`: `FerrixProvider`, `useQuery(WithStatus)`, `usePaginatedQuery(WithStatus)`, `useMutation`, `useAction`, auth hooks. |
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
@@ -27,6 +28,20 @@ example found (index order, codegen names, `#[object]`, dev mode, storage URLs i
 | `examples/chat-react` | The flagship example: a Slack-lite in React (auth, pagination, uploads, search, scheduler). |
 | `docs/CONTRACT.md` | Rust API and the exact code each macro generates. |
 | `docs/PROTOCOL.md` | WebSocket and HTTP protocol. |
+
+## Start an app
+
+```sh
+cargo install --path crates/ferrix-cli     # the `ferrix` command
+ferrix new my-app                          # --web react (default), svelte or none
+cd my-app && cargo run -- serve --dev      # then, in a second terminal: cd web && bun install && bun run dev
+```
+
+The app is a Rust crate (a sample `tasks` table, query and mutations in `src/tasks.rs`) with the web app in `web/`,
+and a `.cargo/config.toml` that builds SQLite for parallel queries (see [Deploying](#deploying)) and points
+`serve --dev`'s codegen at `web/src/ferrix`. Built from a checkout, `ferrix new` depends on that checkout: a path
+dependency for the crate, and the @ferrix packages packed into `web/vendor` (run `bun install && bun run build` in the
+checkout first). `--published` uses crates.io and npm instead, and `--ferrix-path DIR` another checkout.
 
 ## A backend in a nutshell
 
@@ -414,10 +429,13 @@ work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` prox
 A Ferrix app is one binary plus one data directory (`--dir`, default `fx_data`: `data.db`, `aux.db` with the
 execution log, `storage/` for files, `auth_secret.key`, `backups/`).
 
-**Build your app with these SQLite flags.** Put this in your app's `.cargo/config.toml` (this repository has the same
-file). Without it, rusqlite's bundled SQLite shares one page cache behind a global mutex, so concurrent queries don't
-run in parallel (measured: 8 parallel readers ran no faster than one; with the flags they scale to ~4x the single-reader
-throughput and beyond). Ferrix logs a warning at startup when the flags are missing.
+**Build your app with these SQLite flags.** Apps created with `ferrix new` have them in `.cargo/config.toml` (so does
+this repository); for an app created otherwise, put this in its `.cargo/config.toml`. Without it, rusqlite's bundled
+SQLite shares one page cache behind a global mutex, so concurrent queries don't run in parallel (measured: 8 parallel
+readers ran no faster than one; with the flags they scale to ~4x the single-reader throughput and beyond). Ferrix logs
+a warning at startup when the flag is missing. It has to be the app's own config: Cargo gives a dependency no way to
+set another crate's build flags, and `libsqlite3-sys` reads them only from this variable. (Memory statistics, the
+second flag, are also turned off at runtime; the page cache can only be changed at build time.)
 
 ```toml
 [env]
@@ -591,6 +609,7 @@ app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun
 ```sh
 cargo test --workspace                                          # Rust: unit, proptests, model-based reactivity, WS e2e
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # generated TS type-checks with tsc
+cargo test -p ferrix-cli --test new -- --ignored                 # `ferrix new` apps build, typecheck; no SQLite warning
 bun run typecheck && bun run test                               # TS packages (dashboard included)
 bun run check:dashboard                                         # the committed dashboard build matches its sources
 (cd packages/dashboard && bun e2e/dashboard.ts)                 # after `cargo build -p todo-server`; starts its own servers

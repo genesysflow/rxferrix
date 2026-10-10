@@ -80,6 +80,9 @@ jobs:
       - name: TS type check and tests
         run: bun run typecheck && bun run test
 
+      - name: apps created by `ferrix new` build and typecheck
+        run: cargo test -p ferrix-cli --test new -- --ignored
+
       - name: dashboard build is current
         run: bun run build:dashboard && bun run check:dashboard && git diff --exit-code -- crates/ferrix/dashboard-dist
 

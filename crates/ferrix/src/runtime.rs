@@ -434,12 +434,15 @@ impl App {
                 replication: OnceLock::new(),
             }),
         };
-        if let Some(r) = crate::ops::replicate::start(&app, app.downgrade())? {
-            let _ = app.inner.replication.set(r);
-        }
         crate::storage::service::ensure_schema(&app).await?;
         crate::migrations::startup(&app).await?;
         crate::auth::start(&app).await?;
+        // Last, so the replicator's first snapshot is taken after the startup commits above (system crons, migration and
+        // auth bookkeeping). They are journaled either way (journaling is on from `Database::open`); starting earlier
+        // only made whether they land in the first snapshot or in its first segment depend on timing.
+        if let Some(r) = crate::ops::replicate::start(&app, app.downgrade())? {
+            let _ = app.inner.replication.set(r);
+        }
         Ok(app)
     }
 

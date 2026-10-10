@@ -105,8 +105,9 @@ use pitr::*;
 
 fn options(target: BackupTarget) -> ReplicationOptions {
     let mut r = ReplicationOptions::with_target(target);
-    // Tests drive the replicator with `sync_now`; the background loop only runs its first step.
-    r.every = Duration::from_secs(3600);
+    // Tests drive the replicator with `sync_now` only: a background step running at an arbitrary moment would make
+    // their lag, failure and segment counts depend on timing.
+    r.background = false;
     r
 }
 

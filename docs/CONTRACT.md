@@ -2036,7 +2036,10 @@ restore::{stage(dir, archive, label, staged_by) -> Result<PendingRestore>, pendi
           stage_point_in_time(dir, &BackupTarget, &PointInTime, staged_by) -> Result<PendingRestore>,
           apply_pending(dir, storage_dir) -> Result<Option<RestoreReport>>};   // serve calls apply_pending at startup
 replicate::ReplicationOptions { target, store: Option<BackupTarget>, every, snapshot_every, keep, max_pending_bytes,
-                                segment_max_entries, segment_max_bytes };   // AppOptions::ops.replication
+                                segment_max_entries, segment_max_bytes,
+                                background /* default true; false = only sync_now/snapshot_now drive it */ };
+                                // AppOptions::ops.replication. The replicator starts at the end of App::open, after the
+                                // startup commits, so the first snapshot includes them.
 app.replication() -> Option<&Arc<Replicator>>;   // started by App::open when configured
 Replicator::{sync_now(&app), flush(&app), snapshot_now(&app) -> Result<SnapshotInfo>, status(&app) -> ReplicationStatus, target()};
 replicate::{list_generations(&target) -> Result<Vec<Generation>>, read_segment(&target, generation, from, to),

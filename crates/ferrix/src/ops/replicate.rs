@@ -100,6 +100,10 @@ pub struct ReplicationOptions {
     pub segment_max_entries: usize,
     /// Uncompressed bytes of changes per segment (approximately; a single larger commit gets a segment of its own).
     pub segment_max_bytes: usize,
+    /// Run the background loop that ships every [`Self::every`] and snapshots every [`Self::snapshot_every`] (default
+    /// `true`). With `false` nothing happens on its own: the embedder (or a test) drives replication through
+    /// [`Replicator::sync_now`] / [`Replicator::snapshot_now`], and journaling still records every commit.
+    pub background: bool,
 }
 
 impl ReplicationOptions {
@@ -114,6 +118,7 @@ impl ReplicationOptions {
             max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
             segment_max_entries: 10_000,
             segment_max_bytes: 16 << 20,
+            background: true,
         }
     }
 
@@ -589,7 +594,9 @@ pub(crate) fn start(app: &App, weak: WeakApp) -> crate::Result<Option<Arc<Replic
         running: tokio::sync::Mutex::new(()),
         wake: tokio::sync::Notify::new(),
     });
-    tokio::spawn(run(replicator.clone(), weak));
+    if replicator.options.background {
+        tokio::spawn(run(replicator.clone(), weak));
+    }
     Ok(Some(replicator))
 }
 

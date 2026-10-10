@@ -166,7 +166,7 @@
       {:else if jobs.results.length === 0}
         <Empty
           title={filterState ? `No ${stateLabels[filterState]} jobs` : "No scheduled jobs"}
-          hint="Jobs appear here when a function calls ctx.scheduler.run_after / run_at, or a cron runs."
+          hint="Jobs appear here when a function calls ctx.scheduler.run_after / run_at / pool(..).enqueue, a cron runs, or a workflow runs a step."
         />
       {:else}
         <table class="grid" data-testid="jobs">
@@ -176,7 +176,10 @@
           <tbody>
             {#each jobs.results as job (job._id)}
               <tr onclick={() => (open = open === job._id ? null : job._id)} class:selected={open === job._id} aria-expanded={open === job._id}>
-                <td><span class="badge {job.kind}">{job.kind}</span> <span class="mono">{job.path}</span></td>
+                <td>
+                  <span class="badge {job.kind}">{job.kind}</span> <span class="mono">{job.path}</span>
+                  {#if job.pool}<span class="badge pool" title="Workpool">{job.pool}</span>{/if}
+                </td>
                 <td><span class="badge state {job.state}">{stateLabels[job.state]}</span></td>
                 <td title={formatTime(job.runAt)}>{job.state === "pending" ? formatRelative(job.runAt, now) : formatTime(job.runAt)}</td>
                 <td>{job.attempts}{job.maxAttempts > 1 ? ` / ${job.maxAttempts}` : ""}</td>
@@ -220,6 +223,12 @@
                           <dt>Due</dt><dd>{formatTime(job.runAt)}</dd>
                           <dt>Started</dt><dd>{job.startedAt ? formatTime(job.startedAt) : "—"}</dd>
                           <dt>Finished</dt><dd>{job.completedAt ? formatTime(job.completedAt) : "—"}</dd>
+                          {#if job.pool}<dt>Workpool</dt><dd class="mono">{job.pool}</dd>{/if}
+                          {#if job.onComplete}<dt>On complete</dt><dd class="mono">{job.onComplete.path}</dd>{/if}
+                          {#if job.origin?.startsWith("workflow:")}
+                            <dt>Workflow</dt>
+                            <dd><a href={href("workflows", [], { id: job.origin.slice("workflow:".length) })} onclick={link}>{job.origin.slice("workflow:".length)}</a></dd>
+                          {/if}
                           <dt>Document</dt><dd><IdLink id={job._id} /></dd>
                         </dl>
                         <a href={href("logs")} onclick={link}>Execution logs</a>
@@ -286,7 +295,8 @@
   tr.system td {
     color: var(--muted);
   }
-  .badge.sys {
+  .badge.sys,
+  .badge.pool {
     margin-left: 6px;
   }
   table.grid tbody tr.group:hover,

@@ -315,12 +315,21 @@ impl Ferrix {
         self
     }
 
-    /// Scheduler settings (concurrency, job retention, retry backoff). Crons declared with [`Ferrix::cron`] /
-    /// [`Ferrix::interval`] are kept, before or after this call.
+    /// Declare a workpool: `.workpool(Workpool::new("emails").max_parallelism(5).retries(3))`, then
+    /// `ctx.scheduler.pool("emails").enqueue::<send_email>(args)`. See [`crate::scheduler::Workpool`].
+    pub fn workpool(mut self, pool: crate::scheduler::Workpool) -> Self {
+        self.scheduler.pools.push(pool);
+        self
+    }
+
+    /// Scheduler settings (concurrency, job retention, retry backoff). Crons and workpools declared with
+    /// [`Ferrix::cron`] / [`Ferrix::interval`] / [`Ferrix::workpool`] are kept, before or after this call.
     pub fn scheduler(mut self, options: SchedulerOptions) -> Self {
         let declared = std::mem::take(&mut self.scheduler.crons);
+        let pools = std::mem::take(&mut self.scheduler.pools);
         self.scheduler = options;
         self.scheduler.crons.splice(0..0, declared);
+        self.scheduler.pools.splice(0..0, pools);
         self
     }
 

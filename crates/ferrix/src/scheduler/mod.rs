@@ -1,6 +1,8 @@
 //! The scheduler and crons (PLAN.md §7.3).
 //!
-//! - [`Scheduler`] (`ctx.scheduler` in mutations and actions): `run_after`, `run_at`, `cancel`, `with_retries`.
+//! - [`Scheduler`] (`ctx.scheduler` in mutations and actions): `run_after`, `run_at`, `cancel`, `with_retries`, and
+//!   workpools: `pool(name)` (bounded parallelism per pool, [`Workpool`]), `on_complete::<F>(context)` (a mutation
+//!   run with the outcome, [`WorkResult`]), `cancel_pool`.
 //! - [`tables`]: the system tables `_scheduled_jobs` ([`ScheduledJob`]) and `_crons` ([`Cron`]).
 //! - [`runner`]: the background runner (`App::start_scheduler`, started by `ferrix serve`) and
 //!   `App::run_due_jobs` for tests. Its module docs describe the delivery guarantees: **mutations run exactly
@@ -29,9 +31,9 @@ use serde_json::Value;
 pub use context::{ScheduleWith, Scheduler};
 pub use cancellation::ActionAborted;
 pub use cron::{CronSpec, SWEEP_CRON};
-pub use store::CancelOutcome;
+pub use store::{CancelOutcome, WorkResult};
 pub use runner::SchedulerState;
-pub use tables::{Cron, JobKind, JobState, ScheduledJob};
+pub use tables::{Backoff, Cron, JobKind, JobState, OnComplete, ScheduledJob};
 
 use crate::SchedulableFunction;
 use crate::prelude::*;
@@ -40,8 +42,8 @@ use store::NewJob;
 /// Scheduler settings: `AppOptions::scheduler`, or `Ferrix::scheduler` / `Ferrix::cron` / `Ferrix::interval`.
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {
-    /// Jobs running at the same time (each running action holds a slot; mutations run one at a time anyway).
-    /// Default 10.
+    /// Actions of the default pool (scheduled without [`Scheduler::pool`]) running at the same time. Mutations
+    /// run one at a time anyway, and need no slot. Default 10.
     pub concurrency: usize,
     /// Finished (success, failed, canceled) jobs are deleted this long after they finished. `None` keeps them.
     /// Default 7 days.
@@ -56,6 +58,46 @@ pub struct SchedulerOptions {
     pub cancel_grace: Duration,
     /// The declared crons.
     pub crons: Vec<CronSpec>,
+    /// The declared workpools.
+    pub pools: Vec<Workpool>,
+}
+
+/// A workpool: a named limit on how many of its actions run at once, with default retries for them. Declared with
+/// `Ferrix::workpool(Workpool::new("emails").max_parallelism(5).retries(3))`; used with
+/// `ctx.scheduler.pool("emails").enqueue::<send_email>(args)`. Each pool has its own slots: its actions don't take
+/// the default pool's ([`SchedulerOptions::concurrency`]), nor another pool's. Within a pool, actions start in the
+/// order they are due.
+#[derive(Debug, Clone)]
+pub struct Workpool {
+    pub name: String,
+    /// Actions of this pool running at the same time. Default 10.
+    pub max_parallelism: usize,
+    /// Retries of a failing action enqueued in this pool, unless it says otherwise (`with_retries`). Default 0.
+    pub retries: u32,
+    /// The retry backoff of its actions. Default: the scheduler's (`SchedulerOptions::retry_backoff`, doubling).
+    pub backoff: Option<Backoff>,
+}
+
+impl Workpool {
+    pub fn new(name: impl Into<String>) -> Workpool {
+        Workpool { name: name.into(), max_parallelism: DEFAULT_CONCURRENCY, retries: 0, backoff: None }
+    }
+
+    pub fn max_parallelism(mut self, n: usize) -> Workpool {
+        self.max_parallelism = n;
+        self
+    }
+
+    pub fn retries(mut self, n: u32) -> Workpool {
+        self.retries = n;
+        self
+    }
+
+    /// Wait `initial` before the first retry, then `base` times longer before each further one (at most an hour).
+    pub fn backoff(mut self, initial: Duration, base: f64) -> Workpool {
+        self.backoff = Some(Backoff { initial_ms: initial.as_secs_f64() * 1000.0, base });
+        self
+    }
 }
 
 /// Default [`SchedulerOptions::concurrency`].
@@ -74,6 +116,7 @@ impl Default for SchedulerOptions {
             retry_backoff: Duration::from_secs(1),
             cancel_grace: DEFAULT_CANCEL_GRACE,
             crons: Vec::new(),
+            pools: Vec::new(),
         }
     }
 }
@@ -94,6 +137,12 @@ impl SchedulerOptions {
         args: impl Into<F::Args>,
     ) -> Self {
         self.crons.push(CronSpec::cron_tz::<F>(name, expr, tz, args));
+        self
+    }
+
+    /// Declare a workpool: see [`Workpool`].
+    pub fn workpool(mut self, pool: Workpool) -> Self {
+        self.pools.push(pool);
         self
     }
 
@@ -127,8 +176,9 @@ fn parse_job_id(id: &str) -> Result<Id<ScheduledJob>> {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// Schedule `path` (a mutation or action) with JSON `args` at `run_at`. What `ctx.scheduler.run_after` / `run_at`
-/// run from an action.
+/// run from an action (which has already checked `pool` and `on_complete`).
 #[internal_mutation]
+#[allow(clippy::too_many_arguments)]
 pub async fn schedule(
     ctx: &MutationCtx,
     path: String,
@@ -136,10 +186,21 @@ pub async fn schedule(
     run_at: f64,
     max_attempts: u32,
     origin: Option<String>,
+    pool: Option<String>,
+    on_complete: Option<OnComplete>,
+    backoff: Option<Backoff>,
 ) -> Result<Id<ScheduledJob>> {
     let kind = store::kind_of(&path)?;
     let max_attempts = if kind == JobKind::Action { max_attempts.max(1) } else { 1 };
-    store::insert(&ctx.db, NewJob { path, kind, args, run_at, max_attempts, origin }, ctx.now()).await
+    let job = NewJob { path, kind, args, run_at, max_attempts, origin, pool, on_complete, backoff };
+    store::insert(&ctx.db, job, ctx.now()).await
+}
+
+/// Cancel every pending job and running action of a workpool (see `Scheduler::cancel_pool`). What
+/// `ctx.scheduler.cancel_pool` runs from an action.
+#[internal_mutation]
+pub async fn cancel_pool(ctx: &MutationCtx, pool: String, reason: String) -> Result<u64> {
+    store::cancel_pool(&ctx.db, &pool, ctx.now(), &reason).await
 }
 
 /// Cancel a job (see `Scheduler::cancel`), recording `reason` (default: canceled by an action). What
@@ -209,6 +270,9 @@ pub async fn run_job_now(ctx: &MutationCtx, id: String) -> Result<String> {
                 run_at: now,
                 max_attempts: job.value.max_attempts,
                 origin: Some("dashboard".to_string()),
+                pool: job.value.pool,
+                on_complete: job.value.on_complete,
+                backoff: job.value.backoff,
             };
             Ok(store::insert(&ctx.db, job, now).await?.to_string())
         }

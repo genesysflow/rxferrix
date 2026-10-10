@@ -40,6 +40,11 @@ pub struct QueryCtx {
 }
 
 impl QueryCtx {
+    /// A query context over `db` (e.g. a mutation's transaction: a workflow's query steps), with no identity.
+    pub(crate) fn internal(db: QueryDb, storage: crate::storage::QueryStorage, dev: bool) -> QueryCtx {
+        QueryCtx { db, auth: Auth::new(Identity::anonymous()), storage, dev }
+    }
+
     /// The commit time (ms since the epoch) of the snapshot the query runs at. Deterministic per ts.
     ///
     /// It is not a reactive clock: a subscribed query reruns when what it read changes, not when time passes, so a
@@ -64,6 +69,8 @@ pub struct MutationCtx {
     pub storage: crate::storage::MutationStorage,
     /// Schedule functions to run later; jobs are written in this mutation's transaction (`crate::scheduler`).
     pub scheduler: crate::scheduler::Scheduler,
+    /// Start, cancel and signal workflows, in this mutation's transaction (`crate::workflow`).
+    pub workflows: crate::workflow::Workflows,
     now: f64,
     dev: bool,
 }
@@ -87,6 +94,8 @@ pub struct ActionCtx {
     pub storage: crate::storage::ActionStorage,
     /// Schedule functions to run later; takes effect immediately (`crate::scheduler`).
     pub scheduler: crate::scheduler::Scheduler,
+    /// Start, cancel and signal workflows; takes effect immediately (`crate::workflow`).
+    pub workflows: crate::workflow::Workflows,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -809,11 +818,13 @@ impl App {
         }
         let storage =
             crate::storage::MutationStorage::new(MutationDb::new(txn.clone()), self.storage().clone(), identity.clone());
+        let pools = self.scheduler_state().pools().clone();
         let ctx = MutationCtx {
             db: MutationDb::new(txn.clone()),
             auth: Auth::new(identity.clone()),
             storage,
-            scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path),
+            scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path, pools.clone()),
+            workflows: crate::workflow::Workflows::in_mutation(txn.clone(), path, pools),
             now: txn.now(),
             dev: self.options().dev,
         };
@@ -880,6 +891,7 @@ impl App {
             auth: Auth::new(identity.clone()),
             storage,
             scheduler: crate::scheduler::Scheduler::in_action(self.clone(), identity.clone(), path),
+            workflows: crate::workflow::Workflows::in_action(self.clone(), identity.clone(), path),
             app: self.clone(),
             identity: identity.clone(),
         };
@@ -967,7 +979,9 @@ fn identity_summary(identity: &Identity) -> Option<String> {
 
 /// Turn a panic inside user code into an error, so a buggy function can't take down a connection (and so that a
 /// panicking mutation is rolled back like any other failure).
-async fn catch_panics(fut: futures::future::BoxFuture<'static, crate::Result<Value>>) -> crate::Result<Value> {
+pub(crate) async fn catch_panics(
+    fut: futures::future::BoxFuture<'static, crate::Result<Value>>,
+) -> crate::Result<Value> {
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(r) => r,
         Err(panic) => {

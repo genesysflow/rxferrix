@@ -1,7 +1,7 @@
 /**
  * Hand-written references to the admin-only system functions and the types they return (codegen leaves system
  * functions out of app APIs): `_system/dashboard:*` (crates/ferrix/src/dashboard/mod.rs), `_system/storage:*`,
- * `_system/scheduler:*`, `_system/migrations:*`, `_system/settings:*` and `_system/audit:list`, plus the types of
+ * `_system/scheduler:*`, `_system/workflow:*`, `_system/migrations:*`, `_system/settings:*` and `_system/audit:list`, plus the types of
  * the `/api/admin/*` endpoints (lib/admin.ts). See docs/CONTRACT.md §4.
  */
 import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@ferrix/client";
@@ -206,8 +206,14 @@ export interface ScheduledJob {
   scheduledAt: number;
   startedAt: number | null;
   completedAt: number | null;
-  /** A function path, `cron:<name>` or `dashboard`. */
+  /** A function path, `cron:<name>`, `dashboard`, `onComplete:<job id>` or `workflow:<id>`. */
   origin: string | null;
+  /** The workpool whose parallelism limits this action; null for the default pool. */
+  pool: string | null;
+  /** The mutation run (as a job of its own) once this one has finished. */
+  onComplete: { path: string; context: Json } | null;
+  /** The retry backoff; null for the scheduler's. */
+  backoff: { initialMs: number; base: number } | null;
 }
 
 export interface CronSummary {
@@ -241,6 +247,67 @@ export const scheduler = {
   crons: sq<Record<string, never>, CronSummary[]>("crons"),
   /** The id of the enqueued job; user error `running` while the previous run is unfinished (unless `force`). */
   runCronNow: sm<{ name: string; force?: boolean | null }, string>("run_cron_now"),
+} as const;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Workflows (`_system/workflow:*`, crates/ferrix/src/workflow)
+
+export type WorkflowState = "running" | "success" | "failed" | "canceled";
+
+/** A `_workflows` document. */
+export interface Workflow {
+  _id: string;
+  _creationTime: number;
+  /** The workflow's path, e.g. `onboarding:onboard`. */
+  name: string;
+  args: Json;
+  state: WorkflowState;
+  result: Json | null;
+  error: string | null;
+  /** Steps started so far. */
+  steps: number;
+  startedAt: number;
+  completedAt: number | null;
+  origin: string | null;
+  onComplete: { path: string; context: Json } | null;
+  /** Events sent before the workflow waited for them. */
+  events: { name: string; value: Json }[];
+}
+
+export type StepKind = "query" | "mutation" | "action" | "sleep" | "event";
+export type StepState = "running" | "success" | "failed" | "canceled";
+
+/** A `_workflow_steps` document: one entry of a workflow's journal. */
+export interface WorkflowStep {
+  _id: string;
+  _creationTime: number;
+  workflow: string;
+  index: number;
+  kind: StepKind;
+  /** The function's path, the event's name, or `sleep`. */
+  name: string;
+  /** The function's args; `{ ms }` for a sleep. */
+  args: Json;
+  state: StepState;
+  result: Json | null;
+  error: string | null;
+  /** The scheduled job that runs it (mutations, actions) or ends it (sleeps). */
+  job: string | null;
+  startedAt: number;
+  completedAt: number | null;
+}
+
+export type CancelWorkflowOutcome = "canceled" | "alreadyFinished";
+
+const wq = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out>("query", `_system/workflow:${name}`);
+const wm = <Args, Out>(name: string) =>
+  makeFunctionReference<"mutation", Args, Out>("mutation", `_system/workflow:${name}`);
+
+/** The admin-only workflow functions (`_system/workflow:*`, crates/ferrix/src/workflow/mod.rs). */
+export const workflows = {
+  list: wq<{ state?: WorkflowState | null; paginationOpts: PaginationOpts }, PaginationResult<Workflow>>("list"),
+  steps: wq<{ id: string }, WorkflowStep[]>("steps"),
+  cancelWorkflow: wm<{ id: string }, CancelWorkflowOutcome>("cancel_workflow"),
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -14,7 +14,13 @@
 //!   startup, jobs still `inProgress` become `failed` ("server restarted while running"). **At most once.**
 //!   Actions scheduled `with_retries(n)` go back to `pending` (with backoff) after an error.
 //!
-//! Every job (and therefore every running action) holds one of `SchedulerOptions::concurrency` permits.
+//! Every running action holds a slot of its pool: the default pool's `SchedulerOptions::concurrency`, or its
+//! workpool's `max_parallelism` (`super::Workpool`). Each pool's due actions start in order while it has free slots;
+//! a full pool doesn't hold up the others. Mutation jobs need no slot (they run one at a time anyway) and run first
+//! in each round, through the `(kind, state, runAt)` index; actions through `(kind, pool, state, runAt)`.
+//!
+//! The transaction that records a job's final state (success, failed for good, canceled) also schedules its
+//! `on_complete` mutation, if any (`store::finished`).
 //!
 //! The background loop sleeps until the next job or cron is due, and wakes early when a commit writes to
 //! `_scheduled_jobs` (it watches the write log, so jobs scheduled by any mutation, action, or the dashboard are
@@ -30,9 +36,11 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use super::cancellation::{self as cancel, ActionAborted, Registration};
 use super::cron::{self, ParsedCron};
-use super::store;
-use super::tables::{JobState, ScheduledJob};
-use super::{IN_JOB, SchedulerOptions};
+use std::collections::BTreeMap;
+
+use super::store::{self, WorkResult};
+use super::tables::{JobKind, JobState, ScheduledJob};
+use super::{IN_JOB, SchedulerOptions, Workpool};
 use crate::db::Clock;
 use crate::db::query::MutationDb;
 use crate::id::Id;
@@ -52,11 +60,28 @@ const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 /// The error recorded for actions interrupted by a restart.
 pub const INTERRUPTED: &str = "server restarted while running";
 
+/// A pool's slots: one per action it may run at once.
+struct Slots {
+    semaphore: Arc<Semaphore>,
+    size: u32,
+}
+
+impl Slots {
+    fn new(size: usize) -> Arc<Slots> {
+        let size = size.clamp(1, Semaphore::MAX_PERMITS) as u32;
+        Arc::new(Slots { semaphore: Arc::new(Semaphore::new(size as usize)), size })
+    }
+}
+
 /// The scheduler's in-memory state, one per `App`.
 pub struct SchedulerState {
     options: SchedulerOptions,
     crons: Vec<ParsedCron>,
-    permits: Arc<Semaphore>,
+    /// The declared workpools, by name.
+    pools: Arc<BTreeMap<String, Workpool>>,
+    /// Slots of the default pool (`None`), the declared pools, and pools that pending jobs name but the app no longer
+    /// declares (found at startup; default size).
+    slots: std::sync::Mutex<BTreeMap<Option<String>, Arc<Slots>>>,
     notify: Notify,
     init: tokio::sync::OnceCell<()>,
     started: AtomicBool,
@@ -72,11 +97,24 @@ impl SchedulerState {
         let mut specs = options.crons.clone();
         specs.extend(cron::system_crons(app_options));
         let crons = cron::parse_all(&specs)?;
-        let concurrency = options.concurrency.max(1);
+        let mut pools = BTreeMap::new();
+        let mut slots = BTreeMap::from([(None, Slots::new(options.concurrency))]);
+        for pool in &options.pools {
+            let name = &pool.name;
+            let length_ok = !name.is_empty() && name.len() <= 64;
+            anyhow::ensure!(length_ok, "workpool names are 1 to 64 characters long: `{name}`");
+            anyhow::ensure!(pool.max_parallelism >= 1, "workpool `{name}` must allow at least 1 action at a time");
+            if let Some(b) = pool.backoff {
+                anyhow::ensure!(b.initial_ms >= 0.0 && b.base >= 1.0, "workpool `{name}`: the backoff must not shrink");
+            }
+            anyhow::ensure!(pools.insert(name.clone(), pool.clone()).is_none(), "two workpools are named `{name}`");
+            slots.insert(Some(name.clone()), Slots::new(pool.max_parallelism));
+        }
         Ok(SchedulerState {
             options: options.clone(),
             crons,
-            permits: Arc::new(Semaphore::new(concurrency)),
+            pools: Arc::new(pools),
+            slots: std::sync::Mutex::new(slots),
             notify: Notify::new(),
             init: tokio::sync::OnceCell::new(),
             started: AtomicBool::new(false),
@@ -90,8 +128,18 @@ impl SchedulerState {
         self.notify.notify_one();
     }
 
-    fn concurrency(&self) -> u32 {
-        self.options.concurrency.max(1) as u32
+    /// The declared workpools.
+    pub(crate) fn pools(&self) -> &Arc<BTreeMap<String, Workpool>> {
+        &self.pools
+    }
+
+    fn all_slots(&self) -> Vec<(Option<String>, Arc<Slots>)> {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    fn slots_of(&self, pool: &Option<String>) -> Arc<Slots> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.entry(pool.clone()).or_insert_with(|| Slots::new(self.options.concurrency)).clone()
     }
 }
 
@@ -115,8 +163,10 @@ impl App {
         let mut total = 0;
         loop {
             let ran = dispatch(self).await?;
-            // Holding every permit means every running action has finished.
-            drop(st.permits.acquire_many(st.concurrency()).await?);
+            // Holding every slot means every running action has finished.
+            for (_, slots) in st.all_slots() {
+                drop(slots.semaphore.acquire_many(slots.size).await?);
+            }
             if ran == 0 {
                 return Ok(total);
             }
@@ -135,6 +185,7 @@ impl App {
                 if recovered > 0 {
                     tracing::warn!("{recovered} scheduled action(s) were interrupted by a restart and marked failed");
                 }
+                discover_pools(self).await?;
                 cron::reconcile(self, &self.scheduler_state().crons, now).await?;
                 maybe_cleanup(self, now).await?;
                 Ok::<_, crate::Error>(())
@@ -163,11 +214,38 @@ async fn recover_interrupted(app: &App, now: f64) -> crate::Result<usize> {
             value.state = JobState::Failed;
             value.error = Some(INTERRUPTED.to_string());
             value.completed_at = Some(now);
+            store::finished(&db, job.id, &value, WorkResult::Failed { error: INTERRUPTED.to_string() }, now).await?;
             db.replace(job.id, value).await?;
         }
         Ok(running.len())
     })
     .await
+}
+
+/// Give pools that jobs name but the app no longer declares slots of their own (default size), so their pending
+/// actions still run. Walks the distinct pool names of action jobs through the `(kind, pool, …)` index.
+async fn discover_pools(app: &App) -> crate::Result<()> {
+    let st = app.scheduler_state();
+    let mut after: Option<String> = None;
+    loop {
+        let last = after.clone();
+        let next = store::read(app, |db| async move {
+            db.query::<ScheduledJob>()
+                .with_index(ScheduledJob::by_kind_pool_state_run_at, |q| {
+                    q.eq(ScheduledJob::kind, JobKind::Action).gt(ScheduledJob::pool, last)
+                })
+                .first()
+                .await
+        })
+        .await?;
+        let Some(name) = next.and_then(|job| job.value.pool) else { return Ok(()) };
+        if !st.pools.contains_key(&name) {
+            let size = st.options.concurrency;
+            tracing::warn!(pool = %name, "scheduled actions name a workpool that is no longer declared ({size} at a time)");
+            st.slots_of(&Some(name.clone()));
+        }
+        after = Some(name);
+    }
 }
 
 /// Run the retention cleanup if it hasn't run within `cleanup_interval`.
@@ -188,10 +266,15 @@ async fn maybe_cleanup(app: &App, now: f64) -> crate::Result<()> {
     Ok(())
 }
 
-/// Delete success, failed and canceled jobs that finished more than `retention` ago.
+/// Delete success, failed and canceled jobs that finished more than `retention` ago (and finished workflows, with
+/// their steps).
 async fn cleanup(app: &App, now: f64) -> crate::Result<usize> {
     let Some(retention) = app.scheduler_state().options.retention else { return Ok(0) };
     let cutoff = now - retention.as_secs_f64() * 1000.0;
+    let workflows = crate::workflow::cleanup(app, cutoff).await?;
+    if workflows > 0 {
+        tracing::info!("deleted {workflows} finished workflow(s) past their retention");
+    }
     let mut total = 0;
     loop {
         let deleted = store::write(app, |db| async move {
@@ -215,7 +298,9 @@ async fn cleanup(app: &App, now: f64) -> crate::Result<usize> {
     }
 }
 
-/// One dispatch round: fire due crons, then start every due job in order. Returns how many jobs were started.
+/// One dispatch round: fire due crons, then run the due mutation jobs and start the due actions of every pool with
+/// free slots, until nothing more is due (or every pool with due actions is full). Returns how many jobs were
+/// started.
 async fn dispatch(app: &App) -> crate::Result<usize> {
     let st = app.scheduler_state();
     let _one_dispatcher = st.dispatch.lock().await;
@@ -226,33 +311,73 @@ async fn dispatch(app: &App) -> crate::Result<usize> {
     cron::fire_due(app, &st.crons, clock.now_ms()).await?;
     let mut started = 0;
     loop {
-        let now = clock.now_ms();
-        let due = store::read(app, |db| async move {
-            db.query::<ScheduledJob>()
-                .with_index(ScheduledJob::by_state_run_at, |q| {
-                    q.eq(ScheduledJob::state, JobState::Pending).lte(ScheduledJob::run_at, now)
-                })
-                .take(BATCH)
-                .await
-        })
-        .await?;
-        let full = due.len() == BATCH;
-        let mut round = 0;
-        for job in due {
-            let permit = st.permits.clone().acquire_owned().await?;
-            if run_job(app, job, permit).await? {
-                round += 1;
-            }
+        let mut round = run_due_mutations(app).await?;
+        for (pool, slots) in st.all_slots() {
+            round += start_due_actions(app, pool, &slots).await?;
         }
-        started += round;
-        if !full || round == 0 {
+        if round == 0 {
             return Ok(started);
         }
+        started += round;
     }
 }
 
-/// Start one job. Returns false if it was no longer pending (someone else ran or canceled it).
-async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: OwnedSemaphorePermit) -> crate::Result<bool> {
+/// Run due mutation jobs, in order, one at a time (up to a batch). Returns how many ran.
+async fn run_due_mutations(app: &App) -> crate::Result<usize> {
+    let now = app.db().clock().now_ms();
+    let due = store::read(app, |db| async move {
+        db.query::<ScheduledJob>()
+            .with_index(ScheduledJob::by_kind_state_run_at, |q| {
+                q.eq(ScheduledJob::kind, JobKind::Mutation)
+                    .eq(ScheduledJob::state, JobState::Pending)
+                    .lte(ScheduledJob::run_at, now)
+            })
+            .take(BATCH)
+            .await
+    })
+    .await?;
+    let mut ran = 0;
+    for job in due {
+        if run_job(app, job, None).await? {
+            ran += 1;
+        }
+    }
+    Ok(ran)
+}
+
+/// Start due actions of `pool`, in order, while it has free slots. Returns how many started.
+async fn start_due_actions(app: &App, pool: Option<String>, slots: &Slots) -> crate::Result<usize> {
+    let free = slots.semaphore.available_permits();
+    if free == 0 {
+        return Ok(0);
+    }
+    let now = app.db().clock().now_ms();
+    let due = store::read(app, |db| async move {
+        db.query::<ScheduledJob>()
+            .with_index(ScheduledJob::by_kind_pool_state_run_at, |q| {
+                q.eq(ScheduledJob::kind, JobKind::Action)
+                    .eq(ScheduledJob::pool, pool)
+                    .eq(ScheduledJob::state, JobState::Pending)
+                    .lte(ScheduledJob::run_at, now)
+            })
+            .take(free.min(BATCH))
+            .await
+    })
+    .await?;
+    let mut started = 0;
+    for job in due {
+        let Ok(permit) = slots.semaphore.clone().try_acquire_owned() else { break };
+        if run_job(app, job, Some(permit)).await? {
+            started += 1;
+        }
+    }
+    Ok(started)
+}
+
+/// Start one job: a mutation runs now; an action is claimed and spawned, holding `permit` (a slot of its pool;
+/// taken here if the job was found as a mutation but is an action now). Returns false if it was no longer pending
+/// (someone else ran or canceled it).
+async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: Option<OwnedSemaphorePermit>) -> crate::Result<bool> {
     let kind = app.registry().get(&job.path).map(|def| def.handler.kind());
     match kind {
         Some(FunctionKind::Mutation) => {
@@ -261,6 +386,10 @@ async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: OwnedSemaphorePermit
             ran
         }
         Some(FunctionKind::Action) => {
+            let permit = match permit {
+                Some(p) => p,
+                None => app.scheduler_state().slots_of(&job.pool).semaphore.clone().acquire_owned().await?,
+            };
             // Registered before the claim commits, so a cancel committed right after it finds the running job.
             let registration = cancel::register(job.id, app.scheduler_state().options.cancel_grace);
             if !claim_action(app, job.id).await? {
@@ -272,6 +401,8 @@ async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: OwnedSemaphorePermit
                 run_action_job(&app, job, &registration).await;
                 drop(registration);
                 drop(permit);
+                // A slot is free: its pool's next due action can start.
+                app.scheduler_state().notify();
             })));
             Ok(true)
         }
@@ -325,6 +456,7 @@ impl MutationHook for JobTxn<'_> {
             job.completed_at = Some(now);
             job.result = Some(store::truncate(serde_json::to_string(value)?));
             job.error = None;
+            store::finished(db, self.id, &job, WorkResult::Success { return_value: value.clone() }, now).await?;
             db.replace(self.id, job).await
         })
     }
@@ -348,11 +480,13 @@ async fn run_mutation_job(app: &App, job: &Doc<ScheduledJob>) -> crate::Result<b
                     return Ok(false);
                 }
                 let mut value = current.value;
+                let now = app.db().clock().now_ms();
                 value.state = JobState::Failed;
                 value.attempts += 1;
                 value.started_at = Some(started);
-                value.completed_at = Some(app.db().clock().now_ms());
-                value.error = Some(error);
+                value.completed_at = Some(now);
+                value.error = Some(error.clone());
+                store::finished(&db, job.id, &value, WorkResult::Failed { error }, now).await?;
                 db.replace(job.id, value).await?;
                 Ok(true)
             })
@@ -370,9 +504,11 @@ async fn fail_pending(app: &App, id: Id<ScheduledJob>, msg: &str) -> crate::Resu
             return Ok(false);
         }
         let mut value = job.value;
+        let now = app.db().clock().now_ms();
         value.state = JobState::Failed;
-        value.completed_at = Some(app.db().clock().now_ms());
+        value.completed_at = Some(now);
         value.error = Some(store::truncate(msg.to_string()));
+        store::finished(&db, id, &value, WorkResult::Failed { error: msg.to_string() }, now).await?;
         db.replace(id, value).await?;
         Ok(true)
     })
@@ -434,16 +570,18 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
                 value.result = Some(store::truncate(serde_json::to_string(&result)?));
                 value.error = None;
                 value.completed_at = Some(now);
+                store::finished(&db, job.id, &value, WorkResult::Success { return_value: result }, now).await?;
             }
             Err(e) => {
-                value.error = Some(store::truncate(format!("{e:#}")));
+                let error = format!("{e:#}");
+                value.error = Some(store::truncate(error.clone()));
                 if value.attempts < value.max_attempts {
-                    let backoff = backoff_base.saturating_mul(1 << (value.attempts - 1).min(20)).min(MAX_BACKOFF);
                     value.state = JobState::Pending;
-                    value.run_at = now + backoff.as_secs_f64() * 1000.0;
+                    value.run_at = now + retry_delay(&value, backoff_base).as_secs_f64() * 1000.0;
                 } else {
                     value.state = JobState::Failed;
                     value.completed_at = Some(now);
+                    store::finished(&db, job.id, &value, WorkResult::Failed { error }, now).await?;
                 }
             }
         }
@@ -455,18 +593,52 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
     }
 }
 
-/// When the next job or cron is due, or the next cleanup should run.
+/// How long to wait before the next attempt of an action that just failed attempt number `job.attempts`.
+fn retry_delay(job: &ScheduledJob, default_initial: Duration) -> Duration {
+    let retry = job.attempts.saturating_sub(1).min(64) as i32;
+    let (initial_ms, base) = match job.backoff {
+        Some(b) => (b.initial_ms, b.base),
+        None => (default_initial.as_secs_f64() * 1000.0, 2.0),
+    };
+    let ms = initial_ms * base.powi(retry);
+    if ms.is_finite() && ms >= 0.0 { Duration::from_secs_f64(ms / 1000.0).min(MAX_BACKOFF) } else { MAX_BACKOFF }
+}
+
+/// When the next job or cron is due, or the next cleanup should run. Actions of a full pool don't count: a slot
+/// freeing up wakes the loop.
 async fn next_wake(app: &App) -> crate::Result<Option<f64>> {
-    let job = store::read(app, |db| async move {
-        db.query::<ScheduledJob>()
-            .with_index(ScheduledJob::by_state_run_at, |q| q.eq(ScheduledJob::state, JobState::Pending))
-            .first()
-            .await
-    })
-    .await?
-    .map(|j| j.run_at);
-    let cron = cron::next_due(app).await?;
     let st = app.scheduler_state();
+    let mut pools = vec![];
+    for (pool, slots) in st.all_slots() {
+        if slots.semaphore.available_permits() > 0 {
+            pools.push(pool);
+        }
+    }
+    let job = store::read(app, |db| async move {
+        let mut first = db
+            .query::<ScheduledJob>()
+            .with_index(ScheduledJob::by_kind_state_run_at, |q| {
+                q.eq(ScheduledJob::kind, JobKind::Mutation).eq(ScheduledJob::state, JobState::Pending)
+            })
+            .first()
+            .await?
+            .map(|j| j.run_at);
+        for pool in pools {
+            let action = db
+                .query::<ScheduledJob>()
+                .with_index(ScheduledJob::by_kind_pool_state_run_at, |q| {
+                    q.eq(ScheduledJob::kind, JobKind::Action)
+                        .eq(ScheduledJob::pool, pool)
+                        .eq(ScheduledJob::state, JobState::Pending)
+                })
+                .first()
+                .await?;
+            first = [first, action.map(|j| j.run_at)].into_iter().flatten().reduce(f64::min);
+        }
+        Ok(first)
+    })
+    .await?;
+    let cron = cron::next_due(app).await?;
     let cleanup = match (st.options.retention, *st.last_cleanup.lock().unwrap_or_else(|e| e.into_inner())) {
         (Some(_), Some(last)) => Some(last + st.options.cleanup_interval.as_secs_f64() * 1000.0),
         _ => None,

@@ -724,6 +724,9 @@ try {
     await page.keyboard.press("Enter");
     await page.getByRole("heading", { name: "todos" }).waitFor();
     await page.keyboard.press("Alt+8");
+    await page.getByRole("heading", { name: "Workflows" }).waitFor();
+    await page.getByText("No workflows").waitFor();
+    await page.keyboard.press("Alt+9");
     await page.getByRole("heading", { name: "Migrations" }).waitFor();
   });
 

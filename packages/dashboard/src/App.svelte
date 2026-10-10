@@ -17,6 +17,7 @@
   import Migrations from "./pages/Migrations.svelte";
   import Overview from "./pages/Overview.svelte";
   import Scheduler from "./pages/Scheduler.svelte";
+  import Workflows from "./pages/Workflows.svelte";
   import Settings from "./pages/Settings.svelte";
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
@@ -73,7 +74,8 @@
       items: [
         { page: "users", label: "Users", icon: "◍", keywords: "sessions auth impersonate" },
         { page: "files", label: "Files", icon: "▤", keywords: "storage uploads" },
-        { page: "scheduler", label: "Scheduler", icon: "◷", keywords: "crons jobs" },
+        { page: "scheduler", label: "Scheduler", icon: "◷", keywords: "crons jobs workpools" },
+        { page: "workflows", label: "Workflows", icon: "⇶", keywords: "steps durable events" },
       ],
     },
     {
@@ -206,6 +208,8 @@
         <Logs />
       {:else if route.page === "scheduler"}
         <Scheduler {route} />
+      {:else if route.page === "workflows"}
+        <Workflows {route} />
       {:else if route.page === "users"}
         <Users />
       {:else if route.page === "files"}

@@ -1,4 +1,4 @@
-//! `#[query]`, `#[mutation]`, `#[action]` and the `internal_*` variants (CONTRACT.md §3.2).
+//! `#[query]`, `#[mutation]`, `#[action]`, the `internal_*` variants (CONTRACT.md §3.2), and `#[workflow]`.
 
 use std::collections::HashMap;
 
@@ -14,6 +14,7 @@ pub enum FnKind {
     Query,
     Mutation,
     Action,
+    Workflow,
 }
 
 impl FnKind {
@@ -22,6 +23,7 @@ impl FnKind {
             FnKind::Query => "QueryCtx",
             FnKind::Mutation => "MutationCtx",
             FnKind::Action => "ActionCtx",
+            FnKind::Workflow => "WorkflowCtx",
         }
     }
 
@@ -30,6 +32,7 @@ impl FnKind {
             FnKind::Query => "query",
             FnKind::Mutation => "mutation",
             FnKind::Action => "action",
+            FnKind::Workflow => "workflow",
         };
         if internal {
             format!("internal_{base}")
@@ -43,6 +46,7 @@ impl FnKind {
             FnKind::Query => "Query",
             FnKind::Mutation => "Mutation",
             FnKind::Action => "Action",
+            FnKind::Workflow => "Workflow",
         };
         syn::Ident::new(s, Span::call_site())
     }
@@ -52,6 +56,7 @@ impl FnKind {
             FnKind::Query => "QueryFunction",
             FnKind::Mutation => "MutationFunction",
             FnKind::Action => "ActionFunction",
+            FnKind::Workflow => "WorkflowFunction",
         };
         syn::Ident::new(s, Span::call_site())
     }
@@ -130,7 +135,7 @@ pub(crate) fn check_ctx_type(
                     errors.error(ty, "the context reference cannot have an explicit lifetime");
                 }
             }
-            Some(id) if ["QueryCtx", "MutationCtx", "ActionCtx"].iter().any(|c| id == c) => errors.error(
+            Some(id) if ["QueryCtx", "MutationCtx", "ActionCtx", "WorkflowCtx"].iter().any(|c| id == c) => errors.error(
                 ty,
                 format_args!("#[{macro_name}] functions take `&{ctx_name}` as their first parameter, found `&{id}`"),
             ),
@@ -155,7 +160,7 @@ pub fn expand_function(
     let mut errors = Errors::default();
     let mut dev_only = false;
     let parser = syn::meta::parser(|meta| {
-        if meta.path.is_ident("dev_only") {
+        if meta.path.is_ident("dev_only") && kind != FnKind::Workflow {
             if dev_only {
                 return Err(meta.error("duplicate `dev_only`"));
             }
@@ -164,6 +169,8 @@ pub fn expand_function(
             }
             dev_only = true;
             Ok(())
+        } else if kind == FnKind::Workflow {
+            Err(meta.error("#[workflow] takes no arguments"))
         } else {
             Err(meta.error(format_args!(
                 "unknown #[{macro_name}] argument; the only one is `dev_only` (refused unless the server runs with --dev)"
@@ -374,7 +381,7 @@ pub fn expand_function(
     let trait_ident = kind.trait_name();
     // Mutations and actions can be scheduled (`ctx.scheduler.run_after::<f>(..)`, crons); queries can't.
     let schedulable = match kind {
-        FnKind::Query => quote!(),
+        FnKind::Query | FnKind::Workflow => quote!(),
         FnKind::Mutation | FnKind::Action => quote! {
             #(#cfgs)*
             impl ::ferrix::SchedulableFunction for #name {}
@@ -386,13 +393,52 @@ pub fn expand_function(
         quote!(Public)
     };
     // Spanned on the fn name so that e.g. "future cannot be sent between threads safely" points at the function.
-    let handler = quote_spanned! {name.span()=>
-        ::ferrix::__private::Handler::#variant(|#ctx_var, #args_var| ::std::boxed::Box::pin(async move {
+    let body = quote_spanned! {name.span()=>
+        |#ctx_var, #args_var| ::std::boxed::Box::pin(async move {
             let #decoded_var: #args_ident = ::ferrix::__private::decode_args(#name_str, #args_var)?;
             // Value namespace: the user's fn (the reference struct is type-namespace only).
             let #out_var = #name(&#ctx_var, #(#call_args),*).await?;
             ::ferrix::__private::encode_output(#out_var)
-        }))
+        })
+    };
+    let ts = quote! {
+        || (
+            ::ferrix::__private::ts_inline::<#args_ident>(),
+            ::ferrix::__private::ts_output::<#output>(),
+        )
+    };
+    // Workflows have a registry of their own (they are started by functions, not called by clients).
+    let registration = if kind == FnKind::Workflow {
+        quote! {
+            #(#cfgs)*
+            #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::WORKFLOWS)]
+            #[linkme(crate = ::ferrix::__private::linkme)]
+            #[allow(non_upper_case_globals)]
+            static #static_ident: ::ferrix::__private::WorkflowDef = ::ferrix::__private::WorkflowDef {
+                module_path: ::core::module_path!(),
+                name: #name_str,
+                handler: #body,
+            };
+        }
+    } else {
+        quote! {
+            #(#cfgs)*
+            #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
+            #[linkme(crate = ::ferrix::__private::linkme)]
+            #[allow(non_upper_case_globals)]
+            static #static_ident: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+                module_path: ::core::module_path!(),
+                name: #name_str,
+                visibility: ::ferrix::__private::Visibility::#visibility,
+                dev_only: #dev_only,
+                handler: ::ferrix::__private::Handler::#variant(#body),
+                ts: #ts,
+            };
+        }
+    };
+    let trait_path = match kind {
+        FnKind::Workflow => quote!(::ferrix::workflow::#trait_ident),
+        _ => quote!(::ferrix::#trait_ident),
     };
 
     Ok(quote! {
@@ -431,23 +477,9 @@ pub fn expand_function(
         }
 
         #(#cfgs)*
-        impl ::ferrix::#trait_ident for #name {}
+        impl #trait_path for #name {}
         #schedulable
 
-        #(#cfgs)*
-        #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
-        #[linkme(crate = ::ferrix::__private::linkme)]
-        #[allow(non_upper_case_globals)]
-        static #static_ident: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
-            module_path: ::core::module_path!(),
-            name: #name_str,
-            visibility: ::ferrix::__private::Visibility::#visibility,
-            dev_only: #dev_only,
-            handler: #handler,
-            ts: || (
-                ::ferrix::__private::ts_inline::<#args_ident>(),
-                ::ferrix::__private::ts_output::<#output>(),
-            ),
-        };
+        #registration
     })
 }

@@ -2,7 +2,7 @@
  * A tiny path router under `/_/` (the server answers every `/_/…` path with index.html).
  *
  * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs`, `/_/users`,
- * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/migrations`, `/_/backups`, `/_/settings`,
+ * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/workflows[?state=<state>&id=<id>]`, `/_/migrations`, `/_/backups`, `/_/settings`,
  * `/_/audit[?action=…&table=…&target=…&admin=…]`, `/_/setup#token=…`.
  */
 export const BASE = "/_/";
@@ -15,6 +15,7 @@ export type Page =
   | "users"
   | "files"
   | "scheduler"
+  | "workflows"
   | "migrations"
   | "backups"
   | "settings"
@@ -38,6 +39,7 @@ export function parseRoute(pathname: string, search: string): Route {
     "users",
     "files",
     "scheduler",
+    "workflows",
     "migrations",
     "backups",
     "settings",

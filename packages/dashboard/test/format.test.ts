@@ -5,6 +5,7 @@ import {
   formatBytes,
   formatDuration,
   formatRelative,
+  formatSpan,
   idTableNumber,
   parseFilterValue,
   parseJson,
@@ -72,6 +73,11 @@ describe("formatting", () => {
     expect(formatDuration(250)).toBe("250µs");
     expect(formatDuration(2500)).toBe("2.5ms");
     expect(formatDuration(2_500_000)).toBe("2.50s");
+    expect(formatSpan(850)).toBe("850ms");
+    expect(formatSpan(12_400)).toBe("12.4s");
+    expect(formatSpan(185_000)).toBe("3m 05s");
+    expect(formatSpan(7_800_000)).toBe("2h 10m");
+    expect(formatSpan(3 * 86_400_000 + 4 * 3_600_000)).toBe("3d 4h");
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(prettyArgs('{"a":1}')).toBe('{\n  "a": 1\n}');

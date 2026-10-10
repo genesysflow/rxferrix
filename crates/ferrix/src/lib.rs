@@ -9,7 +9,8 @@
 //! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
-//! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`), the job runner, crons and `_scheduled_jobs`.
+//! - [`scheduler`]: `ctx.scheduler` (`run_after`, `run_at`, `cancel`, workpools), the job runner, crons and
+//!   `_scheduled_jobs`. [`workflow`]: durable `#[workflow]`s (`ctx.workflows`, `_workflows`, `_workflow_steps`).
 //! - [`migrations`]: `#[migration]` data migrations in batches, `_migrations`, and the schema check's lenient mode.
 //! - [`auth`]: users, sessions, access tokens, email codes, OAuth, external JWTs, admins, and `ctx.auth`; live
 //!   revocation. [`settings`]: runtime settings (`_settings`). [`audit`]: the admin audit log (`_audit_log`).
@@ -44,6 +45,7 @@ pub mod settings;
 pub mod storage;
 pub mod sync;
 pub mod testing;
+pub mod workflow;
 pub mod writelog;
 
 mod private;
@@ -57,7 +59,7 @@ pub mod __private {
 pub use bytes::Bytes;
 pub use cli::Ferrix;
 pub use ferrix_macros::{
-    action, internal_action, internal_mutation, internal_query, migration, mutation, object, query, table,
+    action, internal_action, internal_mutation, internal_query, migration, mutation, object, query, table, workflow,
 };
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
@@ -119,8 +121,9 @@ pub trait SchedulableFunction: FunctionRef {}
 pub mod prelude {
     pub use crate::{
         ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
-        internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table,
+        internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table, workflow,
     };
+    pub use crate::workflow::WorkflowCtx;
     pub use crate::migrations::DocChange;
     pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};

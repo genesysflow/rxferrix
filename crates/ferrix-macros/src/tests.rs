@@ -719,3 +719,34 @@ fn migration_errors() {
         )
     );
 }
+
+// -------------------------------------------------------------------------------------------- #[workflow]
+
+#[test]
+fn workflow_expansion() {
+    insta::assert_snapshot!(func(
+        FnKind::Workflow,
+        false,
+        quote! {
+            /// Onboards a user.
+            pub async fn onboard(step: &WorkflowCtx, user: Id<User>, delay_days: Option<u32>) -> Result<String> { BODY }
+        }
+    ));
+}
+
+#[test]
+fn workflow_errors() {
+    let dev_only = func_err(FnKind::Workflow, quote!(dev_only), quote! {
+        pub async fn w(step: &WorkflowCtx) -> Result<()> { BODY }
+    });
+    assert!(dev_only.contains("#[workflow] takes no arguments"), "{dev_only}");
+    let wrong_ctx = func_err(FnKind::Workflow, TokenStream::new(), quote! {
+        pub async fn w(ctx: &MutationCtx) -> Result<()> { BODY }
+    });
+    let expected = "#[workflow] functions take `&WorkflowCtx` as their first parameter, found `&MutationCtx`";
+    assert!(wrong_ctx.contains(expected), "{wrong_ctx}");
+    let no_ctx = func_err(FnKind::Workflow, TokenStream::new(), quote! {
+        pub async fn w(user: String) -> Result<()> { BODY }
+    });
+    assert!(no_ctx.contains("`ctx: &WorkflowCtx`"), "{no_ctx}");
+}

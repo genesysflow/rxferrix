@@ -1,0 +1,68 @@
+---
+source: crates/ferrix-macros/src/tests.rs
+expression: "func(FnKind::Workflow, false, quote!\n{\n    #[doc = r\" Onboards a user.\"] pub async fn\n    onboard(step: &WorkflowCtx, user: Id<User>, delay_days: Option<u32>) ->\n    Result<String> { BODY }\n})"
+---
+/// Onboards a user.
+pub async fn onboard(
+    step: &WorkflowCtx,
+    user: Id<User>,
+    delay_days: Option<u32>,
+) -> Result<String> {
+    BODY
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::ferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __ferrix_args_onboard {
+    pub user: Id<User>,
+    #[serde(skip_serializing_if = "::core::option::Option::is_none")]
+    pub delay_days: Option<u32>,
+}
+impl ::core::convert::From<(Id<User>, Option<u32>)> for __ferrix_args_onboard {
+    fn from(__ferrix_tuple: (Id<User>, Option<u32>)) -> Self {
+        Self {
+            user: __ferrix_tuple.0,
+            delay_days: __ferrix_tuple.1,
+        }
+    }
+}
+/// Function reference for [`onboard`](fn@onboard).
+#[allow(non_camel_case_types, dead_code)]
+pub struct onboard {}
+impl ::ferrix::FunctionRef for onboard {
+    type Args = __ferrix_args_onboard;
+    type Output = String;
+    fn path() -> ::std::string::String {
+        ::ferrix::__private::function_path(::core::module_path!(), "onboard")
+    }
+}
+impl ::ferrix::workflow::WorkflowFunction for onboard {}
+#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::WORKFLOWS)]
+#[linkme(crate = ::ferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __FERRIX_FN_onboard: ::ferrix::__private::WorkflowDef = ::ferrix::__private::WorkflowDef {
+    module_path: ::core::module_path!(),
+    name: "onboard",
+    handler: |__ferrix_ctx, __ferrix_args| ::std::boxed::Box::pin(async move {
+        let __ferrix_decoded: __ferrix_args_onboard = ::ferrix::__private::decode_args(
+            "onboard",
+            __ferrix_args,
+        )?;
+        let __ferrix_out = onboard(
+                &__ferrix_ctx,
+                __ferrix_decoded.user,
+                __ferrix_decoded.delay_days,
+            )
+            .await?;
+        ::ferrix::__private::encode_output(__ferrix_out)
+    }),
+};

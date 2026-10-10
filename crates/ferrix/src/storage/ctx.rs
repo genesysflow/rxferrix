@@ -123,6 +123,10 @@ impl MutationStorage {
         MutationStorage { db, service, identity }
     }
 
+    pub(crate) fn service(&self) -> &Arc<StorageService> {
+        &self.service
+    }
+
     /// A short-lived (`upload_url_ttl`, default 1 hour), single-use, signed URL to `POST` a file to. The response is
     /// `{ "storageId": "<Id<"_storage">>" }`; the file's `createdBy` is the caller of this mutation.
     pub async fn generate_upload_url(&self) -> Result<String> {

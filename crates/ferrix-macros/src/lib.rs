@@ -1,5 +1,5 @@
 //! Procedural macros for ferrix: `#[table]`, `#[object]`, `#[query]`, `#[mutation]`, `#[action]`, the `internal_*`
-//! variants, and `#[migration]`.
+//! variants, `#[workflow]`, and `#[migration]`.
 //!
 //! The expansions are specified normatively in `docs/CONTRACT.md` §3. Every path the expansions use is fully
 //! qualified (`::core::..`, `::std::..`, `::ferrix::..`), so `use` items in user code cannot change their meaning.
@@ -108,6 +108,23 @@ pub fn action(attr: TokenStream, item: TokenStream) -> TokenStream {
         attr.into(),
         item.into(),
     ))
+}
+
+/// Declares a durable workflow: an `async fn` taking `step: &WorkflowCtx` whose steps (`step.run_query`,
+/// `run_mutation`, `run_action`, `sleep`, `wait_for_event`) are journaled, so it survives restarts and can run for
+/// days. Started with `ctx.workflows.start::<name>(args)`. See `ferrix::workflow`.
+///
+/// ```ignore
+/// #[workflow]
+/// pub async fn onboard(step: &WorkflowCtx, user: Id<User>) -> Result<()> {
+///     step.run_action::<send_welcome>((user,)).with_retries(3).await?;
+///     step.sleep(Duration::from_secs(86_400)).await?;
+///     step.run_mutation::<mark_onboarded>((user,)).await
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    into_tokens(expand_function(FnKind::Workflow, false, attr.into(), item.into()))
 }
 
 /// Declares a query that cannot be called by clients. See `docs/CONTRACT.md` §3.2.

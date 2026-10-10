@@ -17,7 +17,7 @@ use ferrix::prelude::*;
 // prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
 //           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, DocChange,
 //           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
-//           json!, Ferrix
+//           workflow, WorkflowCtx, json!, Ferrix
 use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
@@ -166,8 +166,8 @@ objects.
 
 ```rust
 pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage,    /* private */ }
-pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, /* private */ }
-pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, /* private: runtime handle */ }
+pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, pub workflows: Workflows, /* private */ }
+pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, pub workflows: Workflows, /* private: runtime handle */ }
 // ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7.
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit
 // (in a query: the snapshot's commit time, NOT a reactive clock; see §1.10).
@@ -404,7 +404,7 @@ pub struct AppOptions {
     pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with ferrix::QueryTimeout
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
-    pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons (§1.7)
+    pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons and workpools (§1.7)
     pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
     pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
@@ -919,6 +919,7 @@ pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::schedul
     pub retry_backoff: Duration,       // 1 second
     pub cancel_grace: Duration,        // 5 seconds: a canceled action is aborted this long after the cancel
     pub crons: Vec<CronSpec>,
+    pub pools: Vec<Workpool>,          // Ferrix::workpool(..) / SchedulerOptions::workpool(..)
 }
 impl App {
     pub async fn start_scheduler(&self) -> Result<()>;      // `ferrix serve` calls it; idempotent
@@ -932,6 +933,124 @@ impl App {
 are deterministic: `t.run_due_jobs()` runs what is due; `t.advance_time(d)` moves the clock forward and then runs
 what became due; `t.restart()` / `t.restart_with(options)` reopen the data dir (keeping the clock offset) like a
 restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a socket).
+
+**Workpools and `on_complete`** (built into the scheduler). A workpool is a named limit on
+how many of its actions run at once, with defaults for their retries:
+
+```rust
+ferrix::Ferrix::new()
+    .workpool(Workpool::new("emails").max_parallelism(5).retries(3).backoff(Duration::from_millis(250), 2.0))
+
+#[mutation]
+pub async fn invite(ctx: &MutationCtx, to: String) -> Result<Id<ScheduledJob>> {
+    ctx.scheduler.pool("emails").on_complete::<sent>(to.clone()).enqueue::<send_email>((to,)).await
+}
+
+#[internal_mutation]   // `{ workId, context, result }`, result = { kind: "success", returnValue } | { kind: "failed", error } | { kind: "canceled" }
+pub async fn sent(ctx: &MutationCtx, work_id: Id<ScheduledJob>, context: String, result: WorkResult<String>) -> Result<()> { … }
+```
+```rust
+pub struct Workpool { pub name: String, pub max_parallelism: usize /* 10 */, pub retries: u32 /* 0 */, pub backoff: Option<Backoff> }
+impl Scheduler {   // each returns a ScheduleWith; the options combine, in any order
+    pub fn pool(&self, name: &str) -> ScheduleWith<'_>;
+    pub fn on_complete<F: MutationFunction>(&self, context: impl Serialize) -> ScheduleWith<'_>;
+    pub async fn cancel_pool(&self, name: &str) -> Result<u64>;   // every pending job and running action of the pool
+}
+impl ScheduleWith<'_> {
+    pub fn pool(self, name: &str) -> Self;  pub fn with_retries(self, n: u32) -> Self;
+    pub fn backoff(self, initial: Duration, base: f64) -> Self;
+    pub fn on_complete<F: MutationFunction>(self, context: impl Serialize) -> Self;
+    pub async fn run_after<F>(self, delay, args) -> Result<Id<ScheduledJob>>;  run_at<F>(..);  enqueue<F>(args) /* = run_after(0) */
+}
+#[serde(tag = "kind")] pub enum WorkResult<T = Value> { Success { return_value: T /* "returnValue" */ }, Failed { error: String }, Canceled }
+```
+- **Slots.** Every running action holds a slot of its pool: the default pool's (`SchedulerOptions::concurrency`) when
+  scheduled without `pool`, else its workpool's `max_parallelism`. Pools don't share slots: a full pool doesn't hold
+  up the default pool or another pool. Within a pool, actions start in the order they are due. **Mutations need no
+  slot** (they run one at a time in the dispatcher anyway, first in each round), whatever their pool.
+- **Defaults.** An action in a pool gets the pool's `retries` and `backoff` unless the call sets its own. Backoff:
+  wait `initial`, then `base` times longer before each further retry, at most an hour (default: `retry_backoff`,
+  doubling). Pools are declared at startup (unknown name: an error when scheduling; duplicate names, empty names or
+  `max_parallelism: 0` fail `App::open`). Pending actions naming a pool the app no longer declares still run, in a
+  pool of the default size (with a warning at startup).
+- **`on_complete`.** When the job reaches its final state (success; failed once no retries are left, including
+  "server restarted while running"; canceled, also while running), the transaction that records it also schedules
+  the mutation `F` (due now, origin `onComplete:<job id>`) with args `{ workId, context, result }`. So it runs exactly
+  once, after the outcome is committed, in its own transaction (if it fails, that's its own failed job; the work's
+  outcome stands). A return value too large for job args (1 MiB) is passed as `failed`. `on_complete::<F>` only takes
+  a mutation (`MutationFunction`: an action doesn't compile).
+
+### 1.7.1 Workflows
+
+Durable functions made of steps. A `#[workflow]` body awaits **steps**; each step's
+outcome is journaled, so a workflow survives restarts, can sleep for days, and wait for events:
+
+```rust
+#[workflow]
+pub async fn onboard(step: &WorkflowCtx, user: Id<User>) -> Result<String> {
+    let email = step.run_query::<email_of>((user,)).await?;
+    step.run_action::<send_welcome>((email,)).with_retries(3).pool("emails").await?;
+    step.sleep(Duration::from_secs(3 * 86_400)).await?;
+    let (a, b) = futures::try_join!(step.run_action::<x>(()).into_future(), step.run_action::<y>(()).into_future())?;
+    let answer: String = step.wait_for_event("survey").await?;
+    step.run_mutation::<save_answer>((user, answer.clone())).await?;
+    Ok(answer)
+}
+
+#[mutation]
+pub async fn sign_up(ctx: &MutationCtx, email: String) -> Result<Id<Workflow>> {
+    let user = ctx.db.insert(User { email }).await?;
+    ctx.workflows.on_complete::<onboarded>(user).start::<onboard>((user,)).await   // only if this commits
+}
+```
+```rust
+impl WorkflowCtx {
+    pub fn workflow_id(&self) -> Id<Workflow>;
+    pub fn run_query<F: QueryFunction>(&self, args) -> Step<F::Output>;        // inside the advancing transaction
+    pub fn run_mutation<F: MutationFunction>(&self, args) -> Step<F::Output>;  // a scheduled job: exactly once
+    pub fn run_action<F: ActionFunction>(&self, args) -> Step<F::Output>;      // a scheduled job: at most once per attempt
+    pub fn sleep(&self, d: Duration) -> Step<()>;
+    pub fn wait_for_event<T: DeserializeOwned>(&self, name: &str) -> Step<T>;
+}
+impl<T> Step<T> { pub fn with_retries(self, n: u32) -> Self; pub fn pool(self, name: &str) -> Self; pub fn backoff(self, initial: Duration, base: f64) -> Self; }
+impl<T: DeserializeOwned> IntoFuture for Step<T> { type Output = Result<T>; }
+pub struct Workflows;   // ctx.workflows in MutationCtx (transactional) and ActionCtx (immediate)
+impl Workflows {
+    pub async fn start<W: WorkflowFunction>(&self, args: impl Into<W::Args>) -> Result<Id<Workflow>>;
+    pub fn on_complete<F: MutationFunction>(&self, context: impl Serialize) -> StartWith<'_>;   // .start::<W>(args)
+    pub async fn cancel(&self, id: Id<Workflow>) -> Result<()>;
+    pub async fn send_event(&self, id: Id<Workflow>, name: &str, value: impl Serialize) -> Result<()>;
+}
+```
+- **How it runs** (`crate::workflow::engine`). `start` inserts the `_workflows` row (state `running`) and schedules
+  `_system/workflow:advance`. Advancing runs the body **from the start** inside that mutation: every step it starts
+  gets the next index (in the order the step futures are created, i.e. awaited or passed to `try_join!`); a step in
+  the journal (`_workflow_steps`) resolves at once with its recorded result or error, a new one is recorded and stays
+  pending. When the body can't go further, the new steps start: **queries** run right there in the transaction (and
+  the body runs again with their result, up to 100 times per transaction, then a new `advance` job continues);
+  **mutations and actions** become scheduled jobs (pool, retries and backoff from the step's options, origin
+  `workflow:<id>`) whose `on_complete` is `_system/workflow:step_done`, which records the outcome and advances, in one
+  transaction; a **sleep** schedules `_system/workflow:wake` for when it ends; an **event** waits for `send_event`.
+  Steps started together (`try_join!`) run in parallel.
+- **The body must be deterministic**: replayed with the same step outcomes it must start the same steps in the same
+  order. It reads and writes only through steps, sleeps with `step.sleep`, and keeps the clock and randomness in steps.
+  Each run checks that step `i` is the same kind and function (or event name) as journaled; if not (e.g. code changed
+  while it ran) the workflow **fails** ("not deterministic"). Racing steps (`select!`) can replay differently: avoid.
+- **Errors.** A failed step is an `Err` the body can handle (compensate, try something else); `?` lets it end the
+  workflow as `failed` with that error. A step that can't be scheduled (e.g. an unknown pool) fails the same way. A
+  body that returns `Err`, panics, or waits on anything that isn't a step fails the workflow. At most 10 000 steps.
+- **Events.** `send_event(id, name, value)` completes the oldest step waiting for `name`, or is kept on the workflow
+  (`events`) for the next `wait_for_event(name)`; each event is taken once. `not_found` for an unknown workflow,
+  `finished` for a finished one.
+- **Cancel.** `cancel(id)` finishes a running workflow as `canceled` (`error` = `"Canceled by <path>"`): its running
+  steps are canceled (their jobs too, a running action is signaled as in §1.7), what its steps already did stays done.
+  A finished workflow is left alone.
+- **`on_complete`** works like the scheduler's: `{ workflowId, context, result: WorkResult }`, scheduled in the
+  transaction that finishes the workflow (origin `workflow:<id>`).
+- **Status** is the workflow's document: `ctx.db.get(id)` (live in a query); `Id<Workflow>` can be returned to
+  clients (`Id<"_workflows">`, see §4). Finished workflows and their steps are deleted with the scheduler's
+  `retention`.
+- In an action, `ctx.workflows` calls the internal mutations `_system/workflow:start`, `:cancel` and `:send_event`.
 
 ### 1.8 Search: full-text (FTS5) and vector (sqlite-vec)
 
@@ -1415,6 +1534,9 @@ pub fn ts_output<T: ts_rs::TS + ?Sized + 'static>() -> String;   // T::name(cfg)
                                                                  // name (codegen declares them and their dependencies)
 /// `TableDef::validate` of a table: Ok iff `doc` deserializes as `Doc<T>`; Err = the serde error message.
 pub fn validate_doc<T: Table>(doc: &serde_json::Value) -> Result<(), String>;
+#[linkme::distributed_slice] pub static WORKFLOWS: [WorkflowDef];
+pub type WorkflowHandler = fn(WorkflowCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
+pub struct WorkflowDef { pub module_path: &'static str, pub name: &'static str, pub handler: WorkflowHandler }
 #[linkme::distributed_slice] pub static MIGRATIONS: [MigrationDef];
 pub type MigrationHandler = for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, Result<DocChange>>;
 pub struct MigrationDef {
@@ -1603,6 +1725,11 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
 - Mutations use `Handler::Mutation` + `impl MutationFunction`; actions use `Handler::Action` + `impl ActionFunction`.
   Both also get `impl ::ferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
   don't.
+- **`#[workflow]`** expands the same way (args struct, `From` tuple, reference struct, `FunctionRef`) with ctx type
+  `WorkflowCtx`, `impl ::ferrix::workflow::WorkflowFunction` instead of a function trait, no `SchedulableFunction`,
+  and registers a `WorkflowDef { module_path, name, handler }` in `__private::WORKFLOWS` (not `FUNCTIONS`: workflows
+  are started by functions, never called by clients, and aren't in codegen). It takes no arguments (`dev_only` is an
+  error).
 
 ### 3.3 `#[migration]`
 
@@ -1706,7 +1833,7 @@ ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping)
 
 - **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
   in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
-  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`
+  of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`, `_workflows`
   and `_scheduled_jobs`, whose TS types inline their enums so no extra named types are declared)
   are declared in a separate `SystemDataModel`, and the generated `Id<T>` / `Doc<T>` accept
   `TableNames | keyof SystemDataModel`.
@@ -1782,14 +1909,19 @@ Defined in `crates/ferrix/src/scheduler` with the normal macros (§1.7).
 "inProgress" | "success" | "failed" | "canceled", attempts, maxAttempts, result: string | null (the return value as
 JSON text), error: string | null (both cut to 4 KiB), scheduledAt, startedAt, completedAt, origin: string | null (the
 scheduling function's path, "cron:<name>" or "dashboard") }`, with indexes `by_state_run_at = [state, runAt,
-scheduledAt]` and `by_completed_at = [completedAt]`. Mutation jobs never show `inProgress`.
+scheduledAt]`, `by_completed_at = [completedAt]`, `by_kind_state_run_at = [kind, state, runAt, scheduledAt]` (the
+dispatcher's mutations) and `by_kind_pool_state_run_at = [kind, pool, state, runAt, scheduledAt]` (each pool's
+actions). Mutation jobs never show `inProgress`. Workpools (§1.7) add `pool: string | null`, `onComplete: { path,
+context } | null` and `backoff: { initialMs, base } | null`; `origin` can also be `"onComplete:<job id>"` or
+`"workflow:<id>"`.
 
 **`_crons`** (`Cron`): `{ name, schedule (the expression, or "every 5m"), timezone (IANA name, null for UTC), path,
 args, lastRun, nextRun, lastJob }`, indexes `by_name` and `by_next_run`. Names starting with `_` are system crons.
 
 | Path `_system/scheduler:…` | Kind | Args → result |
 |---|---|---|
-| `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin? }` → job id. `ctx.scheduler` in actions. |
+| `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin?, pool?, onComplete?, backoff? }` → job id. `ctx.scheduler` in actions. |
+| `cancel_pool` | internal mutation | `{ pool, reason }` → how many were canceled. `ctx.scheduler.cancel_pool` in actions. |
 | `cancel` | internal mutation | `{ id, reason? }` → `"canceled" \| "alreadyFinished"`. `ctx.scheduler.cancel` in actions. |
 | `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. |
 | `cancel_job` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished"`. Pending jobs and **actions in progress** (signaled, then aborted after `cancel_grace`; §1.7); `error` = `"Canceled from the dashboard by admin:<id>"` (+ `" (while running)"`, then how the action ended). |
@@ -1799,6 +1931,34 @@ args, lastRun, nextRun, lastJob }`, indexes `by_name` and `by_next_run`. Names s
 
 The admin functions start with `ctx.auth.require_admin()` like §4.1; `invalid_id` / `not_found` for bad ids. The
 dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`), its Scheduler page at `/_/scheduler`.
+
+### 4.1.2.1 Workflow tables and system functions
+
+Defined in `crates/ferrix/src/workflow` (§1.7.1).
+
+**`_workflows`** (`Workflow`): `{ name (the workflow's path), args, state: "running" | "success" | "failed" |
+"canceled", result (the return value, in full), error, steps (started so far), startedAt, completedAt, origin,
+onComplete: { path, context } | null, events: [{ name, value }] (sent before they were waited for) }`, indexes
+`by_state = [state, startedAt]` and `by_completed_at = [completedAt]`. Referenceable by app code (§4).
+
+**`_workflow_steps`** (`WorkflowStep`): `{ workflow, index, kind: "query" | "mutation" | "action" | "sleep" | "event",
+name (function path, event name, or "sleep"), args (`{ ms }` for a sleep), state: "running" | "success" | "failed" |
+"canceled", result (in full: replays read it), error, job (the job that runs or ends it), startedAt, completedAt }`,
+index `by_workflow = [workflow, index]`.
+
+| Path `_system/workflow:…` | Kind | Args → result |
+|---|---|---|
+| `advance` | internal mutation | `{ workflow }`: run the body, start new steps (the engine's job). |
+| `step_done` | internal mutation | `{ workId, context: step id, result }`: the `on_complete` of mutation and action steps. |
+| `wake` | internal mutation | `{ step }`: a sleep has ended. |
+| `start` | internal mutation | `{ name, args, onComplete?, origin? }` → workflow id. `ctx.workflows.start` in actions. |
+| `cancel` | internal mutation | `{ id, reason }` → whether it was running. `ctx.workflows.cancel` in actions. |
+| `send_event` | internal mutation | `{ id, name, value }`. `ctx.workflows.send_event` in actions. |
+| `list` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_workflows">>`, newest first. Live. |
+| `steps` | query (admin) | `{ id }` → the workflow's steps in order. Live. |
+| `cancel_workflow` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished"`; `error` = `"Canceled from the dashboard by admin:<id>"`. |
+
+The dashboard's Workflows page (`/_/workflows[?state=…&id=…]`) lists them and shows an open workflow's steps.
 
 ### 4.1.3 Migration table and system functions
 

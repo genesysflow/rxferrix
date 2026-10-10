@@ -53,6 +53,17 @@ export function formatDuration(us: number): string {
   return `${(us / 1_000_000).toFixed(2)}s`;
 }
 
+/** A span of `ms` milliseconds at a readable scale: `850ms`, `12.4s`, `3m 05s`, `2h 10m`, `3d 4h`. */
+export function formatSpan(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.floor(ms / 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ${pad(Math.floor((s % 3600) / 60))}m`;
+  return `${Math.floor(s / 86_400)}d ${Math.floor((s % 86_400) / 3600)}h`;
+}
+
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   const units = ["KB", "MB", "GB", "TB"];

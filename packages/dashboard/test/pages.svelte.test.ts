@@ -10,6 +10,7 @@ import CommandPalette from "../src/components/CommandPalette.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
 import Backups from "../src/pages/Backups.svelte";
 import Settings from "../src/pages/Settings.svelte";
+import Workflows from "../src/pages/Workflows.svelte";
 
 let target: HTMLElement;
 let mounted: ReturnType<typeof mount> | null = null;
@@ -275,6 +276,106 @@ describe("Backups page", () => {
     expect(JSON.parse(staged.init!.body as string)).toEqual({ toTs: 110 });
     expect(text("pending-restore")).toContain("plus 10 replayed commits");
     expect(button("Restore to this point").disabled).toBe(true);
+  });
+});
+
+describe("Workflows page", () => {
+  it("lists workflows, shows an open one's steps, and cancels it", async () => {
+    const server = new FakeServer();
+    const client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    const toast = vi.fn();
+    const ctx: DashboardContext = {
+      auth: { getAccessToken: async () => "token" } as unknown as DashboardContext["auth"],
+      tables: [],
+      tableByNumber: () => undefined,
+      toast,
+    };
+    vi.stubGlobal("confirm", () => true);
+    const now = Date.now();
+    const wf = {
+      _id: "w1",
+      _creationTime: now - 7_200_000,
+      name: "onboarding:onboard",
+      args: { user: "u1" },
+      state: "running",
+      result: null,
+      error: null,
+      steps: 4,
+      startedAt: now - 7_200_000,
+      completedAt: null,
+      origin: "users:sign_up",
+      onComplete: { path: "onboarding:done", context: null },
+      events: [{ name: "note", value: "early" }],
+    };
+    const step = (index: number, kind: string, name: string, state: string, extra: Record<string, unknown> = {}) => ({
+      _id: `s${index}`,
+      _creationTime: now,
+      workflow: "w1",
+      index,
+      kind,
+      name,
+      args: {},
+      state,
+      result: null,
+      error: null,
+      job: null,
+      startedAt: now - 7_000_000,
+      completedAt: state === "running" ? null : now - 6_000_000,
+      ...extra,
+    });
+    const steps = [
+      step(0, "query", "users:email_of", "success", { result: "a@b.co" }),
+      step(1, "action", "emails:send", "failed", { error: "SMTP said no", job: "j1" }),
+      step(2, "sleep", "sleep", "success", { args: { ms: 3_600_000 } }),
+      step(3, "event", "survey", "running", { args: null }),
+    ];
+    mounted = mount(Workflows, {
+      target,
+      props: { route: { page: "workflows", rest: [], params: new URLSearchParams("id=w1") } },
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@ferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await settle();
+    const added = () =>
+      server
+        .drain()
+        .flatMap((m) => (m.type === "ModifyQuerySet" ? m.modifications : []))
+        .filter((m) => m.type === "Add");
+    const listId = added().find((m) => m.udfPath === "_system/workflow:list")!.queryId;
+    server.transition({ querySet: 1, ts: 1 }, [
+      { type: "QueryUpdated", queryId: listId, value: { page: [wf], isDone: true, continueCursor: "end" } },
+    ]);
+    await settle();
+    // The open workflow's steps are subscribed once its row shows.
+    const stepsAdd = added().find((m) => m.udfPath === "_system/workflow:steps")!;
+    expect(stepsAdd.args).toEqual({ id: "w1" });
+    server.transition({ querySet: 2 }, [{ type: "QueryUpdated", queryId: stepsAdd.queryId, value: steps }]);
+    await settle();
+    const text = (id: string) => target.querySelector(`[data-testid=${id}]`)?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    expect(text("workflows")).toContain("onboarding:onboard");
+    expect(text("workflows")).toContain("2h 00m"); // running for two hours
+    expect(text("workflows")).toContain("note: \"early\"");
+    const rows = [...target.querySelectorAll("[data-testid=workflow-steps] tbody tr")].map((r) => r.textContent!.replace(/\s+/g, " ").trim());
+    expect(rows).toHaveLength(4);
+    expect(rows[0]).toContain("users:email_of");
+    expect(rows[0]).toContain("a@b.co");
+    expect(rows[1]).toContain("SMTP said no");
+    expect(rows[2]).toContain("for 1h 00m");
+    expect(rows[3]).toContain("waiting for the event");
+
+    button("Cancel").click();
+    await settle();
+    const cancel = server.drain().find((m) => m.type === "Mutation")!;
+    expect(cancel).toMatchObject({ udfPath: "_system/workflow:cancel_workflow", args: { id: "w1" } });
+    if (cancel.type !== "Mutation") throw new Error("unreachable");
+    server.push({ type: "MutationResponse", requestId: cancel.requestId, success: true, result: "canceled", ts: 2 });
+    server.transition({ ts: 2 });
+    await settle();
+    expect(toast).toHaveBeenCalledWith("Workflow canceled", "info");
+    client.close();
   });
 });
 

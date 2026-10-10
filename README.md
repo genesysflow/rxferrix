@@ -257,6 +257,45 @@ finished jobs are deleted after 7 days. In a time zone, a run in the hour skippe
 hour later, and a time of day in the repeated fall-back hour runs once. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
 deterministically. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.7.
 
+**Workpools** limit how many actions of one kind run at once, with default retries, and **`on_complete`** runs a
+mutation with the outcome once a job has finished (exactly once, in the transaction that records the outcome):
+
+```rust
+ferrix::Ferrix::new().workpool(Workpool::new("emails").max_parallelism(5).retries(3))
+
+ctx.scheduler.pool("emails").on_complete::<sent>(user).enqueue::<send_email>((to,)).await?;
+// sent(ctx, work_id: Id<ScheduledJob>, context: Id<User>, result: WorkResult<String>)
+```
+
+Each pool has its own slots, so a full pool doesn't hold up the others. `ctx.scheduler.cancel_pool("emails")`
+cancels everything queued or running in it.
+
+## Workflows
+
+A `#[workflow]` is a durable function made of steps. Each step's outcome is journaled, so a workflow survives
+restarts, can sleep for days and wait for events, and each mutation step runs exactly once:
+
+```rust
+#[workflow]
+pub async fn onboard(step: &WorkflowCtx, user: Id<User>) -> Result<String> {
+    let email = step.run_query::<email_of>((user,)).await?;
+    step.run_action::<send_welcome>((email,)).with_retries(3).pool("emails").await?;
+    step.sleep(Duration::from_secs(3 * 86_400)).await?;
+    let answer: String = step.wait_for_event("survey").await?;   // ctx.workflows.send_event(id, "survey", ..)
+    step.run_mutation::<save_answer>((user, answer.clone())).await?;
+    Ok(answer)
+}
+
+// In a mutation (transactional) or an action:
+let id: Id<Workflow> = ctx.workflows.on_complete::<onboarded>(user).start::<onboard>((user,)).await?;
+```
+
+The body runs again from the start whenever a step finishes. Steps already in the journal return their recorded
+result at once, so the body must be deterministic: it touches the database and the outside world only through steps.
+A failed step is an `Err` the body can handle. Steps run in parallel with `try_join!`, and `ctx.workflows.cancel(id)`
+stops a workflow. Its status is its `_workflows` document, so a query can show progress live. The dashboard has a
+Workflows page. Details: [docs/CONTRACT.md](docs/CONTRACT.md) §1.7.1.
+
 ## Search
 
 Full-text search uses SQLite FTS5 and vector search uses sqlite-vec, both compiled into the binary. The indexes are
@@ -396,6 +435,7 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.
 - **Files**: stored files with thumbnails and previews (images, video, audio, text), download, delete, and upload by
   drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
+- **Workflows**: workflows by state, an open one's steps (args, outcome, duration, job), and cancel.
 - **Scheduler**: crons with their schedule, time zone, last and next run, and "run now" (system crons last);
   scheduled jobs live, by state, with cancel (running actions too), run now and retry.
 - **Migrations**: every `#[migration]` in run order with its dependencies, live progress, errors linking to the failing

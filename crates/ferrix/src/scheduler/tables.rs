@@ -49,12 +49,35 @@ pub enum JobKind {
     Action,
 }
 
+/// What to run once a job has finished ([`ScheduledJob::on_complete`]): the mutation at `path`, with args
+/// `{ workId, context, result }` ([`crate::scheduler::WorkResult`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct OnComplete {
+    pub path: String,
+    #[ts(type = "any")]
+    pub context: Value,
+}
+
+/// How long to wait before retrying a failed action: `initial_ms`, then `initial_ms * base`, `* base²`, ... (at most
+/// an hour).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct Backoff {
+    pub initial_ms: f64,
+    pub base: f64,
+}
+
 /// A scheduled run of a mutation or an action (`_scheduled_jobs`). Created by `ctx.scheduler.run_after` /
 /// `run_at`, by crons, and by the dashboard's "run now" on a finished job. The TS types are inlined (`#[ts(type)]`)
 /// so app code can return `Id<ScheduledJob>` (`Id<"_scheduled_jobs">`) without declaring extra named types.
 #[table(name = "_scheduled_jobs")]
 #[index(by_state_run_at = [state, run_at, scheduled_at])]
 #[index(by_completed_at = [completed_at])]
+#[index(by_kind_state_run_at = [kind, state, run_at, scheduled_at])]
+#[index(by_kind_pool_state_run_at = [kind, pool, state, run_at, scheduled_at])]
 pub struct ScheduledJob {
     // The function's path, e.g. "todos:add".
     pub path: String,
@@ -81,8 +104,17 @@ pub struct ScheduledJob {
     pub started_at: Option<f64>,
     // Set once the job is success, failed or canceled.
     pub completed_at: Option<f64>,
-    // Who scheduled it: a function path, "cron:<name>", or "dashboard".
+    // Who scheduled it: a function path, "cron:<name>", "dashboard", "onComplete:<job id>" or "workflow:<id>".
     pub origin: Option<String>,
+    // The workpool whose parallelism limits this action (`Ferrix::workpool`); null for the default pool
+    // (`SchedulerOptions::concurrency`). Mutations run one at a time whatever their pool.
+    pub pool: Option<String>,
+    // The mutation run once the job has finished (success, failed or canceled), as a job of its own.
+    #[ts(type = "{ path: string, context: any } | null")]
+    pub on_complete: Option<OnComplete>,
+    // The retry backoff of this action; null for the scheduler's (`SchedulerOptions::retry_backoff`, doubling).
+    #[ts(type = "{ initialMs: number, base: number } | null")]
+    pub backoff: Option<Backoff>,
 }
 
 /// A cron declared with `Ferrix::cron` / `Ferrix::cron_tz` / `Ferrix::interval` (`_crons`), reconciled at startup:

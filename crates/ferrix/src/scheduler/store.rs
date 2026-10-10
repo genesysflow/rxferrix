@@ -5,7 +5,7 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::tables::{JobKind, JobState, ScheduledJob};
+use super::tables::{Backoff, JobKind, JobState, OnComplete, ScheduledJob};
 use crate::UserError;
 use crate::db::query::{MutationDb, QueryDb, Source};
 use crate::id::Id;
@@ -25,6 +25,17 @@ pub(crate) struct NewJob {
     pub run_at: f64,
     pub max_attempts: u32,
     pub origin: Option<String>,
+    pub pool: Option<String>,
+    pub on_complete: Option<OnComplete>,
+    pub backoff: Option<Backoff>,
+}
+
+impl NewJob {
+    /// A job with no pool, completion callback or custom backoff.
+    pub fn new(path: String, kind: JobKind, args: Value, run_at: f64, attempts: u32, origin: Option<String>) -> NewJob {
+        let max_attempts = attempts;
+        NewJob { path, kind, args, run_at, max_attempts, origin, pool: None, on_complete: None, backoff: None }
+    }
 }
 
 /// The kind of the function at `path`, if it can be scheduled.
@@ -60,6 +71,9 @@ pub(crate) async fn insert(db: &MutationDb, job: NewJob, now: f64) -> crate::Res
         started_at: None,
         completed_at: None,
         origin: job.origin,
+        pool: job.pool,
+        on_complete: job.on_complete,
+        backoff: job.backoff,
     };
     let id = db.insert(value.clone()).await?;
     // `scheduledAt` := the document's `_creationTime`, which is strictly increasing across all inserts (even within
@@ -71,6 +85,75 @@ pub(crate) async fn insert(db: &MutationDb, job: NewJob, now: f64) -> crate::Res
         db.replace(id, value).await?;
     }
     Ok(id)
+}
+
+/// How a job ended: the `result` passed to its `on_complete` mutation (`{ workId, context, result }`), as
+/// `{ "kind": "success", "returnValue": … }`, `{ "kind": "failed", "error": "…" }` or `{ "kind": "canceled" }`.
+///
+/// ```ignore
+/// #[internal_mutation]
+/// pub async fn email_sent(ctx: &MutationCtx, work_id: Id<ScheduledJob>, context: Id<User>, result: WorkResult<String>)
+///     -> Result<()> { … }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", tag = "kind")]
+pub enum WorkResult<T = Value> {
+    Success {
+        #[serde(rename = "returnValue")]
+        #[ts(rename = "returnValue")]
+        return_value: T,
+    },
+    Failed {
+        error: String,
+    },
+    Canceled,
+}
+
+impl<T> WorkResult<T> {
+    /// The return value, or an error for a failed or canceled job.
+    pub fn into_result(self) -> crate::Result<T> {
+        match self {
+            WorkResult::Success { return_value } => Ok(return_value),
+            WorkResult::Failed { error } => Err(anyhow::anyhow!("{error}")),
+            WorkResult::Canceled => Err(anyhow::anyhow!("canceled")),
+        }
+    }
+}
+
+/// A job has finished (`job` is its final state, about to be written in the caller's transaction): if it has an
+/// `on_complete`, schedule that mutation, due now, in the same transaction, so it runs exactly once, after the
+/// outcome is committed. A return value too large to pass on (over [`MAX_ARGS_BYTES`]) is passed as a failure.
+pub(crate) async fn finished(
+    db: &MutationDb,
+    id: Id<ScheduledJob>,
+    job: &ScheduledJob,
+    result: WorkResult,
+    now: f64,
+) -> crate::Result<()> {
+    let Some(on_complete) = &job.on_complete else { return Ok(()) };
+    let origin = format!("onComplete:{id}");
+    schedule_on_complete(db, on_complete, ("workId", serde_json::to_value(id)?), result, now, origin).await
+}
+
+/// Schedule `on_complete`, due now, with args `{ <key>: <id>, context, result }`. A return value too large to pass on
+/// (over [`MAX_ARGS_BYTES`]) is passed as a failure.
+pub(crate) async fn schedule_on_complete(
+    db: &MutationDb,
+    on_complete: &OnComplete,
+    (key, id): (&str, Value),
+    result: WorkResult,
+    now: f64,
+    origin: String,
+) -> crate::Result<()> {
+    let mut args = serde_json::json!({ key: id, "context": on_complete.context, "result": result });
+    let size = serde_json::to_string(&args)?.len();
+    if size > MAX_ARGS_BYTES {
+        let error = format!("the return value is too large to pass to onComplete ({size} bytes, max {MAX_ARGS_BYTES})");
+        args["result"] = serde_json::to_value(WorkResult::<Value>::Failed { error })?;
+    }
+    insert(db, NewJob::new(on_complete.path.clone(), JobKind::Mutation, args, now, 1, Some(origin)), now).await?;
+    Ok(())
 }
 
 /// What [`cancel`] did.
@@ -101,11 +184,36 @@ pub(crate) async fn cancel(db: &MutationDb, id: Id<ScheduledJob>, now: f64, reas
     value.completed_at = Some(now);
     let reason = truncate(if running { format!("{reason} (while running)") } else { reason.to_string() });
     value.error = Some(reason.clone());
+    finished(db, id, &value, WorkResult::Canceled, now).await?;
     db.replace(id, value).await?;
     if running {
         db.txn().on_commit(move || super::cancellation::signal(id, &reason));
     }
     Ok(CancelOutcome::Canceled)
+}
+
+/// Cancel every pending job and running action of workpool `pool`, in the caller's transaction. Returns how many.
+pub(crate) async fn cancel_pool(db: &MutationDb, pool: &str, now: f64, reason: &str) -> crate::Result<u64> {
+    let mut canceled = 0;
+    for kind in [JobKind::Mutation, JobKind::Action] {
+        for state in [JobState::Pending, JobState::InProgress] {
+            let jobs = db
+                .query::<ScheduledJob>()
+                .with_index(ScheduledJob::by_kind_pool_state_run_at, |q| {
+                    q.eq(ScheduledJob::kind, kind)
+                        .eq(ScheduledJob::pool, Some(pool.to_string()))
+                        .eq(ScheduledJob::state, state)
+                })
+                .collect()
+                .await?;
+            for job in jobs {
+                if cancel(db, job.id, now, reason).await? == CancelOutcome::Canceled {
+                    canceled += 1;
+                }
+            }
+        }
+    }
+    Ok(canceled)
 }
 
 /// `s` cut to [`MAX_OUTCOME_BYTES`] (on a char boundary, with `…` appended when cut).

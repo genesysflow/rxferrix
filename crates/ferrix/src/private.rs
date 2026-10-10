@@ -42,6 +42,30 @@ pub static TABLES: [fn() -> TableDef];
 #[linkme::distributed_slice]
 pub static FUNCTIONS: [FunctionDef];
 
+/// Every `#[workflow]` registers a definition here (`crate::workflow`).
+#[linkme::distributed_slice]
+pub static WORKFLOWS: [WorkflowDef];
+
+/// Runs a workflow's body (replaying its journal) up to the first step that hasn't finished.
+pub type WorkflowHandler =
+    fn(crate::workflow::WorkflowCtx, serde_json::Value) -> BoxFuture<'static, crate::Result<serde_json::Value>>;
+
+/// A `#[workflow]`.
+pub struct WorkflowDef {
+    /// `module_path!()` at the definition site.
+    pub module_path: &'static str,
+    /// The Rust fn name.
+    pub name: &'static str,
+    pub handler: WorkflowHandler,
+}
+
+impl WorkflowDef {
+    /// The workflow's path, named like a function's (`"onboarding:onboard"`).
+    pub fn path(&self) -> String {
+        function_path(self.module_path, self.name)
+    }
+}
+
 /// Every `#[migration]` registers a definition here (`crate::migrations`).
 #[linkme::distributed_slice]
 pub static MIGRATIONS: [MigrationDef];

@@ -17,6 +17,8 @@ mod group_commit;
 mod hardening;
 mod fuzz;
 mod index_order;
+mod workflow;
+mod workpool;
 mod jwt;
 mod limits;
 mod macros;

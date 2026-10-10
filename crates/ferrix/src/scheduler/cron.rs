@@ -336,6 +336,9 @@ pub(crate) async fn enqueue_now(
         args: value.args.clone(),
         run_at: now,
         max_attempts: 1,
+        pool: None,
+        on_complete: None,
+        backoff: None,
         origin: Some(format!("cron:{}", value.name)),
     };
     let id = store::insert(db, job, now).await?;
@@ -386,6 +389,9 @@ pub(crate) async fn fire_due(app: &App, crons: &[ParsedCron], now: f64) -> crate
                         args: cron.args.clone(),
                         run_at: now,
                         max_attempts: 1,
+                        pool: None,
+                        on_complete: None,
+                        backoff: None,
                         origin: Some(format!("cron:{}", cron.name)),
                     };
                     let id = store::insert(&db, job, now).await?;

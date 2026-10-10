@@ -192,10 +192,11 @@ fn generates_from_the_real_registry() {
     assert!(dm.contains(
         "export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };"
     ));
-    // `_scheduled_jobs`, `_storage` and `_users` may be referenced by app code; other system tables are left out
-    // entirely. The job's enums are inlined, so no extra named types (that could clash with the app's) are declared.
+    // `_scheduled_jobs`, `_storage`, `_users` and `_workflows` may be referenced by app code; other system tables are
+    // left out entirely. The job's enums are inlined, so no extra named types (that could clash with the app's) are
+    // declared.
     assert!(
-        dm.contains("export type SystemDataModel = {\n  \"_scheduled_jobs\": { path: string, kind: \"mutation\" | \"action\", args: any, runAt: number, state: \"pending\" | \"inProgress\" | \"success\" | \"failed\" | \"canceled\", attempts: number, maxAttempts: number, result: string | null, error: string | null, scheduledAt: number, startedAt: number | null, completedAt: number | null, origin: string | null, };\n  \"_storage\": { sha256: string, size: number, contentType: string | null, createdBy: string | null, filename: string | null, };\n  \"_users\": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };\n};\n"),
+        dm.contains("export type SystemDataModel = {\n  \"_scheduled_jobs\": { path: string, kind: \"mutation\" | \"action\", args: any, runAt: number, state: \"pending\" | \"inProgress\" | \"success\" | \"failed\" | \"canceled\", attempts: number, maxAttempts: number, result: string | null, error: string | null, scheduledAt: number, startedAt: number | null, completedAt: number | null, origin: string | null, pool: string | null, onComplete: { path: string, context: any } | null, backoff: { initialMs: number, base: number } | null, };\n  \"_storage\": { sha256: string, size: number, contentType: string | null, createdBy: string | null, filename: string | null, };\n  \"_users\": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };\n  \"_workflows\": { name: string, args: any, state: \"running\" | \"success\" | \"failed\" | \"canceled\", result: any, error: string | null, steps: number, startedAt: number, completedAt: number | null, origin: string | null, onComplete: { path: string, context: any } | null, events: Array<{ name: string, value: any }>, };\n};\n"),
         "{dm}"
     );
     assert!(!dm.contains("JobState") && !dm.contains("_crons"), "{dm}");

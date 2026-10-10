@@ -392,79 +392,99 @@ async fn subscribers(app: &ferrix::App, clients: u64, queries: u64) -> Vec<tokio
 /// Mutations are serialized: each holds the writer lock for its whole run, so throughput is about 1 / (time per
 /// mutation) however many writers there are, and latency grows with the queue. Scenarios: a one-insert mutation at
 /// 1 to 64 concurrent writers; with idempotency keys (the WebSocket path); 10 inserts per mutation; read 100 documents
-/// (an index range) then insert; every writer incrementing one counter (checked: no lost updates); with continuous replication's
-/// journal; with 100 subscribed clients; and fast writers queued behind a mutation that awaits 20 ms. In-process
+/// (an index range) then insert; every writer incrementing one counter (checked: no lost updates); with continuous
+/// replication's journal; with 100 subscribed clients; and fast writers queued behind a mutation that awaits 20 ms. In-process
 /// (`App::execute_mutation`): no JSON over a socket. SQLite runs in WAL mode with `synchronous = NORMAL`, so a commit
-/// doesn't wait for fsync. Tunable: `BENCH_SECS` (2 per scenario).
+/// doesn't wait for fsync. Tunable: `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, many,
+/// scan, counter, replication, subscribers, slow), `BENCH_WRITERS` (for insert: 1,4,16,64).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_writes() {
     let secs = env("BENCH_SECS", 2) as f64;
+    // `BENCH_ONLY=insert,counter` runs only those scenarios (e.g. to profile one).
+    let only = std::env::var("BENCH_ONLY").ok();
+    let wanted = |name: &str| only.as_deref().is_none_or(|only| only.split(',').any(|o| o == name));
     let insert: MakeCall = Arc::new(|w, n| call(fns::bench_insert::path(), json!({ "group": (w as u64 + n) % 10 })));
 
-    let t = write_app(Default::default()).await;
-    for writers in [1, 4, 16, 64] {
-        let run = hammer(t.app(), writers, secs, false, insert.clone()).await;
-        println!("[writes] insert, {writers} writers: {}", run.line());
+    if wanted("insert") {
+        let t = write_app(Default::default()).await;
+        let writers: Vec<usize> = match std::env::var("BENCH_WRITERS") {
+            Ok(list) => list.split(',').map(|w| w.parse().unwrap()).collect(),
+            Err(_) => vec![1, 4, 16, 64],
+        };
+        for writers in writers {
+            let run = hammer(t.app(), writers, secs, false, insert.clone()).await;
+            println!("[writes] insert, {writers} writers: {}", run.line());
+        }
     }
-    let run = hammer(t.app(), 16, secs, true, insert.clone()).await;
-    println!("[writes] insert with idempotency keys, 16 writers: {}", run.line());
-
-    let many: MakeCall = Arc::new(|w, _| call(fns::bench_insert_many::path(), json!({ "group": w % 10, "n": 10 })));
-    let run = hammer(t.app(), 16, secs, false, many).await;
-    println!("[writes] 10 inserts per mutation, 16 writers: {} = {:.0} documents/s", run.line(), run.per_sec() * 10.0);
-
-    // Groups of 100 items to scan.
-    let t = write_app(Default::default()).await;
-    for i in 0..1000 {
-        t.app().run_mutation(&fns::bench_insert::path(), json!({ "group": 100 + i % 10 }), &Identity::default()).await.unwrap();
+    if wanted("idempotent") {
+        let t = write_app(Default::default()).await;
+        let run = hammer(t.app(), 16, secs, true, insert.clone()).await;
+        println!("[writes] insert with idempotency keys, 16 writers: {}", run.line());
     }
-    let scan: MakeCall = Arc::new(|w, _| call(fns::bench_scan_insert::path(), json!({ "group": 100 + w as u64 % 10 })));
-    let run = hammer(t.app(), 16, secs, false, scan).await;
-    println!("[writes] read 100 documents then insert, 16 writers: {}", run.line());
-
-    let t = write_app(Default::default()).await;
-    let (id, _) = t.app().run_mutation(&fns::bench_new_counter::path(), json!({}), &Identity::default()).await.unwrap();
-    let increment: MakeCall = Arc::new({
-        let id = id.clone();
-        move |_, _| call(fns::bench_increment::path(), json!({ "id": id }))
-    });
-    let run = hammer(t.app(), 16, secs, false, increment).await;
-    let after = t.app().run_query(&fns::bench_counter::path(), json!({ "id": id }), &Identity::default()).await;
-    let score = after.result.unwrap().as_u64().unwrap();
-    assert_eq!(score, run.count, "every increment is kept: no lost updates");
-    println!("[writes] 16 writers incrementing one counter (final count = mutations): {}", run.line());
-
-    let target = tempfile::tempdir().unwrap();
-    let replication = ferrix::ops::replicate::ReplicationOptions::new(target.path().to_str().unwrap());
-    let t = write_app(ferrix::AppOptions {
-        ops: ferrix::ops::OpsOptions { replication: Some(replication), ..Default::default() },
-        ..Default::default()
-    })
-    .await;
-    let run = hammer(t.app(), 16, secs, false, insert.clone()).await;
-    println!("[writes] insert with continuous replication, 16 writers: {}", run.line());
-
-    let t = write_app(Default::default()).await;
-    let inputs = subscribers(t.app(), 100, 10).await;
-    let run = hammer(t.app(), 16, secs, false, insert.clone()).await;
-    println!("[writes] insert with 100 clients x 10 subscribed queries, 16 writers: {}", run.line());
-    drop(inputs);
-
-    let t = write_app(Default::default()).await;
-    let alone = hammer(t.app(), 16, secs / 2.0, false, insert.clone()).await;
-    let app = t.app().clone();
-    let slow = tokio::spawn(async move {
-        let slow: MakeCall = Arc::new(|_, _| call(fns::bench_slow_insert::path(), json!({ "ms": 20 })));
-        hammer(&app, 1, secs, false, slow).await
-    });
-    let fast = hammer(t.app(), 16, secs, false, insert.clone()).await;
-    let slow = slow.await.unwrap();
-    println!(
-        "[writes] 16 fast writers alone: p50 {:?} p99 {:?}; next to one writer of 20 ms mutations ({} ran): {}",
-        percentile(&alone.latencies, 0.5),
-        percentile(&alone.latencies, 0.99),
-        slow.count,
-        fast.line()
-    );
+    if wanted("many") {
+        let t = write_app(Default::default()).await;
+        let many: MakeCall = Arc::new(|w, _| call(fns::bench_insert_many::path(), json!({ "group": w % 10, "n": 10 })));
+        let run = hammer(t.app(), 16, secs, false, many).await;
+        println!("[writes] 10 inserts per mutation, 16 writers: {} = {:.0} documents/s", run.line(), run.per_sec() * 10.0);
+    }
+    if wanted("scan") {
+        // Groups of 100 items to scan.
+        let t = write_app(Default::default()).await;
+        for i in 0..1000 {
+            t.app().run_mutation(&fns::bench_insert::path(), json!({ "group": 100 + i % 10 }), &Identity::default()).await.unwrap();
+        }
+        let scan: MakeCall = Arc::new(|w, _| call(fns::bench_scan_insert::path(), json!({ "group": 100 + w as u64 % 10 })));
+        let run = hammer(t.app(), 16, secs, false, scan).await;
+        println!("[writes] read 100 documents then insert, 16 writers: {}", run.line());
+    }
+    if wanted("counter") {
+        let t = write_app(Default::default()).await;
+        let (id, _) = t.app().run_mutation(&fns::bench_new_counter::path(), json!({}), &Identity::default()).await.unwrap();
+        let increment: MakeCall = Arc::new({
+            let id = id.clone();
+            move |_, _| call(fns::bench_increment::path(), json!({ "id": id }))
+        });
+        let run = hammer(t.app(), 16, secs, false, increment).await;
+        let after = t.app().run_query(&fns::bench_counter::path(), json!({ "id": id }), &Identity::default()).await;
+        let score = after.result.unwrap().as_u64().unwrap();
+        assert_eq!(score, run.count, "every increment is kept: no lost updates");
+        println!("[writes] 16 writers incrementing one counter (final count = mutations): {}", run.line());
+    }
+    if wanted("replication") {
+        let target = tempfile::tempdir().unwrap();
+        let replication = ferrix::ops::replicate::ReplicationOptions::new(target.path().to_str().unwrap());
+        let t = write_app(ferrix::AppOptions {
+            ops: ferrix::ops::OpsOptions { replication: Some(replication), ..Default::default() },
+            ..Default::default()
+        })
+        .await;
+        let run = hammer(t.app(), 16, secs, false, insert.clone()).await;
+        println!("[writes] insert with continuous replication, 16 writers: {}", run.line());
+    }
+    if wanted("subscribers") {
+        let t = write_app(Default::default()).await;
+        let inputs = subscribers(t.app(), 100, 10).await;
+        let run = hammer(t.app(), 16, secs, false, insert.clone()).await;
+        println!("[writes] insert with 100 clients x 10 subscribed queries, 16 writers: {}", run.line());
+        drop(inputs);
+    }
+    if wanted("slow") {
+        let t = write_app(Default::default()).await;
+        let alone = hammer(t.app(), 16, secs / 2.0, false, insert.clone()).await;
+        let app = t.app().clone();
+        let slow = tokio::spawn(async move {
+            let slow: MakeCall = Arc::new(|_, _| call(fns::bench_slow_insert::path(), json!({ "ms": 20 })));
+            hammer(&app, 1, secs, false, slow).await
+        });
+        let fast = hammer(t.app(), 16, secs, false, insert.clone()).await;
+        let slow = slow.await.unwrap();
+        println!(
+            "[writes] 16 fast writers alone: p50 {:?} p99 {:?}; next to one writer of 20 ms mutations ({} ran): {}",
+            percentile(&alone.latencies, 0.5),
+            percentile(&alone.latencies, 0.99),
+            slow.count,
+            fast.line()
+        );
+    }
 }

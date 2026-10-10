@@ -89,13 +89,13 @@ pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
 
 pub fn read_meta_u64(conn: &Connection, key: &str) -> anyhow::Result<u64> {
     let v: Option<i64> =
-        conn.query_row("SELECT v FROM _meta WHERE k = ?1", [key], |r| r.get(0)).optional()?.flatten();
+        conn.prepare_cached("SELECT v FROM _meta WHERE k = ?1")?.query_row([key], |r| r.get(0)).optional()?.flatten();
     Ok(v.unwrap_or(0) as u64)
 }
 
 pub fn read_meta_f64(conn: &Connection, key: &str) -> anyhow::Result<f64> {
     let v: Option<f64> =
-        conn.query_row("SELECT v FROM _meta WHERE k = ?1", [key], |r| r.get(0)).optional()?.flatten();
+        conn.prepare_cached("SELECT v FROM _meta WHERE k = ?1")?.query_row([key], |r| r.get(0)).optional()?.flatten();
     Ok(v.unwrap_or(0.0))
 }
 
@@ -110,6 +110,26 @@ pub fn get_document(conn: &Connection, id: &[u8; 16]) -> anyhow::Result<Option<S
         .prepare_cached("SELECT json FROM documents WHERE id = ?1")?
         .query_row([&id[..]], |r| r.get(0))
         .optional()?)
+}
+
+/// A statement without parameters or results (`BEGIN`, `COMMIT`), from the statement cache: `execute_batch` would
+/// compile it again on every call, a measurable share of a small mutation.
+pub fn exec_cached(conn: &Connection, sql: &str) -> anyhow::Result<()> {
+    conn.prepare_cached(sql)?.execute([])?;
+    Ok(())
+}
+
+/// Store a new document. Fails (a constraint error) if `id` exists, so a colliding id can never overwrite one.
+pub fn insert_document(conn: &Connection, id: &[u8; 16], table_number: u32, json: &str, ts: u64) -> anyhow::Result<()> {
+    conn.prepare_cached("INSERT INTO documents (id, table_number, json, ts) VALUES (?1, ?2, ?3, ?4)")?
+        .execute(params![&id[..], table_number, json, ts as i64])
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {
+                anyhow::anyhow!("id collision: document {} already exists", data_encoding::HEXLOWER.encode(id))
+            }
+            e => e.into(),
+        })?;
+    Ok(())
 }
 
 pub fn put_document(conn: &Connection, id: &[u8; 16], table_number: u32, json: &str, ts: u64) -> anyhow::Result<()> {

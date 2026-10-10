@@ -237,7 +237,7 @@ impl Database {
         };
         // BEGIN is deferred: the snapshot is pinned by the first read, which is the ts read itself.
         let begun = (|| -> anyhow::Result<(u64, f64)> {
-            conn.execute_batch("BEGIN")?;
+            storage::exec_cached(&conn, "BEGIN")?;
             let ts = storage::read_meta_u64(&conn, storage::META_TS)?;
             let time = storage::read_meta_f64(&conn, storage::META_TIME)?;
             Ok((ts, time))
@@ -308,7 +308,7 @@ impl Database {
         if !guard.is_autocommit() {
             guard.execute_batch("ROLLBACK")?;
         }
-        guard.execute_batch("BEGIN IMMEDIATE")?;
+        storage::exec_cached(&guard, "BEGIN IMMEDIATE")?;
         let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
             Ok((
                 storage::read_meta_u64(&guard, storage::META_TS)?,
@@ -436,7 +436,7 @@ impl Drop for Snapshot {
         let conn = self.conn.get_mut().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(conn) = conn {
             // Ending the read transaction releases the WAL snapshot so checkpoints can progress.
-            if conn.execute_batch("COMMIT").is_ok() || conn.is_autocommit() {
+            if storage::exec_cached(&conn, "COMMIT").is_ok() || conn.is_autocommit() {
                 self.pool.conns.lock().unwrap_or_else(|e| e.into_inner()).push(conn);
             }
             // Otherwise the connection is in an unknown state: drop it; the pool opens a new one on demand.
@@ -516,7 +516,7 @@ impl WriteTxn {
         let mut state = state.context("the mutation's transaction has already finished")?;
         if state.writes.is_empty() && !state.force_ts_bump {
             before_commit(&state.conn, state.prev_ts)?;
-            state.conn.execute_batch("COMMIT")?;
+            storage::exec_cached(&state.conn, "COMMIT")?;
             self.run_on_commit();
             return Ok(state.prev_ts);
         }
@@ -534,7 +534,7 @@ impl WriteTxn {
             }
             None => 0,
         };
-        state.conn.execute_batch("COMMIT")?;
+        storage::exec_cached(&state.conn, "COMMIT")?;
         self.journal.add_pending_bytes(journaled);
         // Still holding the writer lock (inside `state.conn`), so log entries are appended in ts order.
         self.write_log.append(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
@@ -615,7 +615,11 @@ impl WriteState {
         let json = match new {
             Some(doc) => {
                 let json = serde_json::to_string(doc)?;
-                storage::put_document(&self.conn, &id.0, table.number, &json, ts)?;
+                if old.is_some() {
+                    storage::put_document(&self.conn, &id.0, table.number, &json, ts)?;
+                } else {
+                    storage::insert_document(&self.conn, &id.0, table.number, &json, ts)?;
+                }
                 Some(json)
             }
             None => {
@@ -668,7 +672,7 @@ impl WriteState {
     ) -> anyhow::Result<DocId> {
         reject_system_fields(&fields)?;
         check_table(table, id)?;
-        anyhow::ensure!(storage::get_document(&self.conn, &id.0)?.is_none(), "id collision");
+        // (An existing id fails the document insert in `write`: no lookup needed here.)
         fields.insert(ID_FIELD.into(), Value::String(id.encode()));
         let last_creation_time = self.last_creation_time;
         let ct = self.next_creation_time();

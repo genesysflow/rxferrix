@@ -10,6 +10,10 @@
 //!   system tables masked as in the dashboard).
 //! - `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv` with a JSONL or CSV body (at most
 //!   256 MiB) → `ImportReport`. App tables only.
+//! - `GET /api/admin/replication` → `{ enabled: false }` or `{ enabled: true, ...ReplicationStatus }`
+//!   (`super::replicate`); `POST /api/admin/replication/snapshot` → `SnapshotInfo` (201).
+//! - `POST /api/admin/restore/point-in-time` with `{ toTs?, toTime?, generation? }` → `{ pendingRestore, restart }`:
+//!   a point-in-time restore from the replication target, checked and staged like an archive.
 //! - `GET /metrics` → Prometheus text (404 unless enabled; bearer token if configured). See [`super::metrics`].
 
 use std::io::Write;
@@ -46,6 +50,9 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/backups/{name}/restore", post(stage_backup))
         .route("/api/admin/restore", get(get_restore).post(stage_upload).delete(cancel_restore))
         .route("/api/admin/restore/restart", post(restart))
+        .route("/api/admin/restore/point-in-time", post(stage_point_in_time))
+        .route("/api/admin/replication", get(replication_status))
+        .route("/api/admin/replication/snapshot", post(replication_snapshot))
         .route("/api/admin/export/{table}", get(export_table))
         .route("/api/admin/import/{table}", post(import_table))
 }
@@ -61,6 +68,7 @@ fn failure(e: crate::Error) -> Response {
         let status = match u.code.as_str() {
             "not_found" => 404,
             "restore_pending" | "no_pending_restore" => 409,
+            "replication_off" => 404,
             _ => 400,
         };
         return AuthFailure::new(status, &u.code, u.message.clone()).into_response();
@@ -139,6 +147,10 @@ async fn list_backups(State(app): State<App>, headers: HeaderMap) -> Response {
     let mut body = try_or!(restore_state(&app));
     body["target"] = json!(target.location);
     body["backups"] = json!(backups);
+    body["replication"] = match app.replication() {
+        Some(r) => json!(r.status(&app).await),
+        None => serde_json::Value::Null,
+    };
     (no_store(), axum::Json(body)).into_response()
 }
 
@@ -217,11 +229,21 @@ async fn audit_ops(app: &App, admin: Option<Id<Admin>>, action: &'static str, de
 }
 
 async fn staged(app: &App, admin: Option<Id<Admin>>, archive: &std::path::Path, source: &str) -> Response {
-    let marker = match restore::stage(app.dir(), archive, source, admin.map(|a| a.to_string())).await {
+    let marker = restore::stage(app.dir(), archive, source, admin.map(|a| a.to_string())).await;
+    staged_marker(app, admin, marker).await
+}
+
+async fn staged_marker(app: &App, admin: Option<Id<Admin>>, marker: crate::Result<restore::PendingRestore>) -> Response {
+    let marker = match marker {
         Ok(m) => m,
         Err(e) => return failure(e),
     };
-    let details = json!({ "source": marker.source, "ts": marker.ts, "secretIgnored": marker.secret_ignored });
+    let details = json!({
+        "source": marker.source,
+        "ts": marker.ts,
+        "secretIgnored": marker.secret_ignored,
+        "pointInTime": marker.point_in_time,
+    });
     audit_ops(app, admin, "restore_stage", details).await;
     let mut body = try_or!(restore_state(app));
     body["pendingRestore"] = json!(marker.public());
@@ -293,6 +315,82 @@ async fn stage_upload(
         return AuthFailure::new(400, "invalid_request", "send the backup archive as the request body").into_response();
     }
     staged(&app, admin, spool.path(), &source).await
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct PointInTimeBody {
+    to_ts: Option<u64>,
+    /// RFC 3339, or ms since the epoch.
+    to_time: Option<serde_json::Value>,
+    generation: Option<String>,
+}
+
+fn replication_off() -> Response {
+    let message = "Replication is off: start the server with --replicate-to <directory | s3://bucket/prefix>";
+    AuthFailure::new(404, "replication_off", message).into_response()
+}
+
+/// `POST /api/admin/restore/point-in-time`: stage the state of a past commit (or time) from the replication target.
+async fn stage_point_in_time(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let Some(replicator) = app.replication().cloned() else { return replication_off() };
+    let body: PointInTimeBody = if body.is_empty() {
+        PointInTimeBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(b) => b,
+            Err(e) => return AuthFailure::new(400, "invalid_request", format!("Invalid body: {e}")).into_response(),
+        }
+    };
+    let to_time = match &body.to_time {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Number(n)) => n.as_f64(),
+        Some(serde_json::Value::String(s)) => match super::parse_time(s) {
+            Ok(t) => Some(t),
+            Err(e) => return AuthFailure::new(400, "invalid_request", e).into_response(),
+        },
+        Some(_) => return AuthFailure::new(400, "invalid_request", "toTime must be an RFC 3339 string or ms").into_response(),
+    };
+    if restore::pending(app.dir()).ok().flatten().is_some() {
+        return failure(crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into());
+    }
+    // The newest commits first, so "the newest point" includes them (best effort: the target may be down).
+    if let Err(e) = replicator.flush(&app).await {
+        tracing::warn!("replication: shipping before a point-in-time restore failed: {e:#}");
+    }
+    let point = super::replicate::PointInTime { to_ts: body.to_ts, to_time, generation: body.generation };
+    let marker = restore::stage_point_in_time(app.dir(), replicator.target(), &point, admin.map(|a| a.to_string())).await;
+    staged_marker(&app, admin, marker).await
+}
+
+/// `GET /api/admin/replication`.
+async fn replication_status(State(app): State<App>, headers: HeaderMap) -> Response {
+    admin!(app, headers);
+    let body = match app.replication() {
+        Some(r) => {
+            let mut v = json!(r.status(&app).await);
+            v["enabled"] = json!(true);
+            v
+        }
+        None => json!({ "enabled": false }),
+    };
+    (no_store(), axum::Json(body)).into_response()
+}
+
+/// `POST /api/admin/replication/snapshot`: take a snapshot of the current generation now.
+async fn replication_snapshot(State(app): State<App>, headers: HeaderMap) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let Some(replicator) = app.replication().cloned() else { return replication_off() };
+    let snapshot = try_or!(replicator.snapshot_now(&app).await);
+    audit_ops(&app, admin, "replication_snapshot", json!({ "name": snapshot.name, "ts": snapshot.ts })).await;
+    (StatusCode::CREATED, no_store(), axum::Json(snapshot)).into_response()
 }
 
 /// `GET /api/admin/restore`: `{ pendingRestore, restart }`.

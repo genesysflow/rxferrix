@@ -182,7 +182,7 @@ struct ServeArgs {
 }
 
 /// `"100MB"`, `"2GB"`, `"512KB"`, `"1.5MB"` (powers of 1024), or a bare number of bytes.
-fn parse_size(s: &str) -> Result<u64, String> {
+pub(crate) fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
     let (num, unit) = (&s[..split], s[split..].trim());
@@ -647,6 +647,8 @@ fn serve(
                 }
             })
             .await?;
+        // The last commits reach the replication target before the process exits.
+        crate::ops::replicate::flush(&app, Duration::from_secs(15)).await;
         app.logs().flush().await?;
         Ok::<_, crate::Error>(restart.is_requested().then(|| restart.exit_code()).flatten())
     })?;

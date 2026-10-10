@@ -41,6 +41,24 @@ pub struct OpsServeArgs {
     #[arg(long)]
     pub backup_with_files: bool,
 
+    /// Replicate continuously to a directory, file:///dir or s3://bucket/prefix: every commit is journaled and
+    /// shipped in segments, with periodic snapshots, for point-in-time restores (`restore --from`).
+    #[arg(long, env = "FERRIX_REPLICATE_TO", value_name = "LOCATION")]
+    pub replicate_to: Option<String>,
+    /// With --replicate-to: ship new commits this often (e.g. `1s`, `10s`).
+    #[arg(long, value_name = "DURATION", default_value = "1s", value_parser = super::parse_duration)]
+    pub replicate_every: Duration,
+    /// With --replicate-to: take a snapshot this often (e.g. `24h`, `6h`).
+    #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = super::parse_duration)]
+    pub snapshot_every: Duration,
+    /// With --replicate-to: how far back point-in-time restores reach (older snapshots and segments are deleted).
+    #[arg(long, value_name = "DURATION", default_value = "7d", value_parser = super::parse_duration)]
+    pub replicate_keep: Duration,
+    /// With --replicate-to: journal kept locally while the target is unreachable before it is dropped (a new
+    /// generation starts when the target is back), e.g. `1GB`, `200MB`.
+    #[arg(long, value_name = "SIZE", default_value = "1GB", value_parser = crate::cli::parse_size)]
+    pub replicate_max_pending: u64,
+
     /// Serve HTTPS for DOMAIN (comma-separated for several) with automatic Let's Encrypt certificates.
     #[arg(long, value_name = "DOMAIN", value_delimiter = ',', env = "FERRIX_HTTPS")]
     pub https: Vec<String>,
@@ -91,6 +109,14 @@ impl OpsServeArgs {
         }
         if self.restart_exit_code.is_some() {
             options.ops.restart = super::restore::RestartHandle::new(self.restart_exit_code);
+        }
+        if let Some(to) = self.replicate_to.clone().filter(|t| !t.trim().is_empty()) {
+            let mut replication = super::replicate::ReplicationOptions::new(to);
+            replication.every = self.replicate_every.max(Duration::from_millis(10));
+            replication.snapshot_every = self.snapshot_every.max(Duration::from_secs(60));
+            replication.keep = self.replicate_keep;
+            replication.max_pending_bytes = self.replicate_max_pending;
+            options.ops.replication = Some(replication);
         }
         if let Some(every) = self.backup_every {
             let schedule = ScheduledBackup {
@@ -225,15 +251,33 @@ pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()>
     Ok(())
 }
 
-/// `restore`: replace the data directory's database with a backup (offline).
+/// `restore`: replace the data directory's database with a backup, or with a point in time from a replication
+/// target (offline).
 #[derive(Args, Debug, Clone)]
 pub struct RestoreArgs {
     /// The archive: a file, or s3://bucket/path/to/ferrix-….tar.zst.
-    #[arg(required_unless_present = "cancel")]
+    #[arg(required_unless_present_any = ["cancel", "from"])]
     pub backup: Option<String>,
     /// Cancel the restore staged from the dashboard (it would otherwise be applied at the next start).
-    #[arg(long, conflicts_with_all = ["backup", "skip_verify", "storage_dir"])]
+    #[arg(long, conflicts_with_all = ["backup", "skip_verify", "storage_dir", "from"])]
     pub cancel: bool,
+    /// Restore a point in time from a replication target (what `serve --replicate-to` wrote): a directory,
+    /// file:///dir or s3://bucket/prefix. Default point: the newest replicated commit.
+    #[arg(long, value_name = "LOCATION", conflicts_with = "backup")]
+    pub from: Option<String>,
+    /// With --from: the commit ts to restore.
+    #[arg(long, value_name = "TS", requires = "from", conflicts_with = "to_time")]
+    pub to_ts: Option<u64>,
+    /// With --from: the time to restore (RFC 3339, e.g. 2026-10-09T12:00:00Z): the state after the last commit
+    /// at or before it.
+    #[arg(long, value_name = "TIME", requires = "from", value_parser = super::parse_time)]
+    pub to_time: Option<f64>,
+    /// With --from: the generation to restore from (default: the newest, or the one live at --to-time).
+    #[arg(long, value_name = "ID", requires = "from")]
+    pub generation: Option<String>,
+    /// With --from: list the generations and restorable ranges of the target, and restore nothing.
+    #[arg(long, requires = "from")]
+    pub list: bool,
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     pub dir: PathBuf,
@@ -256,8 +300,7 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
         }
         return Ok(());
     }
-    let given = args.backup.clone().context("which backup to restore?")?;
-    if let Some(p) = super::restore::pending(&args.dir)? {
+    if let Some(p) = super::restore::pending(&args.dir)?.filter(|_| !args.list) {
         anyhow::bail!(
             "a restore of {} is staged in {} (from the dashboard) and would replace this one at the next start; cancel \
              it first with `restore --cancel`",
@@ -265,6 +308,10 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
             args.dir.display()
         );
     }
+    if let Some(from) = &args.from {
+        return runtime()?.block_on(restore_from_replica(&args, from, &options));
+    }
+    let given = args.backup.clone().context("which backup to restore?")?;
     runtime()?.block_on(async {
         std::fs::create_dir_all(&args.dir)?;
         let work = tempfile::Builder::new().prefix(".ferrix-download-").tempdir_in(&args.dir)?;
@@ -294,6 +341,60 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
         }
         Ok(())
     })
+}
+
+fn time_str(ms: f64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "?".into())
+}
+
+/// `restore --from <replica> [--to-ts N | --to-time T] [--generation G] [--list]`.
+async fn restore_from_replica(args: &RestoreArgs, from: &str, options: &RestoreOptions) -> crate::Result<()> {
+    std::fs::create_dir_all(&args.dir)?;
+    let target = BackupTarget::parse(from, &args.dir)?;
+    if args.list {
+        let generations = super::replicate::list_generations(&target).await?;
+        if generations.is_empty() {
+            println!("No replicated data in {}.", target.location);
+        }
+        for g in &generations {
+            let (Some(from_ts), Some(to_ts)) = (g.oldest_ts(), g.newest_ts()) else {
+                println!("generation {} (started {}): no snapshot, not restorable", g.id, time_str(g.created_at));
+                continue;
+            };
+            println!(
+                "generation {} (started {}): ts {from_ts}..={to_ts}, {} snapshot(s), {} segment(s)",
+                g.id,
+                time_str(g.created_at),
+                g.snapshots.len(),
+                g.segments.len()
+            );
+            for s in &g.snapshots {
+                println!("  snapshot {} (ts {}, taken {})", s.name, s.ts, time_str(s.created_at));
+            }
+        }
+        return Ok(());
+    }
+    let point = super::replicate::PointInTime { to_ts: args.to_ts, to_time: args.to_time, generation: args.generation.clone() };
+    let (report, info) = super::replicate::restore_point_in_time(&target, &args.dir, &point, options).await?;
+    println!(
+        "Restored ts {} (committed {}) of generation {} into {}: snapshot ts {} plus {} replayed commit(s) from {} segment(s).",
+        info.ts,
+        time_str(info.time),
+        info.generation,
+        args.dir.display(),
+        info.snapshot_ts,
+        info.replayed,
+        info.segments
+    );
+    if !info.reached {
+        println!("The point asked for is beyond the newest replicated commit; restored that one instead.");
+    }
+    if let Some(previous) = report.previous {
+        println!("The previous database files are in {} (delete them once you're happy).", previous.display());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -455,5 +556,16 @@ mod tests {
         assert!(parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--https", "example.com"]).is_err());
         assert!(parse(&["--https", "example.com", "--http-redirect", "nope"]).unwrap().listen(http, dir).is_err());
         assert!(parse(&["--backup-every", "soon"]).is_err());
+
+        // Replication: off by default; the flags fill `ops.replication`.
+        assert!(options.ops.replication.is_none());
+        let ops = parse(&["--replicate-to", "s3://b/r", "--replicate-every", "10s", "--snapshot-every", "6h", "--replicate-keep", "3d", "--replicate-max-pending", "200MB"]).unwrap();
+        let mut options = AppOptions::default();
+        ops.apply(&mut options);
+        let r = options.ops.replication.unwrap();
+        assert_eq!((r.target.as_str(), r.every, r.snapshot_every, r.keep), ("s3://b/r", Duration::from_secs(10), Duration::from_secs(6 * 3600), Duration::from_secs(3 * 86400)));
+        assert_eq!(r.max_pending_bytes, 200 << 20);
+        let defaults = parse(&["--replicate-to", "/r"]).unwrap();
+        assert_eq!((defaults.replicate_every, defaults.snapshot_every, defaults.replicate_keep), (Duration::from_secs(1), Duration::from_secs(86400), Duration::from_secs(7 * 86400)));
     }
 }

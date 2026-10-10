@@ -584,6 +584,78 @@ export interface PendingRestore {
   secretIgnored: boolean;
   /** Why the last start didn't apply it (cancel it). */
   error: string | null;
+  /** A point-in-time restore from the replication target (null for an archive; absent from older servers). */
+  pointInTime?: PointInTimeInfo | null;
+}
+
+/** `PointInTimeInfo` (crates/ferrix/src/ops/replicate.rs): what a point-in-time restore restores. */
+export interface PointInTimeInfo {
+  generation: string;
+  /** The snapshot it starts from, and its ts. */
+  snapshot: string;
+  snapshotTs: number;
+  requestedTs: number | null;
+  requestedTime: number | null;
+  /** The restored commit ts and its time. */
+  ts: number;
+  time: number;
+  /** Journal entries replayed after the snapshot, from how many segments. */
+  replayed: number;
+  segments: number;
+  /** False when the point asked for is beyond the newest replicated commit (which is restored instead). */
+  reached: boolean;
+}
+
+/** A snapshot of a replication generation. */
+export interface ReplicationSnapshot {
+  name: string;
+  ts: number;
+  createdAt: number;
+  bytes: number;
+}
+
+/** A generation in the replication target: one continuous history, restorable from `fromTs` to `toTs`. */
+export interface ReplicationGeneration {
+  id: string;
+  createdAt: number;
+  /** The generation being shipped. */
+  current: boolean;
+  snapshots: ReplicationSnapshot[];
+  segments: number;
+  fromTs: number | null;
+  toTs: number | null;
+  /** When the oldest snapshot was taken; the commit time of `toTs` (current generation only). */
+  fromTime: number | null;
+  toTime: number | null;
+}
+
+/** `ReplicationStatus` (crates/ferrix/src/ops/replicate.rs): `GET /api/admin/replication` (`--replicate-to`). */
+export interface ReplicationStatus {
+  target: string;
+  everyMs: number;
+  snapshotEveryMs: number;
+  keepMs: number;
+  generation: string | null;
+  currentTs: number;
+  currentTime: number;
+  shippedTs: number;
+  shippedTime: number;
+  /** Commits not in the target yet, and the age of the oldest of them (0 when caught up). */
+  lagCommits: number;
+  lagMs: number;
+  pendingBytes: number;
+  maxPendingBytes: number;
+  journaling: boolean;
+  lastSegment: { name: string; from: number; to: number; entries: number; bytes: number; shippedAt: number } | null;
+  lastSnapshot: ReplicationSnapshot | null;
+  nextSnapshotAt: number | null;
+  segmentsShipped: number;
+  snapshotsTaken: number;
+  lastSuccessAt: number | null;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  failures: number;
+  generations: ReplicationGeneration[];
 }
 
 /** Whether the server can restart itself to apply a staged restore (`--restart-exit-code`). */
@@ -598,6 +670,8 @@ export interface BackupListing {
   backups: BackupInfo[];
   pendingRestore: PendingRestore | null;
   restart: RestartInfo;
+  /** Continuous replication, or null when the server runs without `--replicate-to`. */
+  replication: ReplicationStatus | null;
 }
 
 export interface ImportReport {

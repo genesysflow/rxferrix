@@ -9,6 +9,7 @@
     type ImportMode,
     type ImportReport,
     type PendingRestore,
+    type ReplicationStatus,
     type RestartInfo,
   } from "../lib/api.js";
   import {
@@ -17,17 +18,21 @@
     deleteBackup,
     downloadBackup,
     exportTable,
+    getReplication,
     importFormatOf,
     importTable,
     listBackups,
+    replicationSnapshot,
     restartServer,
     saveBlob,
+    stagePointInTime,
     stageRestore,
+    type PointInTimeRequest,
     uploadRestore,
     waitForRestart,
   } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
-  import { formatBytes, formatRelative, formatTime } from "../lib/format.js";
+  import { formatBytes, formatRelative, formatSeconds, formatTime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
 
@@ -57,6 +62,10 @@
   let restoreError = $state<string | null>(null);
   let staging = $state<string | null>(null);
   let restarting = $state<"waiting" | "timeout" | null>(null);
+  // Continuous replication (`--replicate-to`; docs/CONTRACT.md §4.4): null when off.
+  let replication = $state<ReplicationStatus | null>(null);
+  let replicationKnown = $state(false);
+  let snapshotting = $state(false);
 
   async function refresh() {
     try {
@@ -65,19 +74,37 @@
       backups = r.backups;
       pending = r.pendingRestore;
       restartInfo = r.restart;
+      replication = r.replication;
+      replicationKnown = true;
       listError = null;
     } catch (e) {
       listError = e instanceof Error ? e.message : String(e);
     }
   }
+  async function refreshReplication() {
+    try {
+      replication = await getReplication(ctx.auth);
+      replicationKnown = true;
+    } catch {
+      // The next full refresh reports errors.
+    }
+  }
   onMount(() => {
     void refresh();
-    // Scheduled backups appear without a reload.
+    // Scheduled backups appear without a reload; the replication lag is polled more often.
     const t = setInterval(() => {
       now = Date.now();
       void refresh();
     }, 15_000);
-    return () => clearInterval(t);
+    const r = setInterval(() => {
+      if (!replication) return;
+      now = Date.now();
+      void refreshReplication();
+    }, 3_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(r);
+    };
   });
   // A scheduled run that finished: list again.
   $effect(() => {
@@ -164,6 +191,60 @@
     if (!file) return;
     if (!confirm(`Restore ${file.name} (${formatBytes(file.size)}) from this computer?\n\n${restoreWarning}`)) return;
     void restore(file.name, () => uploadRestore(ctx.auth, file, file.name));
+  }
+
+  async function snapshotNow() {
+    snapshotting = true;
+    try {
+      const s = await replicationSnapshot(ctx.auth);
+      ctx.toast(`Snapshot ${s.name} stored (ts ${s.ts}, ${formatBytes(s.bytes)})`);
+      await refreshReplication();
+    } catch (e) {
+      ctx.toast(`Snapshot failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      snapshotting = false;
+    }
+  }
+
+  // Point-in-time restore: a time (the state after the last commit at or before it) or a commit ts.
+  let pitrMode = $state<"time" | "ts">("time");
+  let pitrTime = $state("");
+  let pitrTs = $state<number | null>(null);
+  /** "" = the newest generation (or, by time, the one that was live then). */
+  let pitrGeneration = $state("");
+  const generations = $derived(replication?.generations ?? []);
+  const pitrRange = $derived(
+    generations.find((g) => g.id === pitrGeneration) ?? generations.find((g) => g.current) ?? generations.at(-1) ?? null,
+  );
+
+  /** `ms` as a `datetime-local` value (local time, whole seconds). */
+  function localInput(ms: number): string {
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  $effect(() => {
+    if (!pitrTime && replication?.shippedTime) pitrTime = localInput(replication.shippedTime);
+    if (pitrTs === null && replication) pitrTs = replication.shippedTs;
+  });
+
+  function restorePointInTime() {
+    const point: PointInTimeRequest = {};
+    if (pitrGeneration) point.generation = pitrGeneration;
+    let label: string;
+    if (pitrMode === "ts") {
+      if (pitrTs === null || !Number.isInteger(pitrTs) || pitrTs < 0) return;
+      point.toTs = pitrTs;
+      label = `commit ts ${pitrTs}`;
+    } else {
+      const ms = new Date(pitrTime).getTime();
+      if (!pitrTime || !Number.isFinite(ms)) return;
+      // The whole second: everything committed during it is included.
+      point.toTime = ms + 999;
+      label = formatTime(ms);
+    }
+    if (!confirm(`Restore the data as it was at ${label}?\n\n${restoreWarning}`)) return;
+    void restore(`The state at ${label}`, () => stagePointInTime(ctx.auth, point));
   }
 
   async function cancelPending() {
@@ -300,10 +381,19 @@
               <div class="error-text" data-testid="pending-restore-error">{pending.error}</div>
               <div>The server started on its current data. Cancel it, then restore again.</div>
             {:else}
-              <strong>Restore pending:</strong> <span class="mono">{pending.source}</span> (snapshot ts {pending.ts}, taken
-              {formatTime(pending.backupCreatedAt)}{pending.includesAux ? ", with the execution log" : ""}{pending.blobs
-                ? `, ${pending.blobs} file${pending.blobs === 1 ? "" : "s"}`
-                : ""}, {formatBytes(pending.bytes)}) passed every check. It replaces the current data
+              <strong>Restore pending:</strong> <span class="mono">{pending.source}</span>
+              {#if pending.pointInTime}
+                {@const p = pending.pointInTime}
+                (committed {formatTime(p.time)}: the snapshot at ts {p.snapshotTs} plus {p.replayed} replayed commit{p.replayed === 1
+                  ? ""
+                  : "s"}{p.reached ? "" : "; the point asked for is beyond the newest replicated commit"}, {formatBytes(pending.bytes)})
+              {:else}
+                (snapshot ts {pending.ts}, taken
+                {formatTime(pending.backupCreatedAt)}{pending.includesAux ? ", with the execution log" : ""}{pending.blobs
+                  ? `, ${pending.blobs} file${pending.blobs === 1 ? "" : "s"}`
+                  : ""}, {formatBytes(pending.bytes)})
+              {/if}
+              passed every check. It replaces the current data
               <strong>the next time the server starts</strong>; the current files are kept in
               <code>pre-restore-…/</code>.
               {#if pending.secretIgnored}<div class="faint">The archive's <code>auth_secret.key</code> is not restored (only <code>ferrix restore</code> restores it).</div>{/if}
@@ -367,6 +457,132 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+    </section>
+
+    <section class="card section" aria-labelledby="r-head" data-testid="replication">
+      <div class="head row">
+        <h2 id="r-head">Continuous replication</h2>
+        <span class="spacer"></span>
+        {#if replication}
+          <button onclick={snapshotNow} disabled={snapshotting}>{snapshotting ? "Taking a snapshot…" : "Snapshot now"}</button>
+        {/if}
+      </div>
+      {#if !replicationKnown}
+        <p class="faint">Loading…</p>
+      {:else if !replication}
+        <p class="muted small" data-testid="replication-off">
+          Off. Start the server with <code>--replicate-to s3://bucket/prefix</code> (or a directory) to journal every commit,
+          ship it within a second and restore any point in time (<code>--snapshot-every 24h</code>,
+          <code>--replicate-keep 7d</code>).
+        </p>
+      {:else}
+        {@const r = replication}
+        <dl class="facts">
+          <dt>Target</dt>
+          <dd class="mono" data-testid="replication-target">{r.target}</dd>
+          <dt>Status</dt>
+          <dd data-testid="replication-health">
+            {#if r.lastError}
+              <span class="badge serverError">failing</span>
+              <span class="error-text">{r.lastError}</span>
+              <span class="faint"
+                >({r.failures} attempt{r.failures === 1 ? "" : "s"}{r.lastErrorAt ? `, last ${formatRelative(r.lastErrorAt, now)}` : ""};
+                the journal is kept locally until the target is back: {formatBytes(r.pendingBytes)} of at most {formatBytes(
+                  r.maxPendingBytes,
+                )})</span>
+            {:else if !r.journaling}
+              <span class="badge userError">paused</span>
+              <span class="faint">the journal was dropped; a new generation starts at the next contact</span>
+            {:else}
+              <span class="badge success">healthy</span>
+              {#if r.lastSuccessAt}<span class="faint">last contact {formatRelative(r.lastSuccessAt, now)}</span>{/if}
+            {/if}
+          </dd>
+          <dt>Lag</dt>
+          <dd data-testid="replication-lag">
+            {#if r.lagCommits === 0}
+              caught up · ts <span class="mono">{r.shippedTs}</span> is in the target
+            {:else}
+              <strong>{r.lagCommits}</strong> commit{r.lagCommits === 1 ? "" : "s"} behind ({formatSeconds(r.lagMs / 1000)}) · shipped
+              ts <span class="mono">{r.shippedTs}</span> of <span class="mono">{r.currentTs}</span>
+            {/if}
+          </dd>
+          <dt>Last segment</dt>
+          <dd data-testid="replication-last-segment">
+            {#if r.lastSegment}
+              ts <span class="mono">{r.lastSegment.from}–{r.lastSegment.to}</span> ({r.lastSegment.entries} commit{r.lastSegment.entries === 1
+                ? ""
+                : "s"}, {formatBytes(r.lastSegment.bytes)}) shipped {formatRelative(r.lastSegment.shippedAt, now)}
+            {:else}
+              <span class="faint">none since the server started</span>
+            {/if}
+          </dd>
+          <dt>Last snapshot</dt>
+          <dd data-testid="replication-last-snapshot">
+            {#if r.lastSnapshot}
+              <span class="mono">{r.lastSnapshot.name}</span> (ts {r.lastSnapshot.ts}, {formatRelative(r.lastSnapshot.createdAt, now)},
+              {formatBytes(r.lastSnapshot.bytes)}){#if r.nextSnapshotAt}&nbsp;· next {formatRelative(r.nextSnapshotAt, now)}{/if}
+            {:else}
+              <span class="faint">—</span>
+            {/if}
+          </dd>
+          <dt>Schedule</dt>
+          <dd>
+            ships every {formatSeconds(r.everyMs / 1000)}, a snapshot every {formatSeconds(r.snapshotEveryMs / 1000)}, restorable
+            for {formatSeconds(r.keepMs / 1000)}
+          </dd>
+        </dl>
+
+        <h3>Point-in-time restore</h3>
+        {#if generations.length === 0}
+          <p class="faint small">Nothing restorable yet: the first snapshot is taken when the target is reachable.</p>
+        {:else}
+          <table class="grid" data-testid="replication-generations">
+            <thead><tr><th>Generation</th><th>From</th><th>To</th><th>Snapshots</th><th>Segments</th></tr></thead>
+            <tbody>
+              {#each generations as g (g.id)}
+                <tr>
+                  <td class="mono">{g.id}{#if g.current}&nbsp;<span class="badge">current</span>{/if}</td>
+                  <td>ts <span class="mono">{g.fromTs ?? "—"}</span>{#if g.fromTime}&nbsp;<span class="faint">({formatTime(g.fromTime)})</span>{/if}</td>
+                  <td>ts <span class="mono">{g.toTs ?? "—"}</span>{#if g.toTime}&nbsp;<span class="faint">({formatTime(g.toTime)})</span>{/if}</td>
+                  <td>{g.snapshots.length}</td>
+                  <td>{g.segments}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="row pitr" data-testid="pitr">
+            <label class="inline"><input type="radio" bind:group={pitrMode} value="time" /> at a time</label>
+            <label class="inline"><input type="radio" bind:group={pitrMode} value="ts" /> at a commit ts</label>
+            {#if pitrMode === "time"}
+              <input type="datetime-local" step="1" aria-label="Restore time" bind:value={pitrTime} />
+            {:else}
+              <input type="number" min={pitrRange?.fromTs ?? 0} aria-label="Restore commit ts" bind:value={pitrTs} />
+            {/if}
+            <select aria-label="Generation" bind:value={pitrGeneration}>
+              <option value="">{pitrMode === "time" ? "the generation live then" : "the newest generation"}</option>
+              {#each generations as g (g.id)}<option value={g.id}>{g.id}</option>{/each}
+            </select>
+            <button
+              class="primary"
+              onclick={restorePointInTime}
+              disabled={!!pending || !!staging}
+              title={pending
+                ? "A restore is pending"
+                : "Rebuild this point from the newest snapshot before it plus the journal, check it, and restore it at the next start"}
+              data-testid="pitr-restore">Restore to this point</button>
+          </div>
+          {#if pitrRange && pitrMode === "ts"}
+            <p class="faint small">Generation <span class="mono">{pitrRange.id}</span> restores ts {pitrRange.fromTs}–{pitrRange.toTs}.</p>
+          {/if}
+        {/if}
+        <p class="faint small">
+          Every commit is journaled with the data and shipped in segments; a point is rebuilt from the newest snapshot before it
+          and the journal after it, then checked and staged like a backup. Offline:
+          <code>ferrix restore --from {r.target} --to-time 2026-10-09T12:00:00Z</code>. The blobs of stored files are not
+          journaled.
+        </p>
       {/if}
     </section>
 
@@ -541,5 +757,14 @@
   .upload {
     margin: 8px 0;
     gap: 8px;
+  }
+  h3 {
+    margin: 16px 0 8px;
+    font-size: 14px;
+  }
+  .pitr {
+    margin: 10px 0 4px;
+    gap: 10px;
+    flex-wrap: wrap;
   }
 </style>

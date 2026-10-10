@@ -13,6 +13,8 @@ import type {
   ImportReport,
   LogEntry,
   LogFilter,
+  ReplicationSnapshot,
+  ReplicationStatus,
   Stats,
   Timeseries,
 } from "./api.js";
@@ -190,7 +192,42 @@ export function importFormatOf(name: string): ExportFormat {
 export async function listBackups(auth: FerrixAuth): Promise<BackupListing> {
   const res = await adminFetch(auth, "/api/admin/backups");
   const r = (await res.json()) as Partial<BackupListing> & { target: string; backups: BackupInfo[] };
-  return { pendingRestore: null, restart: { available: false, exitCode: null }, ...r };
+  return { pendingRestore: null, restart: { available: false, exitCode: null }, replication: null, ...r };
+}
+
+/** `GET /api/admin/replication`: the replication status, or null when replication is off. */
+export async function getReplication(auth: FerrixAuth): Promise<ReplicationStatus | null> {
+  const res = await adminFetch(auth, "/api/admin/replication");
+  const r = (await res.json()) as { enabled: boolean } & Partial<ReplicationStatus>;
+  if (!r.enabled) return null;
+  const { enabled: _, ...status } = r;
+  return status as ReplicationStatus;
+}
+
+/** `POST /api/admin/replication/snapshot`: take a snapshot of the current generation now. */
+export async function replicationSnapshot(auth: FerrixAuth): Promise<ReplicationSnapshot> {
+  const res = await adminFetch(auth, "/api/admin/replication/snapshot", { method: "POST" });
+  return (await res.json()) as ReplicationSnapshot;
+}
+
+/** Which point a point-in-time restore restores: a commit ts or a time (ms), in a generation (default: the newest). */
+export interface PointInTimeRequest {
+  toTs?: number;
+  toTime?: number;
+  generation?: string;
+}
+
+/**
+ * `POST /api/admin/restore/point-in-time`: restore the replicated state at a commit ts or time (the newest snapshot
+ * before it plus the journal up to it), check it like a backup, and stage it for the next start.
+ */
+export async function stagePointInTime(auth: FerrixAuth, point: PointInTimeRequest): Promise<RestoreState> {
+  const res = await adminFetch(auth, "/api/admin/restore/point-in-time", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(point),
+  });
+  return (await res.json()) as RestoreState;
 }
 
 /** The pending restore and restart availability, as the staging endpoints answer. */

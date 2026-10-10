@@ -55,6 +55,7 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
       | "ops_mixed"
       | "ops_pairs"
       | "page_messages"
+      | "pitr_notes"
       | "posts"
       | "private_notes"
       | "revocation_notes"

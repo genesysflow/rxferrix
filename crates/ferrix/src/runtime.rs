@@ -280,6 +280,8 @@ struct AppInner {
     scheduler: crate::scheduler::SchedulerState,
     /// Started on first use (it needs a tokio runtime).
     subscriptions: OnceLock<SubscriptionManager>,
+    /// The replicator, with `AppOptions::ops.replication` (`crate::ops::replicate`).
+    replication: OnceLock<Arc<crate::ops::replicate::Replicator>>,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -392,7 +394,12 @@ impl App {
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
         let scheduler = crate::scheduler::SchedulerState::new(&options)?;
         let open_options =
-            crate::db::OpenOptions { readers: options.readers, skip_schema_check: options.skip_schema_check };
+            crate::db::OpenOptions {
+                readers: options.readers,
+                skip_schema_check: options.skip_schema_check,
+                // Replication journals every commit from the very first one (`crate::ops::replicate`).
+                journal: options.ops.replication.is_some(),
+            };
         let retention = options.log_retention.clone();
         let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
             let db = Database::open_with_migrations(&dir, &tables, &open_options, &migrations)?;
@@ -424,8 +431,12 @@ impl App {
                 storage,
                 scheduler,
                 subscriptions,
+                replication: OnceLock::new(),
             }),
         };
+        if let Some(r) = crate::ops::replicate::start(&app, app.downgrade())? {
+            let _ = app.inner.replication.set(r);
+        }
         crate::storage::service::ensure_schema(&app).await?;
         crate::migrations::startup(&app).await?;
         crate::auth::start(&app).await?;
@@ -434,6 +445,11 @@ impl App {
 
     pub(crate) fn downgrade(&self) -> WeakApp {
         WeakApp(Arc::downgrade(&self.inner))
+    }
+
+    /// The replicator, when the app runs with `AppOptions::ops.replication` (`--replicate-to`).
+    pub fn replication(&self) -> Option<&Arc<crate::ops::replicate::Replicator>> {
+        self.inner.replication.get()
     }
 
     /// File storage (blob store, upload URLs, sweep).

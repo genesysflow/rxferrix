@@ -16,6 +16,7 @@
 
 pub mod catalog;
 pub mod dedup;
+pub mod journal;
 pub mod pagination;
 pub mod query;
 pub mod readset;
@@ -49,6 +50,8 @@ pub struct Database {
     catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
     clock: Clock,
+    /// The change journal's switch (`journal`; on with `serve --replicate-to`).
+    journal: Arc<journal::Journal>,
     writer: Arc<tokio::sync::Mutex<Connection>>,
 }
 
@@ -59,11 +62,13 @@ pub struct OpenOptions {
     pub readers: usize,
     /// Skip validating existing documents against changed table types (see [`schema_check`]).
     pub skip_schema_check: bool,
+    /// Journal every commit's document changes from the start ([`journal`]; replication).
+    pub journal: bool,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false }
+        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false, journal: false }
     }
 }
 
@@ -94,6 +99,7 @@ impl Database {
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
         dedup::ensure_schema(&writer)?;
+        writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
         let coverage = crate::migrations::coverage(&writer, &catalog, migrations)?;
         for table in schema_check::run(&writer, &catalog, tables, options.skip_schema_check, &coverage)? {
@@ -103,7 +109,14 @@ impl Database {
         let readers = options.readers.max(1);
         let write_log = Arc::new(WriteLog::new(ts));
         let ann = search::ann::AnnIndexes::open(dir, &catalog, write_log.clone());
+        let journal = Arc::new(journal::Journal::default());
+        journal.set_enabled(options.journal);
+        if options.journal {
+            // Rows a previous run didn't ship count towards the bound from the start.
+            journal.set_pending_bytes(journal::stats(&writer)?.map(|s| s.3).unwrap_or(0));
+        }
         Ok(Database {
+            journal,
             writer: Arc::new(tokio::sync::Mutex::new(writer)),
             readers: Arc::new(ReaderPool {
                 path,
@@ -134,6 +147,70 @@ impl Database {
 
     pub fn write_log(&self) -> &Arc<WriteLog> {
         &self.write_log
+    }
+
+    /// The change journal's switch and size ([`journal`]).
+    pub fn journal(&self) -> &Arc<journal::Journal> {
+        &self.journal
+    }
+
+    /// Run `f` on the writer connection in its own `BEGIN IMMEDIATE` transaction while holding the writer lock (so
+    /// no mutation is in flight), committed if `f` succeeds. For bookkeeping outside the document model that must
+    /// not race with commits (the replicator's trims and `_meta` keys, switching the journal). Doesn't bump the ts.
+    pub(crate) async fn with_writer<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
+        let guard = self.writer.clone().lock_owned().await;
+        if !guard.is_autocommit() {
+            guard.execute_batch("ROLLBACK")?;
+        }
+        guard.execute_batch("BEGIN IMMEDIATE")?;
+        match f(&guard) {
+            Ok(r) => {
+                guard.execute_batch("COMMIT")?;
+                Ok(r)
+            }
+            Err(e) => {
+                let _ = guard.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply one journal entry ([`journal`]) as its own commit, with its ts and time: the documents are written
+    /// through the write path (indexes, search and vector entries maintained, the write log appended), unvalidated.
+    /// The database must be exactly at `entry.ts - 1`. Used by point-in-time restores (`crate::ops::replicate`).
+    pub async fn replay(&self, entry: &journal::JournalEntry) -> anyhow::Result<u64> {
+        let changes = entry.parse_changes()?;
+        let txn = self.begin_write().await?;
+        txn.with_state(|s| {
+            anyhow::ensure!(
+                s.prev_ts + 1 == entry.ts,
+                "journal gap: the database is at ts {} but the next journal entry is ts {}",
+                s.prev_ts,
+                entry.ts
+            );
+            s.now = entry.time;
+            s.force_ts_bump = true;
+            for change in &changes {
+                let table = self
+                    .catalog
+                    .table_by_number(change.id.table_number())
+                    .with_context(|| format!("journal entry ts {}: no table number {}", entry.ts, change.id.table_number()))?
+                    .clone();
+                anyhow::ensure!(
+                    table.name == change.table,
+                    "journal entry ts {}: table number {} is `{}` here but `{}` in the journal",
+                    entry.ts,
+                    table.number,
+                    table.name,
+                    change.table
+                );
+                s.apply_change(&table, change.id, change.doc.as_ref())?;
+            }
+            Ok(())
+        })?;
+        let ts = txn.commit_with(|_, _| Ok(()))?;
+        anyhow::ensure!(ts == entry.ts, "replaying journal entry ts {} committed ts {ts}", entry.ts);
+        Ok(ts)
     }
 
     /// Open a read snapshot at the latest committed ts.
@@ -254,11 +331,15 @@ impl Database {
             last_creation_time,
             writes: Vec::new(),
             catalog: self.catalog.clone(),
+            // Decided here, under the writer lock (the switch only changes under it): all or nothing per transaction.
+            journal: self.journal.is_enabled().then(journal::Changes::default),
+            force_ts_bump: false,
         };
         Ok(Arc::new(WriteTxn {
             state: Mutex::new(Some(state)),
             catalog: self.catalog.clone(),
             write_log: self.write_log.clone(),
+            journal: self.journal.clone(),
             on_commit: Mutex::new(Vec::new()),
         }))
     }
@@ -368,6 +449,7 @@ pub struct WriteTxn {
     state: Mutex<Option<WriteState>>,
     pub(crate) catalog: Arc<Catalog>,
     write_log: Arc<WriteLog>,
+    journal: Arc<journal::Journal>,
     /// Run after a successful `COMMIT`, dropped on rollback (see [`WriteTxn::on_commit`]).
     on_commit: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
@@ -380,6 +462,10 @@ pub(crate) struct WriteState {
     writes: Vec<(IndexId, Vec<u8>)>,
     /// For [`Catalog::is_migrating`].
     catalog: Arc<Catalog>,
+    /// The document changes to journal at commit, when journaling ([`journal`]).
+    journal: Option<journal::Changes>,
+    /// Commit a new ts even without writes (a replayed journal entry whose writes cancel out here).
+    force_ts_bump: bool,
 }
 
 impl Drop for WriteState {
@@ -428,7 +514,7 @@ impl WriteTxn {
     ) -> anyhow::Result<u64> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut state = state.context("the mutation's transaction has already finished")?;
-        if state.writes.is_empty() {
+        if state.writes.is_empty() && !state.force_ts_bump {
             before_commit(&state.conn, state.prev_ts)?;
             state.conn.execute_batch("COMMIT")?;
             self.run_on_commit();
@@ -439,7 +525,17 @@ impl WriteTxn {
         storage::write_meta(&state.conn, storage::META_TS, (ts as i64).into())?;
         storage::write_meta(&state.conn, storage::META_TIME, state.now.into())?;
         storage::write_meta(&state.conn, storage::META_LAST_CREATION_TIME, state.last_creation_time.into())?;
+        // In the same SQLite transaction as the writes and the ts bump: journaled exactly once, or not at all.
+        let journaled = match state.journal.take() {
+            Some(changes) => {
+                let encoded = changes.encode();
+                journal::insert(&state.conn, ts, state.now, &encoded)?;
+                encoded.len() as u64
+            }
+            None => 0,
+        };
         state.conn.execute_batch("COMMIT")?;
+        self.journal.add_pending_bytes(journaled);
         // Still holding the writer lock (inside `state.conn`), so log entries are appended in ts order.
         self.write_log.append(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
         drop(state);
@@ -516,11 +612,38 @@ impl WriteState {
         }
         self.writes.push((table.by_id().id, id.0.to_vec()));
         special.apply(&self.conn, id, &mut self.writes)?;
-        match new {
-            Some(doc) => storage::put_document(&self.conn, &id.0, table.number, &serde_json::to_string(doc)?, ts)?,
-            None => storage::delete_document(&self.conn, &id.0)?,
+        let json = match new {
+            Some(doc) => {
+                let json = serde_json::to_string(doc)?;
+                storage::put_document(&self.conn, &id.0, table.number, &json, ts)?;
+                Some(json)
+            }
+            None => {
+                storage::delete_document(&self.conn, &id.0)?;
+                None
+            }
+        };
+        if let Some(changes) = &mut self.journal {
+            changes.record(&table.name, &id.0, old.is_some(), json);
         }
         Ok(())
+    }
+
+    /// Write a journaled document state as is (`None`: delete it if it exists), keeping every index up to date.
+    /// Used to replay the journal ([`Database::replay`]); no validation (the document was valid when written).
+    fn apply_change(&mut self, table: &TableInfo, id: DocId, doc: Option<&Map<String, Value>>) -> anyhow::Result<()> {
+        check_table(table, id)?;
+        let old = match storage::get_document(&self.conn, &id.0)? {
+            Some(_) => Some(self.load(table, id)?),
+            None => None,
+        };
+        if let Some(t) = doc.and_then(|d| d.get(CREATION_TIME_FIELD)).and_then(Value::as_f64) {
+            self.last_creation_time = self.last_creation_time.max(t);
+        }
+        match (old, doc) {
+            (None, None) => Ok(()),
+            (old, new) => self.write(table, id, old.as_ref(), new),
+        }
     }
 
     /// Insert a document from user fields; adds `_id` and `_creationTime`. `validate` sees the complete document

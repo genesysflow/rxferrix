@@ -19,6 +19,11 @@
 //!    were changed or damaged since staging, nothing is replaced: the server starts on the current database and the
 //!    marker records the error (shown on the dashboard) until it is canceled.
 //!
+//! **Point in time** ([`stage_point_in_time`], `POST /api/admin/restore/point-in-time`): the same, with the staging
+//! directory filled by `super::replicate::prepare_point_in_time` (a snapshot of the replication target plus the
+//! replayed journal, checked like an archive) instead of an archive; the marker records what was restored
+//! (`PendingRestore::point_in_time`).
+//!
 //! **Cancel** ([`cancel`], `DELETE /api/admin/restore`, `ferrix restore --cancel`): removes the marker, then the
 //! staged files. **Restart** (`POST /api/admin/restore/restart`): only when the server runs with
 //! `--restart-exit-code N` (under systemd with `Restart=on-failure` or `RestartForceExitStatus=N`, or Docker with a
@@ -77,6 +82,10 @@ pub struct PendingRestore {
     pub secret_ignored: bool,
     /// Why the last start didn't apply it (the staged files were changed or damaged). Cancel it and stage again.
     pub error: Option<String>,
+    /// A point-in-time restore from the replication target (`super::replicate`): the snapshot it started from and
+    /// the point reached. `None` for an archive.
+    #[serde(default)]
+    pub point_in_time: Option<super::replicate::PointInTimeInfo>,
     /// SHA-256 of the staged databases, checked before they are applied (in the marker only; [`Self::public`]
     /// leaves them out).
     #[ts(skip)]
@@ -150,14 +159,57 @@ static STAGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// the user error `restore_pending` if one is staged already, or `invalid_backup` with the reason if the archive
 /// doesn't pass the checks (nothing is changed then).
 pub async fn stage(dir: &Path, archive: &Path, source: &str, staged_by: Option<String>) -> crate::Result<PendingRestore> {
+    let archive = archive.to_path_buf();
+    stage_with(dir, source, staged_by, |work| async move {
+        let manifest = backup::prepare(&archive, &work, false)
+            .await
+            .map_err(|e| user_error("invalid_backup", format!("This backup can't be restored: {e:#}")))?;
+        Ok((manifest, None))
+    })
+    .await
+}
+
+/// Stage a point-in-time restore from the replication `target` (`super::replicate::prepare_point_in_time`: the
+/// snapshot plus the replayed journal, checked like an archive). Fails with `restore_pending`, or
+/// `invalid_point_in_time` / `invalid_backup` with the reason.
+pub async fn stage_point_in_time(
+    dir: &Path,
+    target: &super::BackupTarget,
+    point: &super::replicate::PointInTime,
+    staged_by: Option<String>,
+) -> crate::Result<PendingRestore> {
+    let scratch = tempfile::Builder::new().prefix(".ferrix-pitr-").tempdir_in(dir)?;
+    let (target, point, scratch_path) = (target.clone(), point.clone(), scratch.path().to_path_buf());
+    let marker = stage_with(dir, "point in time", staged_by, |work| async move {
+        let (manifest, info) = super::replicate::prepare_point_in_time(&target, &scratch_path, &work, &point)
+            .await
+            .map_err(|e| match e.chain().find_map(|c| c.downcast_ref::<UserError>()) {
+                Some(u) => crate::Error::from(u.clone()),
+                None => user_error("invalid_backup", format!("This point in time can't be restored: {e:#}")),
+            })?;
+        Ok((manifest, Some(info)))
+    })
+    .await;
+    drop(scratch);
+    marker
+}
+
+/// Stage what `prepare` puts into the (empty) staging directory it is given, with its manifest.
+async fn stage_with<F, Fut>(dir: &Path, source: &str, staged_by: Option<String>, prepare: F) -> crate::Result<PendingRestore>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = crate::Result<(Manifest, Option<super::replicate::PointInTimeInfo>)>>,
+{
     let _one = STAGING.lock().await;
     if pending(dir)?.is_some() {
         return Err(user_error("restore_pending", "A restore is staged already; cancel it first"));
     }
     let work = tempfile::Builder::new().prefix(".ferrix-restore-staging-").tempdir_in(dir)?;
-    let manifest: Manifest = backup::prepare(archive, work.path(), false)
-        .await
-        .map_err(|e| user_error("invalid_backup", format!("This backup can't be restored: {e:#}")))?;
+    let (manifest, point_in_time) = prepare(work.path().to_path_buf()).await?;
+    let source = match &point_in_time {
+        Some(p) => format!("point in time: ts {} of generation {}", p.ts, p.generation),
+        None => source.to_string(),
+    };
     let secret_ignored = work.path().join(SECRET_FILE).exists();
     if secret_ignored {
         std::fs::remove_file(work.path().join(SECRET_FILE))?;
@@ -175,7 +227,7 @@ pub async fn stage(dir: &Path, archive: &Path, source: &str, staged_by: Option<S
     .await??;
     let blob_bytes: u64 = manifest.files.iter().filter(|f| f.path.starts_with("storage/")).map(|f| f.bytes).sum();
     let marker = PendingRestore {
-        source: source.to_string(),
+        source,
         staged_at: crate::db::wall_clock_ms(),
         staged_by,
         backup_created_at: manifest.created_at,
@@ -186,6 +238,7 @@ pub async fn stage(dir: &Path, archive: &Path, source: &str, staged_by: Option<S
         bytes: staged_files.iter().map(|f| f.bytes).sum::<u64>() + blob_bytes,
         secret_ignored,
         error: None,
+        point_in_time,
         staged_files,
     };
     // A leftover staging directory (a cancel interrupted halfway) goes first.

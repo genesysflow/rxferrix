@@ -284,7 +284,7 @@ async fn startup_refuses_documents_that_no_longer_match() {
     };
     assert_eq!(bad_ids.len(), 25);
     let open = |def: TableDef, skip: bool| {
-        Database::open_with(dir.path(), &[def], &OpenOptions { readers: 1, skip_schema_check: skip }).map(drop)
+        Database::open_with(dir.path(), &[def], &OpenOptions { readers: 1, skip_schema_check: skip, ..Default::default() }).map(drop)
     };
 
     let err = open(strict_items(|| "{ changed: true }".into()), false).unwrap_err().to_string();

@@ -467,7 +467,7 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
 
 - **Data dir**: `./fx_data/{data.db, aux.db, storage/, backups/}`, overridable with `--dir`.
 - **CLI**: `serve [--http 0.0.0.0:8090] [--https domain] [--dev]`, `codegen`, `migrate`, `admin create|reset-password`, `backup`, `restore`, `export --format jsonl`, `import`.
-- **Backups**: the SQLite online backup API (or `VACUUM INTO`), on demand or on a schedule, optionally uploaded to S3. Running Litestream alongside works for continuous replication.
+- **Backups**: the SQLite online backup API (or `VACUUM INTO`), on demand or on a schedule, optionally uploaded to S3. Continuous replication: a logical change journal written in each commit's transaction, shipped in segments with periodic snapshots, for point-in-time restores (Litestream alongside works too).
 - **Deploy**: one static binary (target `x86_64-unknown-linux-musl`), a systemd unit, a `FROM scratch` Docker image, and an optional `--https` mode with automatic TLS.
 - **Serving the frontend**: `.static_dir(...)` or `.embed_static::<Assets>()` serves the SPA from the same binary with SPA fallback routing, so an entire app ships as one binary.
 - **Observability**: `tracing` to stdout as JSON in production, optional Prometheus `/metrics`, and dashboard metrics read from `aux.db`.
@@ -481,7 +481,12 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   `rustls-acme` (TLS-ALPN-01, cache in `<dir>/acme`), `--tls-cert/--tls-key` takes files (reloaded when they
   change). `scripts/release.sh` builds the static musl binary with cargo-zigbuild; `Dockerfile` (`FROM scratch`),
   `deploy/ferrix.service`, built in CI by `.github/workflows/release.yml`. Logs are JSON lines off a terminal
-  (`--log-format`); `_settings` holds the runtime auth settings.)
+  (`--log-format`); `_settings` holds the runtime auth settings. Continuous replication (`ops::replicate`,
+  `db::journal`): `serve --replicate-to` journals every commit's document changes into `_journal` inside its own
+  transaction, ships them every `--replicate-every` as `generations/<g>/journal/<from>-<to>.zst` and takes snapshots
+  every `--snapshot-every` (`generations/<g>/snapshots/`), with `--replicate-keep` retention; `restore --from
+  <target> [--to-ts | --to-time]` and `POST /api/admin/restore/point-in-time` rebuild a point from a snapshot plus the
+  replayed journal.)
 
 ---
 
@@ -723,7 +728,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
   (README "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
 
-### Phase 9 — Operations polish (M) — done (except incremental backups)
+### Phase 9 — Operations polish (M) — done
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
   `auth_secret.key` only with `--include-secret`), `ferrix backup`, scheduled backups with rotation to a directory or
   S3 (`--backup-every/--backup-keep/--backup-to`, the cron `ferrix-backup`), an offline `ferrix restore` that refuses
@@ -753,7 +758,13 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Hot reload of `--tls-cert`/`--tls-key` (`--tls-reload-every`, atomic swap, a bad pair keeps the current one).
 - [x] CI: `.github/workflows/release.yml` (gates, the musl release, the Docker image build and smoke test, pushes on
   tags). Not run here (no usable Docker daemon); the YAML is validated.
-- [ ] Not yet: incremental/streaming backups (use Litestream).
+- [x] Incremental, continuous backups with point-in-time restore: a logical change journal (`_journal`, written in
+  each commit's own SQLite transaction: exactly once, never a rolled-back write) shipped as checksummed zstd segments
+  named by ts range to a directory or S3 (`--replicate-to`, `--replicate-every`), periodic snapshots
+  (`--snapshot-every`), retention (`--replicate-keep`), generations for restored or diverged databases, a bounded
+  local backlog while the target is down (`--replicate-max-pending`); `restore --from [--to-ts | --to-time]`, the
+  staged `POST /api/admin/restore/point-in-time`, the lag in `GET /api/admin/replication`, `/metrics` and the
+  dashboard (docs/CONTRACT.md §4.4). Litestream remains an alternative.
 - [x] An interval-tree invalidation index (done in Phase 2).
 
 ---

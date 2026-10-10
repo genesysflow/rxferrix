@@ -6,12 +6,15 @@ import {
   exportTable,
   fetchTimeseries,
   filenameFromDisposition,
+  getReplication,
   impersonate,
   importFormatOf,
   importTable,
   listBackups,
+  replicationSnapshot,
   restartServer,
   saveBlob,
+  stagePointInTime,
   stageRestore,
   uploadRestore,
   waitForRestart,
@@ -160,7 +163,28 @@ describe("other admin endpoints", () => {
       backups: [],
       pendingRestore: null,
       restart: { available: false, exitCode: null },
+      replication: null,
     });
+  });
+
+  it("reads the replication status, snapshots and stages point-in-time restores", async () => {
+    const status = { target: "s3://b/r", generation: "g", lagCommits: 0, generations: [] };
+    const state = { pendingRestore: { source: "point in time: ts 7 of generation g" }, restart: { available: false, exitCode: null } };
+    const fetch = mockFetch(
+      new Response(JSON.stringify({ enabled: false })),
+      new Response(JSON.stringify({ enabled: true, ...status })),
+      new Response(JSON.stringify({ name: "ferrix-auto-x-ts9.tar.zst", ts: 9, createdAt: 1, bytes: 2 }), { status: 201 }),
+      new Response(JSON.stringify(state)),
+    );
+    expect(await getReplication(fakeAuth())).toBeNull();
+    expect(await getReplication(fakeAuth())).toEqual(status);
+    expect(fetch.mock.calls[1]![0]).toBe("/api/admin/replication");
+    expect((await replicationSnapshot(fakeAuth())).ts).toBe(9);
+    expect(fetch.mock.calls[2]![1]?.method).toBe("POST");
+    expect(await stagePointInTime(fakeAuth(), { toTs: 7, generation: "g" })).toEqual(state);
+    const [url, init] = fetch.mock.calls[3]!;
+    expect(url).toBe("/api/admin/restore/point-in-time");
+    expect(JSON.parse(init!.body as string)).toEqual({ toTs: 7, generation: "g" });
   });
 
   it("waits for the server to go down and come back", async () => {

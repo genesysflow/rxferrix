@@ -1834,8 +1834,8 @@ action, targetTable, targetId, before, after, details, at }` with indexes `by_at
 for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
 `details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
 `open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1), `restore_stage` / `restore_cancel` /
-`restore_restart` (staged restores, §4.2; `details`: the backup, its ts, `secretIgnored`, or the exit code). Secrets are
-masked by the §4.1 rule.
+`restore_restart` (staged restores, §4.2; `details`: the backup, its ts, `secretIgnored`, `pointInTime`, or the exit
+code), `replication_snapshot` (`details`: the snapshot's name and ts). Secrets are masked by the §4.1 rule.
 
 Each entry is written in the same transaction as the write it describes. The table is a system table, so the
 dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
@@ -1855,13 +1855,16 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 
 | Endpoint | Response |
 |---|---|
-| `GET /api/admin/backups` | `{ target, backups: BackupInfo[], pendingRestore: PendingRestore \| null, restart: { available, exitCode } }`, newest first (`pendingRestore` and `restart` as for `GET /api/admin/restore`). `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
+| `GET /api/admin/backups` | `{ target, backups: BackupInfo[], pendingRestore: PendingRestore \| null, restart: { available, exitCode }, replication: ReplicationStatus \| null }`, newest first (`replication` as for `GET /api/admin/replication`, null without `--replicate-to`) (`pendingRestore` and `restart` as for `GET /api/admin/restore`). `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
 | `POST /api/admin/backups` | Body (optional) `{ includeAux?, includeFiles? }` → 201 `BackupInfo` once the archive is stored. Runs while the server serves (writes are not blocked); one backup at a time per process (a second request waits). `includeSecret: true` → 400 `invalid_request` (`auth_secret.key` is only ever included by the CLI). 500 `server_error` with the reason (e.g. S3 credentials) on failure. |
 | `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `ferrix-….tar.zst`. |
 | `DELETE /api/admin/backups/{name}` | `{ deleted: true }`; 404 `not_found`; 400 `invalid_name`. |
 | `POST /api/admin/backups/{name}/restore` | Stage that backup of the target for a restore at the next start (§4.4 "Staged restores") → `{ pendingRestore, restart }` once it passed every check. 400 `invalid_backup` with the reason (nothing is staged); 409 `restore_pending` if one is staged already; 404 `not_found`; 400 `invalid_name`. Audited (`restore_stage`). |
 | `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
-| `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error }`; `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
+| `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error, pointInTime }`; `pointInTime` (null for an archive) = `PointInTimeInfo` `{ generation, snapshot, snapshotTs, requestedTs, requestedTime, ts, time, replayed, segments, reached }` (`reached: false`: the point asked for is beyond the newest replicated commit, which was restored instead); `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
+| `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
+| `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
+| `POST /api/admin/replication/snapshot` | 201 `SnapshotInfo`: a snapshot of the current generation now (after shipping), then retention. 404 `replication_off`. Audited (`replication_snapshot`). |
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
 | `POST /api/admin/restore/restart` | 202 `{ restarting: true, exitCode }`, then a graceful shutdown and exit with `--restart-exit-code`, for the supervisor (systemd, Docker) to start the server again, which applies the restore. 400 `restart_unavailable` without `--restart-exit-code`; 409 `no_pending_restore`; 400 `invalid_backup` when the staged restore has an `error`. Audited (`restore_restart`). |
 | `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
@@ -1900,10 +1903,11 @@ is served; the system functions and `/api/admin/*` exist either way.
 **Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `ferrix-auto-…`; the
 snapshot ts in the name is what `GET /api/admin/backups` reports as `ts`, `null` for older names without it): a zstd-compressed
 tar of `data.db` (a `VACUUM INTO` snapshot: one read transaction, so a consistent copy at one commit ts that never
-blocks the writer), optionally `aux.db` (same), `storage/<storage id>` for the blob of every `_storage` document of
-the snapshot (local storage only), `auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`:
-`{ format: "ferrix-backup", version: 1, createdAt, ferrixVersion, ts, storage: "included" | "excluded" | "remote",
-missingBlobs, files: [{ path, bytes, sha256 }] }`.
+blocks the writer; the copy's replication journal and state are removed, below), optionally `aux.db` (same),
+`storage/<storage id>` for the blob of every `_storage` document of the snapshot (local storage only),
+`auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`: `{ format: "ferrix-backup", version: 1,
+createdAt, ferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
+"remote", missingBlobs, files: [{ path, bytes, sha256 }] }`.
 
 **Scheduled backups**: `serve --backup-every 6h --backup-keep 7 [--backup-to LOCATION] [--backup-with-aux]
 [--backup-with-files]` declares the interval cron `ferrix-backup` running the internal system action
@@ -1938,6 +1942,51 @@ until the restore is canceled. *Restart*: `serve --restart-exit-code N` (`FERRIX
 admin request `POST /api/admin/restore/restart`: `serve` shuts down gracefully (as on SIGTERM) and exits with `N`
 for the supervisor to start it again (`deploy/ferrix.service` sets 75 with `RestartForceExitStatus=75`; with Docker,
 `--restart unless-stopped`). Without the flag nothing restarts by itself: the restore waits for the next start.
+
+**Continuous replication** (`crate::ops::replicate`, `crate::db::journal`; `serve --replicate-to <dir | file:///dir |
+s3://bucket/prefix> [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d] [--replicate-max-pending 1GB]`,
+env `FERRIX_REPLICATE_TO`; `AppOptions::ops.replication`). *Journal*: with replication configured the database opens
+with journaling on, and every write transaction that commits documents inserts one row into the raw SQLite table
+`_journal (ts INTEGER PRIMARY KEY, time REAL, changes TEXT)` right before `COMMIT`, in the same transaction as its
+writes and the `_meta.ts` bump: `changes` is `[[table, id, document | null], …]`, the final state of every document
+written (user and system tables; a document created and deleted by the same transaction is left out, and such a
+commit journals `[]`). Index entries, full-text and vector tables and HNSW files are not journaled. So the journal
+holds every committed ts exactly once (consecutive), and nothing rolled back; whether a transaction journals is decided
+at `BEGIN` under the writer lock, and the switch only flips under that lock. *Layout* in the target:
+`generations/<UTC time>-<8 hex>/snapshots/ferrix-auto-<time>-ts<N>.tar.zst` (backup archives without `aux.db` and
+blobs) and `generations/<g>/journal/<from ts>-<to ts>.zst` (ts zero-padded to 20 digits): zstd of a JSON header line
+`{ format: "ferrix-journal", version: 1, generation, from, to, fromTime, toTime, entries, bytes, sha256 }` (the size
+and SHA-256 of the body) and one `<ts>\t<time>\t<changes>` line per commit (at most 10 000 commits or ~16 MiB per
+segment). *Shipping*: every `--replicate-every` the rows after the shipped ts are read on a reader snapshot, uploaded
+as a segment, and only then deleted locally, with `_meta.replication_shipped_ts` (and `_generation`, `_shipped_time`)
+updated in the same transaction. An upload whose answer is lost is retried and may overlap the earlier segment;
+restores pick the segments that reach furthest and verify the overlap is identical. *Generations*: at start the
+replicator resumes the generation in `_meta` only if the target has it, holds nothing beyond this database's ts, and
+the journal holds every commit after the shipped ts (adopting a segment uploaded right before a crash); otherwise it
+starts a new generation with a snapshot (journaling is on first, so every commit after the snapshot's ts is
+journaled). Backups and restored databases carry no journal or replication state, so a restored database always starts
+a new generation. *Snapshots* every `--snapshot-every` (also `POST /api/admin/replication/snapshot`). *Retention*
+after each snapshot: every snapshot taken within `--replicate-keep`, plus the newest one before that window (across
+generations), and per generation the segments whose last ts is after its oldest kept snapshot; everything else,
+whole generations included, is deleted. *Failure*: errors are retried with exponential backoff (up to a minute),
+reported in the status and logged (once, then every minute); the journal keeps growing locally; past
+`--replicate-max-pending` it is dropped, journaling pauses and the next successful contact starts a new generation.
+`serve` ships what is left at a graceful shutdown (up to 15 s). *Overhead*: one extra row insert per commit, with the
+document JSON the write already serialized; measured with `bench_journal_overhead` (`tests/it/replication.rs`, release
+build, 5000 sequential insert/patch mutations of a small indexed document, median of 3 rounds): 7065 commits/s
+without replication, 6747/s journaling (-4.5%), 6708/s journaling and shipping every second (-5.1%).
+
+**Point-in-time restore** (`ferrix restore --from <target> [--to-ts N | --to-time <RFC 3339>] [--generation G]
+[--storage-dir]`, offline under `ferrix.lock`; `--list` prints the generations and their restorable ranges; or staged
+with `POST /api/admin/restore/point-in-time`). The generation is `--generation`, else with `--to-time` the newest one
+created at or before that time, else the newest; the base is its newest snapshot at or before the ts (taken at or
+before the time). The snapshot is extracted and checked like an archive (`backup::prepare`), tables created after it
+are added with the journal's table numbers, then every journal entry after it up to the point is replayed as its own
+commit with its original ts and time (`Database::replay`: unvalidated documents through the write path, so ordinary,
+full-text and vector indexes are maintained and the write log is appended). The result goes through the archive
+checks (schema check with the binary's tables, `verify_indexes`) and its ts must be the point's: `--to-ts N` restores
+exactly N, `--to-time` the last commit at or before it, and a point beyond the newest replicated commit restores that
+one (`reached: false`). Before the oldest snapshot is an error. File blobs are not journaled.
 
 A backup holds the whole database, system tables included (`_users`, `_settings`, `_audit_log`, ...); secrets in
 `_settings` are encrypted with a key derived from `auth_secret.key`, so they are readable after a restore only with
@@ -1984,7 +2033,18 @@ backup::restore(archive: &Path, dir: &Path, &RestoreOptions { storage_dir, skip_
 backup::prepare(archive, staging, skip_verify) -> Result<Manifest>;   // extract + check, no data dir touched
 backup::apply_staged(staging, dir, manifest, storage_dir, previous) -> Result<RestoreReport>;   // offline, repeatable
 restore::{stage(dir, archive, label, staged_by) -> Result<PendingRestore>, pending(dir), cancel(dir) -> Result<bool>,
+          stage_point_in_time(dir, &BackupTarget, &PointInTime, staged_by) -> Result<PendingRestore>,
           apply_pending(dir, storage_dir) -> Result<Option<RestoreReport>>};   // serve calls apply_pending at startup
+replicate::ReplicationOptions { target, store: Option<BackupTarget>, every, snapshot_every, keep, max_pending_bytes,
+                                segment_max_entries, segment_max_bytes };   // AppOptions::ops.replication
+app.replication() -> Option<&Arc<Replicator>>;   // started by App::open when configured
+Replicator::{sync_now(&app), flush(&app), snapshot_now(&app) -> Result<SnapshotInfo>, status(&app) -> ReplicationStatus, target()};
+replicate::{list_generations(&target) -> Result<Vec<Generation>>, read_segment(&target, generation, from, to),
+            plan_restore(&gens, &PointInTime { to_ts, to_time, generation }) -> Result<RestorePlan>,
+            prepare_point_in_time(&target, scratch, staging, &point) -> Result<(Manifest, PointInTimeInfo)>,
+            restore_point_in_time(&target, dir, &point, &RestoreOptions) -> Result<(RestoreReport, PointInTimeInfo)>,
+            plan_retention(&gens, now_ms, keep) -> RetentionPlan, encode_segment, decode_segment};
+db.replay(&JournalEntry) -> Result<u64>;   // one journal entry as a commit with its ts and time
 RestartHandle::{new(exit_code), exit_code(), request() -> bool, requested().await, is_requested()};
 BackupTarget::{parse(location, data_dir), for_app(&app), list(), open(name), download(name, dest), delete(name), rotate(keep)};
 export::export_to_dir(data_dir, Option<BlobStore>, out, &ExportOptions { tables, format, include_files }) -> Result<ExportManifest>;

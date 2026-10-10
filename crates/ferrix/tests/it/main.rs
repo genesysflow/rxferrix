@@ -23,6 +23,7 @@ mod ops;
 mod pagination;
 mod query_engine;
 mod readsets;
+mod replication;
 mod revocation;
 mod storage;
 mod vector_queries;

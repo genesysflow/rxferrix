@@ -740,8 +740,14 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact)
   older than `orphan_grace` (1 h, by the app clock), and not being uploaded. Other keys under the prefix are left
   alone. The sweep runs as the **system cron `_storage_sweep`** (§1.7): an interval of `sweep_interval` (6 h; the
   first run 6 h after the first start, then on schedule across restarts) running the internal action
-  `_system/storage:sweep_orphans`, whose job result is the `SweepStats` (`{ scanned, deleted, thumbnails }`). With
+  `_system/storage:sweep_orphans`, whose job result is the `SweepStats` (`{ scanned, deleted, thumbnails, kept }`). With
   `sweep_interval: None` there is no such cron (`StorageService::sweep(&app)` still works).
+- **Keeping deleted files.** Every deletion of a `_storage` document records its time in the raw table
+  `_storage_deleted` (in the write path, so a replayed journal records it too; recreating the document removes it).
+  With `keep_deleted: Some(d)` (default: `--replicate-keep` when replicating, else `None`; `--storage-keep-deleted`),
+  `ctx.storage.delete` leaves the blob, and the sweep keeps an orphan until `d` after its deletion (or after it was
+  written, when no deletion is recorded: a file from after the point a restore went back to), then deletes it and
+  forgets the deletion. `SweepStats` adds `kept`. Without it, blobs are deleted right after the commit, as before.
 - **Thumbnails** (`GET /api/storage/<id>?thumb=WxH|N[&fit=contain|cover]`, docs/PROTOCOL.md): JPEG, PNG, WebP and GIF
   (first frame) sources up to `thumbnail_max_source_bytes`, decoded with the `image` crate only after the header's
   dimensions passed `thumbnail_max_source_pixels` (decompression-bomb guard; the decoder also runs with matching
@@ -760,6 +766,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url (exact)
       pub upload_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP; Some((60, 120))
       pub sweep_interval: Option<Duration>,     // Some(6 h): the `_storage_sweep` system cron; None = none
       pub orphan_grace: Duration,               // 1 h
+      pub keep_deleted: Option<Duration>,       // None, or --replicate-keep when replicating
       pub private: bool,                        // false; `--storage-private`
       pub max_signed_url_ttl: Duration,         // 7 days
       pub thumbnail_max_dimension: u32,         // 1024 (W and H in 1..=this) unless:

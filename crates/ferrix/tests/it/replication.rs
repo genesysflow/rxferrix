@@ -861,3 +861,37 @@ async fn bench_journal_overhead() {
         (ship / off - 1.0) * 100.0
     );
 }
+
+/// Deleted files are kept as long as point-in-time restores reach back (`StorageConfig::keep_deleted` defaults to
+/// `--replicate-keep` when replicating): a restore to before a deletion finds the file's contents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn point_in_time_restores_find_deleted_files() {
+    use ferrix::storage::{StorageBackend, StorageConfig};
+
+    use crate::storage::app::{delete_file, read_text, store_text};
+
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = dir_target(target_dir.path());
+    let t = replicated(options(target.clone())).await;
+    assert_eq!(t.app().storage().config().keep_deleted, Some(Duration::from_secs(7 * 86_400)));
+    rep(&t).sync_now(t.app()).await.unwrap();
+    let file = t.action::<store_text>(("hello".to_string(),)).await.unwrap();
+    let before_delete = t.app().db().write_log().latest();
+    t.mutation::<delete_file>((file, false)).await.unwrap();
+    rep(&t).sync_now(t.app()).await.unwrap();
+
+    // Past the orphan grace, the sweep keeps the deleted file's blob.
+    t.advance_time(Duration::from_secs(2 * 3600)).await.unwrap();
+    let stats = t.app().storage().sweep(t.app()).await.unwrap();
+    assert_eq!((stats.deleted, stats.kept), (0, 1), "{stats:?}");
+    let storage_dir = t.dir().join("storage");
+    assert!(storage_dir.join(file.to_string()).exists());
+
+    // Restored to before the deletion (blobs stay where they are: the restore only replaces the database), the file
+    // is back, contents and all.
+    let (dir, _) = restore_to(&target, PointInTime { to_ts: Some(before_delete), ..Default::default() }).await;
+    assert_eq!(meta_ts(dir.path()), before_delete);
+    let storage = StorageConfig { backend: StorageBackend::Local(Some(storage_dir)), ..Default::default() };
+    let restored = App::open(dir.path(), AppOptions { dev: true, storage, ..Default::default() }).await.unwrap();
+    assert_eq!(restored.action::<read_text>((file,)).await.unwrap().as_deref(), Some("hello"));
+}

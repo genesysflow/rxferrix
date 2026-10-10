@@ -142,6 +142,9 @@ pub struct SweepStats {
     /// Cached thumbnails deleted because their file is gone.
     #[ts(type = "number")]
     pub thumbnails: u64,
+    /// Blobs (and thumbnails) of deleted files kept for `StorageConfig::keep_deleted`.
+    #[ts(type = "number")]
+    pub kept: u64,
 }
 
 /// File storage of an [`App`]: get it with `app.storage()`.
@@ -579,8 +582,8 @@ impl StorageService {
         let cutoff_ms = app.db().clock().now_ms() as i64 - self.config.orphan_grace.as_millis() as i64;
         let mut stats = SweepStats::default();
         let mut listing = self.store.list(prefix.as_ref());
-        // (file id, key, is a thumbnail)
-        let mut candidates: Vec<(DocId, ObjectPath, bool)> = Vec::new();
+        // (file id, key, is a thumbnail, written at ms)
+        let mut candidates: Vec<(DocId, ObjectPath, bool, i64)> = Vec::new();
         let thumbs_root = format!("{}/", super::thumbs::THUMBS_DIR);
         while let Some(meta) = listing.next().await {
             let meta = meta.context("listing stored blobs")?;
@@ -602,21 +605,37 @@ impl StorageService {
             if id.table_number() != table_number || meta.last_modified.timestamp_millis() > cutoff_ms {
                 continue;
             }
-            candidates.push((id, meta.location, thumbnail));
+            candidates.push((id, meta.location, thumbnail, meta.last_modified.timestamp_millis()));
         }
+        // With `keep_deleted`, an orphan is kept until that long after its file was deleted (or, if no deletion is
+        // recorded, e.g. a file written after the point a restore went back to, after it was written).
+        let now_ms = app.db().clock().now_ms();
+        let keep_cutoff_ms = self.config.keep_deleted.map(|keep| now_ms - keep.as_secs_f64() * 1000.0);
         for chunk in candidates.chunks(500) {
             let snapshot = app.db().snapshot().await?;
-            let orphans: Vec<&(DocId, ObjectPath, bool)> = snapshot.with_conn(|c| {
-                let mut out = Vec::new();
+            let (orphans, kept): (Vec<&(DocId, ObjectPath, bool, i64)>, u64) = snapshot.with_conn(|c| {
+                let (mut out, mut kept) = (Vec::new(), 0);
                 for entry in chunk {
-                    if crate::db::storage::get_document(c, &entry.0.0)?.is_none() {
-                        out.push(entry);
+                    if crate::db::storage::get_document(c, &entry.0.0)?.is_some() {
+                        continue;
                     }
+                    if let Some(cutoff) = keep_cutoff_ms {
+                        let deleted_at: Option<f64> = c
+                            .prepare_cached("SELECT deleted_at FROM _storage_deleted WHERE id = ?1")?
+                            .query_row([&entry.0.0[..]], |r| r.get(0))
+                            .optional()?;
+                        if deleted_at.unwrap_or(entry.3 as f64) > cutoff {
+                            kept += 1;
+                            continue;
+                        }
+                    }
+                    out.push(entry);
                 }
-                Ok(out)
+                Ok((out, kept))
             })?;
             drop(snapshot);
-            for (id, path, thumbnail) in orphans {
+            stats.kept += kept;
+            for (id, path, thumbnail, _) in orphans {
                 if self.blobs_in_flight.lock().unwrap_or_else(|e| e.into_inner()).contains(id) {
                     continue;
                 }
@@ -627,6 +646,14 @@ impl StorageService {
                 }
             }
         }
+        // Deletion times past every use: their blobs were deleted above (one that couldn't be is then kept by its
+        // write time instead, and swept later).
+        let keep = self.config.keep_deleted.unwrap_or_default().max(self.config.orphan_grace);
+        let forget_before = now_ms - keep.as_secs_f64() * 1000.0;
+        let forget = |c: &Connection| {
+            Ok(c.prepare_cached("DELETE FROM _storage_deleted WHERE deleted_at < ?1")?.execute([forget_before])?)
+        };
+        app.db().with_writer(forget).await?;
         if stats.deleted > 0 || stats.thumbnails > 0 {
             tracing::info!(
                 "storage sweep: deleted {} orphaned blob(s) and {} thumbnail(s) of {} scanned",

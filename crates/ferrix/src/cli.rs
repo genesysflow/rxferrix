@@ -188,6 +188,10 @@ struct ServeArgs {
     /// expiring URLs (ctx.storage.get_signed_url).
     #[arg(long, env = "FERRIX_STORAGE_PRIVATE")]
     storage_private: bool,
+    /// Keep deleted files' contents this long, e.g. `7d`, so restores to before a deletion find them (they are gone
+    /// for everything else at once). Default: the `--replicate-keep` window when replicating, otherwise off.
+    #[arg(long, env = "FERRIX_STORAGE_KEEP_DELETED", value_name = "DURATION", value_parser = parse_duration)]
+    storage_keep_deleted: Option<Duration>,
     /// How log lines are written to stdout: `json` (one object per line), `pretty` or `compact`. Default: pretty on a
     /// terminal, json otherwise. `RUST_LOG` filters them either way.
     #[arg(long, env = "FERRIX_LOG_FORMAT", value_enum, value_name = "FORMAT")]
@@ -226,7 +230,8 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         "s" => n,
         "m" => n * 60.0,
         "h" => n * 3600.0,
-        _ => return Err(format!("invalid duration unit in `{s}` (use ms, s, m or h)")),
+        "d" => n * 86400.0,
+        _ => return Err(format!("invalid duration unit in `{s}` (use ms, s, m, h or d)")),
     };
     Duration::try_from_secs_f64(secs).map_err(|e| format!("invalid duration `{s}`: {e}"))
 }
@@ -560,6 +565,9 @@ fn storage_config(args: &ServeArgs, mut storage: StorageConfig, explicit_public_
     if args.storage_private {
         storage.private = true;
     }
+    if let Some(keep) = args.storage_keep_deleted {
+        storage.keep_deleted = Some(keep);
+    }
     Ok(storage)
 }
 
@@ -827,7 +835,8 @@ mod tests {
         assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-        assert!(parse_duration("5d").is_err() && parse_duration("x").is_err() && parse_duration("-1s").is_err());
+        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 86400));
+        assert!(parse_duration("5w").is_err() && parse_duration("x").is_err() && parse_duration("-1s").is_err());
         assert!(parse(&["--mutation-timeout", "soon"]).is_err());
     }
 

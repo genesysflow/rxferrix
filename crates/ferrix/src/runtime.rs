@@ -481,9 +481,16 @@ impl App {
         let metrics = Arc::new(Metrics::default());
         let subscriptions = OnceLock::new();
         let public_url = options.auth.public_url.clone();
+        let mut storage_config = options.storage.clone();
+        if storage_config.keep_deleted.is_none()
+            && let Some(replication) = &options.ops.replication
+        {
+            // Point-in-time restores reach `--replicate-keep` back: deleted files' blobs must too.
+            storage_config.keep_deleted = Some(replication.keep);
+        }
         let storage = crate::storage::StorageService::new(
             &data_dir,
-            options.storage.clone(),
+            storage_config,
             public_url.as_deref(),
             *auth.keys.storage_key(),
         )?;

@@ -550,9 +550,12 @@ applied at the next start, like an archive. If the target is unreachable, commit
 `GET /api/admin/replication`, `/metrics` and the dashboard) and are shipped when it is back; past
 `--replicate-max-pending` (1 GB) the local journal is dropped and replication starts over with a new snapshot. A
 restored database, or one that was written without replication (e.g. `import` offline), starts a new *generation*
-next to the old ones, so history is never overwritten. The journal holds documents, not file blobs: keep files in S3
-(`--storage s3://…`) or back up `storage/` separately, and keep a copy of `auth_secret.key`. The cost is one extra row
-per commit: about 5% fewer commits per second in a sequential benchmark (docs/CONTRACT.md §4.4).
+next to the old ones, so history is never overwritten. The journal holds documents, not file contents, but **deleted
+files' contents are kept as long as restores reach** (`--replicate-keep`; `--storage-keep-deleted` to choose another
+window): the orphan sweep removes them only after that, so a restore to before a deletion finds the file. They are gone
+for everything else at once (their document is deleted). Restores leave a local storage directory in place (S3 files
+stay in their bucket). Keep a copy of `auth_secret.key`. The cost is one extra row per commit: about 5% fewer commits
+per second in a sequential benchmark (docs/CONTRACT.md §4.4).
 
 **Litestream** works too, as an alternative: `data.db` is a normal SQLite database in WAL mode, so
 [Litestream](https://litestream.io) can replicate its pages next to the server (`litestream replicate
@@ -626,6 +629,7 @@ app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun
 cargo test --workspace                                          # Rust: unit, proptests, model-based reactivity, WS e2e
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # generated TS type-checks with tsc
 cargo test -p ferrix-cli --test new -- --ignored                 # `ferrix new` apps build, typecheck; no SQLite warning
+FUZZ_SCALE=20 cargo test --release -p ferrix --test it fuzz     # longer randomized protocol/WebSocket/HTTP fuzzing
 bun run typecheck && bun run test                               # TS packages (dashboard included)
 bun run check:dashboard                                         # the committed dashboard build matches its sources
 (cd packages/dashboard && bun e2e/dashboard.ts)                 # after `cargo build -p todo-server`; starts its own servers

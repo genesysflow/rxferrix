@@ -980,6 +980,16 @@ impl WriteState {
         }
         self.writes.push((table.by_id().id, id.0.to_vec()));
         special.apply(&self.conn, id, &mut self.writes)?;
+        if table.name == <crate::storage::StoredFile as crate::schema::Table>::NAME {
+            // Deletion times of files, for keeping their blobs (`StorageConfig::keep_deleted`).
+            if new.is_some() {
+                self.conn.prepare_cached("DELETE FROM _storage_deleted WHERE id = ?1")?.execute([&id.0[..]])?;
+            } else if old.is_some() {
+                self.conn
+                    .prepare_cached("INSERT OR REPLACE INTO _storage_deleted (id, deleted_at) VALUES (?1, ?2)")?
+                    .execute(rusqlite::params![&id.0[..], self.now])?;
+            }
+        }
         let json = match new {
             Some(doc) => {
                 let json = serde_json::to_string(doc)?;
@@ -1227,9 +1237,10 @@ mod tests {
         let copy = tempfile::tempdir().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            // A copy taken while the checkpoint thread writes can be torn: then it just doesn't count yet.
             std::fs::copy(dir.path().join("data.db"), copy.path().join("main.db")).unwrap();
-            let main = Connection::open(copy.path().join("main.db")).unwrap();
-            let in_main = storage::read_meta_u64(&main, "probe").unwrap_or(0);
+            let in_main = Connection::open(copy.path().join("main.db"))
+                .map_or(0, |main| storage::read_meta_u64(&main, "probe").unwrap_or(0));
             if in_main >= 300 {
                 break;
             }

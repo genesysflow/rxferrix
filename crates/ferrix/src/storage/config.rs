@@ -99,6 +99,12 @@ pub struct StorageConfig {
     /// A blob is only swept once it is older than this (an upload's document is inserted right after its blob is
     /// complete). Default one hour.
     pub orphan_grace: Duration,
+    /// Keep the blob of a deleted file this long after the deletion (the orphan sweep removes it then), so restores to
+    /// a point before the deletion (point-in-time restores, archive backups without files) find it. The file is gone
+    /// for everything else at once: its document is deleted, so it can't be read or downloaded. Default: off (blobs
+    /// are deleted right after the commit), or `--replicate-keep` when replicating (`--replicate-to`);
+    /// `--storage-keep-deleted`.
+    pub keep_deleted: Option<Duration>,
     /// Private mode (`--storage-private`): `GET /api/storage/{id}` without a valid signature is refused (403), so
     /// files are only reachable through `ctx.storage.get_signed_url(id, ttl)`, and `get_url` fails. Default off
     /// (file URLs are unguessable capability URLs).
@@ -129,6 +135,7 @@ impl Default for StorageConfig {
             upload_rate_limit: Some((60, 120)),
             sweep_interval: Some(Duration::from_secs(6 * 3600)),
             orphan_grace: Duration::from_secs(3600),
+            keep_deleted: None,
             private: false,
             max_signed_url_ttl: DEFAULT_MAX_SIGNED_URL_TTL,
             thumbnail_max_dimension: DEFAULT_THUMBNAIL_MAX_DIMENSION,
@@ -200,6 +207,12 @@ impl StorageConfig {
     }
 
     /// Private mode: see [`StorageConfig::private`].
+    /// See [`StorageConfig::keep_deleted`].
+    pub fn keep_deleted(mut self, keep: Option<Duration>) -> Self {
+        self.keep_deleted = keep;
+        self
+    }
+
     pub fn private(mut self, private: bool) -> Self {
         self.private = private;
         self

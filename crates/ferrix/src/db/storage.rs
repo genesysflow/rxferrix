@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS _meta (k TEXT PRIMARY KEY, v);
 CREATE TABLE IF NOT EXISTS _tables (table_number INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS _indexes (index_id INTEGER PRIMARY KEY, table_number INTEGER NOT NULL, name TEXT NOT NULL, fields TEXT NOT NULL, UNIQUE(table_number, name));
 INSERT OR IGNORE INTO _meta (k, v) VALUES ('ts', 0);
+
+-- When each file's `_storage` document was deleted (maintained by the write path, also when a journal is replayed), so
+-- its blob can be kept for a while (`StorageConfig::keep_deleted`): point-in-time restores to before the deletion find
+-- it. Removed when the document comes back.
+CREATE TABLE IF NOT EXISTS _storage_deleted (id BLOB PRIMARY KEY, deleted_at REAL NOT NULL) WITHOUT ROWID;
 ";
 
 /// `_meta` keys.

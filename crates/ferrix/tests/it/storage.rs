@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::Message;
 
-mod app {
+pub mod app {
     use ferrix::prelude::*;
     use ferrix::storage::StoredFile;
 
@@ -1210,4 +1210,44 @@ async fn the_orphan_sweep_runs_as_a_system_cron() {
         .await
         .unwrap();
     assert!(t.query::<sweep_q::cron_rows>(()).await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Keeping deleted files (`StorageConfig::keep_deleted`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Whether a deletion time is recorded for `id` (`_storage_deleted`, maintained by the write path).
+fn deletion_recorded(dir: &std::path::Path, id: Id<StoredFile>) -> bool {
+    let id = ferrix::id::DocId::decode(&id.to_string()).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("data.db")).unwrap();
+    conn.query_row("SELECT count(*) FROM _storage_deleted WHERE id = ?1", [&id.0[..]], |r| r.get::<_, i64>(0)).unwrap() > 0
+}
+
+#[tokio::test]
+async fn deleted_files_are_kept_for_keep_deleted_then_swept() {
+    let day = Duration::from_secs(86_400);
+    let s = server_with(StorageConfig::default().keep_deleted(Some(day))).await;
+    let id = s.upload(b"keep me", "text/plain", None).await;
+    let blob = s.t.dir().join("storage").join(id.to_string());
+    s.t.mutation::<app::delete_file>((id, false)).await.unwrap();
+    // Gone for everyone at once...
+    assert_eq!(s.get(id, &[]).await.status(), 404);
+    assert!(s.t.action::<app::read_text>((id,)).await.unwrap().is_none());
+    // ...but its blob stays, with its deletion time recorded.
+    assert!(blob.exists(), "the blob was deleted at once");
+    assert!(deletion_recorded(s.t.dir(), id));
+
+    // Past the orphan grace, within keep_deleted: the sweep keeps it.
+    s.t.advance_time(Duration::from_secs(2 * 3600)).await.unwrap();
+    let stats = s.t.app().storage().sweep(s.t.app()).await.unwrap();
+    assert_eq!((stats.deleted, stats.kept), (0, 1), "{stats:?}");
+    assert!(blob.exists());
+
+    // Past keep_deleted: deleted (by the system cron `_storage_sweep`, which moving the clock runs, or by this sweep),
+    // and the deletion time forgotten.
+    s.t.advance_time(day).await.unwrap();
+    let stats = s.t.app().storage().sweep(s.t.app()).await.unwrap();
+    assert_eq!(stats.kept, 0, "{stats:?}");
+    assert!(!blob.exists());
+    assert!(!deletion_recorded(s.t.dir(), id));
 }

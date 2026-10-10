@@ -145,15 +145,18 @@ impl MutationStorage {
         self.db.get(id).await
     }
 
-    /// Delete the file: its document now (in this transaction), its blob once the transaction has committed. Fails
-    /// with the user error `not_found` if it doesn't exist.
+    /// Delete the file: its document now (in this transaction), its blob once the transaction has committed (or, with
+    /// `StorageConfig::keep_deleted`, by the orphan sweep once that has passed). Fails with the user error `not_found`
+    /// if it doesn't exist.
     pub async fn delete(&self, id: Id<StoredFile>) -> Result<()> {
         if self.db.get(id).await?.is_none() {
             return Err(not_found(id));
         }
         self.db.delete(id).await?;
-        let service = self.service.clone();
-        self.db.txn().on_commit(move || service.delete_blob_later(id.as_str()));
+        if self.service.config.keep_deleted.is_none() {
+            let service = self.service.clone();
+            self.db.txn().on_commit(move || service.delete_blob_later(id.as_str()));
+        }
         Ok(())
     }
 }
@@ -238,6 +241,9 @@ impl ActionStorage {
         }
         db.delete(id).await?;
         txn.commit_with(|_, _| Ok(())).await?;
+        if self.service().config.keep_deleted.is_some() {
+            return Ok(()); // the orphan sweep deletes the blob once `keep_deleted` has passed
+        }
         self.service().delete_blob(&id.as_str()).await
     }
 }

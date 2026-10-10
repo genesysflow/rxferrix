@@ -1001,7 +1001,7 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
     let swept = job(&t, sweep).await;
     assert_eq!(swept.state, JobState::Success, "{swept:?}");
     let stats: Value = serde_json::from_str(swept.result.as_deref().unwrap()).unwrap();
-    assert_eq!(stats, json!({ "scanned": 0, "deleted": 0, "thumbnails": 0 }));
+    assert_eq!(stats, json!({ "scanned": 0, "deleted": 0, "thumbnails": 0, "kept": 0 }));
 
     // The dashboard cancels a running action: it sees the cancel and stops.
     let hang: Id<ScheduledJob> = http.ok("mutation", "run_cron_now", json!({ "name": "hang" }), &admin).await.as_str().unwrap().parse().unwrap();

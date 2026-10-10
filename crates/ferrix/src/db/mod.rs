@@ -111,6 +111,10 @@ impl Database {
         let ann = search::ann::AnnIndexes::open(dir, &catalog, write_log.clone());
         let journal = Arc::new(journal::Journal::default());
         journal.set_enabled(options.journal);
+        if options.journal {
+            // Rows a previous run didn't ship count towards the bound from the start.
+            journal.set_pending_bytes(journal::stats(&writer)?.map(|s| s.3).unwrap_or(0));
+        }
         Ok(Database {
             journal,
             writer: Arc::new(tokio::sync::Mutex::new(writer)),

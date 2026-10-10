@@ -7,8 +7,9 @@ WebSocket and get updated results automatically whenever a write affects them.
 Status: Phases 0–8 are built (core, shared reactive subscriptions, clients, the admin dashboard, auth, the scheduler
 and crons, file storage, and full-text and vector search); see [PLAN.md](PLAN.md) §10 for what each still lacks.
 Phase 9 (operations) is built: data migrations (`#[migration]`), backups and restores (also from the dashboard),
-continuous replication with point-in-time restores, JSONL/CSV export and import, metrics, JSON logs, TLS (with certificate reload), frontend serving, release builds and a
-CI workflow for the binary and the Docker image (see [Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
+continuous replication with point-in-time restores, JSONL/CSV export and import, metrics, JSON logs, TLS (with
+certificate reload), frontend serving, release builds and a CI workflow for the binary and the Docker image (see
+[Deploying](#deploying)). Phase 10 fixed the rough edges that building the chat
 example found (index order, codegen names, `#[object]`, dev mode, storage URLs in dev; see
 [Things to know](#things-to-know)).
 

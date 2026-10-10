@@ -66,7 +66,10 @@ pub use error::{Error, MutationTimeout, Result, UserError};
 pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use private::FunctionKind;
 pub use id::Id;
-pub use runtime::{ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCtx, Registry, registry};
+pub use runtime::{
+    ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCacheOptions, QueryCtx,
+    Registry, registry,
+};
 pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
 pub use schema::{
     Doc, Field, HnswParams, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, Tokenizer,

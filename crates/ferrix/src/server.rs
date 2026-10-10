@@ -205,7 +205,15 @@ async fn http_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
         Ok(i) => i,
         Err(e) => return e.into_response(),
     };
-    let run = app.run_query(&call.path, call.args, &identity).await;
+    let run = match app.query_or_cached(&call.path, call.args, &identity, false).await {
+        // The cached result's JSON text goes into the response as is.
+        crate::runtime::QueryOutcome::Cached(hit) => {
+            let log_lines = serde_json::to_string(&hit.log_lines).unwrap_or_else(|_| "[]".into());
+            let body = format!(r#"{{"status":"success","value":{},"logLines":{log_lines}}}"#, hit.value.json());
+            return ([(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response();
+        }
+        crate::runtime::QueryOutcome::Ran(run) => run,
+    };
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {
         Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": log_lines })).into_response(),

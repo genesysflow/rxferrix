@@ -155,6 +155,15 @@ struct ServeArgs {
     /// Only enforced at `.await` points.
     #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
     mutation_timeout: Duration,
+    /// Memory for cached results of queries nobody watches any more, e.g. `64MB`, `1GB` (0 keeps none). They answer
+    /// the next subscriber, HTTP query or `ctx.run_query` without running, until a write changes them.
+    #[arg(long, env = "FERRIX_QUERY_CACHE_SIZE", value_name = "SIZE", default_value = "64MB")]
+    #[arg(value_parser = parse_size)]
+    query_cache_size: u64,
+    /// How long a cached result of a query nobody watches is kept, e.g. `30m`, `2h`.
+    #[arg(long, env = "FERRIX_QUERY_CACHE_TTL", value_name = "DURATION", default_value = "30m")]
+    #[arg(value_parser = parse_duration)]
+    query_cache_ttl: Duration,
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
@@ -204,12 +213,13 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         Some(i) => (&s[..i], s[i..].trim()),
         None => (s, "s"),
     };
-    let n: f64 = num.parse().map_err(|_| format!("invalid duration `{s}` (examples: 500ms, 5s, 2m)"))?;
+    let n: f64 = num.parse().map_err(|_| format!("invalid duration `{s}` (examples: 500ms, 5s, 2m, 1h)"))?;
     let secs = match unit {
         "ms" => n / 1000.0,
         "s" => n,
         "m" => n * 60.0,
-        _ => return Err(format!("invalid duration unit in `{s}` (use ms, s or m)")),
+        "h" => n * 3600.0,
+        _ => return Err(format!("invalid duration unit in `{s}` (use ms, s, m or h)")),
     };
     Duration::try_from_secs_f64(secs).map_err(|e| format!("invalid duration `{s}`: {e}"))
 }
@@ -575,6 +585,10 @@ fn serve(
             dev: args.dev,
             mutation_timeout: args.mutation_timeout,
             skip_schema_check: args.skip_schema_check,
+            query_cache: crate::runtime::QueryCacheOptions {
+                idle_ttl: args.query_cache_ttl,
+                max_bytes: usize::try_from(args.query_cache_size).unwrap_or(usize::MAX),
+            },
             auth,
             storage,
             scheduler,
@@ -803,7 +817,19 @@ mod tests {
         assert_eq!(parse_duration("2").unwrap(), Duration::from_secs(2));
         assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
-        assert!(parse_duration("5h").is_err() && parse_duration("x").is_err() && parse_duration("-1s").is_err());
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert!(parse_duration("5d").is_err() && parse_duration("x").is_err() && parse_duration("-1s").is_err());
         assert!(parse(&["--mutation-timeout", "soon"]).is_err());
+    }
+
+    #[test]
+    fn query_cache_flags() {
+        let cli = parse(&["serve"]).unwrap();
+        let Some(Command::Serve(a)) = cli.command else { panic!("serve") };
+        assert_eq!((a.query_cache_size, a.query_cache_ttl), (64 << 20, Duration::from_secs(30 * 60)));
+        let cli = parse(&["serve", "--query-cache-size", "1GB", "--query-cache-ttl", "2h"]).unwrap();
+        let Some(Command::Serve(a)) = cli.command else { panic!("serve") };
+        assert_eq!((a.query_cache_size, a.query_cache_ttl), (1 << 30, Duration::from_secs(7200)));
+        assert!(parse(&["serve", "--query-cache-size", "lots"]).is_err());
     }
 }

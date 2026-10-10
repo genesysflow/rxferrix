@@ -36,7 +36,6 @@ pub struct QueryCtx {
     pub auth: Auth,
     /// File storage: `get_url`, `get_metadata` (`crate::storage`).
     pub storage: crate::storage::QueryStorage,
-    now: f64,
     dev: bool,
 }
 
@@ -45,9 +44,10 @@ impl QueryCtx {
     ///
     /// It is not a reactive clock: a subscribed query reruns when what it read changes, not when time passes, so a
     /// result computed from `now()` (e.g. "expired") goes stale. Store the state instead and change it with a
-    /// scheduled mutation (`ctx.scheduler.run_at`).
+    /// scheduled mutation (`ctx.scheduler.run_at`). A query that reads it is never answered from the query cache:
+    /// its result depends on the time, not just the data.
     pub fn now(&self) -> f64 {
-        self.now
+        self.db.time()
     }
 
     /// True when the app runs in dev mode (`ferrix serve --dev`, and `TestApp`).
@@ -212,6 +212,27 @@ pub struct AppOptions {
     pub scheduler: crate::scheduler::SchedulerOptions,
     /// Operations: `/metrics` and the backup target (`crate::ops`).
     pub ops: crate::ops::OpsOptions,
+    /// How long, and within how much memory, query results stay cached after their last subscriber leaves
+    /// (`sync::subscriptions`, "Query cache").
+    pub query_cache: QueryCacheOptions,
+}
+
+/// The query cache ([`AppOptions::query_cache`]). Live queries are always kept (their subscribers need them); these
+/// bound the results kept for queries nobody watches any more, which serve the next subscriber, HTTP query or
+/// `ctx.run_query` without running.
+#[derive(Debug, Clone)]
+pub struct QueryCacheOptions {
+    /// An unwatched result is dropped after this long. Default: 30 minutes.
+    pub idle_ttl: Duration,
+    /// Memory (estimated) the unwatched results may take; the least recently used go first. Default: 64 MiB. `0`
+    /// keeps none (results of live queries still serve HTTP queries and `ctx.run_query`).
+    pub max_bytes: usize,
+}
+
+impl Default for QueryCacheOptions {
+    fn default() -> Self {
+        QueryCacheOptions { idle_ttl: Duration::from_secs(30 * 60), max_bytes: 64 << 20 }
+    }
 }
 
 /// Default [`AppOptions::mutation_timeout`].
@@ -229,11 +250,18 @@ impl Default for AppOptions {
             storage: Default::default(),
             scheduler: Default::default(),
             ops: Default::default(),
+            query_cache: QueryCacheOptions::default(),
         }
     }
 }
 
 /// The result of running a query: its value or error, what it read, the ts it ran at, and its log lines.
+/// [`App::query_or_cached`]'s answer.
+pub(crate) enum QueryOutcome {
+    Cached(crate::sync::subscriptions::CacheHit),
+    Ran(QueryRun),
+}
+
 pub struct QueryRun {
     pub result: crate::Result<Value>,
     pub read_set: ReadSet,
@@ -308,6 +336,11 @@ pub struct Metrics {
     last_round_reruns: AtomicU64,
     stale_runs: AtomicU64,
     holds: AtomicU64,
+    idle_queries: AtomicU64,
+    idle_bytes: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    cache_evictions: AtomicU64,
     /// Request and execution counters for `/metrics` (`crate::ops::metrics`).
     pub(crate) ops: crate::ops::metrics::Counters,
 }
@@ -340,6 +373,11 @@ impl Metrics {
             last_round_reruns: self.last_round_reruns.load(Ordering::Relaxed),
             stale_runs: self.stale_runs.load(Ordering::Relaxed),
             holds: self.holds.load(Ordering::Relaxed),
+            idle_queries: self.idle_queries.load(Ordering::Relaxed),
+            idle_bytes: self.idle_bytes.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            cache_evictions: self.cache_evictions.load(Ordering::Relaxed),
         }
     }
 
@@ -356,6 +394,20 @@ impl Metrics {
         self.shared_queries.store(shared_queries, Ordering::Relaxed);
         self.subscriptions.store(subscriptions, Ordering::Relaxed);
         self.index_ranges.store(ranges, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_idle_cache(&self, queries: u64, bytes: u64) {
+        self.idle_queries.store(queries, Ordering::Relaxed);
+        self.idle_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_cache_lookup(&self, hit: bool) {
+        let counter = if hit { &self.cache_hits } else { &self.cache_misses };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_cache_evictions(&self, n: u64) {
+        self.cache_evictions.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Count reruns as a batch *starts*: its results can reach clients before the round ends, and the counter must
@@ -586,8 +638,34 @@ impl App {
     }
 
     pub(crate) async fn typed_query<F: QueryFunction>(&self, args: F::Args, identity: &Identity) -> crate::Result<F::Output> {
-        let out = self.call_query(&F::path(), serde_json::to_value(args)?, identity, true).await.result?;
-        Ok(serde_json::from_value(out)?)
+        match self.query_or_cached(&F::path(), serde_json::to_value(args)?, identity, true).await {
+            QueryOutcome::Cached(hit) => Ok(serde_json::from_str(hit.value.json())?),
+            QueryOutcome::Ran(run) => Ok(serde_json::from_value(run.result?)?),
+        }
+    }
+
+    /// A query's result from the query cache when it holds one valid at the latest commit (`sync::subscriptions`,
+    /// "Query cache"), else a run. For callers that only need the result: HTTP queries and `ctx.run_query`. A cached
+    /// answer is not an execution (no execution log entry).
+    pub(crate) async fn query_or_cached(
+        &self,
+        path: &str,
+        args: Value,
+        identity: &Identity,
+        allow_internal: bool,
+    ) -> QueryOutcome {
+        // Visibility first: a cached result of an internal query must not reach a public caller.
+        if self.lookup(path, FunctionKind::Query, allow_internal).is_ok() {
+            let latest = self.db().write_log().latest();
+            let hit = self.subscriptions().cache().get(path, &args, identity, latest);
+            self.inner.metrics.record_cache_lookup(hit.is_some());
+            if let Some(hit) = hit {
+                return QueryOutcome::Cached(hit);
+            }
+        }
+        let run = self.call_query(path, args.clone(), identity, allow_internal).await;
+        self.subscriptions().offer(path, &args, identity, &run);
+        QueryOutcome::Ran(run)
     }
 
     pub(crate) async fn typed_mutation<F: MutationFunction>(
@@ -631,7 +709,7 @@ impl App {
         let read_set = db.read_set_handle();
         let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
         let (auth, auth_access) = Auth::tracked(identity.clone());
-        let ctx = QueryCtx { db, auth, storage, now: snapshot.time, dev: self.options().dev };
+        let ctx = QueryCtx { db, auth, storage, dev: self.options().dev };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let (result, log_lines) = crate::log::capture(catch_panics(handler(ctx, args))).await;
         exec.finish(self, &result, &log_lines);

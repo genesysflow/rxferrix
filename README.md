@@ -568,6 +568,12 @@ scheduler queue depth, dropped log entries and, with `--replicate-to`, the repli
 
 ## Things to know
 
+- **Query results are cached while nothing they read changes.** Every subscriber of a query shares one result; after
+  the last one leaves it stays cached (up to 30 minutes, 64 MiB in all: `--query-cache-ttl`, `--query-cache-size`)
+  and answers the next subscriber, HTTP query or `ctx.run_query` without running, until a write touches what it read.
+  Repeated HTTP queries are cached too. A query that reads `ctx.now()` is never cached. The Overview page and
+  `/metrics` show the hit rate.
+
 - **Optimistic updates are replayed** on top of every server change until the mutation's result arrives. Create ids
   and timestamps outside the update closure (once per call), not inside it:
   ```ts

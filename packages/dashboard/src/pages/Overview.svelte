@@ -53,6 +53,11 @@
   const totalBytes = $derived((stats?.overview.files ?? []).reduce((n, f) => n + f.bytes, 0));
 
   /** A sparkline path (0 at the bottom) over the samples. */
+  function cacheHitRate(o: Stats["overview"]): string {
+    const total = (o.cacheHits ?? 0) + (o.cacheMisses ?? 0);
+    return total === 0 ? "–" : `${Math.round(((o.cacheHits ?? 0) / total) * 100)}%`;
+  }
+
   function spark(values: number[], w = 120, h = 26): string {
     if (values.length < 2) return "";
     const max = Math.max(...values, 1e-9);
@@ -125,7 +130,12 @@
           <div class="card stat">
             <div class="label">Shared queries</div>
             <div class="value">{o.sharedQueries ?? 0}</div>
-            <div class="sub">serving {o.subscriptions} subscriptions</div>
+            <div class="sub">serving {o.subscriptions} subscriptions · {o.cachedQueries ?? 0} cached</div>
+          </div>
+          <div class="card stat" data-testid="stat-cache">
+            <div class="label">Query cache</div>
+            <div class="value">{cacheHitRate(o)}</div>
+            <div class="sub">hit rate (HTTP and ctx.run_query) · {formatBytes(o.cacheBytes ?? 0)} kept</div>
           </div>
           <a class="card stat link" href={href("scheduler", [], { state: "pending" })} onclick={link}>
             <div class="label">Scheduler queue</div>

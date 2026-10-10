@@ -82,6 +82,7 @@ impl QueryDb {
     /// The time (ms since the epoch) this context reads at: the snapshot's commit time (queries), or the time the
     /// write transaction commits at (mutations). Deterministic for a given ts.
     pub(crate) fn time(&self) -> f64 {
+        self.read_set.lock().unwrap_or_else(|e| e.into_inner()).record_clock();
         match &self.source {
             Source::Snapshot(s) => s.time,
             Source::Write(t) => t.now(),

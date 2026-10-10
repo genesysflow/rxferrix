@@ -186,7 +186,7 @@ impl Client {
 }
 
 /// Executions of `path` recorded in the execution log, by caller identity.
-async fn executions(app: &App, path: &str) -> BTreeMap<Option<String>, usize> {
+pub async fn executions(app: &App, path: &str) -> BTreeMap<Option<String>, usize> {
     app.logs().flush().await.unwrap();
     let entries = app.logs().query(LogFilter { path_prefix: Some(path.into()), limit: Some(10_000), ..Default::default() }).await.unwrap();
     let mut by = BTreeMap::new();
@@ -196,16 +196,17 @@ async fn executions(app: &App, path: &str) -> BTreeMap<Option<String>, usize> {
     by
 }
 
-async fn total_executions(app: &App, path: &str) -> usize {
+pub async fn total_executions(app: &App, path: &str) -> usize {
     executions(app, path).await.values().sum()
 }
 
-/// Wait until the manager has processed everything and holds nothing.
+/// Wait until the manager has processed everything and holds nothing but idle queries (the query cache, which is
+/// bounded and dropped on invalidation: see `query_cache.rs`).
 pub async fn assert_manager_empty(app: &App) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let s = app.subscription_stats();
-        if s.connections == 0 && s.shared_queries == 0 && s.subscriptions == 0 && s.index_ranges == 0 {
+        if s.connections == 0 && s.subscriptions == 0 && s.shared_queries == s.idle_queries {
             return;
         }
         assert!(tokio::time::Instant::now() < deadline, "manager not empty: {s:?}");
@@ -293,7 +294,7 @@ async fn fifty_sockets_one_execution_per_commit() {
 // Identity
 // ---------------------------------------------------------------------------------------------------------------------
 
-async fn sign_up(app: &App, email: &str) -> (String, String) {
+pub async fn sign_up(app: &App, email: &str) -> (String, String) {
     let res = app.auth().sign_up(app, email, "correct horse".into(), None, ClientInfo::default()).await.unwrap();
     let SignUpResult::SignedIn(tokens) = res else { panic!("signed in") };
     (tokens.user_id.clone().unwrap(), tokens.access_token)
@@ -429,8 +430,8 @@ async fn late_subscriber_reuses_cached_result() {
     assert_eq!(total_executions(&app, &list).await, executions + 1, "both cached");
 }
 
-/// Unsubscribing drops the shared query once its last subscriber leaves; subscribing again runs it fresh and keeps
-/// receiving updates.
+/// Once its last subscriber leaves, a shared query is kept idle until a commit invalidates it; subscribing again after
+/// that runs it fresh and keeps receiving updates.
 #[tokio::test]
 async fn unsubscribe_and_resubscribe() {
     let t = TestApp::new().await.unwrap();
@@ -446,9 +447,15 @@ async fn unsubscribe_and_resubscribe() {
     assert!(a.results.is_empty());
     assert_eq!(app.subscription_stats().shared_queries, 1, "b still watches it");
     b.unsubscribe(1).await;
-    assert_eq!(app.subscription_stats().shared_queries, 0, "dropped with its last subscriber");
+    let s = app.subscription_stats();
+    assert_eq!((s.shared_queries, s.idle_queries), (1, 1), "kept idle after its last subscriber left");
 
     t.mutation::<todos::add>(("x".to_string(),)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while app.subscription_stats().shared_queries > 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the idle query wasn't dropped when invalidated");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let value = a.subscribe(2, &list, json!({})).await.unwrap();
     assert_eq!(texts(&value), vec!["x"]);
     t.mutation::<todos::add>(("y".to_string(),)).await.unwrap();

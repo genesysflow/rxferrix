@@ -23,6 +23,7 @@ mod model;
 mod oauth_presets;
 mod ops;
 mod pagination;
+mod query_cache;
 mod query_engine;
 mod readsets;
 mod replication;

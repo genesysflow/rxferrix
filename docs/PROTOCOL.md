@@ -209,6 +209,9 @@ or signed-out token it fails with 401 and `errorData.code = "invalid_token"` (ne
   Status codes: 400 for a user error or bad args, 404 for an unknown function, 500 for anything else.
 - Mutation responses also include `"ts": number`.
 - `logLines` as in guarantee 8 (only in `--dev`). HTTP mutations are not deduplicated.
+- A query may be answered from the server's query cache (no execution) when a result valid at the latest commit is
+  cached for the same function, args and identity: the response is the same as if it had run then. So a query right
+  after a caller's own mutation always reflects it. (docs/CONTRACT.md §1.10, Query cache.)
 
 ## Auth
 

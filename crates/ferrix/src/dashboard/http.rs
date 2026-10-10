@@ -225,6 +225,10 @@ async fn stats(
                 "runningJobs": running_jobs,
                 "subscriptionRounds": subscriptions.rounds,
                 "queryReruns": subscriptions.reruns,
+                "cachedQueries": subscriptions.idle_queries,
+                "cacheBytes": subscriptions.idle_bytes,
+                "cacheHits": subscriptions.cache_hits,
+                "cacheMisses": subscriptions.cache_misses,
                 "metricsEnabled": app.options().ops.metrics.enabled,
             },
         }))

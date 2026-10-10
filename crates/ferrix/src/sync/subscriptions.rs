@@ -77,6 +77,24 @@
 //! each `ModifyQuerySet` / `Authenticate` gets its own update, in order, and commit-driven updates are pushed into the
 //! same mailbox: nothing can be reordered.
 //!
+//! ## Query cache
+//!
+//! A shared query whose last subscriber leaves is kept, *idle*, if it is current: it stays in the invalidation index,
+//! and the first commit that writes into its read set drops it (an idle query is never run), so every idle result is
+//! valid at the frontier. A new subscriber to it attaches without a run. Idle queries are dropped least recently used
+//! first beyond `QueryCacheOptions::max_bytes` (estimated from their results' sizes), and after
+//! `QueryCacheOptions::idle_ttl`.
+//!
+//! Every current query with a successful result (live or idle) is also published to a [`QueryCache`], with the
+//! frontier, for HTTP queries and `ctx.run_query`, which read it without going through the manager. When they miss and
+//! run the query, the same query missing again soon after ([`QueryCache`]'s doorkeeper: one-off queries don't fill the
+//! cache) hands its run to the manager, which adopts it as an idle query if it is still valid at the frontier.
+//!
+//! A published result is removed before the frontier moves past a commit that invalidates it, so a reader that sees a
+//! frontier at or past the latest commit, and the result still published, has a result valid at that commit:
+//! read-your-writes holds (a caller's own commit is in the write log before its mutation returns). Results of queries
+//! that read the time (`ctx.now()`) are neither kept idle nor published: they depend on more than the data.
+//!
 //! ## Backpressure
 //!
 //! The manager never waits on a connection. A mailbox holds the updates the worker has not taken yet. An update that
@@ -89,8 +107,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
@@ -248,6 +266,8 @@ pub enum Command {
     /// Read-your-writes: send an update at a ts >= `ts` (even an empty one) as soon as possible.
     Cover { conn: ConnId, ts: u64 },
     Disconnect { conn: ConnId },
+    /// A run from outside the manager (an HTTP query, `ctx.run_query`) to keep as an idle query.
+    Adopt { path: Arc<str>, args: Value, identity: Identity, run: Box<Adoptee> },
 }
 
 impl Command {
@@ -258,7 +278,17 @@ impl Command {
             | Command::Authenticate { conn, .. }
             | Command::Cover { conn, .. }
             | Command::Disconnect { conn } => *conn,
+            Command::Adopt { .. } => unreachable!("not a connection's command"),
         }
+    }
+}
+
+/// The run in a [`Command::Adopt`].
+pub struct Adoptee(QueryRun);
+
+impl std::fmt::Debug for Adoptee {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "QueryRun at ts {}", self.0.ts)
     }
 }
 
@@ -267,6 +297,100 @@ impl Command {
 pub struct SubscriptionManager {
     tx: mpsc::Sender<Command>,
     next_conn: Arc<AtomicU64>,
+    cache: Arc<QueryCache>,
+}
+
+/// The current successful results of shared queries, published by the manager for readers outside it (see the
+/// module docs, Query cache).
+pub struct QueryCache {
+    entries: RwLock<HashMap<QueryKey, Published>>,
+    /// The manager's frontier: every published result is valid at it.
+    frontier: AtomicU64,
+    /// Doorkeeper: hashes of queries that recently missed, one per slot. A query is adopted when it misses while its
+    /// hash is still there (a second miss soon after the first), so one-off queries never reach the manager.
+    recent_misses: Box<[AtomicU64]>,
+    /// Off when the cache keeps no idle queries.
+    adopt: bool,
+}
+
+const DOORKEEPER_SLOTS: usize = 8192;
+
+struct Published {
+    /// The run's ts: the result is valid from it up to the frontier.
+    ts: u64,
+    result: Arc<CachedResult>,
+}
+
+/// A cached query result ([`QueryCache::get`]).
+pub struct CacheHit {
+    pub value: QueryValue,
+    /// Already filtered for clients (empty outside `--dev`).
+    pub log_lines: Vec<String>,
+}
+
+impl QueryCache {
+    fn new(adopt: bool) -> QueryCache {
+        QueryCache {
+            entries: RwLock::new(HashMap::new()),
+            frontier: AtomicU64::new(0),
+            recent_misses: (0..DOORKEEPER_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            adopt,
+        }
+    }
+
+    /// The doorkeeper ([`QueryCache::recent_misses`]): true on the second miss of `key` in a row of its slot.
+    fn missed_again(&self, key: &QueryKey) -> bool {
+        use std::hash::BuildHasher;
+        static SEED: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
+        let hash = SEED.get_or_init(std::hash::RandomState::new).hash_one(key) | 1; // never 0, the empty slot
+        let slot = &self.recent_misses[(hash as usize) % DOORKEEPER_SLOTS];
+        if slot.load(Ordering::Relaxed) == hash {
+            slot.store(0, Ordering::Relaxed);
+            true
+        } else {
+            slot.store(hash, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// The result of `path(args)` for `identity`, if one is cached and valid at `latest` (the latest commit): the
+    /// caller then needn't run the query.
+    pub fn get(&self, path: &str, args: &Value, identity: &Identity, latest: u64) -> Option<CacheHit> {
+        // The frontier first: results are unpublished before it moves past a commit that invalidates them.
+        if self.frontier.load(Ordering::Acquire) < latest {
+            return None;
+        }
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        if entries.is_empty() {
+            return None;
+        }
+        let (path, args): (Arc<str>, Arc<str>) = (path.into(), canonical_args(args).into());
+        for deps in [AuthDeps::None, AuthDeps::Principal, AuthDeps::Session] {
+            let key = QueryKey { path: path.clone(), args: args.clone(), scope: Scope::of(deps, identity) };
+            if let Some(p) = entries.get(&key)
+                && p.ts <= latest
+                && let Ok(value) = &p.result.outcome
+            {
+                return Some(CacheHit { value: value.clone(), log_lines: p.result.log_lines.clone() });
+            }
+        }
+        None
+    }
+
+    fn publish(&self, key: QueryKey, ts: u64, result: Arc<CachedResult>) {
+        self.entries.write().unwrap_or_else(|e| e.into_inner()).insert(key, Published { ts, result });
+    }
+
+    fn unpublish(&self, key: &QueryKey) {
+        self.entries.write().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    fn unpublish_all<'a>(&self, keys: impl IntoIterator<Item = &'a QueryKey>) {
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        for key in keys {
+            entries.remove(key);
+        }
+    }
 }
 
 /// The manager is gone (the app is shutting down).
@@ -283,9 +407,37 @@ impl SubscriptionManager {
     /// Start the manager task for `app`. It holds the app weakly and stops when the app is dropped.
     pub(crate) fn spawn(app: &App, metrics: Arc<Metrics>) -> SubscriptionManager {
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
-        let manager = Manager::new(app, metrics, rx);
+        let cache = Arc::new(QueryCache::new(app.options().query_cache.max_bytes > 0));
+        let manager = Manager::new(app, metrics, rx, cache.clone());
         tokio::spawn(manager.run());
-        SubscriptionManager { tx, next_conn: Arc::new(AtomicU64::new(0)) }
+        SubscriptionManager { tx, next_conn: Arc::new(AtomicU64::new(0)), cache }
+    }
+
+    /// The published results of current queries (see the module docs, Query cache).
+    pub fn cache(&self) -> &QueryCache {
+        &self.cache
+    }
+
+    /// A successful run of `path(args)` for `identity` outside the manager (a cache miss): offered for adoption as an
+    /// idle query if the doorkeeper lets it through. Never waits: dropped if the manager is busy.
+    pub(crate) fn offer(&self, path: &str, args: &Value, identity: &Identity, run: &QueryRun) {
+        if !self.cache.adopt || run.result.is_err() || run.read_set.reads_clock() {
+            return;
+        }
+        let scope = Scope::of(run.auth_deps, identity);
+        let key = QueryKey { path: path.into(), args: canonical_args(args).into(), scope };
+        if !self.cache.missed_again(&key) {
+            return;
+        }
+        let run = Box::new(Adoptee(QueryRun {
+            result: run.result.as_ref().map(Clone::clone).map_err(|e| anyhow::anyhow!("{e}")),
+            read_set: run.read_set.clone(),
+            ts: run.ts,
+            log_lines: run.log_lines.clone(),
+            auth_deps: run.auth_deps,
+        }));
+        let adopt = Command::Adopt { path: key.path, args: args.clone(), identity: identity.clone(), run };
+        let _ = self.tx.try_send(adopt);
     }
 
     /// Register a new connection. Updates for it arrive in the returned mailbox; its doorbell rings when they do.
@@ -361,6 +513,16 @@ pub struct SubscriptionStats {
     pub stale_runs: u64,
     /// Times new generations were held for a starving connection (see `sync::subscriptions`, Liveness).
     pub holds: u64,
+    /// Shared queries nobody watches, kept as a cache (see `sync::subscriptions`, Query cache).
+    pub idle_queries: u64,
+    /// Their estimated memory, bytes.
+    pub idle_bytes: u64,
+    /// HTTP queries and `ctx.run_query` calls answered from the cache since start.
+    pub cache_hits: u64,
+    /// ... and those that ran the query.
+    pub cache_misses: u64,
+    /// Idle queries dropped for the memory budget or their age (not for being invalidated), since start.
+    pub cache_evictions: u64,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -446,6 +608,18 @@ struct SharedQuery {
     in_flight: Option<u64>,
     /// Moving average of its run time, µs.
     cost_us: u64,
+    /// Set while nobody subscribes to it (see the module docs, Query cache).
+    idle: Option<Idle>,
+    /// The newest run read the time: its result is neither kept idle nor published.
+    reads_clock: bool,
+}
+
+struct Idle {
+    /// Its position in [`Manager::idle`].
+    seq: u64,
+    since: Instant,
+    /// Estimated memory, counted in [`Manager::idle_bytes`].
+    bytes: usize,
 }
 
 impl SharedQuery {
@@ -598,11 +772,31 @@ struct Manager {
     /// Jobs queued or running: sequence number -> the frontier when it was queued (ascending with the sequence).
     in_flight: BTreeMap<u64, u64>,
     next_job: u64,
+
+    // ---- query cache ----
+    cache: Arc<QueryCache>,
+    /// Idle queries, least recently idled first.
+    idle: BTreeMap<u64, SharedId>,
+    next_idle: u64,
+    idle_bytes: usize,
+    idle_ttl: Duration,
+    idle_budget: usize,
 }
 
 fn canonical_args(args: &Value) -> String {
     // serde_json maps are sorted (no `preserve_order`), so equal values serialize identically.
     serde_json::to_string(args).unwrap_or_default()
+}
+
+/// Estimated memory of an idle query: its result (the JSON text, and the parsed value, about twice as big), its key
+/// and its read set.
+fn idle_bytes(q: &SharedQuery) -> usize {
+    let result = q.versions.back().map_or(0, |v| match &v.result.outcome {
+        Ok(value) => value.json().len() * 3,
+        Err(e) => e.message.len(),
+    });
+    let ranges: usize = q.ranges.iter().map(|(_, interval)| interval.size_bytes() + 48).sum();
+    result + q.key.path.len() + q.key.args.len() * 2 + ranges + 512
 }
 
 fn hash_bytes(tag: &[u8], bytes: &[u8]) -> Hash {
@@ -619,8 +813,9 @@ fn touches(ranges: &[(IndexId, Interval)], index_id: IndexId, key: &[u8]) -> boo
 }
 
 impl Manager {
-    fn new(app: &App, metrics: Arc<Metrics>, rx: mpsc::Receiver<Command>) -> Manager {
+    fn new(app: &App, metrics: Arc<Metrics>, rx: mpsc::Receiver<Command>, cache: Arc<QueryCache>) -> Manager {
         let (events_tx, events) = mpsc::unbounded_channel();
+        cache.frontier.store(app.db().write_log().latest(), Ordering::Release);
         let threads = tokio::runtime::Handle::current().metrics().num_workers();
         Manager {
             app: app.downgrade(),
@@ -631,7 +826,8 @@ impl Manager {
             commits: app.db().write_log().subscribe(),
             events_tx,
             events,
-            ts: 0,
+            // With no queries yet, any committed ts is consistent (see `pump`).
+            ts: app.db().write_log().latest(),
             queries: HashMap::new(),
             next_id: 0,
             by_key: HashMap::new(),
@@ -653,6 +849,12 @@ impl Manager {
             requesting: false,
             in_flight: BTreeMap::new(),
             next_job: 0,
+            cache,
+            idle: BTreeMap::new(),
+            next_idle: 0,
+            idle_bytes: 0,
+            idle_ttl: app.options().query_cache.idle_ttl,
+            idle_budget: app.options().query_cache.max_bytes,
         }
     }
 
@@ -672,7 +874,10 @@ impl Manager {
                     self.need_round = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.retry => self.retry = false,
+                // Idle queries expire even when nothing else happens.
+                _ = tokio::time::sleep(Duration::from_secs(60)), if !self.idle.is_empty() => {}
             }
+            self.expire_idle();
             // Take whatever else is waiting, so that one pass (and one generation) serves all of it.
             while let Ok(event) = self.events.try_recv() {
                 self.event(event);
@@ -699,6 +904,7 @@ impl Manager {
             self.subscriptions,
             self.index.len() as u64,
         );
+        self.metrics.set_idle_cache(self.idle.len() as u64, self.idle_bytes as u64);
     }
 
     // ---- commands ----
@@ -708,6 +914,7 @@ impl Manager {
             Command::Connect { conn, mailbox } => {
                 self.conns.insert(conn, Conn::new(mailbox));
             }
+            Command::Adopt { path, args, identity, run } => self.adopt(path, args, identity, run.0),
             Command::Disconnect { conn } => self.remove_conn(conn),
             cmd => {
                 let c = cmd.conn();
@@ -772,7 +979,9 @@ impl Manager {
                     self.need_round = true;
                 }
             }
-            Command::Connect { .. } | Command::Disconnect { .. } => unreachable!("handled in handle()"),
+            Command::Connect { .. } | Command::Disconnect { .. } | Command::Adopt { .. } => {
+                unreachable!("handled in handle()")
+            }
         }
     }
 
@@ -797,6 +1006,7 @@ impl Manager {
         let path: Arc<str> = path.into();
         let args_key: Arc<str> = canonical_args(&args).into();
         let id = self.find_or_create(&path, &args_key, args, &identity);
+        self.wake(id);
         self.queries.get_mut(&id).expect("just found").subscribers.insert((c, qid));
         let conn = self.conns.get_mut(&c).expect("checked");
         conn.subs.insert(qid, Sub { shared: id, sent: None, runs: (0, 0) });
@@ -819,18 +1029,121 @@ impl Manager {
         let Some(q) = self.queries.get_mut(&id) else { return };
         q.subscribers.remove(&(c, qid));
         if q.subscribers.is_empty() {
-            self.drop_query(id);
+            self.release(id);
         }
+    }
+
+    /// The last subscriber of `id` left: keep it idle if it can serve as a cache, else drop it.
+    fn release(&mut self, id: SharedId) {
+        let Some(q) = self.queries.get_mut(&id) else { return };
+        let cacheable = self.idle_budget > 0
+            && !q.reads_clock
+            && q.is_current()
+            && q.in_flight.is_none()
+            && q.versions.back().is_some_and(|v| v.result.outcome.is_ok())
+            && q.key.scope == Scope::of(q.deps, &q.identity);
+        if !cacheable {
+            self.drop_query(id);
+            return;
+        }
+        // Only the newest version can serve anyone now.
+        while q.versions.len() > 1 {
+            q.versions.pop_front();
+        }
+        let bytes = idle_bytes(q);
+        let seq = self.next_idle;
+        self.next_idle += 1;
+        q.idle = Some(Idle { seq, since: Instant::now(), bytes });
+        self.idle.insert(seq, id);
+        self.idle_bytes += bytes;
+        self.evict_over_budget();
+    }
+
+    /// Keep a run from outside the manager ([`SubscriptionManager::offer`]) as an idle query, if nothing serves its
+    /// key yet and its result is still valid at the frontier.
+    fn adopt(&mut self, path: Arc<str>, args: Value, identity: Identity, run: QueryRun) {
+        // A run past the frontier saw commits the manager hasn't checked yet; and without a budget nothing is kept.
+        if run.ts > self.ts || self.idle_budget == 0 {
+            return;
+        }
+        let key = QueryKey { path, args: canonical_args(&args).into(), scope: Scope::of(run.auth_deps, &identity) };
+        if self.by_key.contains_key(&key) {
+            return;
+        }
+        let id = self.create(key, args, identity);
+        self.apply_run(id, run);
+        // Idle if still current (else dropped), then published.
+        self.release(id);
+        self.sync_published(id);
+    }
+
+    /// `id` gets a subscriber: it is no longer idle.
+    fn wake(&mut self, id: SharedId) {
+        let Some(q) = self.queries.get_mut(&id) else { return };
+        if let Some(idle) = q.idle.take() {
+            self.idle.remove(&idle.seq);
+            self.idle_bytes -= idle.bytes;
+        }
+    }
+
+    fn evict_over_budget(&mut self) {
+        let mut evicted = 0;
+        while self.idle_bytes > self.idle_budget {
+            let Some((_, id)) = self.idle.pop_first() else { break };
+            self.drop_query(id);
+            evicted += 1;
+        }
+        self.metrics.record_cache_evictions(evicted);
+    }
+
+    fn expire_idle(&mut self) {
+        let mut evicted = 0;
+        while let Some((_, &id)) = self.idle.first_key_value() {
+            let idle = self.queries.get(&id).and_then(|q| q.idle.as_ref());
+            let expired = idle.is_none_or(|i| i.since.elapsed() >= self.idle_ttl);
+            if !expired {
+                break;
+            }
+            self.idle.pop_first();
+            self.drop_query(id);
+            evicted += 1;
+        }
+        self.metrics.record_cache_evictions(evicted);
     }
 
     /// Forget a query. A job of it that is in flight still runs; its result is ignored.
     fn drop_query(&mut self, id: SharedId) {
         let Some(q) = self.queries.remove(&id) else { return };
+        if let Some(idle) = &q.idle {
+            self.idle.remove(&idle.seq);
+            self.idle_bytes -= idle.bytes;
+        }
         if self.by_key.get(&q.key) == Some(&id) {
             self.by_key.remove(&q.key);
+            self.cache.unpublish(&q.key);
         }
         for (index_id, interval) in &q.ranges {
             self.index.remove(*index_id, interval, id);
+        }
+    }
+
+    /// Publish the newest result of `id` to the [`QueryCache`] if it is current and successful (and its key final),
+    /// else withdraw it.
+    fn sync_published(&self, id: SharedId) {
+        let Some(q) = self.queries.get(&id) else { return };
+        if self.by_key.get(&q.key) != Some(&id) {
+            return;
+        }
+        match q.versions.back() {
+            Some(v)
+                if v.through == OPEN
+                    && v.result.outcome.is_ok()
+                    && !q.reads_clock
+                    && q.key.scope == Scope::of(q.deps, &q.identity) =>
+            {
+                self.cache.publish(q.key.clone(), v.ts, v.result.clone());
+            }
+            _ => self.cache.unpublish(&q.key),
         }
     }
 
@@ -839,6 +1152,7 @@ impl Manager {
         if from == to {
             return;
         }
+        self.wake(to);
         if let Some(q) = self.queries.get_mut(&to) {
             q.subscribers.insert((c, qid));
         }
@@ -851,7 +1165,7 @@ impl Manager {
         if let Some(q) = self.queries.get_mut(&from) {
             q.subscribers.remove(&(c, qid));
             if q.subscribers.is_empty() {
-                self.drop_query(from);
+                self.release(from);
             }
         }
     }
@@ -892,6 +1206,8 @@ impl Manager {
             ranges: Vec::new(),
             in_flight: None,
             cost_us: 0,
+            idle: None,
+            reads_clock: false,
         };
         self.queries.insert(id, q);
         id
@@ -1078,9 +1394,15 @@ impl Manager {
             // queries nor for queries known to be slow, which have a lane (and runners) of their own.
             if self.need_round && !advanced && !self.holding && (self.queued(FAST) == 0 || self.runners[FAST] == 0) {
                 if self.queries.is_empty() && self.covering.is_empty() {
-                    // Nothing to bring up to date. (`self.ts` stays: with no queries, any committed ts is consistent.)
+                    // Nothing to bring up to date: with no queries, any committed ts is consistent, so the frontier
+                    // moves to the latest commit without a generation. (The query cache needs it current: a result
+                    // is only adopted, and only served, at or behind the frontier.)
                     self.need_round = false;
-                    self.commits.borrow_and_update();
+                    let latest = *self.commits.borrow_and_update();
+                    if latest > self.ts {
+                        self.ts = latest;
+                        self.cache.frontier.store(latest, Ordering::Release);
+                    }
                 } else {
                     match self.take_snapshot(app) {
                         Some(snapshot) if snapshot.ts > self.ts => {
@@ -1223,11 +1545,15 @@ impl Manager {
         self.write_log.wait_for(s).await;
         let frontier = self.ts;
         let mut stale = Vec::new();
+        // Idle queries a commit invalidated: dropped, not run (see the module docs, Query cache).
+        let mut dropped = Vec::new();
         match self.write_log.entries_between(frontier, s) {
             // Trimmed: we can't tell what changed, so everything did (all we know is that it was valid at the frontier).
             None => {
                 for (id, q) in &mut self.queries {
-                    if q.is_current() {
+                    if q.idle.is_some() {
+                        dropped.push(*id);
+                    } else if q.is_current() {
                         q.versions.back_mut().expect("current").through = frontier;
                         stale.push(*id);
                     }
@@ -1245,14 +1571,24 @@ impl Manager {
                     if let Some(q) = self.queries.get_mut(&id)
                         && q.is_current()
                     {
+                        if q.idle.is_some() {
+                            dropped.push(id);
+                            continue;
+                        }
                         q.versions.back_mut().expect("current").through = ts - 1;
                         stale.push(id);
                     }
                 }
             }
         }
+        // Withdraw the invalidated results before the frontier moves past the commits that invalidated them.
+        self.cache.unpublish_all(stale.iter().filter_map(|id| self.queries.get(id)).map(|q| &q.key));
+        for id in dropped {
+            self.drop_query(id);
+        }
         // From here on, jobs run at `s`. Every query that is still current is valid at `s` (nothing it read changed).
         self.ts = s;
+        self.cache.frontier.store(s, Ordering::Release);
         self.generation += 1;
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).generation = self.generation;
         self.runners = [0, 0];
@@ -1296,6 +1632,7 @@ impl Manager {
         let stale = self.queries.get(&id).is_some_and(|q| !q.is_current());
         let mut split = Vec::new();
         self.settle_key(id, &mut split);
+        self.sync_published(id);
         self.launch(split);
         for (c, qids) in subscribers {
             if self.try_flush(c, &[self.ts, s]) || !stale {
@@ -1376,6 +1713,7 @@ impl Manager {
         let changed = q.versions.back().is_none_or(|v| v.result.hash != hash);
         q.versions.push_back(Version { ts: run.ts, through, result: Arc::new(CachedResult { hash, outcome, log_lines }) });
         q.deps = run.auth_deps;
+        q.reads_clock = run.read_set.reads_clock();
         q.in_flight = None;
         if ranges != q.ranges {
             for (index_id, interval) in &q.ranges {
@@ -1462,6 +1800,7 @@ impl Manager {
                     let old = std::mem::replace(&mut q.key, own.clone());
                     if self.by_key.get(&old) == Some(&id) {
                         self.by_key.remove(&old);
+                        self.cache.unpublish(&old);
                     }
                     self.by_key.insert(own, id);
                 }
@@ -1485,10 +1824,16 @@ impl Manager {
         let mut subs = 0u64;
         let mut ranges = 0usize;
         let mut in_flight = 0;
+        let mut idle_bytes = 0usize;
         for (id, q) in &self.queries {
             assert_eq!(self.by_key.get(&q.key), Some(id), "by_key out of sync");
-            assert!(!q.subscribers.is_empty(), "shared query without subscribers");
+            assert_eq!(q.subscribers.is_empty(), q.idle.is_some(), "without subscribers if and only if idle");
             assert!(q.is_current() || q.in_flight.is_some(), "stale query not in flight");
+            if let Some(idle) = &q.idle {
+                assert!(q.is_current() && q.in_flight.is_none(), "an idle query must be current and not in flight");
+                assert_eq!(self.idle.get(&idle.seq), Some(id), "idle query not in the LRU");
+                idle_bytes += idle.bytes;
+            }
             for (i, v) in q.versions.iter().enumerate() {
                 assert!(v.ts <= v.through && v.ts <= self.ts, "version past the frontier");
                 assert!(i + 1 == q.versions.len() || (v.through != OPEN && v.through < q.versions[i + 1].ts));
@@ -1508,6 +1853,8 @@ impl Manager {
             }
         }
         assert_eq!(self.by_key.len(), self.queries.len());
+        assert_eq!(idle_bytes, self.idle_bytes, "idle bytes out of sync");
+        assert_eq!(self.idle.len(), self.queries.values().filter(|q| q.idle.is_some()).count());
         assert_eq!(subs, self.subscriptions);
         assert_eq!(ranges, self.index.len());
     }
@@ -1527,6 +1874,32 @@ mod tests {
             })
             .collect();
         Update { query_set, identity: 0, ts, removed, changed }
+    }
+
+    #[test]
+    fn the_cache_answers_only_at_or_past_its_frontier() {
+        let cache = QueryCache::new(true);
+        let identity = Identity::default();
+        let key = QueryKey { path: "q:f".into(), args: canonical_args(&json!({})).into(), scope: Scope::Any };
+        let result = |n: i64| {
+            let value = QueryValue::new(json!(n));
+            Arc::new(CachedResult { hash: [0; 32], outcome: Ok(value), log_lines: vec![] })
+        };
+        cache.publish(key.clone(), 5, result(1));
+        cache.frontier.store(7, Ordering::Release);
+        let get = |latest| cache.get("q:f", &json!({}), &identity, latest).map(|h| h.value.value().clone());
+        assert_eq!(get(7), Some(json!(1)), "valid from its run (5) through the frontier (7)");
+        assert_eq!(get(6), Some(json!(1)));
+        assert_eq!(get(8), None, "a commit past the frontier may have invalidated it");
+        assert_eq!(get(4), None, "computed after the ts asked for");
+        cache.unpublish(&key);
+        assert_eq!(get(7), None);
+        // Another identity's scope doesn't match a session-scoped entry.
+        let mine = Identity { session_id: Some("s1".into()), ..Default::default() };
+        let session_key = QueryKey { scope: Scope::of(AuthDeps::Session, &mine), ..key.clone() };
+        cache.publish(session_key, 5, result(2));
+        assert_eq!(cache.get("q:f", &json!({}), &mine, 7).map(|h| h.value.value().clone()), Some(json!(2)));
+        assert!(cache.get("q:f", &json!({}), &Identity::default(), 7).is_none());
     }
 
     #[test]

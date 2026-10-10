@@ -36,6 +36,9 @@ impl KeyRange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadSet {
     ranges: BTreeMap<IndexId, Vec<KeyRange>>,
+    /// The execution read the time (`ctx.now()`, or a storage URL that expires): its result depends on more than the
+    /// database, so it is never kept in the query cache (`sync::subscriptions`, Query cache).
+    clock: bool,
 }
 
 impl ReadSet {
@@ -52,6 +55,15 @@ impl ReadSet {
 
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
+    }
+
+    pub fn record_clock(&mut self) {
+        self.clock = true;
+    }
+
+    /// Did the execution read the time?
+    pub fn reads_clock(&self) -> bool {
+        self.clock
     }
 
     pub fn ranges(&self) -> impl Iterator<Item = (IndexId, &KeyRange)> {
@@ -71,6 +83,7 @@ impl ReadSet {
     }
 
     pub fn merge(&mut self, other: ReadSet) {
+        self.clock |= other.clock;
         for (id, rs) in other.ranges {
             self.ranges.entry(id).or_default().extend(rs);
         }

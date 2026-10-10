@@ -407,6 +407,7 @@ pub struct AppOptions {
     pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
     pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
+    pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
@@ -1335,6 +1336,17 @@ pub struct MigrationReport {   // camelCase JSON
   commits the open group before it starts, so fast mutations are not held back by a slow one queued behind them;
   the slow one still blocks every write while it runs (`ferrix::db` module docs, `MAX_BATCH`, `MAX_BATCH_AGE`,
   `SLOW_WRITE`).
+- **Query cache.** A query's result is reused, not recomputed, while nothing it read has changed: by every subscriber
+  of the same query (always), by the next subscriber after the last one left, and by HTTP queries and
+  `ctx.run_query`. After its last subscriber leaves, a result stays cached until a commit writes into what it read
+  (then it is dropped, never rerun), for at most `QueryCacheOptions::idle_ttl` (30 minutes), and within
+  `QueryCacheOptions::max_bytes` (64 MiB, least recently used dropped first; `--query-cache-size`,
+  `--query-cache-ttl`). An HTTP query or `ctx.run_query` that misses twice in a row of the cache's doorkeeper (a
+  query asked again soon after) is kept too; one-off queries are not. A cached answer is valid at the latest commit,
+  so a caller always sees its own writes; it is never shared across identities a query's auth reads tell apart; and a
+  query that reads the time (`ctx.now()`, or a signed storage URL) is never cached (its result depends on more than
+  the data). Cached answers are not executions: they don't appear in the execution log. Args are compared as
+  canonical JSON, so `{"done": null}` and `{}` are different cache entries.
 - **Invalidation is by index range, so writes are coarse.** Any write to a document (even one that leaves it
   unchanged) invalidates every query that read it through any index, and an insert invalidates every query whose
   range covers its keys. Tips: skip no-op writes (check first; `mark_read` only patches when something is new, since

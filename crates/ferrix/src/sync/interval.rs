@@ -51,6 +51,14 @@ impl Interval {
         Interval { start: range.start.clone(), end: End::from_range(range) }
     }
 
+    /// The bytes its bounds hold (for memory estimates).
+    pub fn size_bytes(&self) -> usize {
+        self.start.len() + match &self.end {
+            End::Key(e) => e.len(),
+            End::Unbounded => 0,
+        }
+    }
+
     /// Does this range contain `key`?
     pub fn contains(&self, key: &[u8]) -> bool {
         self.start.as_slice() <= key && self.end.above(key)

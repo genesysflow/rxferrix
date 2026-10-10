@@ -298,6 +298,17 @@ that is clearly smaller, computed once per pair of results and shared by every s
 array elements, patches for changed elements and keys). A new post at the top of a 20-post list is ~250 bytes instead
 of 5.5 KB; at 1,000 subscribers delivery went from p50 9.9 / p99 21 ms to 5.6 / 11 ms.
 
+**Query cache (2026-10-10).** A shared query whose last subscriber leaves stays *idle* if it is current: still in the
+invalidation index, dropped (never rerun) by the first commit that writes into its read set, evicted least recently
+used beyond a memory budget (64 MiB, estimated from result sizes) and after an idle TTL (30 minutes). Current
+successful results (live and idle) are published with the manager's frontier to a read-only map that HTTP queries and
+`ctx.run_query` consult without going through the manager; a result is withdrawn before the frontier moves past a
+commit that invalidates it, and a lookup needs the frontier at the latest commit, so read-your-writes holds. Misses
+are adopted as idle queries on their second occurrence (a doorkeeper keeps one-off queries out). Results of queries
+that read the time are never cached. HTTP, one machine: get-by-id over 10k records
+134k → 293k requests/s, list of the 20 newest 42k → 284k/s (server CPU per request about 3x and 9x lower); lists
+under 22k writes/s, which keep invalidating them: no regression (29.6k → 32.8k/s).
+
 ### 4.6 WebSocket protocol (v1: JSON frames)
 
 The protocol is small: JSON frames over one WebSocket per client.

@@ -519,6 +519,12 @@ export interface Stats {
     subscriptions: number;
     /** Distinct queries the server reruns (shared between subscribers). */
     sharedQueries?: number;
+    /** Of those, kept as a cache after their last subscriber left (until a write changes them). */
+    cachedQueries?: number;
+    cacheBytes?: number;
+    /** HTTP queries and `ctx.run_query` calls answered from the cache, and those that ran the query. */
+    cacheHits?: number;
+    cacheMisses?: number;
     droppedLogEntries: number;
     files: { name: string; bytes: number }[];
     /** Over the last 10 seconds. */

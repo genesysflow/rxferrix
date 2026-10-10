@@ -345,7 +345,9 @@ fn call(path: String, args: serde_json::Value) -> (String, serde_json::Value) {
 }
 
 async fn write_app(options: ferrix::AppOptions) -> TestApp {
-    TestApp::with_options(ferrix::AppOptions { dev: false, ..options }).await.unwrap()
+    // BENCH_FSYNC=1: commits wait for the disk (`AppOptions::fsync_commits`).
+    let fsync_commits = std::env::var("BENCH_FSYNC").is_ok_and(|v| !v.is_empty() && v != "0");
+    TestApp::with_options(ferrix::AppOptions { dev: false, fsync_commits, ..options }).await.unwrap()
 }
 
 /// `clients` sync workers, each subscribed to the same `queries` queries over `items` (so every insert invalidates
@@ -395,8 +397,9 @@ async fn subscribers(app: &ferrix::App, clients: u64, queries: u64) -> Vec<tokio
 /// (an index range) then insert; every writer incrementing one counter (checked: no lost updates); with continuous
 /// replication's journal; with 100 subscribed clients; and fast writers queued behind a mutation that awaits 20 ms. In-process
 /// (`App::execute_mutation`): no JSON over a socket. SQLite runs in WAL mode with `synchronous = NORMAL`, so a commit
-/// doesn't wait for fsync. Tunable: `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, many,
-/// scan, counter, replication, subscribers, slow), `BENCH_WRITERS` (for insert: 1,4,16,64).
+/// doesn't wait for fsync (`BENCH_FSYNC=1`: it does; point `TMPDIR` at a real disk to measure that). Tunable:
+/// `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, many, scan, counter, replication,
+/// subscribers, slow), `BENCH_WRITERS` (for insert: 1,4,16,64).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_writes() {

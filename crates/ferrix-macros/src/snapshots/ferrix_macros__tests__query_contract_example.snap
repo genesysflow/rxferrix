@@ -23,6 +23,7 @@ pub async fn list(
     optional_fields = nullable
 )]
 pub struct __ferrix_args_list {
+    #[serde(skip_serializing_if = "::core::option::Option::is_none")]
     pub done: Option<bool>,
     pub limit: u32,
 }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 
@@ -66,6 +66,17 @@ struct Arg {
 }
 
 /// Returns the `T` of a `...::Result<T, ...>` return type.
+/// Is `ty` written as `Option<T>` (or `std::option::Option<T>`, ...)?
+fn is_option(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(p) if p.qself.is_none() => p.path.segments.last().is_some_and(|seg| {
+            let one_arg = matches!(&seg.arguments, syn::PathArguments::AngleBracketed(a) if a.args.len() == 1);
+            seg.ident == "Option" && one_arg
+        }),
+        _ => false,
+    }
+}
+
 pub(crate) fn output_type(ty: &syn::Type) -> Option<&syn::Type> {
     let syn::Type::Path(tp) = ty else { return None };
     if tp.qself.is_some() {
@@ -330,8 +341,14 @@ pub fn expand_function(
             ty,
             field_attrs,
         } = a;
+        // `None` is left out rather than sent as `null` (reading treats a missing `Option` as `None` anyway), so a
+        // typed call (`ctx.run_query`, the scheduler) sends the same args as a client that omits the field, and both
+        // share one subscription and query cache entry, which compare args as JSON.
+        let own_skip = field_attrs.iter().any(|attr| attr.to_token_stream().to_string().contains("skip_serializing"));
+        let skip_none = (is_option(ty) && !own_skip)
+            .then(|| quote!(#[serde(skip_serializing_if = "::core::option::Option::is_none")]));
         // Spanned on the type so that trait errors from the derives (e.g. a missing `Serialize`) point at it.
-        quote_spanned! {ty.span()=> #(#field_attrs)* pub #ident: #ty }
+        quote_spanned! {ty.span()=> #skip_none #(#field_attrs)* pub #ident: #ty }
     });
     let arg_idents: Vec<_> = args.iter().map(|a| &a.ident).collect();
     let arg_types: Vec<_> = args.iter().map(|a| &a.ty).collect();

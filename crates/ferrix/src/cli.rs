@@ -164,6 +164,10 @@ struct ServeArgs {
     #[arg(long, env = "FERRIX_QUERY_CACHE_TTL", value_name = "DURATION", default_value = "30m")]
     #[arg(value_parser = parse_duration)]
     query_cache_ttl: Duration,
+    /// Wait for each commit to reach the disk before answering (SQLite synchronous=FULL). Without it a process crash
+    /// loses nothing, but a power loss or OS crash may lose the last commits. One fsync covers a batch of mutations.
+    #[arg(long, env = "FERRIX_FSYNC_COMMITS")]
+    fsync_commits: bool,
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
@@ -589,6 +593,7 @@ fn serve(
                 idle_ttl: args.query_cache_ttl,
                 max_bytes: usize::try_from(args.query_cache_size).unwrap_or(usize::MAX),
             },
+            fsync_commits: args.fsync_commits,
             auth,
             storage,
             scheduler,
@@ -831,5 +836,8 @@ mod tests {
         let Some(Command::Serve(a)) = cli.command else { panic!("serve") };
         assert_eq!((a.query_cache_size, a.query_cache_ttl), (1 << 30, Duration::from_secs(7200)));
         assert!(parse(&["serve", "--query-cache-size", "lots"]).is_err());
+        assert!(!a.fsync_commits);
+        let Some(Command::Serve(a)) = parse(&["serve", "--fsync-commits"]).unwrap().command else { panic!("serve") };
+        assert!(a.fsync_commits);
     }
 }

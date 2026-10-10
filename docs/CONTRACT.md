@@ -408,9 +408,12 @@ pub struct AppOptions {
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
     pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
     pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
+    pub fsync_commits: bool,          // false: commits wait for the disk (SQLite synchronous = FULL); `--fsync-commits`
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
+- **Slow mutations.** A mutation that holds the database writer for 100 ms or more (`ferrix::db::WARN_WRITE`) is
+  logged as a warning, at most once a minute per path: every other write waited for it.
 - **Mutation timeout.** A mutation still running after `mutation_timeout` is dropped and rolled back, and fails with
   `ferrix::MutationTimeout { path, timeout }`, a server error (its message reaches clients only in `--dev`). It can
   only fire at an `.await`: synchronous code in a mutation (a busy loop, blocking I/O) is never preempted and keeps
@@ -1346,7 +1349,8 @@ pub struct MigrationReport {   // camelCase JSON
   so a caller always sees its own writes; it is never shared across identities a query's auth reads tell apart; and a
   query that reads the time (`ctx.now()`, or a signed storage URL) is never cached (its result depends on more than
   the data). Cached answers are not executions: they don't appear in the execution log. Args are compared as
-  canonical JSON, so `{"done": null}` and `{}` are different cache entries.
+  canonical JSON: typed calls leave `None` args out (§3), so they match clients that omit them, but a client sending
+  `{"done": null}` and one sending `{}` get separate entries.
 - **Invalidation is by index range, so writes are coarse.** Any write to a document (even one that leaves it
   unchanged) invalidates every query that read it through any index, and an insert invalidates every query whose
   range covers its keys. Tips: skip no-op writes (check first; `mark_read` only patches when something is new, since
@@ -1534,7 +1538,11 @@ pub async fn list(ctx: &QueryCtx, done: Option<bool>, limit: u32) -> Result<Vec<
 #[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
-pub struct __ferrix_args_list { pub done: Option<bool>, pub limit: u32 }
+pub struct __ferrix_args_list {
+    #[serde(skip_serializing_if = "::core::option::Option::is_none")]
+    pub done: Option<bool>,
+    pub limit: u32,
+}
 
 impl ::core::convert::From<(Option<bool>, u32,)> for __ferrix_args_list {
     fn from((done, limit,): (Option<bool>, u32,)) -> Self { Self { done, limit } }
@@ -1574,6 +1582,9 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
   `anyhow::Result<T>`: it takes the first generic argument of the last path segment named `Result`. Anything else is
   a compile error.
 - `optional_fields = nullable` makes `Option<T>` args optional in TS (`done?: boolean | null`); serde already treats a missing `Option` field as `None`.
+- `skip_serializing_if` on every field written as `Option<T>` (unless the param sets its own `skip_serializing*`): a
+  typed call with `None` (`ctx.run_query`, the scheduler) sends the args without the field, as clients that omit it
+  do, so both share one subscription and query cache entry (args are compared as canonical JSON).
 - Zero params: `pub struct __ferrix_args_list {}` and `impl From<()>`.
 - Compile errors (with spans) for: a non-async fn, a missing ctx param, a ctx type that doesn't match the macro kind
   (match on the last path segment: `QueryCtx` / `MutationCtx` / `ActionCtx`), `self` params, non-identifier

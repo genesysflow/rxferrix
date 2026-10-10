@@ -1249,7 +1249,7 @@ pub async fn prepare_point_in_time(
     let dir = staging.to_path_buf();
     let db = tokio::task::spawn_blocking(move || {
         let tables = crate::runtime::registered_tables();
-        let options = crate::db::OpenOptions { readers: 1, skip_schema_check: true, journal: false };
+        let options = crate::db::OpenOptions { readers: 1, skip_schema_check: true, ..Default::default() };
         crate::db::Database::open_with_migrations(&dir, &tables, &options, &[])
     })
     .await?

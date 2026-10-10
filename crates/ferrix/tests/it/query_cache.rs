@@ -25,6 +25,19 @@ pub mod fns {
         Ok(ctx.now())
     }
 
+    /// How many todos there are, optionally only those with this text.
+    #[query]
+    pub async fn qc_count(ctx: &QueryCtx, text: Option<String>) -> Result<usize> {
+        let all = ctx.db.query::<todos::Todo>().collect().await?;
+        Ok(all.iter().filter(|t| text.as_ref().is_none_or(|x| &t.value.text == x)).count())
+    }
+
+    /// `qc_count` with no text, through `ctx.run_query`.
+    #[action]
+    pub async fn qc_count_all(ctx: &ActionCtx) -> Result<usize> {
+        ctx.run_query::<qc_count>((None,)).await
+    }
+
     /// How many todos `todos:list` returns, through `ctx.run_query`.
     #[action]
     pub async fn qc_count_via_action(ctx: &ActionCtx) -> Result<usize> {
@@ -274,4 +287,20 @@ async fn queries_that_read_the_time_are_never_cached() {
     c.subscribe(1, &now, json!({})).await.unwrap();
     c.unsubscribe(1).await;
     wait_stats(&app, "dropped", |s| s.subscriptions == 0 && s.shared_queries == 0).await;
+}
+
+#[tokio::test]
+async fn typed_calls_and_clients_share_entries_when_options_are_none() {
+    let t = TestApp::new().await.unwrap();
+    let app = t.app().clone();
+    let count = fns::qc_count::path();
+    t.mutation::<todos::add>(("a".to_string(),)).await.unwrap();
+    // A client leaves the optional arg out; a typed call passes None: the same args, so the same cache entry.
+    let mut c = Client::new(&app).await;
+    assert_eq!(c.subscribe(1, &count, json!({})).await.unwrap(), json!(1));
+    c.unsubscribe(1).await;
+    wait_stats(&app, "idle", |s| s.idle_queries == 1).await;
+    let http = Http::new(&t).await;
+    assert_eq!(http.call("action", &fns::qc_count_all::path(), json!({}), None).await, json!(1));
+    assert_eq!(total_executions(&app, &count).await, 1, "ctx.run_query((None,)) found the client's entry");
 }

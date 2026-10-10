@@ -25,6 +25,7 @@ pub async fn add_many(
 )]
 pub struct __ferrix_args_add_many {
     pub n: u32,
+    #[serde(skip_serializing_if = "::core::option::Option::is_none")]
     pub prefix_text: Option<String>,
     #[serde(default)]
     pub dry_run: bool,

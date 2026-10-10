@@ -1,11 +1,12 @@
 [package]
 name = "ferrix"
+description = "A single-binary reactive backend: typed Rust queries, mutations and actions, live over WebSockets, with auth, file storage, scheduling, search and an admin dashboard"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-ferrix-macros = { path = "../ferrix-macros" }
+ferrix-macros = { path = "../ferrix-macros", version = "0.1.0" }
 anyhow = "1.0.104"
 argon2 = "0.6.0"
 axum = { version = "0.8.9", features = ["ws"] }

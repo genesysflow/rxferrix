@@ -215,6 +215,10 @@ pub struct AppOptions {
     /// How long, and within how much memory, query results stay cached after their last subscriber leaves
     /// (`sync::subscriptions`, "Query cache").
     pub query_cache: QueryCacheOptions,
+    /// Wait for each commit to reach the disk before answering (SQLite `synchronous = FULL`). Default: off (`NORMAL`
+    /// in WAL mode): a process crash loses nothing, but a power loss or OS crash may lose the last commits. With group
+    /// commit, one fsync covers a whole batch of mutations.
+    pub fsync_commits: bool,
 }
 
 /// The query cache ([`AppOptions::query_cache`]). Live queries are always kept (their subscribers need them); these
@@ -251,6 +255,7 @@ impl Default for AppOptions {
             scheduler: Default::default(),
             ops: Default::default(),
             query_cache: QueryCacheOptions::default(),
+            fsync_commits: false,
         }
     }
 }
@@ -451,6 +456,7 @@ impl App {
                 skip_schema_check: options.skip_schema_check,
                 // Replication journals every commit from the very first one (`crate::ops::replicate`).
                 journal: options.ops.replication.is_some(),
+                fsync_commits: options.fsync_commits,
             };
         let retention = options.log_retention.clone();
         let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {

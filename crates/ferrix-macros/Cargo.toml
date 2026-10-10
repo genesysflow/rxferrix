@@ -1,5 +1,6 @@
 [package]
 name = "ferrix-macros"
+description = "Procedural macros for Ferrix: #[table], #[query], #[mutation], #[action], #[object], #[migration]"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

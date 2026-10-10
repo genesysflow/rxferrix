@@ -527,7 +527,7 @@ fn ts_signatures() {
     // Param doc comments and `#[ts]` / `#[serde]` param attributes move to the args struct fields.
     assert_eq!(
         ts("add_many").0,
-        "{ \n/**\n * How many to add.\n */\nn: number, prefixText: string | null, }"
+        "{ \n/**\n * How many to add.\n */\nn: number, prefixText?: string | null, }"
     );
     assert_eq!(ts("secret").1, "null");
     assert_eq!(

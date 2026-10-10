@@ -58,6 +58,9 @@ pub const MAX_BATCH_AGE: Duration = Duration::from_millis(2);
 /// Group commit: a write transaction whose label (the mutation's path) has recently taken longer than this commits
 /// the open batch before it starts, so the mutations already in the batch don't wait for it.
 pub const SLOW_WRITE: Duration = Duration::from_micros(500);
+/// A mutation holding the writer this long is logged as a warning (at most once a minute per path): every other write
+/// waited for it.
+pub const WARN_WRITE: Duration = Duration::from_millis(100);
 
 /// Fields drop in order: the HNSW thread is stopped (and its connection closed) first, the writer closes last, so
 /// the read-write connection is the last one and checkpoints the WAL when the database is dropped.
@@ -82,11 +85,15 @@ pub struct OpenOptions {
     pub skip_schema_check: bool,
     /// Journal every commit's document changes from the start ([`journal`]; replication).
     pub journal: bool,
+    /// Wait for each commit to reach the disk (SQLite `synchronous = FULL`) instead of only the OS (`NORMAL`, the
+    /// default: a process crash loses nothing, a power loss may lose the last commits). With group commit this is one
+    /// fsync per batch of mutations.
+    pub fsync_commits: bool,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false, journal: false }
+        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false, journal: false, fsync_commits: false }
     }
 }
 
@@ -116,6 +123,9 @@ impl Database {
         search::vector::register_extension();
         let path = dir.join("data.db");
         let mut writer = storage::open_writer(&path)?;
+        if options.fsync_commits {
+            writer.pragma_update(None, "synchronous", "FULL")?;
+        }
         dedup::ensure_schema(&writer)?;
         writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
@@ -458,8 +468,9 @@ pub(crate) struct WriterShared {
     lock: Arc<tokio::sync::Mutex<Writer>>,
     /// Tasks between asking for the lock and getting it.
     waiting: AtomicUsize,
-    /// A moving average of how long each label's write transactions hold the lock (µs).
-    durations: Mutex<std::collections::HashMap<String, f64>>,
+    /// Per label: a moving average of how long its write transactions hold the lock (µs), and when one was last
+    /// reported for holding it too long ([`WARN_WRITE`]).
+    durations: Mutex<std::collections::HashMap<String, (f64, Option<Instant>)>>,
     write_log: Arc<WriteLog>,
     journal: Arc<journal::Journal>,
 }
@@ -468,18 +479,24 @@ impl WriterShared {
     /// How long a write transaction labelled `label` is expected to take (zero if never seen).
     fn expected(&self, label: &str) -> Duration {
         let durations = self.durations.lock().unwrap_or_else(|e| e.into_inner());
-        Duration::from_secs_f64(durations.get(label).copied().unwrap_or(0.0) / 1e6)
+        Duration::from_secs_f64(durations.get(label).map_or(0.0, |d| d.0) / 1e6)
     }
 
     fn record_duration(&self, label: &str, took: Duration) {
         let mut durations = self.durations.lock().unwrap_or_else(|e| e.into_inner());
         let micros = took.as_secs_f64() * 1e6;
-        match durations.get_mut(label) {
-            // Weighted towards recent runs, so a function that got slow (or fast) is noticed within a few calls.
-            Some(avg) => *avg += (micros - *avg) / 4.0,
-            None => {
-                durations.insert(label.to_string(), micros);
-            }
+        let entry = durations.entry(label.to_string()).or_insert((micros, None));
+        // Weighted towards recent runs, so a function that got slow (or fast) is noticed within a few calls.
+        entry.0 += (micros - entry.0) / 4.0;
+        if took >= WARN_WRITE && !label.is_empty() && entry.1.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+            entry.1 = Some(Instant::now());
+            tracing::warn!(
+                mutation = label,
+                held_ms = took.as_millis() as u64,
+                "a mutation held the database writer for {} ms: every other write waited for it. Keep mutations short \
+                 (read less, or split the work into several mutations, scheduled or run from an action)",
+                took.as_millis()
+            );
         }
     }
 
@@ -1128,4 +1145,51 @@ fn reject_system_fields(fields: &Map<String, Value>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slow_mutations_are_reported_once_a_minute() {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(dir.path(), &[], &OpenOptions::default()).unwrap();
+        let buf = Buf::default();
+        let make = buf.clone();
+        let subscriber = tracing_subscriber::fmt().with_writer(move || make.clone()).with_ansi(false).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            db.writer.record_duration("app:slow", Duration::from_millis(150));
+            db.writer.record_duration("app:slow", Duration::from_millis(300)); // within the minute: not again
+            db.writer.record_duration("app:fast", Duration::from_millis(5));
+            db.writer.record_duration("", Duration::from_millis(500)); // internal writes have no label
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(out.matches("held the database writer").count(), 1, "{out}");
+        assert!(out.contains("app:slow") && out.contains("150 ms"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn fsync_commits_sets_synchronous_full() {
+        for (fsync, expected) in [(false, 1), (true, 2)] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = OpenOptions { fsync_commits: fsync, ..Default::default() };
+            let db = Database::open_with(dir.path(), &[], &options).unwrap();
+            // 1 = NORMAL, 2 = FULL.
+            let level = |c: &Connection| Ok(c.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?);
+            let level = db.with_writer(level).await.unwrap();
+            assert_eq!(level, expected, "fsync_commits = {fsync}");
+        }
+    }
 }

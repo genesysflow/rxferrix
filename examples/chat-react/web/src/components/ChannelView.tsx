@@ -32,6 +32,23 @@ export function ChannelView({ channelId, me, onLeave }: Props) {
             {channel.name}
           </h2>
           {channel.topic && <p className="topic">{channel.topic}</p>}
+          <p className="channel-stats" data-testid="channel-stats">
+            <span data-testid="message-count">{plural(channel.messageCount, "message")}</span> ·{" "}
+            {plural(channel.memberCount, "member")}
+            {channel.topPosters.length > 0 && (
+              <span className="top-posters" data-testid="header-top-posters">
+                {" · top: "}
+                {channel.topPosters.map((p) => (
+                  <span key={p.user} className="poster" title={`${p.name}: ${p.messages} messages`}>
+                    <span className="avatar tiny" style={{ background: p.color }}>
+                      {initials(p.name)}
+                    </span>
+                    {p.messages}
+                  </span>
+                ))}
+              </span>
+            )}
+          </p>
         </div>
         <div className="head-actions">
           <button
@@ -160,4 +177,8 @@ function MembersPanel({ channel, onClose, onLeave }: { channel: ChannelInfo; onC
       )}
     </aside>
   );
+}
+
+function plural(n: number, noun: string): string {
+  return `${n.toLocaleString()} ${noun}${n === 1 ? "" : "s"}`;
 }

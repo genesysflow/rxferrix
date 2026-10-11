@@ -1,8 +1,8 @@
 # Ferrix Chat (React)
 
 A Slack-lite that exercises most of Ferrix: auth (password, email code, optional GitHub), reactive queries and
-paginated queries, optimistic updates, file storage, full-text search, the scheduler and crons, and per-channel
-authorization. The backend is `server/` (crate `chat-server`), the React 19 + Vite app is `web/`.
+paginated queries, optimistic updates, file storage, full-text search, the scheduler and crons, per-channel
+authorization, live aggregates (message and member counts) and SQL analytics over the DuckDB copy (Insights). The backend is `server/` (crate `chat-server`), the React 19 + Vite app is `web/`.
 
 ## Run it
 
@@ -30,6 +30,21 @@ Open http://localhost:5180 in two browser profiles (or one normal and one privat
   numbered sample messages through an action so there is history to scroll through.
 - The admin dashboard is at http://127.0.0.1:8097/_/ (the backend prints a one-time setup link on first start).
 
+### Insights (OLAP) and demo traffic
+
+The 📊 Insights view runs SQL over the analytics copy, so it needs a server built with the `olap` feature and started
+with `--olap` (without them it explains this instead):
+
+```sh
+cargo run -p chat-server --features olap -- serve --dev --http 127.0.0.1:8097 --olap
+cd examples/chat-react/web && bun e2e/demo-seed.ts http://127.0.0.1:8097 120   # 6 people chatting for 2 minutes
+```
+
+`demo-seed.ts` signs up `ada@demo.test`, `alan@demo.test`, ... (password `demo-password`), creates #engineering,
+#design and #random, and sends messages and reactions in bursts through the HTTP API; run it again for more. Sign in
+as one of them to watch the counts and the charts move. To serve the built app from the backend instead of Vite,
+`bun run build` in `web/` and set `CHAT_WEB_DIR=examples/chat-react/web/dist`.
+
 ## What's where
 
 | Feature | Server | Web |
@@ -47,6 +62,8 @@ Open http://localhost:5180 in two browser profiles (or one normal and one privat
 | Typing indicators | `typing.rs` (`start` + `run_after` expiry, hourly `prune` cron) | `TypingIndicator.tsx`, `Composer.tsx` |
 | `/remind` | `messages.rs` (`run_after::<deliver_reminder>`) | `Composer.tsx` (shows the notice) |
 | Connection state | | `ConnectionStatus.tsx` (`useConnectionState`) |
+| Live counts: messages per channel, members, top posters | `model.rs` (`#[aggregate]`), `channels.rs` (`aggregate(..).get`, `groups`) | `Sidebar.tsx`, `ChannelView.tsx` |
+| Insights: activity, busiest hours, rankings | `insights.rs` (an action using `ctx.olap.query_as`, scoped to readable channels) | `InsightsView.tsx` (polls `useAction`) |
 
 Every function starts with `ctx.auth.require_user()`; channel access fails with the `UserError` codes
 `not_a_member`, `private_channel`, `forbidden` (editing someone else's message), which the UI shows.
@@ -59,6 +76,7 @@ cargo build -p chat-server
 cd examples/chat-react/web
 bun run typecheck
 bun e2e/chat.ts                           # starts its own backend (fresh data dir) on :8097 and Vite on :5180
+CHAT_OLAP=1 bun e2e/chat.ts               # with --olap (needs `cargo build -p chat-server --features olap`)
 SCREENSHOTS=/tmp/shots bun e2e/chat.ts    # ...and saves chat-*.png screenshots
 E2E_EXTERNAL=1 bun e2e/chat.ts            # against a backend (--dev) and Vite that are already running
 ```
@@ -66,4 +84,5 @@ E2E_EXTERNAL=1 bun e2e/chat.ts            # against a backend (--dev) and Vite t
 The e2e drives three users in separate browser contexts: two sign up with passwords, the third signs in with an
 emailed code. It covers live messages, reactions, edits and deletes, unread badges, attachments, search, infinite
 scroll over 200 seeded messages, a typing indicator that appears and expires, a `/remind` that arrives a few seconds
-later, and a private channel that a non-member can't read (in the UI and over the HTTP API) until invited.
+later, a private channel that a non-member can't read (in the UI and over the HTTP API) until invited, live message
+counts in the sidebar and header, and the Insights view (its totals with `CHAT_OLAP=1`, the how-to otherwise).

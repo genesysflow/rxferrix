@@ -14,9 +14,10 @@ export type DataModel = {
 
 /** Built-in ferrix tables that app documents may reference, e.g. `Id<"_users">`. */
 export type SystemDataModel = {
-  "_scheduled_jobs": { path: string, kind: "mutation" | "action", args: any, runAt: number, state: "pending" | "inProgress" | "success" | "failed" | "canceled", attempts: number, maxAttempts: number, result: string | null, error: string | null, scheduledAt: number, startedAt: number | null, completedAt: number | null, origin: string | null, };
+  "_scheduled_jobs": { path: string, kind: "mutation" | "action", args: any, runAt: number, state: "pending" | "inProgress" | "success" | "failed" | "canceled", attempts: number, maxAttempts: number, result: string | null, error: string | null, scheduledAt: number, startedAt: number | null, completedAt: number | null, origin: string | null, pool: string | null, onComplete: { path: string, context: any } | null, backoff: { initialMs: number, base: number } | null, };
   "_storage": { sha256: string, size: number, contentType: string | null, createdBy: string | null, filename: string | null, };
   "_users": { email: string | null, emailVerified: boolean, name: string | null, image: string | null, };
+  "_workflows": { name: string, args: any, state: "running" | "success" | "failed" | "canceled", result: any, error: string | null, steps: number, startedAt: number, completedAt: number | null, origin: string | null, onComplete: { path: string, context: any } | null, events: Array<{ name: string, value: any }>, };
 };
 
 /** The name of a table. */
@@ -28,14 +29,55 @@ export type Id<T extends TableNames | keyof SystemDataModel> = GenericId<T>;
 /** A stored document of table `T`, with its system fields. */
 export type Doc<T extends TableNames | keyof SystemDataModel> = (DataModel & SystemDataModel)[T] & { _id: Id<T>; _creationTime: number };
 
+export type ActivityPoint = {
+  /** Start of the bucket, in seconds since the epoch (aligned in the caller's time zone). */
+  at: number,
+  messages: number,
+};
+
 /** An attached file, as the app shows it. */
 export type Attachment = { url: string, contentType: string | null, filename: string | null, size: number, };
 
-/** The channel header: the channel, whether the caller joined it, and who did. */
-export type ChannelInfo = { isMember: boolean, members: Array<MemberInfo>, } & Doc<"channels">;
+export type ChannelCount = { name: string, messages: number, };
 
-/** A channel as the sidebar shows it: the channel document, and whether the caller joined it. */
-export type ChannelSummary = { isMember: boolean, } & Doc<"channels">;
+/** The channel header: the channel, whether the caller joined it, who did, and live counts. */
+export type ChannelInfo = {
+  isMember: boolean,
+  members: Array<MemberInfo>,
+  messageCount: number,
+  memberCount: number,
+  /** The channel's five most active people (`messages_per_author`). */
+  topPosters: Array<PosterCount>,
+} & Doc<"channels">;
+
+/**
+ * A channel as the sidebar shows it: the channel document, whether the caller joined it, and how many messages it
+ * has (a live aggregate: no messages are read).
+ */
+export type ChannelSummary = { isMember: boolean, messageCount: number, } & Doc<"channels">;
+
+export type EmojiCount = { emoji: string, count: number, };
+
+export type HourCount = {
+  /** 0..23, in the caller's time zone. */
+  hour: number,
+  messages: number,
+};
+
+/** What the Insights view shows. */
+export type Insights = {
+  /** The analytics copy reflected every commit up to this one. */
+  asOfTs: number,
+  totals: Totals,
+  /** The activity bucket, in seconds (chosen from the data's time span: at most ~48 buckets). */
+  bucketSeconds: number,
+  activity: Array<ActivityPoint>,
+  hours: Array<HourCount>,
+  topPosters: Array<Poster>,
+  topEmojis: Array<EmojiCount>,
+  mostReacted: Array<Reacted>,
+  byChannel: Array<ChannelCount>,
+};
 
 export type MemberInfo = { user: Id<"_users">, name: string, color: string, };
 
@@ -71,6 +113,13 @@ export type PaginationResult<T> = {
   continueCursor: string,
 };
 
+export type Poster = { name: string, color: string, messages: number, };
+
+/** Someone's number of messages in a channel. */
+export type PosterCount = { user: Id<"_users">, name: string, color: string, messages: number, };
+
+export type Reacted = { body: string, author: string, reactions: number, };
+
 /** One emoji's reactions on a message. */
 export type ReactionGroup = {
   emoji: string,
@@ -82,6 +131,8 @@ export type ReactionGroup = {
 
 /** What `send` did: posted a message, or ran a slash command (then `notice` says what happened). */
 export type SendResult = { message: Id<"messages"> | null, notice: string | null, };
+
+export type Totals = { messages: number, people: number, channels: number, reactions: number, };
 
 export type TypingUser = { user: Id<"_users">, name: string, };
 

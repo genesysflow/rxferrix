@@ -27,6 +27,8 @@ pub struct Channel {
 #[table(name = "members")]
 #[index(by_channel_user = [channel, user])]
 #[index(by_user = [user])]
+// Live member counts (the channel header), kept by every join and leave.
+#[aggregate(members_per_channel, group = [channel])]
 pub struct Member {
     pub channel: Id<Channel>,
     pub user: Id<User>,
@@ -35,9 +37,15 @@ pub struct Member {
 
 // Index keys end in `_creationTime, _id`, so `by_channel` lists a channel's messages in the order they were sent
 // (`Order::Desc`: newest first), and `_creation_time` can be bounded after the channel (unread counts).
+//
+// Live aggregates, kept by every send, edit and delete in the same transaction: message counts per channel (the
+// sidebar) and per author within a channel (the header's top posters). A new message reruns only the queries that
+// read its channel's counts.
 #[table(name = "messages")]
 #[index(by_channel = [channel])]
 #[search_index(search_body, search = body, filter = [channel])]
+#[aggregate(messages_per_channel, group = [channel])]
+#[aggregate(messages_per_author, group = [channel, author])]
 pub struct Message {
     pub channel: Id<Channel>,
     pub author: Id<User>,

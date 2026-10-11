@@ -25,7 +25,7 @@ example found (index order, codegen names, `#[object]`, dev mode, storage URLs i
 | `packages/svelte` | `@ferrix/svelte`: Svelte 5 runes bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte 5 SPA), built into `crates/ferrix/dashboard-dist` and embedded at `/_/`. |
 | `examples/todo` | Rust backend and Svelte web app, with Playwright e2e scripts. |
-| `examples/chat-react` | The flagship example: a Slack-lite in React (auth, pagination, uploads, search, scheduler). |
+| `examples/chat-react` | The flagship example: a Slack-lite in React (auth, pagination, uploads, search, scheduler, live aggregates, OLAP insights). |
 | `docs/CONTRACT.md` | Rust API and the exact code each macro generates. |
 | `docs/PROTOCOL.md` | WebSocket and HTTP protocol. |
 

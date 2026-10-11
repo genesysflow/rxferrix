@@ -18,6 +18,8 @@ const BACKEND = `http://127.0.0.1:${BACKEND_PORT}`;
 const APP = `http://localhost:${VITE_PORT}`;
 const EXTERNAL = process.env.E2E_EXTERNAL === "1";
 const SHOTS = process.env.SCREENSHOTS;
+// `CHAT_OLAP=1`: start the server with `--olap` (a chat-server built with `--features olap`), so Insights has data.
+const OLAP = process.env.CHAT_OLAP === "1";
 const webDir = resolve(import.meta.dir, "..");
 const BIN = process.env.CHAT_SERVER ?? resolve(webDir, "../../../target/debug/chat-server");
 
@@ -42,7 +44,7 @@ async function waitFor(url: string, what: string) {
 async function startServers() {
   dataDir = mkdtempSync(join(tmpdir(), "chat-e2e-"));
   const server = Bun.spawn(
-    [BIN, "serve", "--dev", "--http", `127.0.0.1:${BACKEND_PORT}`, "--dir", dataDir],
+    [BIN, "serve", "--dev", "--http", `127.0.0.1:${BACKEND_PORT}`, "--dir", dataDir, ...(OLAP ? ["--olap"] : [])],
     { stdout: "ignore", stderr: "ignore" },
   );
   started.push({ proc: server, port: BACKEND_PORT });
@@ -211,6 +213,15 @@ try {
   await message(a, hello).getByRole("button", { name: "🎉 1" }).click();
   await message(b, hello).getByRole("button", { name: "🎉 2" }).waitFor({ timeout: 3000 });
 
+  console.log("live counts: the sidebar and the header follow new messages (aggregates)");
+  await a.getByTestId("message-count").filter({ hasText: /^1 message$/ }).waitFor({ timeout: 3000 });
+  await a.getByTestId(`count-${room}`).filter({ hasText: /^1$/ }).waitFor({ timeout: 3000 });
+  await send(b, `Got it ${run}`);
+  await timed("send in B -> count in A's sidebar", () =>
+    a.getByTestId(`count-${room}`).filter({ hasText: /^2$/ }).waitFor({ timeout: 3000 }),
+  );
+  await a.getByTestId("message-count").filter({ hasText: /^2 messages$/ }).waitFor({ timeout: 3000 });
+
   console.log("edit and delete");
   const edited = `${hello} (now with charts)`;
   await message(a, hello).hover();
@@ -372,6 +383,18 @@ try {
   await a.getByLabel("Invite by email").fill(cat.email);
   await a.getByRole("button", { name: "Invite", exact: true }).click();
   await timed("invite in A -> channel opens for C", () => message(c, `classified ${run}`).waitFor({ timeout: 5000 }));
+
+  console.log(`insights: SQL over the analytics copy (${OLAP ? "--olap" : "without --olap: explains how to turn it on"})`);
+  await a.getByTestId("open-insights").click();
+  if (OLAP) {
+    await timed("open Insights -> totals shown", () => a.getByTestId("total-messages").waitFor({ timeout: 10000 }));
+    const total = Number((await a.getByTestId("total-messages").innerText()).replace(/\D/g, ""));
+    if (!(total > 200)) failures.push(`Insights shows ${total} messages, expected the 200+ sent above`);
+    await a.getByTestId("top-posters").getByText(ann.name).waitFor();
+    await shot(a, "insights");
+  } else {
+    await a.getByTestId("insights-error").filter({ hasText: "--features olap" }).waitFor({ timeout: 10000 });
+  }
 
   await openChannel(a, room);
   await shot(a, "main");

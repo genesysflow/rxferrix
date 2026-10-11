@@ -10,3 +10,7 @@ ferrix = { path = "../../../crates/ferrix" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[features]
+# The Insights view: SQL over the analytics copy (DuckDB). Serve with `--olap`.
+olap = ["ferrix/olap"]

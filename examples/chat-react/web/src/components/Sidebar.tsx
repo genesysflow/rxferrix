@@ -8,10 +8,18 @@ interface Props {
   me: Profile;
   channels: ChannelSummary[];
   activeId: Id<"channels"> | null;
+  /** The Insights view is open. */
+  insights: boolean;
   onSelect: (id: Id<"channels">) => void;
+  onInsights: () => void;
 }
 
-export function Sidebar({ me, channels, activeId, onSelect }: Props) {
+/** "1.2k" for counts past a thousand. */
+function compact(n: number): string {
+  return n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+}
+
+export function Sidebar({ me, channels, activeId, insights, onSelect, onInsights }: Props) {
   const unread = useQuery(api.channels.unread);
   const counts = useMemo(() => new Map((unread ?? []).map((u) => [u.channel, u.count])), [unread]);
   const joined = channels.filter((c) => c.isMember);
@@ -27,6 +35,10 @@ export function Sidebar({ me, channels, activeId, onSelect }: Props) {
       </div>
 
       <nav className="sidebar-scroll" aria-label="Channels">
+        <button className={`channel-link insights-link${insights ? " active" : ""}`} onClick={onInsights} data-testid="open-insights">
+          <span className="hash">📊</span>
+          <span className="name">Insights</span>
+        </button>
         <div className="section-title">
           <span>Channels</span>
           <button className="icon-btn" aria-label="New channel" title="New channel" onClick={() => setCreating((v) => !v)}>
@@ -54,6 +66,11 @@ export function Sidebar({ me, channels, activeId, onSelect }: Props) {
                 >
                   <span className="hash">{c.private ? "🔒" : "#"}</span>
                   <span className="name">{c.name}</span>
+                  {count === 0 && c.messageCount > 0 && (
+                    <span className="msg-count" data-testid={`count-${c.name}`} title={`${c.messageCount} messages`}>
+                      {compact(c.messageCount)}
+                    </span>
+                  )}
                   {count > 0 && (
                     <span className="badge" data-testid={`unread-${c.name}`} aria-label={`${count} unread`}>
                       {count >= 100 ? "99+" : count}

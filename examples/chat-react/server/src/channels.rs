@@ -8,13 +8,25 @@ use ferrix::prelude::*;
 use crate::model::{Channel, Member, Message, get_channel, membership, require_member, require_readable, user_error};
 use crate::profiles::Names;
 
-/// A channel as the sidebar shows it: the channel document, and whether the caller joined it.
+/// A channel as the sidebar shows it: the channel document, whether the caller joined it, and how many messages it
+/// has (a live aggregate: no messages are read).
 #[object]
 #[derive(Clone, Debug)]
 pub struct ChannelSummary {
     #[serde(flatten)]
     pub channel: Doc<Channel>,
     pub is_member: bool,
+    pub message_count: u64,
+}
+
+/// Someone's number of messages in a channel.
+#[object]
+#[derive(Clone, Debug)]
+pub struct PosterCount {
+    pub user: Id<User>,
+    pub name: String,
+    pub color: String,
+    pub messages: u64,
 }
 
 #[object]
@@ -25,7 +37,7 @@ pub struct MemberInfo {
     pub color: String,
 }
 
-/// The channel header: the channel, whether the caller joined it, and who did.
+/// The channel header: the channel, whether the caller joined it, who did, and live counts.
 #[object]
 #[derive(Clone, Debug)]
 pub struct ChannelInfo {
@@ -33,6 +45,10 @@ pub struct ChannelInfo {
     pub channel: Doc<Channel>,
     pub is_member: bool,
     pub members: Vec<MemberInfo>,
+    pub message_count: u64,
+    pub member_count: u64,
+    /// The channel's five most active people (`messages_per_author`).
+    pub top_posters: Vec<PosterCount>,
 }
 
 #[object]
@@ -59,11 +75,12 @@ pub async fn list(ctx: &QueryCtx) -> Result<Vec<ChannelSummary>> {
         .map(|m| m.value.channel)
         .collect();
     let channels = ctx.db.query::<Channel>().with_index(Channel::by_name, |q| q).take(500).await?;
-    Ok(channels
-        .into_iter()
-        .filter(|c| !c.private || mine.contains(&c.id))
-        .map(|channel| ChannelSummary { is_member: mine.contains(&channel.id), channel })
-        .collect())
+    let mut out = Vec::new();
+    for channel in channels.into_iter().filter(|c| !c.private || mine.contains(&c.id)) {
+        let messages = ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel.id)).await?;
+        out.push(ChannelSummary { is_member: mine.contains(&channel.id), message_count: messages.count, channel });
+    }
+    Ok(out)
 }
 
 /// One channel with its members. Fails with `not_a_member` for a private channel the caller isn't in.
@@ -84,7 +101,22 @@ pub async fn get(ctx: &QueryCtx, channel: Id<Channel>) -> Result<ChannelInfo> {
         members.push(MemberInfo { user: row.user, name, color });
     }
     members.sort_by_key(|m| m.name.to_lowercase());
-    Ok(ChannelInfo { channel: doc, is_member: rows.iter().any(|m| m.user == user), members })
+    let message_count = ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel)).await?.count;
+    let member_count = ctx.db.aggregate(Member::members_per_channel).get(|g| g.eq(Member::channel, channel)).await?.count;
+    // Every author's count in this channel (one row per author), the five largest.
+    let mut posters = ctx
+        .db
+        .aggregate(Message::messages_per_author)
+        .groups(|g| g.eq(Message::channel, channel), Order::Asc, 10_000)
+        .await?;
+    posters.sort_by_key(|a| std::cmp::Reverse(a.value.count));
+    let mut top_posters = Vec::new();
+    for g in posters.into_iter().take(5) {
+        let Some(author) = g.group.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<Id<User>>().ok()) else { continue };
+        let (name, color) = names.get(&ctx.db, author).await?;
+        top_posters.push(PosterCount { user: author, name, color, messages: g.value.count });
+    }
+    Ok(ChannelInfo { channel: doc, is_member: rows.iter().any(|m| m.user == user), members, message_count, member_count, top_posters })
 }
 
 /// Creates a channel (the caller joins it). Names are lowercase letters, digits and dashes, and unique.

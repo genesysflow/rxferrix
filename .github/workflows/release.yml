@@ -146,7 +146,8 @@ jobs:
 
   olap:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # DuckDB's C++ is compiled twice on a cold cache (clippy, then the tests): ~45 minutes; a few with the cache.
+    timeout-minutes: 90
     steps:
       - name: free disk space
         run: |

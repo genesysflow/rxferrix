@@ -621,10 +621,11 @@ docker run --rm todo-server functions             # any CLI command
 ```
 
 **CI.** [`.github/workflows/release.yml`](.github/workflows/release.yml) runs every gate of [Tests](#tests) (end-to-end
-tests included, in Chromium) and, in a job of its own, the tests with the `olap` feature; then builds the static musl
-binaries with `scripts/release.sh`, `todo-server` and `todo-server-olap` (artifacts; attached to the GitHub release
-for `v*` tags) and the Docker image, which it smoke-tests (`functions`, `/api/health` with a
-volume) and pushes to `ghcr.io/<owner>/todo-server` for `v*` tags.
+tests included, in Chromium) and, in a job of its own, the tests with the `olap` feature; builds the static musl
+binary with `scripts/release.sh` (an artifact; attached to the GitHub release for `v*` tags) and, for tags and manual
+runs, `todo-server-olap` too; and builds the Docker image alongside, smoke-tests it (`functions`, `/api/health` with a
+volume) and pushes it to `ghcr.io/<owner>/todo-server` for `v*` tags. A new push cancels the run it supersedes;
+caches are kept even when a run fails, so DuckDB is compiled only when it changes.
 
 **Logs.** `serve` writes JSON lines when stdout isn't a terminal (systemd, Docker): `timestamp`, `level`, `target`,
 `fields` and the span context, one object per line, for Loki, Vector or `jq`. `--log-format pretty|compact|json` (or

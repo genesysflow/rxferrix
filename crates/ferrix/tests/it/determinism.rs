@@ -57,7 +57,9 @@ async fn reruns_queries_and_warns_when_results_differ() {
     let warning = warnings(&run.log_lines);
     assert_eq!(warning.len(), 1, "{:?}", run.log_lines);
     assert!(warning[0].starts_with(&format!("[WARN] query `{}` gave", fns::counter::path())), "{}", warning[0]);
-    assert!(warning[0].contains(&format!("`{first}` then `{}`", first.as_u64().unwrap() + 1)), "{}", warning[0]);
+    // Tests running in parallel share CALLS: the rerun's value is larger, not necessarily by one.
+    let rerun = warning[0].split(&format!("`{first}` then `")).nth(1).and_then(|r| r.split('`').next());
+    assert!(rerun.and_then(|r| r.parse::<u64>().ok()).is_some_and(|r| r > first.as_u64().unwrap()), "{}", warning[0]);
 
     // At most once per interval (10 s in TestApp): the next run isn't checked.
     let run = app.run_query(&fns::counter::path(), json!({}), &anon).await;

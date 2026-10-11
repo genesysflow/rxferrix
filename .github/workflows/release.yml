@@ -29,12 +29,21 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Full debug info made the gates job's target directory outgrow the runner's disk (the linker died with SIGBUS);
+  # line tables keep backtraces' file:line.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   gates:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v4
 
       - name: Rust (mise.toml)
@@ -87,7 +96,7 @@ jobs:
         run: bun run build:dashboard && bun run check:dashboard && git diff --exit-code -- crates/ferrix/dashboard-dist
 
       - name: build the example servers
-        run: cargo build -p todo-server -p chat-server
+        run: cargo build -p todo-server -p chat-server && df -h /
 
       - name: dashboard e2e
         env:
@@ -131,6 +140,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v4
 
       - name: Rust (mise.toml), and mise for zig and cargo-zigbuild

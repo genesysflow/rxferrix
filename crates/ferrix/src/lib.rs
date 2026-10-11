@@ -30,6 +30,7 @@ pub mod cli;
 pub mod codegen;
 pub mod dashboard;
 pub mod db;
+mod determinism;
 pub mod error;
 pub mod exec_log;
 pub mod id;

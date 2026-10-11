@@ -19,7 +19,7 @@ use crate::db::{Database, Snapshot};
 use crate::error::{FunctionNotFound, MutationTimeout, QueryTimeout};
 use crate::exec_log::{LogRetention, Logs};
 use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
-use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, TABLES, Visibility};
+use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, QueryHandler, TABLES, Visibility};
 use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -231,7 +231,17 @@ pub struct AppOptions {
     /// in WAL mode): a process crash loses nothing, but a power loss or OS crash may lose the last commits. With group
     /// commit, one fsync covers a whole batch of mutations.
     pub fsync_commits: bool,
+    /// Dev aid: now and then (at most once per this interval per query) run a query a second time in the same snapshot,
+    /// and warn if the result differs (in the server log, and as a log line of the run, so in the execution log and,
+    /// in dev mode, the client's console). Such a query depends on more than its arguments and the data it reads
+    /// (`SystemTime::now()`, random numbers, `HashMap` order): its subscribers get updates for nothing and its cached
+    /// results are wrong. Runs that read the time (`ctx.now()`, signed URLs) are not checked. Default: off;
+    /// `ferrix serve --dev` and [`TestApp`](crate::testing::TestApp) check every 10 s.
+    pub determinism_check: Option<Duration>,
 }
+
+/// [`AppOptions::determinism_check`] in `ferrix serve --dev` and `TestApp`.
+pub const DEV_DETERMINISM_CHECK: Duration = Duration::from_secs(10);
 
 /// The query cache ([`AppOptions::query_cache`]). Live queries are always kept (their subscribers need them); these
 /// bound the results kept for queries nobody watches any more, which serve the next subscriber, HTTP query or
@@ -271,6 +281,7 @@ impl Default for AppOptions {
             ops: Default::default(),
             query_cache: QueryCacheOptions::default(),
             fsync_commits: false,
+            determinism_check: None,
         }
     }
 }
@@ -330,6 +341,8 @@ struct AppInner {
     subscriptions: OnceLock<SubscriptionManager>,
     /// The replicator, with `AppOptions::ops.replication` (`crate::ops::replicate`).
     replication: OnceLock<Arc<crate::ops::replicate::Replicator>>,
+    /// With `AppOptions::determinism_check`.
+    determinism: Option<crate::determinism::DeterminismCheck>,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -489,6 +502,7 @@ impl App {
         let started_at = crate::db::wall_clock_ms();
         let metrics = Arc::new(Metrics::default());
         let subscriptions = OnceLock::new();
+        let determinism = options.determinism_check.map(crate::determinism::DeterminismCheck::new);
         let public_url = options.auth.public_url.clone();
         let mut storage_config = options.storage.clone();
         if storage_config.keep_deleted.is_none()
@@ -519,6 +533,7 @@ impl App {
                 scheduler,
                 subscriptions,
                 replication: OnceLock::new(),
+                determinism,
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
@@ -746,17 +761,35 @@ impl App {
         let (auth, auth_access) = Auth::tracked(identity.clone());
         let ctx = QueryCtx { db, auth, storage, dev: self.options().dev };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
-        let timeout = self.options().query_timeout;
-        let run = async {
-            match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(QueryTimeout { path: path.to_string(), timeout }.into()),
-            }
-        };
-        let (result, log_lines) = crate::log::capture(run).await;
-        exec.finish(self, &result, &log_lines);
+        let check = self.inner.determinism.as_ref().filter(|c| c.due(path));
+        let rerun_args = check.map(|_| args.clone());
+        let (result, mut log_lines) = crate::log::capture(self.run_query_handler(handler, ctx, args, path)).await;
+        let elapsed = exec.started.elapsed();
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
+        if let (Some(check), Some(args)) = (check, rerun_args)
+            && !read_set.reads_clock()
+        {
+            check.start(path);
+            let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
+            let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
+            let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), storage, dev: self.options().dev };
+            let again = crate::log::discard(self.run_query_handler(handler, ctx, args, path)).await;
+            if let Some(warning) = crate::determinism::compare(path, ts, &result, &again) {
+                tracing::warn!(path, ts, "{warning}");
+                log_lines.push(format!("[WARN] {warning}"));
+            }
+        }
+        exec.finish_timed(self, &result, &log_lines, elapsed);
         QueryRun { result, read_set, ts, log_lines, auth_deps: auth_access.deps() }
+    }
+
+    /// Run a query's handler, with the query timeout and panics caught.
+    async fn run_query_handler(&self, handler: QueryHandler, ctx: QueryCtx, args: Value, path: &str) -> crate::Result<Value> {
+        let timeout = self.options().query_timeout;
+        match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(QueryTimeout { path: path.to_string(), timeout }.into()),
+        }
     }
 
     pub(crate) async fn call_mutation(
@@ -942,8 +975,13 @@ impl Execution {
     }
 
     fn finish<T>(self, app: &App, result: &crate::Result<T>, log_lines: &[String]) {
-        let (args, args_truncated) = self.args;
         let elapsed = self.started.elapsed();
+        self.finish_timed(app, result, log_lines, elapsed);
+    }
+
+    /// [`Execution::finish`] with the duration measured by the caller (a query's, without its determinism check).
+    fn finish_timed<T>(self, app: &App, result: &crate::Result<T>, log_lines: &[String], elapsed: Duration) {
+        let (args, args_truncated) = self.args;
         let outcome = crate::exec_log::LogOutcome::of(result);
         crate::ops::metrics::record_execution(app, &self.path, self.kind, outcome, elapsed);
         app.logs().record(crate::exec_log::LogEntry {

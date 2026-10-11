@@ -615,6 +615,7 @@ fn serve(
                 max_bytes: usize::try_from(args.query_cache_size).unwrap_or(usize::MAX),
             },
             fsync_commits: args.fsync_commits,
+            determinism_check: args.dev.then_some(crate::runtime::DEV_DETERMINISM_CHECK),
             auth,
             storage,
             scheduler,

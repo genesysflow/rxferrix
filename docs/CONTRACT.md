@@ -410,12 +410,21 @@ pub struct AppOptions {
     pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
     pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
     pub fsync_commits: bool,          // false: commits wait for the disk (SQLite synchronous = FULL); `--fsync-commits`
+    pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
 - **Query timeout.** A query still running after `query_timeout` fails with `ferrix::QueryTimeout { path, timeout }`
   (a server error; checked at `.await` points only). A stuck query would otherwise keep a reader connection, and the
   older results its subscribers' other queries are kept at, for good.
+- **Determinism check.** With `determinism_check: Some(every)`, a query is run a second time in the same snapshot,
+  at most once per `every` per path, and a result (or error message) that differs is reported: a `WARN` in the server
+  log and a ``[WARN] query `<path>` gave a different result when run again at the same ts …`` line appended to the
+  run's log lines (so in the execution log and, in `--dev`, the client's `logLines`), with where the two results
+  first differ. Such a query reads something besides its arguments and data (`SystemTime::now()`, random numbers,
+  `HashMap` iteration order): subscribers get updates for nothing and cached results are wrong. Runs that read the
+  time (`ctx.now()`, signed URLs) and timeouts are not compared. The rerun is not an execution (no log entry, no
+  metrics, its log lines dropped; stdout still prints them) and isn't counted in the run's duration.
 - **Slow mutations.** A mutation that holds the database writer for 100 ms or more (`ferrix::db::WARN_WRITE`) is
   logged as a warning, at most once a minute per path: every other write waited for it.
 - **Mutation timeout.** A mutation still running after `mutation_timeout` is dropped and rolled back, and fails with

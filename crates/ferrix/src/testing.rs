@@ -27,7 +27,7 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new() -> crate::Result<TestApp> {
-        Self::with_options(AppOptions { dev: true, ..Default::default() }).await
+        Self::with_options(AppOptions { dev: true, determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK), ..Default::default() }).await
     }
 
     pub async fn with_options(options: AppOptions) -> crate::Result<TestApp> {
@@ -78,7 +78,7 @@ impl TestApp {
 
     /// A dev-mode app with this auth configuration.
     pub async fn with_auth(auth: crate::auth::AuthConfig) -> crate::Result<TestApp> {
-        Self::with_options(AppOptions { dev: true, auth, ..Default::default() }).await
+        Self::with_options(AppOptions { dev: true, auth, determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK), ..Default::default() }).await
     }
 
     /// Run a query as `identity` (e.g. `Identity::user(id, None)`).

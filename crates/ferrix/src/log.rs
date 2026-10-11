@@ -107,6 +107,12 @@ pub(crate) async fn capture<F: Future>(fut: F) -> (F::Output, Vec<String>) {
     (out, lines)
 }
 
+/// Run `fut` with a fresh capture buffer and drop the lines it logs: they reach neither an enclosing buffer nor the
+/// execution log (other subscribers, such as stdout, still see them). For reruns of a query (`crate::determinism`).
+pub(crate) async fn discard<F: Future>(fut: F) -> F::Output {
+    CAPTURE.scope(Arc::new(Buffer::default()), fut).await
+}
+
 /// The `logLines` to send to a client: all of them in `--dev`, none otherwise (they may contain data the client
 /// must not see). The execution log always keeps them.
 pub(crate) fn for_client(dev: bool, lines: Vec<String>) -> Vec<String> {

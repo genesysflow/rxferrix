@@ -436,6 +436,17 @@ async fn duplicate_mutations_are_applied_once() {
 }
 
 #[tokio::test]
+async fn determinism_warnings_reach_clients_in_dev() {
+    use crate::determinism::{fns, warnings};
+
+    let t = TestApp::new().await.unwrap();
+    let mut a = Ws::connect(t.serve().await.unwrap()).await;
+    let first = a.subscribe(0, 0, &fns::counter::path(), json!({})).await;
+    let lines: Vec<String> = serde_json::from_value(first["modifications"][0]["logLines"].clone()).unwrap();
+    assert_eq!(warnings(&lines).len(), 1, "{lines:?}");
+}
+
+#[tokio::test]
 async fn log_lines_reach_clients_only_in_dev() {
     use crate::hardening::fns;
 

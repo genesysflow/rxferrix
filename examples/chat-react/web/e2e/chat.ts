@@ -300,11 +300,24 @@ try {
   if ((await first.count()) > 0) failures.push(`the oldest seeded message was loaded before scrolling (${initial} messages)`);
   console.log(`  messages before scrolling: ${initial}`);
   await timed("scroll to the top -> oldest message", async () => {
-    for (let i = 0; i < 40 && (await first.count()) === 0; i++) {
+    // Time-based, not a number of scrolls: on a slow CI runner each page takes longer to load and render.
+    const deadline = performance.now() + 20_000;
+    while ((await first.count()) === 0 && performance.now() < deadline) {
       await b.getByTestId("messages").evaluate((el) => el.scrollTo({ top: -el.scrollHeight }));
       await Bun.sleep(150);
     }
-    await first.waitFor({ timeout: 3000 });
+    if ((await first.count()) === 0) {
+      // Say where it stopped: still loading, waiting for a scroll, or showing the button.
+      const state = await b.getByTestId("messages").evaluate((el) => ({
+        scrollTop: Math.round(el.scrollTop),
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        edge: el.querySelector(".history-edge")?.textContent?.trim(),
+      }));
+      const count = await b.getByTestId("message").count();
+      await shot(b, "scroll-stuck");
+      throw new Error(`the oldest message never loaded: ${count} messages after 20 s, ${JSON.stringify(state)}`);
+    }
   });
   const loaded = await b.getByTestId("message").count();
   console.log(`  messages loaded: ${initial} -> ${loaded}`);

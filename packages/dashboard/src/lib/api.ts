@@ -52,6 +52,8 @@ export interface TableSummary {
   analytics?: boolean;
   /** Its columns in the analytics copy, from the Rust type (empty when not defined in code or not copied). */
   columns?: { name: string; sqlType: string }[];
+  /** Its live aggregates (`#[aggregate]`; absent from older servers). */
+  aggregates?: { name: string; groupFields: string[]; sumFields: string[] }[];
 }
 
 export type FilterOp = "eq" | "gt" | "gte" | "lt" | "lte";

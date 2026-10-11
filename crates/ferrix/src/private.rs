@@ -34,6 +34,21 @@ impl VectorFieldType for Vec<f32> {}
 impl VectorFieldType for Option<Vec<f32>> {}
 pub const fn assert_vector_field<T: VectorFieldType + ?Sized>() {}
 
+/// Field types `#[aggregate(sum = [f])]` accepts. `#[table]` emits `const _: () = assert_sum_field::<Ty>();`.
+#[diagnostic::on_unimplemented(
+    message = "a sum field of #[aggregate] must be a number or an `Option` of one, not `{Self}`",
+    label = "not a numeric field"
+)]
+pub trait SumFieldType {}
+macro_rules! sum_fields {
+    ($($t:ty),*) => {
+        $(impl SumFieldType for $t {}
+          impl SumFieldType for Option<$t> {})*
+    };
+}
+sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
+pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
+
 /// Every `#[table]` registers its `table_def` here.
 #[linkme::distributed_slice]
 pub static TABLES: [fn() -> TableDef];

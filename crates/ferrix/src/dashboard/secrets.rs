@@ -157,6 +157,7 @@ mod tests {
                 indexes: Vec::new(),
                 def: Some(def.clone()),
                 search_indexes: Vec::new(),
+                aggregates: Vec::new(),
             };
             assert_eq!(secret_fields(&info), fields, "{}", def.name);
         }

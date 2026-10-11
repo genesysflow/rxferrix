@@ -145,7 +145,34 @@ pub struct TableDef {
     pub ts: fn() -> String,
     pub validate: fn(&serde_json::Value) -> std::result::Result<(), String>,
     pub shape: fn() -> shape::Shape,
+    pub aggregates: Vec<AggregateDef>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDef {
+    pub name: &'static str,
+    pub group_fields: Vec<&'static str>,
+    pub sum_fields: Vec<&'static str>,
+}
+
+pub struct Aggregate<T> {
+    name: &'static str,
+    _t: PhantomData<fn() -> T>,
+}
+impl<T> Aggregate<T> {
+    pub const fn new(name: &'static str) -> Self {
+        Self { name, _t: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+impl<T> Clone for Aggregate<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Aggregate<T> {}
 
 /// `ferrix::Bytes` (for `shape`).
 pub struct Bytes(pub Vec<u8>);
@@ -159,6 +186,7 @@ impl PartialEq for TableDef {
             && self.indexes == other.indexes
             && self.search_indexes == other.search_indexes
             && self.vector_indexes == other.vector_indexes
+            && self.aggregates == other.aggregates
             && (self.ts)() == (other.ts)()
     }
 }
@@ -622,6 +650,17 @@ pub mod __private {
     impl VectorFieldType for Vec<f32> {}
     impl VectorFieldType for Option<Vec<f32>> {}
     pub const fn assert_vector_field<T: VectorFieldType + ?Sized>() {}
+
+    #[diagnostic::on_unimplemented(
+        message = "a sum field of #[aggregate] must be a number or an `Option` of one, not `{Self}`",
+        label = "not a numeric field"
+    )]
+    pub trait SumFieldType {}
+    macro_rules! sum_fields {
+        ($($t:ty),*) => { $(impl SumFieldType for $t {} impl SumFieldType for Option<$t> {})* };
+    }
+    sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
+    pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
 
     pub fn validate_doc<T: crate::Table>(
         doc: &serde_json::Value,

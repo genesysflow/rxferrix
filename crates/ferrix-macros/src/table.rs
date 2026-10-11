@@ -157,6 +157,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let mut kept_attrs = Vec::new();
     let mut index_specs = Vec::new();
     let mut special_specs: Vec<SpecialIndexSpec> = Vec::new();
+    let mut aggregate_specs: Vec<crate::aggregate::AggregateSpec> = Vec::new();
     for attr in std::mem::take(&mut strukt.attrs) {
         let path = attr.path();
         if path.is_ident("index") {
@@ -176,6 +177,16 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                         errors.push(e);
                     }
                     special_specs.push(spec);
+                }
+                Err(e) => errors.push(e),
+            }
+        } else if path.is_ident("aggregate") {
+            match crate::aggregate::AggregateSpec::parse(&attr) {
+                Ok(mut spec) => {
+                    for e in spec.errors.drain(..) {
+                        errors.push(e);
+                    }
+                    aggregate_specs.push(spec);
                 }
                 Err(e) => errors.push(e),
             }
@@ -437,6 +448,44 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         }
     }
 
+    // --- aggregates: the same namespace as the indexes (they all become associated consts).
+    let mut aggregate_defs = Vec::new();
+    for spec in &aggregate_specs {
+        let name = spec.name.unraw().to_string();
+        if RESERVED_INDEXES.contains(&name.as_str()) || RESERVED_ITEMS.contains(&name.as_str()) {
+            errors.error(&spec.name, format_args!("aggregate name `{name}` is reserved for a built-in index or system field"));
+        } else if !seen_index.insert(name.clone()) {
+            errors.error(&spec.name, format_args!("duplicate index or aggregate name `{name}`"));
+        } else if field_by_name.contains_key(&name) {
+            errors.error(&spec.name, format_args!("aggregate name `{name}` conflicts with the field handle `{}::{name}`", strukt.ident));
+        }
+        let mut resolve = |fields: &[syn::Ident], role: &str| -> Vec<&FieldInfo> {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for f in fields {
+                let fname = f.unraw().to_string();
+                if !seen.insert(fname.clone()) {
+                    errors.error(f, format_args!("field `{fname}` appears twice in the {role} fields of `{name}`"));
+                    continue;
+                }
+                match field_by_name.get(&fname) {
+                    Some(info) => out.push(*info),
+                    None if fname == "_id" || fname == "_creation_time" => {
+                        errors.error(f, format_args!("system field `{fname}` cannot be used in #[aggregate]"))
+                    }
+                    None => errors.error(
+                        f,
+                        format_args!("unknown {role} field `{fname}` in #[aggregate] `{name}`; struct `{}` has no such field", strukt.ident),
+                    ),
+                }
+            }
+            out
+        };
+        let group = resolve(&spec.group, "group");
+        let sum = resolve(&spec.sum, "sum");
+        aggregate_defs.push((spec, name, group, sum));
+    }
+
     errors.finish()?;
 
     // --- output
@@ -520,6 +569,26 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         }
     });
     let static_ident = format_ident!("__FERRIX_TABLE_{}", ident);
+    let aggregate_def_exprs = aggregate_defs.iter().map(|(_, name, group, sum)| {
+        let group = group.iter().map(|f| &f.json_name);
+        let sum = sum.iter().map(|f| &f.json_name);
+        quote! {
+            ::ferrix::AggregateDef { name: #name, group_fields: ::std::vec![#(#group),*], sum_fields: ::std::vec![#(#sum),*] }
+        }
+    });
+    let aggregate_consts = aggregate_defs.iter().map(|(spec, name, _, _)| {
+        let aident = &spec.name;
+        quote_spanned! {aident.span()=>
+            pub const #aident: ::ferrix::Aggregate<#ident> = ::ferrix::Aggregate::new(#name);
+        }
+    });
+    let sum_checks = aggregate_defs.iter().flat_map(|(_, _, _, sum)| sum.iter()).map(|info| {
+        let ty = info.ty;
+        quote_spanned! {ty.span()=>
+            #(#cfgs)*
+            const _: () = ::ferrix::__private::assert_sum_field::<#ty>();
+        }
+    });
     let shape_expr = match named {
         Some(named) => crate::shape::struct_shape(named, Some(crate::shape::RenameAll::Camel)),
         None => quote!(::ferrix::shape::Shape::unknown()),
@@ -549,6 +618,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     ts: || ::ferrix::__private::ts_inline::<#ident>(),
                     validate: ::ferrix::__private::validate_doc::<#ident>,
                     shape: || #shape_expr,
+                    aggregates: ::std::vec![#(#aggregate_def_exprs),*],
                 }
             }
         }
@@ -562,9 +632,11 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             #(#index_consts)*
             pub const by_creation_time: ::ferrix::Index<#ident> = ::ferrix::Index::new("by_creation_time");
             #(#special_consts)*
+            #(#aggregate_consts)*
         }
 
         #(#special_checks)*
+        #(#sum_checks)*
 
         #(#cfgs)*
         #[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]

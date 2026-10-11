@@ -21,6 +21,7 @@
 //! rusqlite connections are `Send` but not `Sync`, so each is wrapped in a `std::sync::Mutex` that is only ever held
 //! for the duration of synchronous SQLite calls, never across an `.await`.
 
+pub mod aggregate;
 pub mod catalog;
 pub mod checkpoint;
 pub mod dedup;
@@ -346,6 +347,7 @@ impl Database {
                 problems.push(format!("{orphans} index entries belong to no index"));
             }
             problems.extend(search::verify(conn, &catalog)?);
+            problems.extend(aggregate::verify(conn, &catalog.tables().cloned().collect::<Vec<_>>())?);
             problems.extend(self.ann.verify(conn, snapshot.ts)?);
             Ok(problems)
         })
@@ -961,6 +963,7 @@ impl WriteState {
         let ts = self.prev_ts + 1;
         // Validated before anything is written (e.g. a vector of the wrong dimension).
         let special = search::SpecialWrites::prepare(table, old, new)?;
+        let aggregates = aggregate::Writes::prepare(table, old, new);
         for index in table.stored_indexes() {
             let old_key = old.map(|d| keys::index_key(d, &index.key_fields, &id.0));
             let new_key = new.map(|d| keys::index_key(d, &index.key_fields, &id.0));
@@ -981,6 +984,7 @@ impl WriteState {
         }
         self.writes.push((table.by_id().id, id.0.to_vec()));
         special.apply(&self.conn, id, &mut self.writes)?;
+        aggregates.apply(&self.conn, &mut self.writes)?;
         if table.name == <crate::storage::StoredFile as crate::schema::Table>::NAME {
             // Deletion times of files, for keeping their blobs (`StorageConfig::keep_deleted`).
             if new.is_some() {

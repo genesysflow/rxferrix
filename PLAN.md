@@ -4,7 +4,7 @@
 > typed `query` / `mutation` / `action` functions, reactive subscriptions over WebSockets, and an
 > embedded admin dashboard where all data is visible and editable.
 
-**Status:** roadmap done (Phases 0–11), beyond-roadmap work continues · **Audience:** my own apps (tight scope, rough
+**Status:** roadmap done (Phases 0–12), beyond-roadmap work continues · **Audience:** my own apps (tight scope, rough
 edges acceptable) · **Started:** 2026-10-09 · **Updated:** 2026-10-11
 
 ---
@@ -542,6 +542,44 @@ pub async fn revenue_by_day(ctx: &ActionCtx, since: f64) -> Result<Vec<DayRevenu
   through an admin endpoint; live in-app aggregates maintained in the write transaction, which are a separate,
   reactive feature.
 
+### 7.7 Live aggregates (built in Phase 12)
+
+Counts and sums an app shows live (unread badges, totals per customer, votes per post, a leaderboard of sums) without
+scanning documents on every rerun. Declared on a table, maintained **inside every write's own transaction**, read in
+queries like an index point lookup, and reactive with invalidation narrowed to the groups a write changed.
+
+```rust
+#[table(name = "orders")]
+#[aggregate(by_customer, group = [customer], sum = [amount, quantity])]
+#[aggregate(total, sum = [amount])]                      // no group: one row for the whole table
+pub struct Order { pub customer: String, pub amount: f64, pub quantity: i64, pub day: String }
+
+#[query]
+pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<(u64, f64)> {
+    let a = ctx.db.aggregate(Order::by_customer).get(|g| g.eq(Order::customer, customer)).await?;
+    Ok((a.count, a.sum(Order::amount)))
+}
+// .sum_over(|g| ...prefix eq, then a range on the next group field...) combines the groups in a range;
+// .groups(|g| ..., Order::Desc, n) lists groups in key order; .total() adds up every group.
+```
+
+- **Storage**: a raw SQLite table `aggregates (agg_id, key, count, sums)` keyed by `(agg_id, key)`, `key` the
+  memcomparable encoding of the group values (like an index key without the document id). Aggregate ids come from
+  the index id space, like search indexes, so read sets and the write log need nothing new.
+- **Maintenance**: where a write adds and removes index entries, it also computes each aggregate's group and values
+  for the old and the new document and applies the difference (same group: sums change; another group: the old one
+  loses the document, the new one gains it). A group whose count reaches zero is deleted. Each changed group adds a
+  write-log entry `(agg_id, key)`: only queries that read that group (or a range containing it) rerun. Sums of
+  integer fields are exact (`i64`, checked); float fields add and subtract `f64`s (a long-lived running total can
+  accumulate rounding; `rebuild` recomputes). A null or missing field adds nothing; `count` counts documents.
+- **Reads**: `get` records a point read of one group key, `sum_over` / `groups` a range read. Missing groups read as
+  zero. Works in queries and mutations (a mutation reads its own writes).
+- **Definitions**: `#[aggregate(name, group = [fields], sum = [fields])]` on `#[table]`: group fields any indexable
+  fields, sum fields numeric (`i*`, `u*`, `f*`, optionals of them; checked at compile time). Stored in the catalog
+  with a fingerprint; a new or changed aggregate is backfilled from the documents at startup, like an index.
+- **Derived data**: backups carry it; restores, imports, point-in-time replays and migrations go through the write
+  path, which maintains it.
+
 ---
 
 ## 8. Operations
@@ -916,12 +954,28 @@ Design: §7.6. Each step ends with tests and docs (README, docs/CONTRACT.md).
   `POST /api/admin/olap/query` (the same sandbox, audited), with CSV and Parquet downloads of whole results
   (`OlapService::export`; Parquet from DuckDB's Arrow batches through the `parquet` crate, since the sandbox has no
   file access; up to 10M rows in 5 minutes). The schema view lists each table's analytics columns.
-- **Later**: live in-app aggregates (counts and sums kept up to date in each write's transaction, read reactively).
+- Live in-app aggregates: Phase 12.
 - [x] Deletes on big tables (checked 2026-10-11, no change): a batch of 1k changes on an in-memory table takes 4.1 ms
   at 1M rows and 6.8 ms at 5M with the semi-join on `_id` the copy uses; an ART index on `_id` makes it slower (6.3
   and 9.3 ms, with literal `IN` lists 8.1 and 8.5 ms) and bulk loads ~25% slower. DuckDB's vectorized scan of one
   column wins; the spike's 50 ms came from a `PRIMARY KEY` on a file-backed table, which the copy doesn't use.
 
+### Phase 12 — Live aggregates (L) — done
+Design: §7.7.
+- [x] Catalog and storage: `TableDef::aggregates` (`AggregateDef`), `_aggregates` and `aggregate_values`, ids from
+  `0xC000_0000`, reconciliation (new or changed: rebuilt from the documents; removed: deleted), rebuilt on a key
+  encoding change, recomputed by `verify_indexes` (`db::aggregate`).
+- [x] Maintenance in `WriteState::write` next to the index entries (so migrations, imports and point-in-time replays
+  maintain them too); a write that changes no group key or summed value touches nothing; a write-log entry per
+  changed group; exact integer sums (falling back to `f64` past `i64`), `f64` once a float joins.
+- [x] Reads: `ctx.db.aggregate(T::name)` with `get`, `sum_over`, `total`, `groups(range, order, limit)`, reusing the
+  index range builder over the group fields; `sum`, `sum_i64`, `average`.
+- [x] `#[aggregate]` in `#[table]` (shared name namespace, field checks, `assert_sum_field`), the mock, snapshots and a
+  UI test of the errors.
+- [x] Tests (`tests/it/aggregates.rs`, `websocket::aggregate_subscriptions_update_per_group`): values, ranges and
+  listings, a model test against the documents, read sets narrowed to the changed groups, live updates over a socket
+  only for the changed group, rollbacks, mutations reading their own writes, backfill, redefinition, removal and
+  tamper detection; `TestApp::query_run` (a query with its read set). The dashboard's schema view lists aggregates.
 ---
 
 ## 11. Risks and open questions

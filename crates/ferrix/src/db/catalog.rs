@@ -52,6 +52,8 @@ pub struct TableInfo {
     pub def: Option<TableDef>,
     /// Full-text search and vector indexes (`db::search`).
     pub search_indexes: Vec<SearchIndexInfo>,
+    /// Live aggregates (`db::aggregate`).
+    pub aggregates: Vec<super::aggregate::AggregateInfo>,
 }
 
 impl TableInfo {
@@ -122,7 +124,14 @@ impl Catalog {
                 let number: u32 = r.get(0)?;
                 tables.insert(
                     number,
-                    TableInfo { name: r.get(1)?, number, indexes: Vec::new(), def: None, search_indexes: Vec::new() },
+                    TableInfo {
+                        name: r.get(1)?,
+                        number,
+                        indexes: Vec::new(),
+                        def: None,
+                        search_indexes: Vec::new(),
+                        aggregates: Vec::new(),
+                    },
                 );
             }
         }
@@ -139,9 +148,11 @@ impl Catalog {
             }
         }
         let mut search_indexes = search::load(conn)?;
+        let mut aggregates = super::aggregate::load(conn)?;
         let mut catalog = Catalog::default();
         for (number, mut t) in tables {
             t.search_indexes = search_indexes.remove(&number).unwrap_or_default();
+            t.aggregates = aggregates.remove(&number).unwrap_or_default();
             t.def = defs.iter().find(|d| d.name == t.name).cloned();
             let t = Arc::new(t);
             catalog.by_name.insert(t.name.clone(), t.clone());
@@ -185,6 +196,7 @@ fn validate_defs(defs: &[TableDef]) -> anyhow::Result<Vec<TableDef>> {
             }
         }
         search::validate_def(def)?;
+        super::aggregate::validate_def(def)?;
         seen.insert(def.name, def);
     }
     Ok(seen.into_values().cloned().collect())
@@ -195,6 +207,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
     let defs = validate_defs(defs)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     search::ensure_schema(&tx)?;
+    super::aggregate::ensure_schema(&tx)?;
     upgrade_key_encoding(&tx)?;
     let existing = Catalog::load(&tx, &defs)?;
     let mut next_table: u32 = tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
@@ -253,6 +266,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
             }
         }
         search::reconcile_table(&tx, def, number)?;
+        super::aggregate::reconcile_table(&tx, def, number)?;
     }
     tx.commit()?;
     Catalog::load(conn, &defs)
@@ -292,6 +306,8 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
                 backfill(conn, table_number, id, &keys::index_key_fields(&serde_json::from_str::<Vec<String>>(&fields)?))?;
             }
         }
+        // Aggregate keys use the same encoding.
+        super::aggregate::rebuild_all(conn)?;
         if stored >= 2 {
             return storage::write_meta(conn, META_KEY_ENCODING, (keys::KEY_ENCODING_VERSION as i64).into());
         }

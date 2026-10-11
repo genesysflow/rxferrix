@@ -384,6 +384,30 @@ prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18
 HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
 `_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).
 
+## Live aggregates
+
+Counts and sums an app shows live (totals per customer, votes per post, unread counts) without scanning documents:
+declare them on the table, and every write keeps them up to date in its own transaction.
+
+```rust
+#[table(name = "orders")]
+#[aggregate(by_customer, group = [customer], sum = [amount])]
+#[aggregate(total, sum = [amount])]
+pub struct Order { pub customer: String, pub day: String, pub amount: f64 }
+
+#[query]
+pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<(u64, f64)> {
+    let a = ctx.db.aggregate(Order::by_customer).get(|g| g.eq(Order::customer, customer)).await?;
+    Ok((a.count, a.sum(Order::amount)))
+}
+```
+
+`get` reads one group, `sum_over(|g| g.eq(Order::customer, c).gte(Order::day, from))` combines the groups in a range,
+`groups(range, Order::Desc, 10)` lists them, `total()` adds up all of them. They are reactive and narrow: a new order
+for Ann reruns the queries that read Ann's group, not Bob's, and editing a field that isn't aggregated reruns none.
+Integer sums are exact; float sums are running `f64` totals. Adding or changing an aggregate builds it from the
+existing documents at startup (docs/CONTRACT.md §1.12).
+
 ## Analytics (OLAP)
 
 For group-bys, joins and time series over many documents, `serve --olap` keeps a columnar copy of the data in an

@@ -265,6 +265,21 @@
             {/each}
           </ul>
         {/if}
+        {#if table.aggregates && table.aggregates.length > 0}
+          <h3>Aggregates</h3>
+          <ul data-testid="aggregates">
+            {#each table.aggregates as a (a.name)}
+              <li>
+                <code>{a.name}</code>
+                <span class="muted"
+                  >count{a.sumFields.length > 0 ? `, sum of ${a.sumFields.join(", ")}` : ""}{a.groupFields.length > 0
+                    ? ` per ${a.groupFields.join(", ")}`
+                    : " (whole table)"}</span
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#if table.secretFields.length > 0}
           <p class="faint">Masked: {table.secretFields.join(", ")}</p>
         {/if}

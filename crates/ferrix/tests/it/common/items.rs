@@ -26,7 +26,8 @@ impl ::ferrix::Table for Item {
             s.field("score", ::ferrix::shape::Shape::Int);
             s.field("name", ::ferrix::shape::Shape::Text);
             ::ferrix::shape::Shape::Struct(s)
-        } }
+        },
+        aggregates: vec![] }
     }
 }
 

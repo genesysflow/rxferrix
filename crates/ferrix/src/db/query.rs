@@ -329,13 +329,23 @@ impl RangeOps {
 
     /// Turn the constraints into a byte range over the index keys.
     fn to_key_range(&self, table: &str, index: &IndexInfo) -> anyhow::Result<KeyRange> {
-        let ctx = || format!("invalid range for index `{}` of table `{table}` (fields {:?})", index.name, index.key_fields);
+        self.to_range(table, &index.key_fields, &format!("index `{}`", index.name))
+    }
+
+    /// Whether these are exactly an `eq` on each of the first `n` fields (one key of `n` fields).
+    pub(super) fn is_exact(&self, n: usize) -> bool {
+        self.0.len() == n && self.0.iter().all(|op| op.kind == OpKind::Eq)
+    }
+
+    /// Turn the constraints into a byte range over keys made of `fields` (`what`: for errors, e.g. "index `x`").
+    pub(super) fn to_range(&self, table: &str, fields: &[String], what: &str) -> anyhow::Result<KeyRange> {
+        let ctx = || format!("invalid range for {what} of table `{table}` (fields {fields:?})");
         let mut prefix = Vec::new();
         let mut pos = 0;
         let mut ops = self.0.iter().peekable();
         // Equality prefix.
         while let Some(op) = ops.next_if(|op| op.kind == OpKind::Eq) {
-            let Some(expected) = index.key_fields.get(pos) else {
+            let Some(expected) = fields.get(pos) else {
                 bail!("{}: too many fields; `eq({})` has no index field left", ctx(), op.field);
             };
             if op.field != expected.as_str() {
@@ -349,7 +359,7 @@ impl RangeOps {
         let mut lower: Option<(OpKind, Vec<u8>)> = None;
         let mut upper: Option<(OpKind, Vec<u8>)> = None;
         for op in ops {
-            let Some(expected) = index.key_fields.get(pos) else {
+            let Some(expected) = fields.get(pos) else {
                 bail!("{}: `{}({})` has no index field left", ctx(), op.kind.name(), op.field);
             };
             if op.kind == OpKind::Eq {
@@ -395,8 +405,12 @@ pub struct IndexRange<T> {
 }
 
 impl<T> IndexRange<T> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         IndexRange { ops: RangeOps::default(), _p: PhantomData }
+    }
+
+    pub(super) fn into_ops(self) -> RangeOps {
+        self.ops
     }
 
     fn push<V: Serialize>(mut self, f: Field<T, V>, kind: OpKind, v: V) -> Self {

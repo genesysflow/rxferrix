@@ -152,6 +152,13 @@ impl TestApp {
         self.app.mutation::<F>(args).await
     }
 
+    /// Run a query (internal ones too) and return the whole run: result, read set, ts and log lines. With
+    /// `read_set.overlaps(commit)` a test can check which writes invalidate it.
+    pub async fn query_run<F: QueryFunction>(&self, args: impl Into<F::Args>) -> crate::Result<crate::runtime::QueryRun> {
+        let args = serde_json::to_value(args.into())?;
+        Ok(self.app.call_query(&F::path(), args, &Identity::default(), true).await)
+    }
+
     /// Like [`TestApp::mutation`], also returning the commit ts.
     pub async fn mutation_ts<F: MutationFunction>(&self, args: impl Into<F::Args>) -> crate::Result<(F::Output, u64)> {
         self.app.typed_mutation::<F>(args.into(), &Identity::default()).await

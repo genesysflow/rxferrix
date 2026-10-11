@@ -64,6 +64,7 @@ pub use cli::Ferrix;
 pub use ferrix_macros::{
     action, internal_action, internal_mutation, internal_query, migration, mutation, object, query, table, workflow,
 };
+pub use db::aggregate::{AggregateGroup, AggregateQuery, AggregateValue, Sum as AggregateSum};
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::dedup::IdempotencyKey;
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
@@ -77,7 +78,7 @@ pub use runtime::{
 };
 pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
 pub use schema::{
-    Doc, Field, HnswParams, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, Tokenizer,
+    Aggregate, AggregateDef, Doc, Field, HnswParams, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, Tokenizer,
     TokenizerKind, VectorIndex, VectorIndexDef, VectorIndexKind,
 };
 pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
@@ -128,6 +129,6 @@ pub mod prelude {
     };
     pub use crate::workflow::WorkflowCtx;
     pub use crate::migrations::DocChange;
-    pub use crate::{SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
+    pub use crate::{Aggregate, SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};
 }

@@ -2,6 +2,7 @@
 
 mod common;
 
+mod aggregates;
 mod audit;
 mod auth;
 mod authkit;

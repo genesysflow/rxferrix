@@ -435,6 +435,28 @@ async fn duplicate_mutations_are_applied_once() {
     assert_eq!(failed_again, failed);
 }
 
+/// Live aggregates over a real socket: a write to one group updates only the subscriptions reading it.
+#[tokio::test]
+async fn aggregate_subscriptions_update_per_group() {
+    use crate::aggregates::fns;
+
+    let t = TestApp::new().await.unwrap();
+    let mut a = Ws::connect(t.serve().await.unwrap()).await;
+    let count = fns::customer_count::path();
+    let first = a.subscribe(0, 0, &count, json!({ "customer": "ann" })).await;
+    assert_eq!(first["modifications"][0]["value"], 0);
+    let second = a.subscribe(1, 1, &count, json!({ "customer": "bob" })).await;
+    assert_eq!(second["modifications"][0]["value"], 0);
+    for expected in 1..=2 {
+        t.mutation::<fns::add>(("ann".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
+        let update = a.recv_type("Transition").await;
+        assert_eq!(update["modifications"], json!([{ "type": "QueryUpdated", "queryId": 0, "value": expected, "logLines": [] }]), "bob's query isn't rerun");
+    }
+    t.mutation::<fns::add>(("bob".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
+    let update = a.recv_type("Transition").await;
+    assert_eq!(update["modifications"], json!([{ "type": "QueryUpdated", "queryId": 1, "value": 1, "logLines": [] }]));
+}
+
 #[tokio::test]
 async fn determinism_warnings_reach_clients_in_dev() {
     use crate::determinism::{fns, warnings};

@@ -100,6 +100,16 @@ pub struct IndexSummary {
     pub usable: bool,
 }
 
+/// A live aggregate of a table (`#[aggregate]`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct AggregateSummary {
+    pub name: String,
+    pub group_fields: Vec<String>,
+    pub sum_fields: Vec<String>,
+}
+
 /// A column of a table in the analytics copy (`crate::olap`).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +144,8 @@ pub struct TableSummary {
     pub analytics: bool,
     /// Its columns in the analytics copy, from its Rust type's shape (empty when not defined in code or not copied).
     pub columns: Vec<ColumnSummary>,
+    /// Its live aggregates.
+    pub aggregates: Vec<AggregateSummary>,
 }
 
 fn access(table: &TableInfo) -> TableAccess {
@@ -184,6 +196,15 @@ pub async fn tables(ctx: &QueryCtx) -> Result<Vec<TableSummary>> {
                     .collect(),
                 _ => Vec::new(),
             },
+            aggregates: t
+                .aggregates
+                .iter()
+                .map(|a| AggregateSummary {
+                    name: a.name.clone(),
+                    group_fields: a.spec.group_fields.clone(),
+                    sum_fields: a.spec.sum_fields.clone(),
+                })
+                .collect(),
         });
     }
     Ok(out)

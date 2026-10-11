@@ -41,6 +41,7 @@ async fn reconcile_and_backfill() {
         ts: || ferrix::__private::ts_inline::<items::Item>(),
         validate: ferrix::__private::validate_doc::<items::Item>,
         shape: ferrix::shape::Shape::unknown,
+        aggregates: vec![],
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&items_v2), 2).unwrap();
     let t = db.catalog().table("items").unwrap();

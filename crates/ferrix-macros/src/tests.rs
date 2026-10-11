@@ -189,6 +189,26 @@ fn table_search_and_vector_indexes() {
 }
 
 #[test]
+fn table_aggregates() {
+    insta::assert_snapshot!(table(
+        quote!(name = "orders"),
+        quote! {
+            #[index(by_customer = [customer])]
+            #[aggregate(by_customer_day, group = [customer, day], sum = [amount, quantity])]
+            #[aggregate(total, sum = [amount])]
+            #[aggregate(count_only)]
+            pub struct Order {
+                pub customer: String,
+                pub day: String,
+                pub amount: f64,
+                #[serde(rename = "qty")]
+                pub quantity: Option<i64>,
+            }
+        }
+    ));
+}
+
+#[test]
 fn table_search_tokenizers_and_vector_kinds() {
     insta::assert_snapshot!(table(
         quote!(),

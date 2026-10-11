@@ -110,6 +110,7 @@ impl ::ferrix::Table for Message {
                 );
                 ::ferrix::shape::Shape::Struct(s)
             },
+            aggregates: ::std::vec![],
         }
     }
 }

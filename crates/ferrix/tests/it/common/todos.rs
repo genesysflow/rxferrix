@@ -25,7 +25,8 @@ impl ::ferrix::Table for Todo {
             s.field("done", ::ferrix::shape::Shape::Bool);
             s.field("createdBy", ::ferrix::shape::Shape::Text.optional());
             ::ferrix::shape::Shape::Struct(s)
-        } }
+        },
+        aggregates: vec![] }
     }
 }
 

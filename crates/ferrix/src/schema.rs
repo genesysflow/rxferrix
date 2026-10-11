@@ -40,6 +40,8 @@ pub struct TableDef {
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
     /// The JSON shape of the table's fields (without system fields), for the analytics copy (`crate::shape`).
     pub shape: fn() -> crate::shape::Shape,
+    /// Live aggregates (`#[aggregate]`): counts and sums per group, maintained in every write (`crate::db::aggregate`).
+    pub aggregates: Vec<AggregateDef>,
 }
 
 /// Compares the schema (name and indexes) and the rendered TS type. Function pointers themselves (`ts`, `validate`)
@@ -50,10 +52,20 @@ impl PartialEq for TableDef {
             && self.indexes == other.indexes
             && self.search_indexes == other.search_indexes
             && self.vector_indexes == other.vector_indexes
+            && self.aggregates == other.aggregates
             && (self.ts)() == (other.ts)()
     }
 }
 impl Eq for TableDef {}
+
+/// A live aggregate (`#[aggregate(name, group = [..], sum = [..])]`): per group of `group_fields` values, the number of
+/// documents and the sums of `sum_fields`. All names are JSON field names; no group fields = one group for the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDef {
+    pub name: &'static str,
+    pub group_fields: Vec<&'static str>,
+    pub sum_fields: Vec<&'static str>,
+}
 
 /// A full-text search index: one string field searched with SQLite FTS5, plus fields usable for equality filters.
 /// All names are JSON field names.
@@ -284,6 +296,33 @@ impl<T> Copy for Index<T> {}
 impl<T> std::fmt::Debug for Index<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Index({})", self.name)
+    }
+}
+
+/// Typed handle for a live aggregate of table `T` (`#[aggregate]`); see `QueryDb::aggregate`.
+pub struct Aggregate<T> {
+    name: &'static str,
+    _p: PhantomData<fn() -> T>,
+}
+
+impl<T> Aggregate<T> {
+    pub const fn new(name: &'static str) -> Self {
+        Aggregate { name, _p: PhantomData }
+    }
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+impl<T> Clone for Aggregate<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Aggregate<T> {}
+impl<T> std::fmt::Debug for Aggregate<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Aggregate({})", self.name)
     }
 }
 

@@ -299,7 +299,7 @@ mod tests {
     }
 
     fn def(ts: fn() -> String) -> TableDef {
-        TableDef { name: "rows", indexes: vec![], search_indexes: vec![], vector_indexes: vec![], ts, validate: |_| Ok(()), shape: crate::shape::Shape::unknown }
+        TableDef { name: "rows", indexes: vec![], search_indexes: vec![], vector_indexes: vec![], ts, validate: |_| Ok(()), shape: crate::shape::Shape::unknown, aggregates: vec![] }
     }
 
     #[test]

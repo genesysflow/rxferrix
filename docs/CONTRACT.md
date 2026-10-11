@@ -119,6 +119,8 @@ pub struct TableDef {
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
     /// The fields' JSON shape (`ferrix::shape::Shape`, §3 "Shapes"): the analytics copy's columns (§1.11).
     pub shape: fn() -> ferrix::shape::Shape,
+    /// `#[aggregate]`s (§1.12): `AggregateDef { name, group_fields, sum_fields }`, JSON names. Compared by PartialEq.
+    pub aggregates: Vec<AggregateDef>,
 }   // PartialEq compares name, all index definitions and the rendered `ts()`, never the fn pointers
 pub struct IndexDef { pub name: &'static str, pub fields: Vec<&'static str> }   // JSON field names
 pub struct SearchIndexDef { pub name: &'static str, pub search_field: &'static str, pub filter_fields: Vec<&'static str> }
@@ -588,6 +590,9 @@ CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-re
 `TestApp::create_user(email, password: Option<&str>) -> Result<Id<User>>` (a verified `_users` row, plus a password
 credential when given; no auth method needs to be enabled and no email is sent; `email_in_use` if taken) and
 `TestApp::as_user(id) -> TestUser` (`query` / `mutation` / `action` as `Identity::user(id, None)`, and `identity()`).
+`TestApp::query_run::<F>(args) -> QueryRun` runs a query (internal ones too) and returns the result with its read
+set, so a test can check which commits invalidate it: `run.read_set.overlaps(&commit)`, with the commit from
+`app.db().write_log().entries_between(ts - 1, ts)` and `ts` from `TestApp::mutation_ts`.
 
 **External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
 HTTP Bearer tokens, alongside ferrix's own:
@@ -1600,6 +1605,65 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
 - **Tests**: `TestApp::with_options(AppOptions { olap: OlapOptions { enabled: true, background: false, .. }, .. })`
   and `t.olap_sync().await?` before querying.
 
+### 1.12 Live aggregates
+
+Counts and sums per group, maintained in every write's own transaction and read in queries without scanning documents.
+Reactive: a write reruns only the queries that read a group it changed.
+
+```rust
+#[table(name = "orders")]
+#[aggregate(by_customer, group = [customer], sum = [amount, quantity])]
+#[aggregate(by_customer_day, group = [customer, day], sum = [amount])]
+#[aggregate(total, sum = [amount])]          // no group fields: one group for the whole table
+#[aggregate(count_only)]                       // no sums: just the number of documents
+pub struct Order { pub customer: String, pub day: String, pub amount: f64, pub quantity: Option<i64> }
+
+#[query]
+pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<f64> {
+    let a = ctx.db.aggregate(Order::by_customer).get(|g| g.eq(Order::customer, customer)).await?;
+    Ok(a.sum(Order::amount))
+}
+
+impl QueryDb { pub fn aggregate<T: Table>(&self, a: Aggregate<T>) -> AggregateQuery<'_, T>; }   // MutationDb too
+impl AggregateQuery<'_, T> {
+    // One group: `eq` on every group field, in order (|g| g for no group fields). Zero when it has no documents.
+    pub async fn get(self, group: impl FnOnce(IndexRange<T>) -> IndexRange<T>) -> Result<AggregateValue>;
+    // The groups in a range (eq on a prefix of the group fields, then at most a lower and an upper bound on the
+    // next one, like `with_index`), combined; `total()` = every group.
+    pub async fn sum_over(self, range: impl FnOnce(IndexRange<T>) -> IndexRange<T>) -> Result<AggregateValue>;
+    pub async fn total(self) -> Result<AggregateValue>;
+    // The groups in a range, in group-key order, at most `limit`: `AggregateGroup { group: Vec<Value>, value }`.
+    pub async fn groups(self, range: impl FnOnce(IndexRange<T>) -> IndexRange<T>, order: Order, limit: usize)
+        -> Result<Vec<AggregateGroup>>;
+}
+pub struct AggregateValue { pub count: u64, pub sums: Vec<AggregateSum>, .. }
+impl AggregateValue {
+    pub fn sum<T, V>(&self, field: Field<T, V>) -> f64;              // 0.0 for a field that isn't summed
+    pub fn sum_i64<T, V>(&self, field: Field<T, V>) -> Option<i64>;   // exact while every contribution was an integer
+    pub fn average<T, V>(&self, field: Field<T, V>) -> Option<f64>;   // None without documents
+}
+pub enum AggregateSum { Int(i64), Float(f64) }
+```
+- **Group and sum fields**: any fields for the group (values compare like index keys; a missing field is its own
+  group value, before `null`); numeric fields or `Option`s of them for the sums (checked at compile time). A null,
+  missing or non-numeric value adds nothing to a sum; `count` counts documents.
+- **Maintenance**: inside the write (insert, replace, patch, delete; migrations, imports and point-in-time replays
+  included, since they all write through the same path), in its transaction: a failed mutation leaves its aggregates
+  untouched, and a mutation reads its own changes. A write that changes no group key and no summed value (another
+  field) changes nothing and invalidates nothing. Integer sums are exact while every contribution is an integer
+  (past `i64` they become floats); a float makes the sum an `f64`, which accumulates rounding like any running
+  total.
+- **Reactivity**: `get` reads one group key, `sum_over` and `groups` the range they cover (for `groups`, the range is
+  recorded whole). A changed group is a write of its key, so only queries reading that group, or a range holding
+  it, rerun. Read cost: one row for `get`, one per group for `sum_over` and `groups`; group by fewer fields, or
+  keep ranges narrow, when there are many groups.
+- **Definitions** are reconciled at startup: a new aggregate, or one whose fields changed, is built from the
+  documents (like an index backfill); a removed one is deleted. `Database::verify_indexes` (backups, restores)
+  recomputes them and reports differences. Storage: `_aggregates` (definitions; ids from `0xC000_0000`, above index
+  and search index ids) and `aggregate_values (agg_id, key, count, sums)`, one row per non-empty group.
+- The dashboard's schema view lists them (`aggregates: [{ name, groupFields, sumFields }]` in
+  `_system/dashboard:tables`).
+
 ---
 
 ## 2. `::ferrix::__private` items (used ONLY by macro output)
@@ -1737,6 +1801,14 @@ compiles. Field names follow serde: the struct's `rename_all` (camelCase for tab
 `f64` (Float), `String`, `str`, `char`, `Id<T>` (Text), `Bytes` (Bytes), `Option<T>` (Optional), `Vec`, `VecDeque`,
 `BTreeSet`, `HashSet`, slices and arrays (List), `Box`, `Arc`, `&T` (as `T`), `Doc<T>` (system fields, then the
 table's), and `serde_json::Value`, maps, `i128`, `u128`, `()` (Json).
+
+**Aggregates.** `#[aggregate(name, group = [f, ...], sum = [f, ...])]` (consumed; `group` and `sum` optional, any
+order) adds `::ferrix::AggregateDef { name: "name", group_fields: vec!["f"], sum_fields: vec!["f"] }` (JSON names) to
+`aggregates` in the `TableDef` literal (`vec![]` when unused), `pub const name: ::ferrix::Aggregate<T> =
+::ferrix::Aggregate::new("name");` next to the index handles, and `const _: () =
+::ferrix::__private::assert_sum_field::<Ty>();` per sum field (numbers and `Option`s of them). Compile errors: a name
+taken by an index, a search or vector index, another aggregate, a field handle or a built-in; unknown, duplicate or
+system (`_id`, `_creation_time`) fields; keys other than `group` and `sum`.
 
 **Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...], tokenizer = "...", language =
 "...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...", m = N,

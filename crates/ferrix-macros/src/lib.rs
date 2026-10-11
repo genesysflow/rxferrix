@@ -12,6 +12,7 @@
 
 use proc_macro::TokenStream;
 
+mod aggregate;
 mod function;
 mod migration;
 mod object;
@@ -36,6 +37,7 @@ fn into_tokens(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 /// #[index(by_done = [done, created_by])]
 /// #[search_index(search_text, search = text, filter = [done])]                  // full-text (FTS5)
 /// #[vector_index(by_embedding, field = embedding, dims = 384, filter = [done])]  // sqlite-vec
+/// #[aggregate(done_count, group = [done])]                                     // live counts and sums per group
 /// pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<String>, pub embedding: Option<Vec<f32>> }
 /// ```
 #[proc_macro_attribute]

@@ -88,6 +88,7 @@ impl ::ferrix::Table for TodoItem {
                 );
                 ::ferrix::shape::Shape::Struct(s)
             },
+            aggregates: ::std::vec![],
         }
     }
 }

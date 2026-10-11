@@ -187,6 +187,8 @@ pub fn truncate_args(args: &Value) -> (String, bool) {
 pub struct LogFilter {
     /// Only paths starting with this (e.g. `"todos:"` or `"todos:list"`).
     pub path_prefix: Option<String>,
+    /// Only this function (`"todos:add"`, not `"todos:add_later"`).
+    pub path: Option<String>,
     #[serde(with = "opt_kind_serde")]
     pub kind: Option<FunctionKind>,
     pub outcome: Option<LogOutcome>,
@@ -208,6 +210,7 @@ impl LogFilter {
     /// way [`Logs::query`] filters history).
     pub fn matches(&self, entry: &LogEntry) -> bool {
         self.path_prefix.as_deref().is_none_or(|p| entry.path.starts_with(p))
+            && self.path.as_deref().is_none_or(|p| entry.path == p)
             && self.kind.is_none_or(|k| entry.kind == k)
             && self.outcome.is_none_or(|o| entry.outcome == o)
             && self.since.is_none_or(|t| entry.timestamp >= t)
@@ -558,6 +561,9 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     if let Some(prefix) = &f.path_prefix {
         arg(&mut sql, " AND substr(path, 1, length(?)) = ?", prefix.clone().into());
     }
+    if let Some(path) = &f.path {
+        arg(&mut sql, " AND path = ?", path.clone().into());
+    }
     if let Some(kind) = f.kind {
         arg(&mut sql, " AND kind = ?", kind.as_str().to_string().into());
     }
@@ -750,6 +756,12 @@ mod tests {
         assert_eq!(all[3].log_lines, vec!["[INFO] hi"]);
         let adds = logs.query(LogFilter { path_prefix: Some("todos:a".into()), ..Default::default() }).await.unwrap();
         assert_eq!(adds.len(), 2);
+        let exact = LogFilter { path: Some("todos:add".into()), ..Default::default() };
+        assert_eq!(logs.query(exact.clone()).await.unwrap().len(), 2);
+        assert!(exact.matches(&entry("todos:add", FunctionKind::Mutation, LogOutcome::Success, 1, now)));
+        assert!(!exact.matches(&entry("todos:add_later", FunctionKind::Mutation, LogOutcome::Success, 1, now)));
+        let none = LogFilter { path: Some("todos:a".into()), ..Default::default() };
+        assert!(logs.query(none).await.unwrap().is_empty());
         let errs = logs
             .query(LogFilter {
                 kind: Some(FunctionKind::Mutation),

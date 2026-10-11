@@ -14,6 +14,7 @@
   import { exportTable, saveBlob } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
   import { diffSnapshots, snapshot, withGhosts, type Removed, type Snapshot } from "../lib/changes.js";
+  import { FLASH_MS, GHOST_MS, flash } from "../lib/flash.js";
   import { columnsOf, documentMatches, parseFilterValue } from "../lib/format.js";
   import { href, link, router } from "../lib/router.svelte.js";
   import { columnWidths, nearEnd, rowWindow } from "../lib/virtual.js";
@@ -99,8 +100,6 @@
   // Live changes, animated: rows that appear slide in, changed cells flash, removed rows fade out (as "ghost" rows
   // kept for a moment where they were). Diffed per document id, so rows scrolled into view mid-animation pick it up
   // where it is, and scrolling itself animates nothing.
-  const FLASH_MS = 1800;
-  const GHOST_MS = 700;
   /** Diffing stops past this many loaded rows (it serializes every row on every update). */
   const DIFF_LIMIT = 5000;
   let recent = $state.raw(new Map<string, { kind: "inserted" | "changed"; fields: string[]; at: number }>());
@@ -141,63 +140,6 @@
     });
   });
   const display = $derived(withGhosts(rows, needle ? ghosts.filter((g) => documentMatches(g.doc, needle)) : ghosts));
-
-  const reducedMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  type Flash = { kind: "inserted" | "changed" | "removed"; at: number } | undefined;
-  /** A theme color (`--ok`, ...) at `alpha`. */
-  function tint(node: HTMLElement, name: string, alpha: number): string {
-    const hex = getComputedStyle(node).getPropertyValue(name).trim();
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-    return m ? `rgb(${parseInt(m[1]!, 16)} ${parseInt(m[2]!, 16)} ${parseInt(m[3]!, 16)} / ${alpha})` : hex;
-  }
-  function keyframes(node: HTMLElement, kind: "inserted" | "changed" | "removed"): Keyframe[] {
-    if (kind === "inserted") {
-      const c = tint(node, "--ok", 0.22);
-      return reducedMotion
-        ? [{ backgroundColor: c }, { backgroundColor: c, offset: 0.4 }]
-        : [
-            { backgroundColor: c, opacity: 0, transform: "translateY(-10px)" },
-            { backgroundColor: c, opacity: 1, transform: "none", offset: 0.12 },
-            { backgroundColor: c, offset: 0.4 },
-          ];
-    }
-    if (kind === "changed") {
-      const c = tint(node, "--warn", 0.3);
-      return [{ backgroundColor: c }, { backgroundColor: c, offset: 0.35 }];
-    }
-    const c = tint(node, "--err", 0.16);
-    return [
-      { backgroundColor: c, opacity: 1 },
-      { backgroundColor: c, opacity: 0 },
-    ];
-  }
-  /** Plays a row's or cell's animation for a change (once per change; partway through if it started earlier). */
-  function flash(node: HTMLElement, change: Flash) {
-    let played = 0;
-    const play = (c: Flash) => {
-      if (!c || c.at === played || typeof node.animate !== "function") return;
-      played = c.at;
-      const duration = c.kind === "removed" ? GHOST_MS : FLASH_MS;
-      const age = performance.now() - c.at;
-      if (age >= duration) return;
-      const timing: KeyframeAnimationOptions = { duration, delay: -age, easing: "ease-out", fill: c.kind === "removed" ? "forwards" : "none" };
-      node.animate(keyframes(node, c.kind), timing);
-      // A removed row then closes up: its cells shrink to nothing, so the rows below slide up instead of jumping.
-      if (c.kind === "removed" && !reducedMotion) {
-        for (const cell of node.children) {
-          (cell as HTMLElement).animate(
-            [
-              { height: `${ROW}px`, lineHeight: `${ROW - 1}px`, offset: 0.55 },
-              { height: "0px", lineHeight: "0px", fontSize: "0px", borderBottomWidth: "0px" },
-            ],
-            { ...timing, easing: "ease-in-out" },
-          );
-        }
-      }
-    };
-    play(change);
-    return { update: play };
-  }
 
   // Virtualization: the window of rows to render, from the scroll position.
   let scroller: HTMLDivElement | undefined = $state();
@@ -531,7 +473,7 @@
             {@const change = ghost ? undefined : recent.get(id)}
             {#if ghost}
               {@const gone = ghosts.find((g) => g.id === id)}
-              <tr class="ghost" aria-hidden="true" data-testid="removed-row" use:flash={gone && { kind: "removed", at: gone.at }}>
+              <tr class="ghost" aria-hidden="true" data-testid="removed-row" use:flash={gone && { kind: "removed", at: gone.at, rowHeight: ROW }}>
                 {#if writable}<td class="check"></td>{/if}
                 {#each columns as c (c)}
                   <td><JsonValue value={doc[c]} field={c} /></td>

@@ -512,9 +512,10 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   table's analytics columns with their SQL types. Secrets (password and token hashes) are never shown,
   and system tables are read-only except the `name`, `image` and `emailVerified` of users.
 - **Functions**: every function with its TS signature, a runner (JSON args, optionally *as a user* through a real,
-  short-lived, audited session), and latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
-  the execution log.
-- **Logs**: a live tail of executions (filter by path, kind, outcome; expand for the error, log lines and args).
+  short-lived, audited session), latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
+  the execution log, and the function's own live log.
+- **Logs**: a live tail of executions (filter by path or one function, kind, outcome; expand for the error, log lines
+  and args); new executions slide in, tinted by outcome.
 - **Users**: users, linked providers, sessions (revoked live; impersonation sessions marked), delete, and "open app as
   user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.
 - **Files**: stored files with thumbnails and previews (images, video, audio, text), download, delete, and upload by

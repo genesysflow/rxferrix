@@ -19,7 +19,7 @@
 //! streamed body rather than `EventSource` (which can't send headers), so no token ever appears in a URL (and thus
 //! in proxy or server logs). The stream ends when the access token expires; the client reconnects with a fresh one.
 //!
-//! `LogFilter` query parameters: `pathPrefix`, `kind` (`query|mutation|action`), `outcome`
+//! `LogFilter` query parameters: `pathPrefix`, `path` (one function), `kind` (`query|mutation|action`), `outcome`
 //! (`success|userError|serverError`), `since`, `limit`, `beforeId`, `identity`, `excludeSystem`.
 
 use std::convert::Infallible;

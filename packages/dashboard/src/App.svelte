@@ -222,7 +222,7 @@
       {:else if route.page === "functions"}
         <Functions {route} />
       {:else if route.page === "logs"}
-        <Logs />
+        <Logs {route} />
       {:else if route.page === "scheduler"}
         <Scheduler {route} />
       {:else if route.page === "workflows"}

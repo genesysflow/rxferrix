@@ -1,82 +1,29 @@
 <script lang="ts">
-  import type { LogEntry, LogFilter } from "../lib/api.js";
-  import { fetchLogs, tailLogs } from "../lib/admin.js";
-  import { dashboardContext } from "../lib/context.js";
-  import { formatClock, formatDuration, formatTime, prettyArgs } from "../lib/format.js";
-  import Empty from "../components/Empty.svelte";
+  import type { LogFilter } from "../lib/api.js";
+  import { href, link, router, type Route } from "../lib/router.svelte.js";
+  import LogTail from "../components/LogTail.svelte";
 
-  const ctx = dashboardContext();
-  const MAX = 1000;
+  /** `?fn=<path>`: only that function (the function view links here). */
+  let { route }: { route: Route } = $props();
+  const fn = $derived(route.params.get("fn"));
 
   let pathPrefix = $state("");
   let kind = $state<LogFilter["kind"]>("");
   let outcome = $state<LogFilter["outcome"]>("");
   let includeSystem = $state(false);
   let paused = $state(false);
-  let entries = $state<LogEntry[]>([]);
   let status = $state<"connecting" | "live" | "error">("connecting");
   let statusError = $state<string | null>(null);
   let lagged = $state(0);
-  let expanded = $state<Set<number>>(new Set());
-  let olderDone = $state(false);
   let pathInput: HTMLInputElement | undefined = $state();
 
   const filter = $derived<LogFilter>({
-    pathPrefix: pathPrefix.trim() || undefined,
+    path: fn ?? undefined,
+    pathPrefix: fn ? undefined : pathPrefix.trim() || undefined,
     kind,
     outcome,
-    excludeSystem: !includeSystem,
+    excludeSystem: !includeSystem && !fn,
   });
-
-  /** Merge entries, newest first, unique by id. */
-  function merge(incoming: LogEntry[]) {
-    const byId = new Map<number, LogEntry>();
-    for (const e of entries) byId.set(e.id, e);
-    for (const e of incoming) byId.set(e.id, e);
-    entries = [...byId.values()].sort((a, b) => b.id - a.id).slice(0, MAX);
-  }
-
-  // (Re)start the tail whenever the filter changes or the view is resumed: open the stream first, then fill in the
-  // history, so nothing between the two is missed (duplicates are merged by id).
-  $effect(() => {
-    const f = { ...filter };
-    if (paused) return;
-    const abort = new AbortController();
-    entries = [];
-    olderDone = false;
-    void tailLogs(
-      ctx.auth,
-      f,
-      {
-        onReady: () => {
-          fetchLogs(ctx.auth, { ...f, limit: 100 }).then(merge, (e: unknown) => (statusError = String(e)));
-        },
-        onEntry: (e) => merge([e]),
-        onLagged: (n) => (lagged += n),
-        onStatus: (s, err) => {
-          status = s;
-          statusError = err ?? null;
-        },
-      },
-      abort.signal,
-    );
-    return () => abort.abort();
-  });
-
-  async function loadOlder() {
-    const last = entries.at(-1);
-    if (!last) return;
-    const older = await fetchLogs(ctx.auth, { ...filter, limit: 100, beforeId: last.id });
-    if (older.length < 100) olderDone = true;
-    merge(older);
-  }
-
-  function toggle(id: number) {
-    const next = new Set(expanded);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    expanded = next;
-  }
 
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "/" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
@@ -99,50 +46,26 @@
     <button onclick={() => (paused = !paused)}>{paused ? "▶ Resume" : "❚❚ Pause"}</button>
   </header>
   <div class="filters row">
-    <input bind:this={pathInput} class="mono" placeholder="Path prefix, e.g. todos:  ( / )" aria-label="Path prefix" bind:value={pathPrefix} />
+    {#if fn}
+      <span class="fn-chip" data-testid="log-function">
+        <span class="mono">{fn}</span>
+        <a href={href("functions", [], { fn })} onclick={link} title="Open the function">ƒ</a>
+        <button class="ghost small" aria-label="Show all functions" onclick={() => router.navigate(href("logs"))}>×</button>
+      </span>
+    {:else}
+      <input bind:this={pathInput} class="mono" placeholder="Path prefix, e.g. todos:  ( / )" aria-label="Path prefix" bind:value={pathPrefix} />
+    {/if}
     <select bind:value={kind} aria-label="Kind">
       <option value="">All kinds</option><option value="query">query</option><option value="mutation">mutation</option><option value="action">action</option>
     </select>
     <select bind:value={outcome} aria-label="Outcome">
       <option value="">All outcomes</option><option value="success">success</option><option value="userError">user error</option><option value="serverError">server error</option>
     </select>
-    <label class="inline"><input type="checkbox" bind:checked={includeSystem} /> include system functions</label>
+    {#if !fn}<label class="inline"><input type="checkbox" bind:checked={includeSystem} /> include system functions</label>{/if}
   </div>
 
   <div class="body">
-    {#if entries.length === 0}
-      <Empty title={status === "live" ? "No executions yet" : "Connecting…"} hint="Function executions appear here live as they happen." />
-    {:else}
-      <table class="grid" data-testid="logs">
-        <thead><tr><th>Time</th><th>Kind</th><th>Function</th><th>Outcome</th><th>Duration</th><th>Caller</th></tr></thead>
-        <tbody>
-          {#each entries as e (e.id)}
-            <tr onclick={() => toggle(e.id)} class:selected={expanded.has(e.id)} aria-expanded={expanded.has(e.id)}>
-              <td class="mono" title={formatTime(e.timestamp)}>{formatClock(e.timestamp)}</td>
-              <td><span class="badge {e.kind}">{e.kind}</span></td>
-              <td class="mono">{e.path}</td>
-              <td><span class="badge {e.outcome}">{e.outcome}</span></td>
-              <td class="num">{formatDuration(e.durationUs)}</td>
-              <td class="mono faint">{e.identity ?? "anonymous"}</td>
-            </tr>
-            {#if expanded.has(e.id)}
-              <tr class="detail">
-                <td colspan="6">
-                  {#if e.error}<h3>Error</h3><pre class="err">{e.error}</pre>{/if}
-                  <h3>Args{e.argsTruncated ? " (truncated)" : ""}</h3>
-                  <pre>{prettyArgs(e.args)}</pre>
-                  <h3>Log lines</h3>
-                  {#if e.logLines.length === 0}<p class="faint">None.</p>{:else}<pre>{e.logLines.join("\n")}</pre>{/if}
-                </td>
-              </tr>
-            {/if}
-          {/each}
-        </tbody>
-      </table>
-      <div class="more">
-        {#if !olderDone}<button onclick={loadOlder}>Load older</button>{:else}<span class="faint">No older entries.</span>{/if}
-      </div>
-    {/if}
+    <LogTail {filter} {paused} bind:status bind:statusError bind:lagged />
   </div>
 </div>
 
@@ -159,6 +82,21 @@
     flex: 1;
     overflow: auto;
   }
+  .fn-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px 2px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .fn-chip button {
+    border: 0;
+    padding: 0 6px;
+    background: none;
+  }
   .state {
     display: inline-flex;
     align-items: center;
@@ -174,30 +112,6 @@
   }
   .state.live .dot {
     background: var(--ok);
-  }
-  .num {
-    font-variant-numeric: tabular-nums;
-  }
-  tr.detail {
-    cursor: default;
-    background: var(--panel-2);
-  }
-  tr.detail:hover {
-    background: var(--panel-2) !important;
-  }
-  tr.detail td {
-    white-space: normal;
-    max-width: none;
-    padding: 4px 16px 12px;
-  }
-  tr.detail h3 {
-    margin: 10px 0 4px;
-  }
-  pre.err {
-    color: var(--err);
-  }
-  .more {
-    padding: 12px 20px;
   }
   @media (max-width: 760px) {
     .filters {

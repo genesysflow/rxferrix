@@ -251,6 +251,26 @@ try {
     await shot(page, "function-runner");
     const list = await call(base, "query", "todos:list", {});
     if (!(list.body.value as { text: string }[]).some((t) => t.text === fromRunner)) throw new Error("runner insert missing");
+    // The function's own log, live: calls of todos:add arrive, calls of other functions don't.
+    const fnLogs = page.getByTestId("function-logs");
+    await fnLogs.locator("tbody tr").first().waitFor({ timeout: 3000 });
+    await page.waitForTimeout(300); // the history has loaded
+    const rows = fnLogs.locator("tbody tr");
+    const before = await rows.count();
+    await call(base, "mutation", "todos:add", { text: "logged for this function" });
+    await call(base, "query", "todos:list", {});
+    await page.waitForFunction((n) => document.querySelectorAll("[data-testid=function-logs] tbody tr").length === n + 1, before, {
+      timeout: 3000,
+    });
+    await page.waitForTimeout(300);
+    if ((await rows.count()) !== before + 1) throw new Error("another function's call showed up in the function's logs");
+    await rows.first().click();
+    await fnLogs.getByText("logged for this function").waitFor();
+    await page.getByRole("link", { name: "View in Logs →" }).click();
+    await page.getByTestId("log-function").filter({ hasText: "todos:add" }).waitFor();
+    await page.getByTestId("logs").getByText("todos:add").first().waitFor();
+    await page.getByRole("button", { name: "Show all functions" }).click();
+    await page.getByLabel("Path prefix").waitFor();
   });
 
   // 5. The live logs tail shows executions as they happen.

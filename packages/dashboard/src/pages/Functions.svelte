@@ -5,10 +5,12 @@
   import { parseJson, pretty } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
+  import LogTail from "../components/LogTail.svelte";
   import FunctionActivity from "../components/FunctionActivity.svelte";
   import JsonEditor from "../components/JsonEditor.svelte";
 
   let { route }: { route: Route } = $props();
+  let logStatus = $state<"connecting" | "live" | "error">("connecting");
   const functions = useQuery(dashboard.functions);
   const users = usePaginatedQuery(dashboard.users, () => ({}), { initialNumItems: 100 });
   const runFunction = useAction(dashboard.runFunction);
@@ -166,11 +168,23 @@
             {:else}
               <pre class="logs">{result.logLines.join("\n")}</pre>
             {/if}
-            <a href={href("logs")} onclick={link} class="small">Open in logs →</a>
+            <a href={href("logs", [], { fn: selected.path })} onclick={link} class="small">Open in logs →</a>
           </div>
         {/if}
 
         <FunctionActivity path={selected.path} />
+
+        <div class="logs-head row">
+          <h3>Logs</h3>
+          <span class="state" class:live={logStatus === "live"}><span class="dot"></span>{logStatus === "live" ? "live" : "connecting"}</span>
+          <span class="spacer"></span>
+          <a href={href("logs", [], { fn: selected.path })} onclick={link} class="small">View in Logs →</a>
+        </div>
+        <div class="fn-logs" data-testid="function-logs">
+          {#key selected.path}
+            <LogTail filter={{ path: selected.path }} pageSize={20} showPath={false} bind:status={logStatus} />
+          {/key}
+        </div>
       </div>
     {/if}
   </section>
@@ -281,5 +295,34 @@
     .sig {
       grid-template-columns: 1fr;
     }
+  }
+  .logs-head {
+    margin-top: 20px;
+  }
+  .logs-head h3 {
+    margin: 0;
+  }
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .state.live .dot {
+    background: var(--ok);
+  }
+  .fn-logs {
+    margin-top: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    overflow: auto;
   }
 </style>

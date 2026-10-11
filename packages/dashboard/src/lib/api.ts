@@ -556,6 +556,8 @@ export interface LogEntry {
 
 export interface LogFilter {
   pathPrefix?: string;
+  /** Exactly this function. */
+  path?: string;
   kind?: LogEntry["kind"] | "";
   outcome?: LogEntry["outcome"] | "";
   identity?: string;

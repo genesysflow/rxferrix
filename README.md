@@ -418,7 +418,9 @@ pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
   restore, when a table's Rust type changes (that table only), or when it falls more than `--olap-max-lag` (512 MB of
   changes) behind. Backups skip it: it is derived data.
 - `--olap-memory 2GB` and `--olap-threads N` bound DuckDB. `GET /api/admin/olap` shows the state, lag, tables and
-  size (also on the dashboard Overview and in `/metrics`); `POST /api/admin/olap/rebuild` starts over.
+  size (also on the dashboard Overview and in `/metrics`); `POST /api/admin/olap/rebuild` starts over. The dashboard's
+  Analytics page runs SQL as an administrator, and `POST /api/admin/olap/query` (`format` csv or parquet) downloads a
+  whole result (up to 10M rows, written from DuckDB's Arrow batches; the sandbox has no file access).
 - In tests: `AppOptions { olap: OlapOptions { enabled: true, background: false, ..Default::default() }, .. }`, then
   `t.olap_sync().await?` before querying. The todo example has `todos:stats_by_day`
   (`cargo run -p todo-server --features olap -- serve --dev --olap`). Details: docs/CONTRACT.md §1.11.
@@ -479,7 +481,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   pages load as you scroll), filters on index fields, a search box for tables with a search index (live, most
   relevant first), a quick filter over the loaded rows, JSONL/CSV export, a side panel with a JSON editor (insert,
   edit, delete; validated against the table's Rust type), and clickable ids that open the referenced document. The
-  schema view lists indexes, tokenizers (with their language) and vector index kinds (with HNSW parameters). Secrets (password and token hashes) are never shown,
+  schema view lists indexes, tokenizers (with their language), vector index kinds (with HNSW parameters) and the
+  table's analytics columns with their SQL types. Secrets (password and token hashes) are never shown,
   and system tables are read-only except the `name`, `image` and `emailVerified` of users.
 - **Functions**: every function with its TS signature, a runner (JSON args, optionally *as a user* through a real,
   short-lived, audited session), and latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
@@ -500,6 +503,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   under systemd/Docker); the target and the `--backup-every` schedule; with `--replicate-to`, the replication status
   (target, lag, last segment and snapshot, generations) and a point-in-time restore picker (a time or a commit ts);
   export a table (JSONL/CSV) and import JSONL or CSV (insert, upsert or replace).
+- **Analytics** (with `--olap`): the copy's state and lag, its tables and columns, a SQL editor (one SELECT, the
+  sandbox of `ctx.olap`, audited) with the results as a table, and the whole result as a CSV or Parquet download;
+  rebuild the copy.
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
   sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.

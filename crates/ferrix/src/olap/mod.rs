@@ -50,6 +50,10 @@ pub struct OlapOptions {
     pub apply_every: Duration,
     /// Follow the database in the background. Off in tests that drive the copy with [`OlapService::sync`].
     pub background: bool,
+    /// Rows an export (CSV, Parquet) may write. Default: 10M.
+    pub max_export_rows: u64,
+    /// An export still running after this long is interrupted. Default: 5 minutes.
+    pub export_timeout: Duration,
 }
 
 impl Default for OlapOptions {
@@ -64,6 +68,8 @@ impl Default for OlapOptions {
             max_lag_bytes: 512 << 20,
             apply_every: Duration::from_millis(250),
             background: true,
+            max_export_rows: 10_000_000,
+            export_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -95,6 +101,53 @@ pub struct OlapColumn {
     pub name: String,
     /// DuckDB's type name (`BIGINT`, `VARCHAR`, `STRUCT(...)`, ...).
     pub type_name: String,
+}
+
+/// The file format of an export ([`OlapService::export`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OlapExportFormat {
+    /// RFC 4180 CSV with a header row: strings as is, `null` empty, anything else as JSON.
+    Csv,
+    /// Apache Parquet (zstd), with DuckDB's types (lists and structs nested).
+    Parquet,
+}
+
+impl OlapExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            OlapExportFormat::Csv => "csv",
+            OlapExportFormat::Parquet => "parquet",
+        }
+    }
+
+    pub fn content_type(self) -> &'static str {
+        match self {
+            OlapExportFormat::Csv => "text/csv; charset=utf-8",
+            OlapExportFormat::Parquet => "application/vnd.apache.parquet",
+        }
+    }
+}
+
+/// What an export wrote.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OlapExport {
+    pub rows: u64,
+    pub columns: Vec<OlapColumn>,
+    pub as_of_ts: u64,
+}
+
+impl OlapValue {
+    /// A JSON value as a parameter: numbers, strings, booleans and `null` as such, arrays and objects as JSON text.
+    pub fn from_json(v: Value) -> OlapValue {
+        match v {
+            Value::Null => OlapValue::Null,
+            Value::Bool(b) => OlapValue::Bool(b),
+            Value::Number(n) => n.as_i64().map_or_else(|| OlapValue::Float(n.as_f64().unwrap_or(f64::NAN)), OlapValue::Int),
+            Value::String(s) => OlapValue::Text(s),
+            other => OlapValue::Text(other.to_string()),
+        }
+    }
 }
 
 /// A query parameter (`?` in the SQL, in order).
@@ -311,6 +364,25 @@ impl OlapService {
             let _ = (sql, params, at_least);
             Err(unavailable())
         }
+    }
+
+    /// Run one SELECT (the same sandbox as [`Olap::query`]) and write its whole result to `path` as CSV or Parquet,
+    /// up to [`OlapOptions::max_export_rows`] rows, interrupted after [`OlapOptions::export_timeout`].
+    pub async fn export(&self, sql: &str, params: Vec<OlapValue>, format: OlapExportFormat, path: &std::path::Path) -> Result<OlapExport> {
+        #[cfg(feature = "olap")]
+        {
+            self.engine.export(sql, params, format, path.to_path_buf()).await
+        }
+        #[cfg(not(feature = "olap"))]
+        {
+            let _ = (sql, params, format, path);
+            Err(unavailable())
+        }
+    }
+
+    /// Run one SELECT for an admin (the dashboard's console): the same sandbox as [`Olap::query`].
+    pub async fn admin_query(&self, sql: &str, params: Vec<OlapValue>) -> Result<OlapResult> {
+        self.query(sql, params, 0).await
     }
 
     /// Bring the copy up to the newest commit now (building it first if needed). For tests and shutdown.

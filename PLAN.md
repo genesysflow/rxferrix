@@ -912,8 +912,15 @@ Design: §7.6. Each step ends with tests and docs (README, docs/CONTRACT.md).
   `GET /api/admin/olap`, `POST /api/admin/olap/rebuild`; `ferrix_olap_*` metrics; `olap` in the stats endpoint and an
   Analytics card on the Overview; the `olap` CI job; the `todo-server-olap` release binary (smoke-tested with
   `serve --olap`); the todo example's `todos:stats_by_day`.
-- **Later**: the dashboard SQL console (same sandbox, admin only, audited); Parquet exports; live in-app aggregates;
-  shapes in the dashboard's schema view; a cheaper delete than scanning `_id` for very large tables.
+- [x] The dashboard's Analytics page (the copy's state, tables and columns, a SQL editor with results, rebuild) on
+  `POST /api/admin/olap/query` (the same sandbox, audited), with CSV and Parquet downloads of whole results
+  (`OlapService::export`; Parquet from DuckDB's Arrow batches through the `parquet` crate, since the sandbox has no
+  file access; up to 10M rows in 5 minutes). The schema view lists each table's analytics columns.
+- **Later**: live in-app aggregates (counts and sums kept up to date in each write's transaction, read reactively).
+- [x] Deletes on big tables (checked 2026-10-11, no change): a batch of 1k changes on an in-memory table takes 4.1 ms
+  at 1M rows and 6.8 ms at 5M with the semi-join on `_id` the copy uses; an ART index on `_id` makes it slower (6.3
+  and 9.3 ms, with literal `IN` lists 8.1 and 8.5 ms) and bulk loads ~25% slower. DuckDB's vectorized scan of one
+  column wins; the spike's 50 ms came from a `PRIMARY KEY` on a file-backed table, which the copy doesn't use.
 
 ---
 

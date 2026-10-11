@@ -48,6 +48,10 @@ export interface TableSummary {
   ts: string | null;
   secretFields: string[];
   access: TableAccess;
+  /** In the analytics copy (`--olap`): user tables and the system tables without secrets (absent from older servers). */
+  analytics?: boolean;
+  /** Its columns in the analytics copy, from the Rust type (empty when not defined in code or not copied). */
+  columns?: { name: string; sqlType: string }[];
 }
 
 export type FilterOp = "eq" | "gt" | "gte" | "lt" | "lte";
@@ -567,6 +571,21 @@ export interface FunctionStats {
   serverErrors: number;
   p50Us: number;
   p95Us: number;
+}
+
+/** A column of an analytics query's result. */
+export interface OlapColumn {
+  name: string;
+  /** DuckDB's type name. */
+  typeName: string;
+}
+
+/** `OlapResult` (crates/ferrix/src/olap/mod.rs): `POST /api/admin/olap/query` with format json. */
+export interface OlapResult {
+  columns: OlapColumn[];
+  rows: Record<string, Json>[];
+  /** The copy reflects every commit up to this one. */
+  asOfTs: number;
 }
 
 /** `OlapStatus` (crates/ferrix/src/olap/mod.rs): the analytics copy (`--olap`). */

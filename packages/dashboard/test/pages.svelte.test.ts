@@ -8,6 +8,7 @@ import type { Command } from "../src/lib/commands.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
 import CommandPalette from "../src/components/CommandPalette.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
+import Analytics from "../src/pages/Analytics.svelte";
 import Backups from "../src/pages/Backups.svelte";
 import Overview from "../src/pages/Overview.svelte";
 import Settings from "../src/pages/Settings.svelte";
@@ -471,5 +472,60 @@ describe("Overview page", () => {
     expect(card).toContain("2 commits behind (300ms)");
     expect(card).toContain("1234 rows");
     expect(card).toContain("3.0 MB");
+  });
+});
+
+describe("Analytics page", () => {
+  const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+  const status = {
+    enabled: true, state: "ready", detail: null, appliedTs: 9, latestTs: 9, appliedTime: 1, lagMs: 0, sizeBytes: 1 << 20, rowsApplied: 30, rebuilds: 1,
+    tables: [{ name: "orders", rows: 30, columns: [{ name: "_id", typeName: "VARCHAR" }, { name: "amount", typeName: "DOUBLE" }] }],
+  };
+
+  beforeEach(() => localStorage.clear());
+
+  it("says so when analytics are off", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ enabled: false }))));
+    mounted = mount(Analytics, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    expect(target.textContent).toContain("Analytics are off");
+  });
+
+  it("runs a query and shows the rows, or the error", async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/admin/olap") return new Response(JSON.stringify(status));
+        const body = JSON.parse(init!.body as string) as { sql: string };
+        bodies.push(body);
+        if (body.sql.startsWith("DELETE")) {
+          return new Response(JSON.stringify({ status: "error", errorMessage: "Analytics queries run exactly one SELECT statement", errorData: { code: "olap_query_failed" } }), { status: 400 });
+        }
+        return new Response(JSON.stringify({ columns: [{ name: "n", typeName: "BIGINT" }, { name: "tags", typeName: "LIST" }, { name: "note", typeName: "VARCHAR" }], rows: [{ n: 30, tags: ["a"], note: null }], asOfTs: 9 }));
+      }),
+    );
+    mounted = mount(Analytics, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    expect(target.querySelector("[data-testid=olap-status]")?.textContent).toContain("ready");
+    // A table's "query" link fills the editor.
+    button("query").click();
+    flushSync();
+    const editor = target.querySelector<HTMLTextAreaElement>("textarea[aria-label=SQL]")!;
+    expect(editor.value).toBe("SELECT * FROM orders LIMIT 100");
+    type(editor, "SELECT count(*) AS n FROM orders");
+    button("Run").click();
+    await settle();
+    expect(bodies.at(-1)).toEqual({ sql: "SELECT count(*) AS n FROM orders", params: [] });
+    const results = target.querySelector("[data-testid=olap-results]")!;
+    expect(results.querySelector("thead")?.textContent).toContain("BIGINT");
+    expect([...results.querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["30", '["a"]', "null"]);
+    expect(target.querySelector("[data-testid=olap-summary]")?.textContent).toContain("1 rows · as of commit 9");
+    expect(localStorage.getItem("ferrix.analytics.sql")).toBe("SELECT count(*) AS n FROM orders");
+
+    type(editor, "DELETE FROM orders");
+    button("Run").click();
+    await settle();
+    expect(target.querySelector("[data-testid=olap-error]")?.textContent).toContain("exactly one SELECT");
   });
 });

@@ -367,6 +367,17 @@ async fn secrets_are_masked_and_system_tables_protected() {
     let session_indexes = find("_sessions")["indexes"].clone();
     let by_hash = session_indexes.as_array().unwrap().iter().find(|i| i["name"] == "by_refresh_token_hash").unwrap();
     assert_eq!(by_hash["usable"], false);
+    // The analytics copy's columns, from the Rust types; tables with secrets are not in it.
+    let columns: Vec<(String, String)> = find("dash_items")["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap().into(), c["sqlType"].as_str().unwrap().into()))
+        .collect();
+    assert_eq!(&columns[..3], &[("_id".into(), "VARCHAR".into()), ("_creationTime".into(), "DOUBLE".into()), ("_ts".into(), "BIGINT".into())]);
+    assert!(columns.contains(&("rank".into(), "BIGINT".into())), "{columns:?}");
+    assert_eq!((find("dash_items")["analytics"].clone(), find("_users")["analytics"].clone()), (json!(true), json!(true)));
+    assert_eq!((find("_credentials")["analytics"].clone(), find("_credentials")["columns"].clone()), (json!(false), json!([])));
 
     for (table, fields) in [
         ("_credentials", vec!["passwordHash"]),

@@ -100,6 +100,16 @@ pub struct IndexSummary {
     pub usable: bool,
 }
 
+/// A column of a table in the analytics copy (`crate::olap`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct ColumnSummary {
+    pub name: String,
+    /// The DuckDB type (`BIGINT`, `VARCHAR[]`, `STRUCT(...)`, `JSON`, ...).
+    pub sql_type: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
@@ -120,6 +130,10 @@ pub struct TableSummary {
     /// Fields whose values are masked.
     pub secret_fields: Vec<String>,
     pub access: TableAccess,
+    /// Whether the analytics copy (`--olap`) includes it: user tables and the system tables without secrets.
+    pub analytics: bool,
+    /// Its columns in the analytics copy, from its Rust type's shape (empty when not defined in code or not copied).
+    pub columns: Vec<ColumnSummary>,
 }
 
 fn access(table: &TableInfo) -> TableAccess {
@@ -161,6 +175,15 @@ pub async fn tables(ctx: &QueryCtx) -> Result<Vec<TableSummary>> {
             ts: t.def.as_ref().map(|d| (d.ts)()),
             secret_fields: secrets::secret_fields(&t),
             access: access(&t),
+            analytics: crate::olap::columns::copied(&t.name),
+            columns: match &t.def {
+                Some(d) if crate::olap::columns::copied(&t.name) => crate::olap::columns::TablePlan::new(&t.name, &(d.shape)())
+                    .columns
+                    .into_iter()
+                    .map(|c| ColumnSummary { name: c.name, sql_type: c.sql_type })
+                    .collect(),
+                _ => Vec::new(),
+            },
         });
     }
     Ok(out)

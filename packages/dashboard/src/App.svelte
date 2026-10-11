@@ -8,6 +8,7 @@
   import { type Command } from "./lib/commands.js";
   import CommandPalette from "./components/CommandPalette.svelte";
   import Audit from "./pages/Audit.svelte";
+  import Analytics from "./pages/Analytics.svelte";
   import Backups from "./pages/Backups.svelte";
   import Data from "./pages/Data.svelte";
   import Files from "./pages/Files.svelte";
@@ -83,6 +84,7 @@
       items: [
         { page: "migrations", label: "Migrations", icon: "⇄", keywords: "schema" },
         { page: "backups", label: "Backups", icon: "⧉", keywords: "export import restore" },
+        { page: "analytics", label: "Analytics", icon: "∑", keywords: "olap sql duckdb parquet csv" },
       ],
     },
     {
@@ -218,6 +220,8 @@
         <Migrations />
       {:else if route.page === "backups"}
         <Backups />
+      {:else if route.page === "analytics"}
+        <Analytics />
       {:else if route.page === "settings"}
         <Settings />
       {:else if route.page === "audit"}

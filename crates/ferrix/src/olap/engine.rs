@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{Semaphore, watch};
 
 use super::columns::{TablePlan, copied, ident, literal};
-use super::{OlapColumn, OlapOptions, OlapResult, OlapStatus, OlapTableStatus, OlapValue};
+use super::{OlapColumn, OlapExport, OlapExportFormat, OlapOptions, OlapResult, OlapStatus, OlapTableStatus, OlapValue};
 use crate::db::journal::{self, Consumer};
 use crate::db::storage;
 use crate::runtime::{App, WeakApp};
@@ -460,14 +460,36 @@ impl Engine {
     }
 
     pub(super) async fn query(&self, sql: &str, params: Vec<OlapValue>, at_least: u64) -> crate::Result<OlapResult> {
-        let timeout = self.options.query_timeout;
+        let (sql, max_rows) = (sql.to_string(), self.options.max_result_rows);
+        self.sandboxed(at_least, self.options.query_timeout, move |conn| run_query(conn, &sql, params, max_rows)).await
+    }
+
+    pub(super) async fn export(
+        &self,
+        sql: &str,
+        params: Vec<OlapValue>,
+        format: OlapExportFormat,
+        path: PathBuf,
+    ) -> crate::Result<OlapExport> {
+        let (sql, max_rows) = (sql.to_string(), self.options.max_export_rows);
+        self.sandboxed(0, self.options.export_timeout, move |conn| run_export(conn, &sql, params, format, &path, max_rows)).await
+    }
+
+    /// Run `f` on a connection of its own once the copy has applied commit `at_least` and is consistent, with at most
+    /// `max_concurrent_queries` at once, interrupting it after `timeout`.
+    async fn sandboxed<T: Send + 'static>(
+        &self,
+        at_least: u64,
+        timeout: Duration,
+        f: impl FnOnce(&Connection) -> crate::Result<T> + Send + 'static,
+    ) -> crate::Result<T> {
         if at_least > *self.applied.borrow() {
             let mut rx = self.applied.subscribe();
-            let reached = tokio::time::timeout(timeout, rx.wait_for(|ts| *ts >= at_least)).await;
+            let reached = tokio::time::timeout(self.options.query_timeout, rx.wait_for(|ts| *ts >= at_least)).await;
             if !matches!(reached, Ok(Ok(_))) {
                 return Err(UserError::new(
                     "olap_timeout",
-                    format!("The analytics copy didn't reach commit {at_least} within {timeout:?}"),
+                    format!("The analytics copy didn't reach commit {at_least} within {:?}", self.options.query_timeout),
                 )
                 .into());
             }
@@ -486,14 +508,13 @@ impl Engine {
         let _permit = self.permits.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!(e))?;
         let conn = self.base.lock().unwrap_or_else(|e| e.into_inner()).try_clone()?;
         let interrupt = conn.interrupt_handle();
-        let (sql, max_rows) = (sql.to_string(), self.options.max_result_rows);
-        let mut task = tokio::task::spawn_blocking(move || run_query(&conn, &sql, params, max_rows));
+        let mut task = tokio::task::spawn_blocking(move || f(&conn));
         match tokio::time::timeout(timeout, &mut task).await {
             Ok(joined) => joined.map_err(|e| anyhow::anyhow!(e))?,
             Err(_) => {
                 interrupt.interrupt();
                 let _ = task.await;
-                Err(UserError::new("olap_timeout", format!("The analytics query ran longer than {timeout:?} (--olap-timeout)")).into())
+                Err(UserError::new("olap_timeout", format!("The analytics query ran longer than {timeout:?}")).into())
             }
         }
     }
@@ -713,16 +734,109 @@ fn type_name(t: &duckdb::core::LogicalTypeHandle) -> String {
     t.get_alias().unwrap_or_else(|| format!("{:?}", t.id()).to_uppercase())
 }
 
-fn run_query(conn: &Connection, sql: &str, params: Vec<OlapValue>, max_rows: usize) -> crate::Result<OlapResult> {
+/// Inside the query's transaction: refuse while tables are at different commits (a rebuild was just swapped in); the
+/// commit the copy reflects.
+fn consistent_as_of(conn: &Connection) -> crate::Result<u64> {
+    let (lo, hi): (Option<i64>, Option<i64>) =
+        conn.query_row("SELECT min(applied_ts), max(applied_ts) FROM _ferrix_tables", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if lo != hi {
+        return Err(unavailable("a table is being rebuilt"));
+    }
+    Ok(meta(conn, "applied_ts")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0))
+}
+
+/// Run `f` in a read transaction that is rolled back; an interrupted statement is a timeout.
+fn in_read_transaction<T>(conn: &Connection, sql: &str, f: impl FnOnce(u64) -> crate::Result<T>) -> crate::Result<T> {
     check_select(conn, sql)?;
     conn.execute_batch("BEGIN TRANSACTION")?;
-    let result = (|| -> crate::Result<OlapResult> {
-        let (lo, hi): (Option<i64>, Option<i64>) =
-            conn.query_row("SELECT min(applied_ts), max(applied_ts) FROM _ferrix_tables", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        if lo != hi {
-            return Err(unavailable("a table is being rebuilt"));
+    let result = consistent_as_of(conn).and_then(f);
+    let _ = conn.execute_batch("ROLLBACK");
+    result.map_err(|e| {
+        let interrupted = e.chain().any(|c| c.to_string().contains("Interrupt"));
+        if interrupted { UserError::new("olap_timeout", "The analytics query was interrupted (it ran too long)").into() } else { e }
+    })
+}
+
+fn run_export(
+    conn: &Connection,
+    sql: &str,
+    params: Vec<OlapValue>,
+    format: OlapExportFormat,
+    path: &Path,
+    max_rows: u64,
+) -> crate::Result<OlapExport> {
+    use std::io::Write;
+    let too_many = || query_failed(format!("The export has more than {max_rows} rows: add a LIMIT"));
+    in_read_transaction(conn, sql, |as_of| {
+        let mut stmt = conn.prepare(sql).map_err(query_failed)?;
+        let params: Vec<duckdb::types::Value> = params.into_iter().map(super::values::param).collect();
+        let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        match format {
+            OlapExportFormat::Csv => {
+                let mut out = file;
+                let mut rows = stmt.query(duckdb::params_from_iter(params)).map_err(query_failed)?;
+                let st = rows.as_ref().context("a statement")?;
+                let n = st.column_count();
+                let names = st.column_names();
+                let types: Vec<String> = (0..n).map(|i| type_name(&st.column_logical_type(i))).collect();
+                crate::ops::export::write_csv_record(&mut out, names.iter().cloned())?;
+                let mut count = 0u64;
+                while let Some(row) = rows.next().map_err(query_failed)? {
+                    count += 1;
+                    if count > max_rows {
+                        return Err(too_many());
+                    }
+                    let mut fields = Vec::with_capacity(n);
+                    for (i, t) in types.iter().enumerate() {
+                        let v: duckdb::types::Value = row.get(i).map_err(query_failed)?;
+                        fields.push(crate::ops::export::csv_value(Some(&super::values::to_json(v, t == "JSON"))));
+                    }
+                    crate::ops::export::write_csv_record(&mut out, fields)?;
+                }
+                out.flush()?;
+                let columns = names.into_iter().zip(types).map(|(name, type_name)| OlapColumn { name, type_name }).collect();
+                Ok(OlapExport { rows: count, columns, as_of_ts: as_of })
+            }
+            OlapExportFormat::Parquet => {
+                let batches = stmt.stream_arrow(duckdb::params_from_iter(params)).map_err(query_failed)?;
+                let schema = batches.get_schema();
+                let columns = schema
+                    .fields()
+                    .iter()
+                    .map(|f| OlapColumn { name: f.name().clone(), type_name: f.data_type().to_string() })
+                    .collect();
+                let props = parquet::file::properties::WriterProperties::builder()
+                    .set_compression(parquet::basic::Compression::ZSTD(Default::default()))
+                    .build();
+                let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).map_err(anyhow::Error::from)?;
+                // The iterator panics when DuckDB fails to fetch a chunk (an interrupt, for one).
+                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> crate::Result<u64> {
+                    let mut count = 0u64;
+                    for batch in batches {
+                        count += batch.num_rows() as u64;
+                        if count > max_rows {
+                            return Err(too_many());
+                        }
+                        writer.write(&batch).map_err(anyhow::Error::from)?;
+                    }
+                    Ok(count)
+                }));
+                let count = match written {
+                    Ok(r) => r?,
+                    Err(panic) => {
+                        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+                        return Err(anyhow::anyhow!("fetching the result failed: {msg}"));
+                    }
+                };
+                writer.close().map_err(anyhow::Error::from)?;
+                Ok(OlapExport { rows: count, columns, as_of_ts: as_of })
+            }
         }
-        let as_of = meta(conn, "applied_ts")?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    })
+}
+
+fn run_query(conn: &Connection, sql: &str, params: Vec<OlapValue>, max_rows: usize) -> crate::Result<OlapResult> {
+    in_read_transaction(conn, sql, |as_of| {
         let mut stmt = conn.prepare(sql).map_err(query_failed)?;
         let params: Vec<duckdb::types::Value> = params.into_iter().map(super::values::param).collect();
         let mut rows = stmt.query(duckdb::params_from_iter(params)).map_err(query_failed)?;
@@ -745,12 +859,5 @@ fn run_query(conn: &Connection, sql: &str, params: Vec<OlapValue>, max_rows: usi
         }
         let columns = names.into_iter().zip(types).map(|(name, type_name)| OlapColumn { name, type_name }).collect();
         Ok(OlapResult { columns, rows: out, as_of_ts: as_of })
-    })();
-    let _ = conn.execute_batch("ROLLBACK");
-    result.map_err(|e| match e.downcast_ref::<duckdb::Error>() {
-        Some(d) if d.to_string().contains("Interrupt") => {
-            UserError::new("olap_timeout", "The analytics query was interrupted (--olap-timeout)").into()
-        }
-        _ => e,
     })
 }

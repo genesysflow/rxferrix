@@ -62,6 +62,8 @@ rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-l
 
 # DuckDB, compiled from its bundled C++ sources (feature `olap`).
 duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = true }
+# Parquet exports of analytics queries, written from DuckDB's Arrow batches (same Arrow major version as duckdb's).
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
 
 [features]
 default = ["dashboard", "s3"]
@@ -71,7 +73,7 @@ s3 = ["object_store/aws"]
 # `/api/admin/*` endpoints exist either way.
 dashboard = []
 # Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions (`--olap`).
-olap = ["dep:duckdb"]
+olap = ["dep:duckdb", "dep:parquet"]
 
 [dev-dependencies]
 # Paused time in tests (`#[tokio::test(start_paused = true)]`).

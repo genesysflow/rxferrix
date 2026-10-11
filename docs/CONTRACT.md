@@ -1587,11 +1587,16 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
 - **Options** (`AppOptions::olap: OlapOptions`; flags): `enabled` (`--olap`, `FERRIX_OLAP`), `memory_limit`
   (`--olap-memory 2GB`; default DuckDB's, 80% of RAM), `threads` (`--olap-threads`), `query_timeout`
   (`--olap-timeout 30s`), `max_lag_bytes` (`--olap-max-lag 512MB`), `max_concurrent_queries`, `max_result_rows`,
-  `apply_every`, `background` (off: tests drive it with `TestApp::olap_sync()`).
+  `max_export_rows` (10M), `export_timeout` (5 min), `apply_every`, `background` (off: tests drive it with
+  `TestApp::olap_sync()`).
+- **Exports**: `OlapService::export(sql, params, OlapExportFormat::Csv | Parquet, path) -> OlapExport { rows,
+  columns, as_of_ts }` writes a whole result (the dashboard's downloads, `POST /api/admin/olap/query`).
 - **Operations**: `GET /api/admin/olap` (`{ enabled: false }` or the status: `state` building / ready / failed,
   `detail`, `appliedTs`, `latestTs`, `lagMs`, tables with row counts and columns, `sizeBytes`, `rowsApplied`,
-  `rebuilds`), `POST /api/admin/olap/rebuild` (202; rebuilds every table in the background; audited), the
-  `ferrix_olap_*` metrics (§4.4), `olap` in `/api/admin/stats` and the dashboard Overview.
+  `rebuilds`), `POST /api/admin/olap/rebuild` (202; rebuilds every table in the background; audited),
+  `POST /api/admin/olap/query` (SQL as an administrator, JSON or a CSV / Parquet download; audited), the
+  `ferrix_olap_*` metrics (§4.4), `olap` in `/api/admin/stats`, the dashboard Overview and its Analytics page, and
+  each table's analytics columns in `_system/dashboard:tables` (`analytics`, `columns: [{ name, sqlType }]`).
 - **Tests**: `TestApp::with_options(AppOptions { olap: OlapOptions { enabled: true, background: false, .. }, .. })`
   and `t.olap_sync().await?` before querying.
 
@@ -2210,6 +2215,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
 | `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
 | `POST /api/admin/olap/rebuild` | 202 `{ rebuilding: true }`: every table of the analytics copy is rebuilt from a snapshot in the background (audited `olap_rebuild`); 404 `olap_off` without `--olap`. |
+| `POST /api/admin/olap/query` | Body `{ sql, params?: Json[], format?: "json" \| "csv" \| "parquet" }`: one SELECT over the analytics copy in the sandbox of `ctx.olap` (§1.11). `json` (default): an `OlapResult` `{ columns: [{ name, typeName }], rows, asOfTs }` (at most `max_result_rows`; audited `olap_query`). `csv` / `parquet`: the whole result as a download (`query.csv`, RFC 4180 with a header, nested values as JSON; `query.parquet`, zstd, DuckDB's types nested), headers `x-ferrix-rows` and `x-ferrix-as-of-ts`, at most `max_export_rows` (10M) rows within `export_timeout` (5 min); written to a temporary file in the data directory by ferrix (DuckDB itself has no file access), streamed, then deleted (audited `olap_export`). 400 `olap_query_failed` / `olap_timeout` / `olap_unavailable`, 404 `olap_off`. |
 | `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
 | `POST /api/admin/replication/snapshot` | 201 `SnapshotInfo`: a snapshot of the current generation now (after shipping), then retention. 404 `replication_off`. Audited (`replication_snapshot`). |
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |

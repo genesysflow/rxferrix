@@ -268,6 +268,16 @@
         {#if table.secretFields.length > 0}
           <p class="faint">Masked: {table.secretFields.join(", ")}</p>
         {/if}
+        {#if table.columns && table.columns.length > 0}
+          <h3>Analytics columns <span class="faint">(SQL in <code>ctx.olap</code>, with <code>--olap</code>)</span></h3>
+          <ul class="columns" data-testid="analytics-columns">
+            {#each table.columns as c (c.name)}
+              <li><code>{c.name}</code> <span class="muted">{c.sqlType}</span></li>
+            {/each}
+          </ul>
+        {:else if table.analytics === false}
+          <p class="faint" data-testid="analytics-columns">Not in the analytics copy: it holds secrets or admin-only data.</p>
+        {/if}
       </div>
     </div>
   {/if}
@@ -550,6 +560,10 @@
   }
   .schema li {
     margin: 2px 0;
+  }
+  .schema ul.columns {
+    columns: 2;
+    font-size: 12px;
   }
   .schema pre {
     background: var(--panel-2);

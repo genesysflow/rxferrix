@@ -11,8 +11,11 @@ import type {
   Impersonation,
   ImportMode,
   ImportReport,
+  Json,
   LogEntry,
   LogFilter,
+  OlapResult,
+  OlapStatus,
   ReplicationSnapshot,
   ReplicationStatus,
   Stats,
@@ -318,4 +321,42 @@ export async function impersonate(
   });
   const r = (await res.json()) as Impersonation & { accessToken?: string; refreshToken?: string };
   return { userId: r.userId, sessionId: r.sessionId, expiresAt: r.expiresAt, url: r.url ?? null };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Analytics (`--olap`)
+
+/** `GET /api/admin/olap`: the analytics copy's status, or null when the server runs without `--olap`. */
+export async function getOlap(auth: FerrixAuth): Promise<OlapStatus | null> {
+  const res = await adminFetch(auth, "/api/admin/olap");
+  const r = (await res.json()) as { enabled: boolean } & Partial<OlapStatus>;
+  if (!r.enabled) return null;
+  const { enabled: _, ...status } = r;
+  return status as OlapStatus;
+}
+
+/** `POST /api/admin/olap/query`: one SELECT over the analytics copy (the sandbox of `ctx.olap`; audited). */
+export async function olapQuery(auth: FerrixAuth, sql: string, params: Json[] = []): Promise<OlapResult> {
+  const res = await adminFetch(auth, "/api/admin/olap/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql, params }),
+  });
+  return (await res.json()) as OlapResult;
+}
+
+/** The whole result of one SELECT as a CSV or Parquet file. */
+export async function olapExport(auth: FerrixAuth, sql: string, format: "csv" | "parquet", params: Json[] = []): Promise<Download> {
+  const res = await adminFetch(auth, "/api/admin/olap/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql, params, format }),
+  });
+  const blob = await res.blob();
+  return { blob, filename: filenameFromDisposition(res.headers.get("content-disposition"), `query.${format}`) };
+}
+
+/** `POST /api/admin/olap/rebuild`: rebuild every table of the copy from a snapshot, in the background. */
+export async function olapRebuild(auth: FerrixAuth): Promise<void> {
+  await adminFetch(auth, "/api/admin/olap/rebuild", { method: "POST" });
 }

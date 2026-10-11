@@ -523,3 +523,93 @@ async fn rebuilding_while_writes_continue() {
     let st = olap.status(t.app()).await;
     assert_eq!((st.rebuilds, st.state.as_str()), (2, "ready"));
 }
+
+/// `POST /api/admin/olap/query`: JSON results, CSV and Parquet downloads, the sandbox, admins only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_queries_and_exports_over_http() {
+    use ferrix::auth::AuthConfig;
+    use reqwest::Method;
+
+    let mut options = olap(false);
+    options.auth = AuthConfig::password().rate_limits(None);
+    let t = TestApp::with_options(options).await.unwrap();
+    let base = format!("http://{}", t.serve().await.unwrap());
+    let app = t.app().clone();
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let client = reqwest::Client::new();
+    let signin: Value = client
+        .post(format!("{base}/api/auth/admin/signin"))
+        .json(&json!({ "email": "admin@example.com", "password": "admin password" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = signin["accessToken"].as_str().unwrap().to_string();
+    let query = |body: Value| client.request(Method::POST, format!("{base}/api/admin/olap/query")).bearer_auth(&token).json(&body);
+    for i in 0..25 {
+        t.mutation::<add>((format!("c{}", i % 3), i as f64, i)).await.unwrap();
+    }
+    t.olap_sync().await.unwrap();
+
+    let anonymous = client.post(format!("{base}/api/admin/olap/query")).json(&json!({ "sql": "SELECT 1" })).send().await.unwrap();
+    assert_eq!(anonymous.status(), 401);
+
+    let r: Value = query(json!({ "sql": "SELECT customer, count(*) AS n FROM olap_orders WHERE quantity >= ? GROUP BY customer ORDER BY customer", "params": [10] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["rows"], json!([{ "customer": "c0", "n": 5 }, { "customer": "c1", "n": 5 }, { "customer": "c2", "n": 5 }]));
+    assert_eq!(r["columns"][1], json!({ "name": "n", "typeName": "BIGINT" }));
+
+    let rejected = query(json!({ "sql": "DELETE FROM olap_orders" })).send().await.unwrap();
+    assert_eq!(rejected.status(), 400);
+    assert_eq!(rejected.json::<Value>().await.unwrap()["errorData"]["code"], "olap_query_failed");
+
+    let csv = query(json!({ "sql": "SELECT customer, quantity, tags FROM olap_orders ORDER BY quantity LIMIT 3", "format": "csv" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(csv.status(), 200);
+    assert_eq!(csv.headers()["content-type"], "text/csv; charset=utf-8");
+    assert_eq!(csv.headers()["x-ferrix-rows"], "3");
+    assert!(csv.headers()["content-disposition"].to_str().unwrap().contains("query.csv"));
+    let text = csv.text().await.unwrap();
+    assert_eq!(text, "customer,quantity,tags\r\nc0,0,\"[\"\"a\"\",\"\"q0\"\"]\"\r\nc1,1,\"[\"\"a\"\",\"\"q1\"\"]\"\r\nc2,2,\"[\"\"a\"\",\"\"q2\"\"]\"\r\n");
+
+    let parquet = query(json!({ "sql": "SELECT * FROM olap_orders", "format": "parquet" })).send().await.unwrap();
+    assert_eq!(parquet.status(), 200);
+    assert_eq!(parquet.headers()["x-ferrix-rows"], "25");
+    let bytes = parquet.bytes().await.unwrap();
+    assert_eq!(&bytes[..4], b"PAR1");
+    use parquet::file::reader::FileReader;
+    let reader = parquet::file::reader::SerializedFileReader::new(bytes).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 25);
+    let fields: Vec<String> = reader.metadata().file_metadata().schema_descr().root_schema().get_fields().iter().map(|f| f.name().to_string()).collect();
+    assert!(fields.contains(&"address".to_string()) && fields.contains(&"tags".to_string()), "{fields:?}");
+
+    let too_big = query(json!({ "sql": "SELECT * FROM range(10) LIMIT 5", "format": "xml" })).send().await.unwrap();
+    assert_eq!(too_big.status(), 400);
+    // The temporary export files are gone.
+    let leftovers: Vec<_> = std::fs::read_dir(t.dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(".olap-export-")).collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[tokio::test]
+async fn exports_have_their_own_row_cap() {
+    let mut options = olap(false);
+    options.olap.max_result_rows = 10;
+    options.olap.max_export_rows = 100;
+    let t = TestApp::with_options(options).await.unwrap();
+    t.olap_sync().await.unwrap();
+    let olap = t.app().olap().unwrap().clone();
+    let path = t.dir().join("out.csv");
+    let ok = olap.export("SELECT * FROM range(50)", vec![], ferrix::olap::OlapExportFormat::Csv, &path).await.unwrap();
+    assert_eq!(ok.rows, 50, "beyond the query cap of 10");
+    let e = olap.export("SELECT * FROM range(500)", vec![], ferrix::olap::OlapExportFormat::Parquet, &path).await.unwrap_err();
+    assert_eq!(code(&e), "olap_query_failed");
+}

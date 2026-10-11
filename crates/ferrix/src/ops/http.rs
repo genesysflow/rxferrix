@@ -11,7 +11,9 @@
 //! - `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv` with a JSONL or CSV body (at most
 //!   256 MiB) → `ImportReport`. App tables only.
 //! - `GET /api/admin/olap` → `{ enabled: false }` or `{ enabled: true, ...OlapStatus }` (`crate::olap`);
-//!   `POST /api/admin/olap/rebuild` → 202: every table is rebuilt from a snapshot in the background.
+//!   `POST /api/admin/olap/rebuild` → 202: every table is rebuilt from a snapshot in the background;
+//!   `POST /api/admin/olap/query` `{ sql, params?, format? }` → an `OlapResult` (`format` json, the default), or the
+//!   whole result as a CSV or Parquet download (`format` csv / parquet); the same sandbox as `ctx.olap`, audited.
 //! - `GET /api/admin/replication` → `{ enabled: false }` or `{ enabled: true, ...ReplicationStatus }`
 //!   (`super::replicate`); `POST /api/admin/replication/snapshot` → `SnapshotInfo` (201).
 //! - `POST /api/admin/restore/point-in-time` with `{ toTs?, toTime?, generation? }` → `{ pendingRestore, restart }`:
@@ -55,6 +57,7 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/restore/point-in-time", post(stage_point_in_time))
         .route("/api/admin/olap", get(olap_status))
         .route("/api/admin/olap/rebuild", post(olap_rebuild))
+        .route("/api/admin/olap/query", post(olap_query))
         .route("/api/admin/replication", get(replication_status))
         .route("/api/admin/replication/snapshot", post(replication_snapshot))
         .route("/api/admin/export/{table}", get(export_table))
@@ -410,6 +413,85 @@ async fn olap_rebuild(State(app): State<App>, headers: HeaderMap) -> Response {
     olap.request_rebuild("an administrator asked for it");
     audit_ops(&app, admin, "olap_rebuild", json!({})).await;
     (StatusCode::ACCEPTED, no_store(), axum::Json(json!({ "rebuilding": true }))).into_response()
+}
+
+#[derive(Deserialize)]
+struct OlapQueryBody {
+    sql: String,
+    #[serde(default)]
+    params: Vec<serde_json::Value>,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `POST /api/admin/olap/query`: one SELECT over the analytics copy, as JSON or as a CSV / Parquet download.
+async fn olap_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    use crate::olap::{OlapExportFormat, OlapValue};
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let Some(olap) = app.olap().cloned() else {
+        return AuthFailure::new(404, "olap_off", "Analytics are off: start the server with --olap").into_response();
+    };
+    let req: OlapQueryBody = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return AuthFailure::new(400, "invalid_request", format!("Expected {{ sql, params?, format? }}: {e}")).into_response(),
+    };
+    let params: Vec<OlapValue> = req.params.into_iter().map(OlapValue::from_json).collect();
+    let logged: String = req.sql.chars().take(2000).collect();
+    let format = match req.format.as_deref().unwrap_or("json") {
+        "json" => None,
+        "csv" => Some(OlapExportFormat::Csv),
+        "parquet" => Some(OlapExportFormat::Parquet),
+        other => {
+            return AuthFailure::new(400, "invalid_request", format!("Unknown format `{other}` (json, csv or parquet)")).into_response();
+        }
+    };
+    let Some(format) = format else {
+        let result = try_or!(olap.admin_query(&req.sql, params).await);
+        audit_ops(&app, admin, "olap_query", json!({ "sql": logged, "rows": result.rows.len() })).await;
+        return (no_store(), axum::Json(result)).into_response();
+    };
+    // Written to a temporary file next to the data (deleted once sent), then streamed.
+    let file = try_or!(
+        tempfile::Builder::new()
+            .prefix(".olap-export-")
+            .suffix(&format!(".{}", format.extension()))
+            .tempfile_in(app.dir())
+            .map_err(anyhow::Error::from)
+    );
+    let export = try_or!(olap.export(&req.sql, params, format, file.path()).await);
+    audit_ops(&app, admin, "olap_export", json!({ "sql": logged, "rows": export.rows, "format": format.extension() })).await;
+    let reader = try_or!(tokio::fs::File::open(file.path()).await.map_err(anyhow::Error::from));
+    let size = try_or!(reader.metadata().await.map_err(anyhow::Error::from)).len();
+    let stream = futures::stream::unfold((reader, file, false), |(mut reader, file, done)| async move {
+        use tokio::io::AsyncReadExt;
+        if done {
+            return None;
+        }
+        let mut buf = vec![0u8; 64 << 10];
+        match reader.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), (reader, file, false)))
+            }
+            Err(e) => Some((Err(e), (reader, file, true))),
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    let h = response.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(format.content_type()));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"query.{}\"", format.extension())) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    h.insert("x-ferrix-rows", HeaderValue::from(export.rows));
+    h.insert("x-ferrix-as-of-ts", HeaderValue::from(export.as_of_ts));
+    response
 }
 
 /// `POST /api/admin/replication/snapshot`: take a snapshot of the current generation now.

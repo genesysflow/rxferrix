@@ -26,6 +26,7 @@ pub mod lock;
 pub mod metrics;
 pub mod replicate;
 pub mod restore;
+pub mod takeover;
 pub mod tls;
 pub mod web;
 

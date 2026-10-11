@@ -75,6 +75,10 @@ dashboard = []
 # Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions (`--olap`).
 olap = ["dep:duckdb", "dep:parquet"]
 
+# Zero-downtime takeover (`serve --takeover`): the listening sockets are passed to the new process over a Unix socket.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["socket", "uio"] }
+
 [dev-dependencies]
 # Paused time in tests (`#[tokio::test(start_paused = true)]`).
 tokio = { version = "1.53.2", features = ["full", "test-util"] }

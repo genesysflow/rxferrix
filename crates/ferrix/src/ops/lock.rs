@@ -56,6 +56,19 @@ impl DirLock {
         Ok(DirLock { file, path })
     }
 
+    /// Like [`DirLock::acquire`], retrying for up to `wait` while another process still holds it (a takeover waits
+    /// for the old server to exit, `crate::ops::takeover`).
+    pub async fn acquire_waiting(dir: &Path, wait: std::time::Duration) -> crate::Result<DirLock> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match DirLock::acquire(dir) {
+                Ok(lock) => return Ok(lock),
+                Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+    }
+
     /// Whether some process holds the lock on `dir` right now.
     pub fn is_locked(dir: &Path) -> bool {
         let Ok(file) = OpenOptions::new().read(true).write(true).open(dir.join(LOCK_FILE)) else { return false };

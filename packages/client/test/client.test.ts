@@ -134,6 +134,21 @@ describe("connection", () => {
     expect(server.sockets).toHaveLength(2);
   });
 
+  it("reconnects at once after a service restart (1012), however many retries came before", async () => {
+    await openAndDrain();
+    // A few failed attempts grow the backoff...
+    for (let i = 0; i < 4; i++) {
+      server.close(1006, "network");
+      vi.advanceTimersByTime(20_000);
+      await openAndDrain();
+    }
+    expect(server.sockets).toHaveLength(5);
+    // ...but a server restarting (or handing over to a new process) is back right away: under 250 ms.
+    server.close(1012, "service restart");
+    vi.advanceTimersByTime(250);
+    expect(server.sockets).toHaveLength(6);
+  });
+
   it("notifies connection state subscribers", async () => {
     const states: ConnectionState[] = [];
     client.subscribeToConnectionState((s) => states.push(s));

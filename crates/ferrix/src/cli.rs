@@ -55,6 +55,16 @@ enum Command {
     /// Run data migrations (`#[migration]`), or show their status with `migrate status`. Stop the server first, or
     /// use `serve --migrate` / the dashboard to migrate a running server.
     Migrate(MigrateArgs),
+    /// Check that this version can open the data (works while a server runs): opens a copy of the database exactly
+    /// as `serve --takeover` would (index builds, schema check), reports, and deletes the copy.
+    Check(CheckArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct CheckArgs {
+    /// Data directory.
+    #[arg(long, default_value = "fx_data")]
+    dir: PathBuf,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -209,6 +219,11 @@ struct ServeArgs {
     /// Run the migrations that aren't done (`#[migration]`, in name order) in the background after starting.
     #[arg(long, env = "FERRIX_MIGRATE")]
     migrate: bool,
+    /// Take over from the server running on this data directory with no downtime: copy the database, open the copy
+    /// with this version (index builds, schema check), catch up, then take the listening sockets and swap the copy in.
+    /// If this version can't serve the data, it exits and the running server carries on.
+    #[arg(long)]
+    takeover: bool,
     /// Where uploaded files are stored: a directory (default: <dir>/storage), file:///dir, or s3://bucket/prefix
     /// (S3, R2, MinIO; credentials, region and endpoint from the standard AWS_* environment variables).
     #[arg(long, env = "FERRIX_STORAGE", value_name = "LOCATION")]
@@ -391,6 +406,7 @@ impl Ferrix {
                 AppOptions { auth: self.auth, storage: self.storage, scheduler: self.scheduler, ..Default::default() },
             ),
             Some(Command::Migrate(args)) => migrate(args, self.auth, self.storage, self.scheduler),
+            Some(Command::Check(args)) => check(args),
             Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler, self.web),
             None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web),
         }
@@ -414,6 +430,27 @@ fn print_functions() -> crate::Result<()> {
 fn codegen(out: &Path) -> crate::Result<()> {
     let changed = crate::codegen::write(out)?;
     println!("ferrix codegen: wrote {} ({} file(s) changed)", out.display(), changed.len());
+    Ok(())
+}
+
+fn check(args: CheckArgs) -> crate::Result<()> {
+    let _ = crate::log::cli_subscriber(
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        std::io::stderr,
+        crate::log::LogFormat::Pretty,
+    )
+    .try_init();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let report = rt.block_on(crate::ops::takeover::check(&args.dir))?;
+    println!(
+        "OK: this version opens the data in {} (at ts {}, in {:.1?})",
+        args.dir.display(),
+        report.ts,
+        report.elapsed
+    );
+    if !report.migrating.is_empty() {
+        println!("migrating (documents waiting for their #[migration]): {}", report.migrating.join(", "));
+    }
     Ok(())
 }
 
@@ -700,6 +737,9 @@ fn storage_config(
     Ok(storage)
 }
 
+/// How long a stopping server keeps serving with `Connection: close` before it stops accepting.
+const DRAIN_GRACE: Duration = Duration::from_millis(100);
+
 fn serve(
     args: ServeArgs,
     auth: AuthConfig,
@@ -743,8 +783,17 @@ fn serve(
         };
         args.ops.apply(&mut options);
         let listen = args.ops.listen(args.http, &args.dir)?;
-        // Held while serving: `restore` refuses to run under a server.
-        let _lock = crate::ops::DirLock::acquire(&args.dir)?;
+        // Held while serving: `restore` refuses to run under a server. A takeover gets it from the old process.
+        let (_lock, inherited) = if args.takeover {
+            let incoming = crate::ops::takeover::take_over(&args.dir).await?;
+            options.prechecked_schema = Some(incoming.migrating);
+            tracing::info!(from = incoming.from_pid, "took over the data directory");
+            (incoming.lock, incoming.listeners)
+        } else {
+            let lock = crate::ops::DirLock::acquire(&args.dir)?;
+            crate::ops::takeover::recover(&args.dir)?;
+            (lock, Vec::new())
+        };
         // A restore staged from the dashboard replaces the database now, before anything opens it.
         let storage_dir = crate::ops::backup::local_storage_dir(&args.dir, &options.storage.backend);
         let dir = args.dir.clone();
@@ -784,7 +833,18 @@ fn serve(
                 );
             }
         }
-        let server = crate::ops::tls::start(crate::ops::web::router(app.clone(), &web), &listen).await?;
+        let server =
+            crate::ops::tls::start_with(crate::ops::web::router(app.clone(), &web), &listen, inherited).await?;
+        // A later version can take over from this process (`serve --takeover`, `crate::ops::takeover`).
+        #[cfg(unix)]
+        let control = match crate::ops::takeover::Control::start(app.clone(), &args.dir, server.listener_fds()).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("no zero-downtime takeover possible: {e:#}");
+                None
+            }
+        };
+        let handed_over = std::sync::atomic::AtomicBool::new(false);
         let scheme = if server.https { "https" } else { "http" };
         tracing::info!(
             "ferrix listening on {scheme}://{} (data: {}, dev: {})",
@@ -803,17 +863,46 @@ fn serve(
                 public_url.trim_end_matches('/')
             );
         }
+        crate::ops::takeover::sd_notify(&format!("READY=1\nMAINPID={}", std::process::id()));
+        let pauser = server.pauser();
         server
             .run_until(async {
+                #[cfg(unix)]
+                let handover = async {
+                    match &control {
+                        Some(c) => c.handover_requested().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                #[cfg(not(unix))]
+                let handover = std::future::pending::<()>();
                 tokio::select! {
                     _ = crate::ops::tls::shutdown_signal() => tracing::info!("shutting down"),
                     _ = restart.requested() => tracing::warn!("restarting: shutting down to apply the staged restore"),
+                    _ = handover => {
+                        handed_over.store(true, std::sync::atomic::Ordering::SeqCst);
+                        tracing::info!("handing over to the new process");
+                    }
                 }
+                crate::ops::takeover::sd_notify("STOPPING=1");
+                // Stop accepting (new connections wait in the socket, for the next process after a takeover) but keep
+                // serving the open ones a moment with `Connection: close`, so keep-alive clients finish and reconnect
+                // instead of racing the shutdown; then close WebSockets (1012) and stop.
+                app.begin_drain();
+                pauser.stop_accepting();
+                tokio::time::sleep(DRAIN_GRACE).await;
+                app.begin_close();
             })
             .await?;
-        // The last commits reach the replication target before the process exits.
-        crate::ops::replicate::flush(&app, Duration::from_secs(15)).await;
+        if !handed_over.load(std::sync::atomic::Ordering::SeqCst) {
+            // The last commits reach the replication target before the process exits. (After a handover the
+            // journal goes to the new process, which ships them.)
+            crate::ops::replicate::flush(&app, Duration::from_secs(15)).await;
+        }
         app.logs().flush().await?;
+        // Nothing may commit after this process lets go of the data directory.
+        let last_ts = app.db().seal().await?;
+        tracing::info!(ts = last_ts, "stopped");
         Ok::<_, crate::Error>(restart.is_requested().then(|| restart.exit_code()).flatten())
     })?;
     // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.

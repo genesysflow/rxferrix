@@ -2367,6 +2367,29 @@ everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<
 restrictive Content-Security-Policy and `X-Frame-Options: DENY`. Without the feature, only a minimal `/_/setup` page
 is served; the system functions and `/api/admin/*` exist either way.
 
+### 4.3.1 Takeover (`serve --takeover`, `crate::ops::takeover`)
+
+Every `serve` listens on `<dir>/ferrix.control` (Unix socket, 0600). `serve --takeover` connects and sends
+`{"op":"prepare"}`; the running server enables its change journal for a `Takeover` consumer (`_meta.takeover_ts`; rows
+after it are kept) and answers `{ok, ts, pid, roles}`. The new process copies `data.db` with `VACUUM INTO` to
+`<dir>/takeover/data.db`, opens it with its tables (`Database::open_with_migrations`: catalog reconcile with every
+backfill, migration coverage, schema check), and replays `_journal` rows after the copy's ts with
+`Database::replay_checked` (a document that doesn't match its table's new type, unless the table is migrating, fails).
+Any failure before the handover: it closes the socket, the running server disables the consumer (and the journal, if
+nothing else needs it, trimming the rows), and the new process exits non-zero. `{"op":"handover"}` returns the
+listening sockets with `SCM_RIGHTS` (roles `main`, `redirect`) and, under systemd, the new process sends
+`MAINPID=<pid>`. The running server stops accepting (`RunningServer::pauser`), sets `Connection: close` on responses
+for 100 ms (`App::begin_drain`), closes WebSockets with 1012 and ends admin log streams (`App::begin_close`), stops
+gracefully (up to 10 s for open requests), flushes the execution log, seals its database (`Database::seal`: no write
+transaction can begin) and exits. The new process waits for the socket to close, takes `ferrix.lock`, replays the last
+rows, checks that the copy's ts equals the database's, copies `_mutation_dedup` rows, the replication and analytics
+`_meta` positions and `_journal` (trimmed to what those consumers still need), raises `last_creation_time` if needed,
+then swaps: `<dir>/takeover/swapping` marks it, `data.db*` moves to `takeover/previous/`, the copy moves in, the
+marker goes; a start that finds the marker finishes the move (`takeover::recover`). The app then opens with
+`AppOptions::prechecked_schema` (the copy's migrating tables; the schema check isn't repeated) and serves on the
+inherited sockets (`tls::start_with`; a socket is reused only if the configured address matches). `check` performs the
+copy and open in `<dir>/check-<pid>/` and deletes it. Unix only.
+
 ### 4.4 Operations: backups, export and import (`crate::ops`)
 
 **Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `ferrix-auto-…`; the

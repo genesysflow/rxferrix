@@ -252,10 +252,26 @@ pub struct RunningServer {
     /// The HTTP→HTTPS redirect listener.
     pub redirect_addr: Option<SocketAddr>,
     stop: Stop,
+    pause: Arc<watch::Sender<bool>>,
     tasks: Vec<tokio::task::JoinHandle<crate::Result<()>>>,
+    /// The listening sockets by role (`main`, `redirect`), for a takeover (`crate::ops::takeover`).
+    #[cfg(unix)]
+    fds: Vec<(String, std::os::fd::RawFd)>,
 }
 
 impl RunningServer {
+    /// The listening sockets by role (`main`, `redirect`): valid while the server runs.
+    #[cfg(unix)]
+    pub fn listener_fds(&self) -> Vec<(String, std::os::fd::RawFd)> {
+        self.fds.clone()
+    }
+
+    /// A handle that stops the server from accepting connections while it keeps serving the open ones (before a
+    /// graceful stop; a takeover's new process then gets every new connection).
+    pub fn pauser(&self) -> Pauser {
+        Pauser(self.pause.clone())
+    }
+
     /// Stop accepting connections and let open requests finish (up to 10 s for HTTPS).
     pub fn shutdown(&self) {
         self.stop.send_replace(true);
@@ -269,7 +285,8 @@ impl RunningServer {
         Ok(())
     }
 
-    /// Serve until `signal` resolves, then shut down gracefully.
+    /// Serve until `signal` resolves, then shut down gracefully: stop accepting, and give open requests up to
+    /// [`DRAIN_TIMEOUT`] to finish.
     pub async fn run_until(self, signal: impl Future<Output = ()>) -> crate::Result<()> {
         let stop = self.stop.clone();
         let tasks = self.tasks;
@@ -279,10 +296,18 @@ impl RunningServer {
             _ = signal => {}
         }
         stop.send_replace(true);
-        all.await?;
+        match tokio::time::timeout(DRAIN_TIMEOUT, &mut all).await {
+            Ok(r) => {
+                r?;
+            }
+            Err(_) => tracing::warn!("requests still open after {DRAIN_TIMEOUT:?}; stopping anyway"),
+        }
         Ok(())
     }
 }
+
+/// How long a graceful shutdown waits for open requests.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Resolves on Ctrl-C (SIGINT) or, on Unix, SIGTERM (what systemd and Docker send to stop a service).
 pub async fn shutdown_signal() {
@@ -333,13 +358,60 @@ fn std_listener(addr: SocketAddr) -> crate::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
+/// A listener that stops accepting while `paused` is set, without closing anything: during a takeover the socket
+/// stays open in the new process, so connections queue there instead of reaching a server about to stop.
+struct Pausable<L> {
+    inner: L,
+    paused: watch::Receiver<bool>,
+}
+
+impl<L: axum::serve::Listener<Addr = SocketAddr>> axum::serve::Listener for Pausable<L> {
+    type Io = L::Io;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            if *self.paused.borrow() {
+                std::future::pending::<()>().await;
+            }
+            tokio::select! {
+                accepted = self.inner.accept() => return accepted,
+                _ = self.paused.changed() => {}
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Stops a running server from accepting connections ([`RunningServer::pauser`]).
+#[derive(Clone)]
+pub struct Pauser(Arc<watch::Sender<bool>>);
+
+impl Pauser {
+    /// Stop accepting (plain HTTP listeners; open connections keep being served).
+    pub fn stop_accepting(&self) {
+        self.0.send_replace(true);
+    }
+}
+
 fn spawn_plain(
     listener: tokio::net::TcpListener,
     router: Router,
     stop: Stop,
+    paused: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<crate::Result<()>> {
     tokio::spawn(async move {
-        axum::serve(crate::server::nodelay(listener), router.into_make_service_with_connect_info::<SocketAddr>())
+        use axum::serve::ListenerExt;
+        fn nodelay(stream: &mut tokio::net::TcpStream) {
+            if let Err(e) = stream.set_nodelay(true) {
+                tracing::debug!("could not set TCP_NODELAY: {e}");
+            }
+        }
+        let listener = Pausable { inner: listener, paused }.tap_io(nodelay as fn(&mut tokio::net::TcpStream));
+        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { stopped(&stop).await })
             .await?;
         Ok(())
@@ -348,13 +420,64 @@ fn spawn_plain(
 
 /// Bind every listener of `listen` and start serving `router`.
 pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServer> {
+    start_with(router, listen, Vec::new()).await
+}
+
+/// A listening socket taken over from another process (`crate::ops::takeover`), by role (`main`, `redirect`).
+pub type Inherited = Vec<(String, std::net::TcpListener)>;
+
+/// The inherited listener for `role` if it listens on `addr`'s port (else it is dropped and a new one is bound).
+fn take_inherited(inherited: &mut Inherited, role: &str, addr: SocketAddr) -> Option<std::net::TcpListener> {
+    let i = inherited.iter().position(|(r, _)| r == role)?;
+    let (_, listener) = inherited.remove(i);
+    let bound = listener.local_addr().ok()?;
+    let same = bound.port() == addr.port() && (addr.ip().is_unspecified() || bound.ip() == addr.ip());
+    if !same {
+        tracing::warn!(%bound, wanted = %addr, "not reusing the inherited {role} listener: the address changed");
+        return None;
+    }
+    listener.set_nonblocking(true).ok()?;
+    Some(listener)
+}
+
+async fn bind_or_take(
+    inherited: &mut Inherited,
+    role: &str,
+    addr: SocketAddr,
+) -> crate::Result<tokio::net::TcpListener> {
+    match take_inherited(inherited, role, addr) {
+        Some(l) => Ok(tokio::net::TcpListener::from_std(l)?),
+        None => Ok(tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?),
+    }
+}
+
+#[cfg(unix)]
+fn fd_of(l: &impl std::os::fd::AsRawFd) -> std::os::fd::RawFd {
+    l.as_raw_fd()
+}
+
+/// Like [`start`], reusing `inherited` listening sockets where they match (a takeover keeps the same sockets, so no
+/// connection is refused while one process hands over to the next).
+pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherited) -> crate::Result<RunningServer> {
     let stop = Arc::new(watch::channel(false).0);
+    let pause = Arc::new(watch::channel(false).0);
     match listen {
         Listen::Http(addr) => {
-            let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let listener = bind_or_take(&mut inherited, "main", *addr).await?;
             let addr = listener.local_addr()?;
-            let task = spawn_plain(listener, router, stop.clone());
-            Ok(RunningServer { addr, https: false, redirect_addr: None, stop, tasks: vec![task] })
+            #[cfg(unix)]
+            let fds = vec![("main".to_string(), fd_of(&listener))];
+            let task = spawn_plain(listener, router, stop.clone(), pause.subscribe());
+            Ok(RunningServer {
+                addr,
+                https: false,
+                redirect_addr: None,
+                stop,
+                pause,
+                tasks: vec![task],
+                #[cfg(unix)]
+                fds,
+            })
         }
         Listen::Acme { https, redirect, acme } => {
             acme.prepare()?;
@@ -368,19 +491,33 @@ pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServ
                     }
                 }
             });
-            let listener = std_listener(*https)?;
+            let listener = match take_inherited(&mut inherited, "main", *https) {
+                Some(l) => l,
+                None => std_listener(*https)?,
+            };
             let addr = listener.local_addr()?;
+            #[cfg(unix)]
+            let fd = fd_of(&listener);
+            #[cfg(not(unix))]
+            let fd = ();
             let handle = axum_server::Handle::new();
             let serve = axum_server::from_tcp(listener)?
                 .acceptor(NoDelay(acceptor))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-            start_tls(serve, handle, addr, *redirect, acme.domains.clone(), stop).await
+            start_tls(serve, handle, addr, *redirect, acme.domains.clone(), stop, pause, fd, inherited).await
         }
         Listen::CertFiles { https, redirect, cert, key, reload_every } => {
             let config = server_config_from_pem(cert, key)?;
-            let listener = std_listener(*https)?;
+            let listener = match take_inherited(&mut inherited, "main", *https) {
+                Some(l) => l,
+                None => std_listener(*https)?,
+            };
             let addr = listener.local_addr()?;
+            #[cfg(unix)]
+            let fd = fd_of(&listener);
+            #[cfg(not(unix))]
+            let fd = ();
             let rustls = axum_server::tls_rustls::RustlsConfig::from_config(config);
             if let Some(every) = reload_every.filter(|d| !d.is_zero()) {
                 spawn_cert_reloader(rustls.clone(), cert.clone(), key.clone(), every, stop.clone());
@@ -390,12 +527,13 @@ pub async fn start(router: Router, listen: &Listen) -> crate::Result<RunningServ
                 .acceptor(NoDelay(axum_server::tls_rustls::RustlsAcceptor::new(rustls)))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-            start_tls(serve, handle, addr, *redirect, Vec::new(), stop).await
+            start_tls(serve, handle, addr, *redirect, Vec::new(), stop, pause, fd, inherited).await
         }
     }
 }
 
 /// Spawn an HTTPS server's future and its redirect listener; a stop signal shuts it down gracefully.
+#[allow(clippy::too_many_arguments)]
 async fn start_tls(
     serve: impl Future<Output = std::io::Result<()>> + Send + 'static,
     handle: axum_server::Handle<SocketAddr>,
@@ -403,13 +541,21 @@ async fn start_tls(
     redirect: Option<SocketAddr>,
     domains: Vec<String>,
     stop: Stop,
+    pause: Arc<watch::Sender<bool>>,
+    #[cfg(unix)] main_fd: std::os::fd::RawFd,
+    #[cfg(not(unix))] _main_fd: (),
+    mut inherited: Inherited,
 ) -> crate::Result<RunningServer> {
     let mut tasks = Vec::new();
+    #[cfg(unix)]
+    let mut fds = vec![("main".to_string(), main_fd)];
     let redirect_addr = match redirect {
         Some(r) => {
-            let listener = tokio::net::TcpListener::bind(r).await.with_context(|| format!("listening on {r}"))?;
+            let listener = bind_or_take(&mut inherited, "redirect", r).await?;
+            #[cfg(unix)]
+            fds.push(("redirect".to_string(), fd_of(&listener)));
             let bound = listener.local_addr()?;
-            tasks.push(spawn_plain(listener, redirect_router(addr.port(), domains), stop.clone()));
+            tasks.push(spawn_plain(listener, redirect_router(addr.port(), domains), stop.clone(), pause.subscribe()));
             Some(bound)
         }
         None => None,
@@ -423,7 +569,16 @@ async fn start_tls(
         serve.await?;
         Ok(())
     }));
-    Ok(RunningServer { addr, https: true, redirect_addr, stop, tasks })
+    Ok(RunningServer {
+        addr,
+        https: true,
+        redirect_addr,
+        stop,
+        pause,
+        tasks,
+        #[cfg(unix)]
+        fds,
+    })
 }
 
 #[cfg(test)]

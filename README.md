@@ -663,6 +663,23 @@ port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port
 without a restart or dropped connections, and a bad pair keeps the current certificate (logged). Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
 (default `0.0.0.0:80` with `--https`; `off`).
 
+**Deploys with no downtime.** `todo-server serve --takeover` (same arguments as the running server) starts the new
+version next to the old one on the same data directory: it copies the database (a consistent snapshot; the old server
+keeps writing), opens the copy with the new code (new and changed indexes, search and vector indexes and aggregates
+are built there, the schema check runs, pending migrations are found), and replays what the old server committed
+meanwhile from its change journal, checking every document against the new types. Then it takes the old server's
+listening sockets: the old one stops accepting (new connections wait in the socket instead of being refused), lets
+open requests finish, closes WebSockets with code 1012 so clients reconnect at once, and exits; the new one replays
+the last commits, swaps the copy in (the old `data.db` stays in `takeover/previous/`) and serves. Acknowledged writes
+are never lost, mutations retried by a reconnecting client still run once, and the pause is the old server's drain
+plus the swap: about 0.2–0.5 s in our tests under write load, during which requests wait. **If the new version can't
+serve the data** (a changed type that existing documents don't fit, with no migration for it), it exits with the
+schema report and the old server carries on unaffected. `todo-server check` runs the same preparation on a copy
+(also while the server runs) and reports, for CI or before a deploy. Under systemd, `systemctl reload` does it: see
+`deploy/ferrix.service` (`Type=notify`, `NotifyAccess=all`, `ExecReload`). In a container, where the server is
+process 1, a takeover can't outlive it: replace the container (clients reconnect and resubscribe on their own, and
+retried mutations run once), or run the binary under systemd or another supervisor.
+
 **Backups.** `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
 snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus
 the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it

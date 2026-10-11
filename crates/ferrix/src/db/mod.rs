@@ -93,11 +93,20 @@ pub struct OpenOptions {
     /// default: a process crash loses nothing, a power loss may lose the last commits). With group commit this is one
     /// fsync per batch of mutations.
     pub fsync_commits: bool,
+    /// The schema check already ran on this database file (a takeover checked its copy before swapping it in,
+    /// `crate::ops::takeover`): skip it, and open these tables as *migrating*.
+    pub prechecked: Option<Vec<String>>,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        OpenOptions { readers: DEFAULT_READERS, skip_schema_check: false, journal: false, fsync_commits: false }
+        OpenOptions {
+            readers: DEFAULT_READERS,
+            skip_schema_check: false,
+            journal: false,
+            fsync_commits: false,
+            prechecked: None,
+        }
     }
 }
 
@@ -133,8 +142,14 @@ impl Database {
         dedup::ensure_schema(&writer)?;
         writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
-        let coverage = crate::migrations::coverage(&writer, &catalog, migrations)?;
-        for table in schema_check::run(&writer, &catalog, tables, options.skip_schema_check, &coverage)? {
+        let migrating = match &options.prechecked {
+            Some(migrating) => migrating.clone(),
+            None => {
+                let coverage = crate::migrations::coverage(&writer, &catalog, migrations)?;
+                schema_check::run(&writer, &catalog, tables, options.skip_schema_check, &coverage)?
+            }
+        };
+        for table in migrating {
             catalog.set_migrating(&table, true);
         }
         let ts = storage::read_meta_u64(&writer, storage::META_TS)?;
@@ -160,6 +175,7 @@ impl Database {
                 durations: Mutex::new(std::collections::HashMap::new()),
                 write_log: write_log.clone(),
                 journal: journal.clone(),
+                sealed: std::sync::atomic::AtomicBool::new(false),
             }),
             journal,
             readers: Arc::new(ReaderPool {
@@ -199,6 +215,19 @@ impl Database {
         &self.write_log
     }
 
+    /// Refuse every write from now on, once the ones in flight have committed: what a server does before it lets go
+    /// of the data directory, so a background task can't commit after another process took over (`serve`,
+    /// `crate::ops::takeover`). Returns the ts of the last commit.
+    pub async fn seal(&self) -> anyhow::Result<u64> {
+        let mut guard = self.writer.lock().await;
+        self.writer.sealed.store(true, Ordering::SeqCst);
+        let finished = self.writer.commit_batch(&mut guard);
+        finish_members(finished);
+        let ts = storage::read_meta_u64(&guard, storage::META_TS)?;
+        self.writer.release(guard);
+        Ok(ts)
+    }
+
     /// The change journal's switch and size ([`journal`]).
     pub fn journal(&self) -> &Arc<journal::Journal> {
         &self.journal
@@ -209,6 +238,10 @@ impl Database {
     /// not race with commits (the replicator's trims and `_meta` keys, switching the journal). Doesn't bump the ts.
     pub(crate) async fn with_writer<R>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<R>) -> anyhow::Result<R> {
         let mut guard = self.writer.lock().await;
+        if self.writer.sealed.load(Ordering::SeqCst) {
+            self.writer.release(guard);
+            anyhow::bail!("the database is closed for writes (the server is shutting down)");
+        }
         // A batch of mutations left for this holder to continue: commit it first.
         let finished = self.writer.commit_batch(&mut guard);
         finish_members(finished);
@@ -231,6 +264,16 @@ impl Database {
     /// through the write path (indexes, search and vector entries maintained, the write log appended), unvalidated.
     /// The database must be exactly at `entry.ts - 1`. Used by point-in-time restores (`crate::ops::replicate`).
     pub async fn replay(&self, entry: &journal::JournalEntry) -> anyhow::Result<u64> {
+        self.replay_with(entry, false).await
+    }
+
+    /// Like [`replay`](Self::replay), but every document written must match its table's type (unless the table is
+    /// migrating): a takeover catching up on what the old server wrote after the copy (`crate::ops::takeover`).
+    pub async fn replay_checked(&self, entry: &journal::JournalEntry) -> anyhow::Result<u64> {
+        self.replay_with(entry, true).await
+    }
+
+    async fn replay_with(&self, entry: &journal::JournalEntry, validate: bool) -> anyhow::Result<u64> {
         let changes = entry.parse_changes()?;
         let txn = self.begin_write().await?;
         txn.with_state(|s| {
@@ -258,6 +301,17 @@ impl Database {
                     table.name,
                     change.table
                 );
+                if validate
+                    && let (Some(doc), Some(def)) = (change.doc.as_ref(), table.def.as_ref())
+                    && !self.catalog.is_migrating(&table.name)
+                    && let Err(e) = (def.validate)(&Value::Object(doc.clone()))
+                {
+                    anyhow::bail!(
+                        "a `{}` document written at ts {} doesn't match the table's type: {e}",
+                        table.name,
+                        entry.ts
+                    );
+                }
                 s.apply_change(&table, change.id, change.doc.as_ref())?;
             }
             Ok(())
@@ -363,6 +417,10 @@ impl Database {
     /// one commits the open batch first instead of joining it ([`SLOW_WRITE`]).
     pub async fn begin_write_as(&self, label: &str) -> anyhow::Result<Arc<WriteTxn>> {
         let guard = self.writer.lock().await;
+        if self.writer.sealed.load(Ordering::SeqCst) {
+            self.writer.release(guard);
+            anyhow::bail!("the database is closed for writes (the server is shutting down)");
+        }
         let mut conn = WriterGuard {
             guard: Some(guard),
             shared: self.writer.clone(),
@@ -501,6 +559,8 @@ pub(crate) struct WriterShared {
     durations: Mutex<std::collections::HashMap<String, (f64, Option<Instant>)>>,
     write_log: Arc<WriteLog>,
     journal: Arc<journal::Journal>,
+    /// Set by [`Database::seal`]: no write transaction may begin any more.
+    sealed: std::sync::atomic::AtomicBool,
 }
 
 impl WriterShared {

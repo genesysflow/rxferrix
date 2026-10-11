@@ -48,7 +48,23 @@ pub fn router(app: App) -> Router {
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
         // on top-level navigations, which CORS doesn't govern). Administrators can restrict origins at runtime.
         .layer(cors(&app))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), connection_close_while_draining))
         .with_state(app)
+}
+
+/// While the server drains before stopping (`App::begin_drain`), every response asks the client to close the
+/// connection, so keep-alive clients reconnect (to the next process, during a takeover) instead of sending a request
+/// on a connection that is about to be closed.
+async fn connection_close_while_draining(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    if app.is_draining() {
+        response.headers_mut().insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("close"));
+    }
+    response
 }
 
 /// Any origin, unless the `corsOrigins` setting lists the allowed ones (`crate::settings`).
@@ -123,10 +139,23 @@ async fn handle_socket(app: App, socket: WebSocket) {
     app.metrics().socket_opened();
     let _open = Open(app.clone());
     let (mut sink, mut stream) = socket.split();
+    let closing = app.clone();
     let (in_tx, mut out_rx) = worker::spawn(app);
 
     let mut writer = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
+        loop {
+            let msg = tokio::select! {
+                msg = out_rx.recv() => match msg {
+                    Some(msg) => msg,
+                    None => break,
+                },
+                // The server is shutting down (or handing over to a new process): tell the client to reconnect now.
+                _ = closing.closed() => {
+                    let frame = axum::extract::ws::CloseFrame { code: 1012, reason: "service restart".into() };
+                    let _ = tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Close(Some(frame)))).await;
+                    return;
+                }
+            };
             // A client that stops reading (while its TCP stack still acknowledges) would otherwise keep this task,
             // its worker and their queues alive for good.
             match tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Text(msg.to_text().into()))).await {

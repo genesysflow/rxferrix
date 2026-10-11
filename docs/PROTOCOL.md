@@ -86,6 +86,11 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 { "type": "Ping" }
 ```
 
+When the server shuts down or hands over to a new process (`serve --takeover`), it closes every WebSocket with close
+code **1012** ("service restart"). The client reconnects right away (within 250 ms of jitter, the backoff reset)
+instead of backing off: during a takeover the listening socket stays open, so the connection waits for the new
+process rather than being refused.
+
 ## Server guarantees
 
 1. **Atomic, consistent transitions.** After a Transition, every query the client has subscribed to has a result

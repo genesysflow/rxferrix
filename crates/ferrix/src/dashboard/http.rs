@@ -133,32 +133,38 @@ async fn logs_stream(
         done: bool,
     }
     let tail = Tail { rx: app.logs().subscribe(), filter, expires, session, done: false };
-    let entries = futures::stream::unfold(tail, |mut t| async move {
-        loop {
-            if t.done {
-                return None;
+    let closing = app.clone();
+    let entries = futures::stream::unfold(tail, move |mut t| {
+        let closing = closing.clone();
+        async move {
+            loop {
+                if t.done {
+                    return None;
+                }
+                let revoked = t.session.as_ref().map(|s| s.ended());
+                let event = tokio::select! {
+                    _ = tokio::time::sleep_until(t.expires) => {
+                        t.done = true;
+                        Event::default().event("expired").data("access token expired")
+                    }
+                    // The server is shutting down: end the stream so the graceful shutdown doesn't wait for it.
+                    _ = closing.closed() => return None,
+                    _ = async { match revoked { Some(r) => r.await, None => std::future::pending().await } } => {
+                        t.done = true;
+                        Event::default().event("revoked").data(crate::auth::revocation::SESSION_ENDED)
+                    }
+                    received = t.rx.recv() => match received {
+                        Ok(entry) if t.filter.matches(&entry) => match Event::default().event("log").json_data(&entry) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        },
+                        Ok(_) => continue,
+                        Err(RecvError::Lagged(n)) => Event::default().event("lagged").data(n.to_string()),
+                        Err(RecvError::Closed) => return None,
+                    }
+                };
+                return Some((Ok::<_, Infallible>(event), t));
             }
-            let revoked = t.session.as_ref().map(|s| s.ended());
-            let event = tokio::select! {
-                _ = tokio::time::sleep_until(t.expires) => {
-                    t.done = true;
-                    Event::default().event("expired").data("access token expired")
-                }
-                _ = async { match revoked { Some(r) => r.await, None => std::future::pending().await } } => {
-                    t.done = true;
-                    Event::default().event("revoked").data(crate::auth::revocation::SESSION_ENDED)
-                }
-                received = t.rx.recv() => match received {
-                    Ok(entry) if t.filter.matches(&entry) => match Event::default().event("log").json_data(&entry) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    },
-                    Ok(_) => continue,
-                    Err(RecvError::Lagged(n)) => Event::default().event("lagged").data(n.to_string()),
-                    Err(RecvError::Closed) => return None,
-                }
-            };
-            return Some((Ok::<_, Infallible>(event), t));
         }
     });
     let ready = futures::stream::once(async { Ok::<_, Infallible>(Event::default().event("ready").data("{}")) });

@@ -230,6 +230,10 @@ pub struct AppOptions {
     pub query_timeout: Duration,
     /// Open even if existing documents may not match changed table types (see `db::schema_check`).
     pub skip_schema_check: bool,
+    /// The schema check already ran on this database (`serve --takeover` checked its copy before swapping it in):
+    /// skip it and open these tables as migrating. Not for app code.
+    #[doc(hidden)]
+    pub prechecked_schema: Option<Vec<String>>,
     /// Retention of the execution log in `aux.db`. Default: 7 days or 200k rows.
     pub log_retention: LogRetention,
     /// File storage backend and limits (`crate::storage`). Default: `<dir>/storage`, 100 MiB uploads.
@@ -291,6 +295,7 @@ impl Default for AppOptions {
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             query_timeout: DEFAULT_QUERY_TIMEOUT,
             skip_schema_check: false,
+            prechecked_schema: None,
             log_retention: LogRetention::default(),
             storage: Default::default(),
             scheduler: Default::default(),
@@ -360,6 +365,11 @@ struct AppInner {
     replication: OnceLock<Arc<crate::ops::replicate::Replicator>>,
     /// The `backups` setting in effect (`crate::settings::backups`).
     backup_settings: std::sync::RwLock<Option<crate::settings::backups::StoredBackups>>,
+    /// Set when the server shuts down ([`App::begin_close`]): long-lived connections end (WebSockets with close code
+    /// 1012, "service restart"; the admin log stream).
+    closing: tokio::sync::watch::Sender<bool>,
+    /// Set first when the server shuts down ([`App::begin_drain`]): responses carry `Connection: close`.
+    draining: std::sync::atomic::AtomicBool,
     /// With `AppOptions::determinism_check`.
     determinism: Option<crate::determinism::DeterminismCheck>,
     /// The analytics copy, with `AppOptions::olap.enabled` (`crate::olap`).
@@ -518,6 +528,7 @@ impl App {
             // (`crate::ops::replicate`, `crate::olap`).
             journal: options.ops.replication.is_some() || options.olap.enabled,
             fsync_commits: options.fsync_commits,
+            prechecked: options.prechecked_schema.clone(),
         };
         let retention = options.log_retention.clone();
         let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
@@ -564,6 +575,8 @@ impl App {
                 subscriptions,
                 replication: OnceLock::new(),
                 backup_settings: std::sync::RwLock::new(None),
+                closing: tokio::sync::watch::channel(false).0,
+                draining: std::sync::atomic::AtomicBool::new(false),
                 determinism,
                 olap: OnceLock::new(),
             }),
@@ -660,6 +673,29 @@ impl App {
 
     pub(crate) fn set_backup_settings(&self, settings: Option<crate::settings::backups::StoredBackups>) {
         *self.inner.backup_settings.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    /// The server is about to stop: responses ask clients to close their connections (`Connection: close`), so
+    /// keep-alive connections end cleanly before the listener stops. `serve` drains briefly before stopping.
+    pub fn begin_drain(&self) {
+        self.inner.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether [`App::begin_drain`] was called.
+    pub fn is_draining(&self) -> bool {
+        self.inner.draining.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The server is shutting down: WebSockets close with code 1012 ("service restart", so clients reconnect at
+    /// once instead of backing off) and the admin log streams end. `serve` calls it when it stops accepting.
+    pub fn begin_close(&self) {
+        self.inner.closing.send_replace(true);
+    }
+
+    /// Resolves once [`App::begin_close`] was called.
+    pub async fn closed(&self) {
+        let mut rx = self.inner.closing.subscribe();
+        let _ = rx.wait_for(|closing| *closing).await;
     }
 
     /// The key that seals environment variables (`crate::env`), for a context.

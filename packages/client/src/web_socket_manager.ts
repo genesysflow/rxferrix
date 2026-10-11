@@ -5,6 +5,10 @@ import type { Logger } from "./logging.js";
 export const SERVER_INACTIVITY_TIMEOUT_MS = 30_000;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 16_000;
+/** The close code a server sends when it restarts or hands over to a new process (RFC 6455 "Service Restart"). */
+const SERVICE_RESTART = 1012;
+/** Spread of the immediate reconnects after a restart, so every client doesn't arrive in the same millisecond. */
+const RESTART_JITTER_MS = 250;
 
 export type SocketState = "disconnected" | "connecting" | "ready" | "stopped";
 
@@ -224,7 +228,10 @@ export class WebSocketManager {
       if (this.ws !== ws) return;
       const reason = event?.reason ? `${event.code}: ${event.reason}` : `closed (${event?.code ?? "?"})`;
       this.closeCurrent(reason);
-      this.scheduleReconnect(reason);
+      // 1012 "service restart": the server is restarting or handing over to a new process, and the new one is
+      // already accepting (or about to): reconnect right away (with a little jitter) instead of backing off.
+      if (event?.code === SERVICE_RESTART) this.retries = 0;
+      this.scheduleReconnect(reason, event?.code === SERVICE_RESTART ? Math.random() * RESTART_JITTER_MS : undefined);
     };
   }
 
@@ -251,9 +258,9 @@ export class WebSocketManager {
     this.callbacks.onStateChange();
   }
 
-  private scheduleReconnect(reason: string): void {
+  private scheduleReconnect(reason: string, delayMs?: number): void {
     if (this._state === "stopped" || this.reconnectTimer !== null) return;
-    const delay = this.nextBackoff();
+    const delay = delayMs ?? this.nextBackoff();
     this.retries += 1;
     this.logger.info(`connection lost (${reason}); reconnecting in ${Math.round(delay)}ms`);
     this.reconnectTimer = setTimeout(() => {

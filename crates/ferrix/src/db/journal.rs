@@ -47,13 +47,21 @@ pub const META_SHIPPED_TIME: &str = "replication_shipped_time";
 pub const META_OLAP_TS: &str = "olap_applied_ts";
 /// `_meta` key: the id of the analytics copy built from this database (a restored database has none: it rebuilds).
 pub const META_OLAP_ID: &str = "olap_id";
+/// `_meta` key: the ts a new process taking over this database copied it at (`crate::ops::takeover`; rows after it
+/// are kept until the takeover finishes or is abandoned).
+pub const META_TAKEOVER_TS: &str = "takeover_ts";
 
 /// A reader of the journal ([`release`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consumer {
     Replication,
     Olap,
+    /// A new process taking over the data directory, catching up on commits made after its copy.
+    Takeover,
 }
+
+/// Every consumer.
+pub const CONSUMERS: [Consumer; 3] = [Consumer::Replication, Consumer::Olap, Consumer::Takeover];
 
 impl Consumer {
     /// The `_meta` key holding its position.
@@ -61,6 +69,7 @@ impl Consumer {
         match self {
             Consumer::Replication => META_SHIPPED_TS,
             Consumer::Olap => META_OLAP_TS,
+            Consumer::Takeover => META_TAKEOVER_TS,
         }
     }
 }
@@ -74,6 +83,7 @@ pub struct Journal {
     /// Which consumers currently need rows ([`release`]).
     replication: AtomicBool,
     olap: AtomicBool,
+    takeover: AtomicBool,
 }
 
 impl Journal {
@@ -106,6 +116,7 @@ impl Journal {
         match consumer {
             Consumer::Replication => &self.replication,
             Consumer::Olap => &self.olap,
+            Consumer::Takeover => &self.takeover,
         }
     }
 
@@ -121,7 +132,7 @@ impl Journal {
 
     /// Whether a consumer other than `consumer` is active.
     pub(crate) fn others_active(&self, consumer: Consumer) -> bool {
-        [Consumer::Replication, Consumer::Olap].into_iter().any(|c| c != consumer && self.is_consumer(c))
+        CONSUMERS.into_iter().any(|c| c != consumer && self.is_consumer(c))
     }
 }
 
@@ -130,7 +141,7 @@ impl Journal {
 pub(crate) fn release(conn: &Connection, journal: &Journal, consumer: Consumer, ts: u64) -> anyhow::Result<u64> {
     crate::db::storage::write_meta(conn, consumer.meta_key(), rusqlite::types::Value::Integer(ts as i64))?;
     let mut floor = ts;
-    for other in [Consumer::Replication, Consumer::Olap] {
+    for other in CONSUMERS {
         if other != consumer && journal.is_consumer(other) {
             floor = floor.min(crate::db::storage::read_meta_u64(conn, other.meta_key())?);
         }

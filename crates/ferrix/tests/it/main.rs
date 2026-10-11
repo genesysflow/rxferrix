@@ -43,6 +43,7 @@ mod settings;
 mod shared;
 mod stemming;
 mod storage;
+mod takeover;
 mod vector_queries;
 mod websocket;
 mod workflow;

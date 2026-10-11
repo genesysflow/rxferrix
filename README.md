@@ -760,6 +760,7 @@ app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun
 ## Tests
 
 ```sh
+cargo fmt --all --check                                         # formatted with rustfmt (rustfmt.toml); `cargo fmt --all` fixes it
 cargo test --workspace                                          # Rust: unit, proptests, model-based reactivity, WS e2e
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # generated TS type-checks with tsc
 cargo test -p ferrix-cli --test new -- --ignored                 # `ferrix new` apps build, typecheck; no SQLite warning

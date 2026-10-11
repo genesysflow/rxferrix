@@ -1,8 +1,8 @@
 # Gates, the static musl release binary and the Docker image.
 #
-#   gates   every check of README "Tests": Rust tests and clippy (no warnings), the macro tests, the TS type check of
-#           generated code, the TS packages, the committed dashboard build, and the end-to-end tests (dashboard,
-#           todo example, chat example) in Chromium.
+#   gates   every check of README "Tests": rustfmt, Rust tests and clippy (no warnings), the macro tests, the TS type
+#           check of generated code, the TS packages, the committed dashboard build, and the end-to-end tests
+#           (dashboard, todo example, chat example) in Chromium.
 #   olap         clippy and the tests with the `olap` feature (DuckDB, built from source: a job of its own, with its
 #                own cache and disk; with the cache warm, DuckDB isn't rebuilt).
 #   release      scripts/release.sh: x86_64-unknown-linux-musl todo-server with the web app embedded (an artifact;
@@ -80,6 +80,9 @@ jobs:
         run: |
           test -z "${LIBSQLITE3_FLAGS:-}" || { echo "LIBSQLITE3_FLAGS must come from .cargo/config.toml"; exit 1; }
           grep -q 'LIBSQLITE3_FLAGS' .cargo/config.toml
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
 
       - name: JS packages
         run: |

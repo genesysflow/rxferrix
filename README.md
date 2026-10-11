@@ -505,7 +505,7 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 `todo-server admin create you@example.com`, then sign in.
 
 - **Data**: every table (system tables grouped below), with a live, virtualized document grid (smooth at 10k+ rows;
-  pages load as you scroll), filters on index fields, a search box for tables with a search index (live, most
+  pages load as you scroll; new rows slide in, changed cells flash, deleted rows fade out), filters on index fields, a search box for tables with a search index (live, most
   relevant first), a quick filter over the loaded rows, JSONL/CSV export, a side panel with a JSON editor (insert,
   edit, delete; validated against the table's Rust type), and clickable ids that open the referenced document. The
   schema view lists indexes, tokenizers (with their language), vector index kinds (with HNSW parameters) and the

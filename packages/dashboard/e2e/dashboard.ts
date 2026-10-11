@@ -200,6 +200,12 @@ try {
     const r = await call(base, "mutation", "todos:add", { text: first });
     if (r.status !== 200) throw new Error(`todos:add failed: ${JSON.stringify(r.body)}`);
     await page.getByTestId("document-grid").getByText(first).waitFor({ timeout: 3000 });
+    // A removed document fades out in place for a moment (a "ghost" row), then goes.
+    const brief = await call(base, "mutation", "todos:add", { text: "short-lived" });
+    await page.getByTestId("document-grid").getByText("short-lived").waitFor({ timeout: 3000 });
+    await call(base, "mutation", "todos:remove", { id: brief.body.value });
+    await page.getByTestId("removed-row").filter({ hasText: "short-lived" }).waitFor({ timeout: 3000 });
+    await page.getByTestId("removed-row").waitFor({ state: "detached", timeout: 3000 });
   });
   await shot(page, "data-grid");
 

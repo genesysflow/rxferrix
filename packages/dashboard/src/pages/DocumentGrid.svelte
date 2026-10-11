@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { FerrixError } from "@ferrix/client";
   import { useMutation, usePaginatedQuery } from "@ferrix/svelte";
   import {
@@ -12,6 +13,7 @@
   } from "../lib/api.js";
   import { exportTable, saveBlob } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
+  import { diffSnapshots, snapshot, withGhosts, type Removed, type Snapshot } from "../lib/changes.js";
   import { columnsOf, documentMatches, parseFilterValue } from "../lib/format.js";
   import { href, link, router } from "../lib/router.svelte.js";
   import { columnWidths, nearEnd, rowWindow } from "../lib/virtual.js";
@@ -94,17 +96,120 @@
   const widths = $derived(columnWidths(columns, docs.results.slice(0, 300)));
   const totalWidth = $derived(widths.reduce((a, b) => a + b, 0) + (writable ? 32 : 0));
 
+  // Live changes, animated: rows that appear slide in, changed cells flash, removed rows fade out (as "ghost" rows
+  // kept for a moment where they were). Diffed per document id, so rows scrolled into view mid-animation pick it up
+  // where it is, and scrolling itself animates nothing.
+  const FLASH_MS = 1800;
+  const GHOST_MS = 700;
+  /** Diffing stops past this many loaded rows (it serializes every row on every update). */
+  const DIFF_LIMIT = 5000;
+  let recent = $state.raw(new Map<string, { kind: "inserted" | "changed"; fields: string[]; at: number }>());
+  let ghosts = $state.raw<(Removed & { at: number })[]>([]);
+  let last: { key: string; snap: Snapshot; settled: boolean } | null = null;
+  $effect(() => {
+    const results = docs.results;
+    const status = docs.status;
+    const key = queryKey;
+    untrack(() => {
+      if (results.length > DIFF_LIMIT) {
+        last = null;
+        return;
+      }
+      const snap = snapshot(results, status !== "Exhausted");
+      const prev = last;
+      // A first page (or a new query) is not a change.
+      last = { key, snap, settled: status !== "LoadingFirstPage" };
+      if (!prev || prev.key !== key || !prev.settled) {
+        if (prev?.key !== key) {
+          recent = new Map();
+          ghosts = [];
+        }
+        return;
+      }
+      const changes = diffSnapshots(prev.snap, snap);
+      const now = performance.now();
+      if (changes.inserted.length > 0 || changes.changed.size > 0) {
+        const next = new Map([...recent].filter(([, r]) => now - r.at < FLASH_MS));
+        for (const id of changes.inserted) next.set(id, { kind: "inserted", fields: [], at: now });
+        for (const [id, fields] of changes.changed) next.set(id, { kind: "changed", fields, at: now });
+        recent = next;
+      }
+      if (changes.removed.length > 0) {
+        ghosts = [...ghosts.filter((g) => now - g.at < GHOST_MS), ...changes.removed.map((r) => ({ ...r, at: now }))];
+        setTimeout(() => (ghosts = ghosts.filter((g) => performance.now() - g.at < GHOST_MS)), GHOST_MS + 20);
+      }
+    });
+  });
+  const display = $derived(withGhosts(rows, needle ? ghosts.filter((g) => documentMatches(g.doc, needle)) : ghosts));
+
+  const reducedMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  type Flash = { kind: "inserted" | "changed" | "removed"; at: number } | undefined;
+  /** A theme color (`--ok`, ...) at `alpha`. */
+  function tint(node: HTMLElement, name: string, alpha: number): string {
+    const hex = getComputedStyle(node).getPropertyValue(name).trim();
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    return m ? `rgb(${parseInt(m[1]!, 16)} ${parseInt(m[2]!, 16)} ${parseInt(m[3]!, 16)} / ${alpha})` : hex;
+  }
+  function keyframes(node: HTMLElement, kind: "inserted" | "changed" | "removed"): Keyframe[] {
+    if (kind === "inserted") {
+      const c = tint(node, "--ok", 0.22);
+      return reducedMotion
+        ? [{ backgroundColor: c }, { backgroundColor: c, offset: 0.4 }]
+        : [
+            { backgroundColor: c, opacity: 0, transform: "translateY(-10px)" },
+            { backgroundColor: c, opacity: 1, transform: "none", offset: 0.12 },
+            { backgroundColor: c, offset: 0.4 },
+          ];
+    }
+    if (kind === "changed") {
+      const c = tint(node, "--warn", 0.3);
+      return [{ backgroundColor: c }, { backgroundColor: c, offset: 0.35 }];
+    }
+    const c = tint(node, "--err", 0.16);
+    return [
+      { backgroundColor: c, opacity: 1 },
+      { backgroundColor: c, opacity: 0 },
+    ];
+  }
+  /** Plays a row's or cell's animation for a change (once per change; partway through if it started earlier). */
+  function flash(node: HTMLElement, change: Flash) {
+    let played = 0;
+    const play = (c: Flash) => {
+      if (!c || c.at === played || typeof node.animate !== "function") return;
+      played = c.at;
+      const duration = c.kind === "removed" ? GHOST_MS : FLASH_MS;
+      const age = performance.now() - c.at;
+      if (age >= duration) return;
+      const timing: KeyframeAnimationOptions = { duration, delay: -age, easing: "ease-out", fill: c.kind === "removed" ? "forwards" : "none" };
+      node.animate(keyframes(node, c.kind), timing);
+      // A removed row then closes up: its cells shrink to nothing, so the rows below slide up instead of jumping.
+      if (c.kind === "removed" && !reducedMotion) {
+        for (const cell of node.children) {
+          (cell as HTMLElement).animate(
+            [
+              { height: `${ROW}px`, lineHeight: `${ROW - 1}px`, offset: 0.55 },
+              { height: "0px", lineHeight: "0px", fontSize: "0px", borderBottomWidth: "0px" },
+            ],
+            { ...timing, easing: "ease-in-out" },
+          );
+        }
+      }
+    };
+    play(change);
+    return { update: play };
+  }
+
   // Virtualization: the window of rows to render, from the scroll position.
   let scroller: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
   let viewport = $state(600);
   const win = $derived(
-    rowWindow({ scrollTop: Math.max(0, scrollTop - HEADER), viewportHeight: viewport - HEADER, rowHeight: ROW, count: rows.length }),
+    rowWindow({ scrollTop: Math.max(0, scrollTop - HEADER), viewportHeight: viewport - HEADER, rowHeight: ROW, count: display.length }),
   );
   // Load the next page when the window nears the end of what is loaded (not while quick-filtering: a filter that
   // matches nothing would otherwise page through the whole table).
   $effect(() => {
-    if (docs.status === "CanLoadMore" && !needle && nearEnd(win, rows.length, 60)) docs.loadMore(PAGE);
+    if (docs.status === "CanLoadMore" && !needle && nearEnd(win, display.length, 60)) docs.loadMore(PAGE);
   });
   // A new query starts at the top. Keyed by names, not the index objects: the table summary (and so every derived
   // object) is re-sent on every write, and a primitive derived only notifies when its value changes.
@@ -394,7 +499,7 @@
       />
     {:else if docs.isLoading && docs.results.length === 0}
       <Empty title="Loading…" />
-    {:else if docs.results.length === 0}
+    {:else if docs.results.length === 0 && ghosts.length === 0}
       {#if searching}
         <Empty title="No documents match this search" hint="Try fewer or shorter words." />
       {:else}
@@ -406,7 +511,7 @@
         </Empty>
       {/if}
     {:else}
-      <table class="grid vgrid" data-testid="document-grid" style:width={`${totalWidth}px`} aria-rowcount={rows.length + 1}>
+      <table class="grid vgrid" data-testid="document-grid" style:width={`${totalWidth}px`} aria-rowcount={display.length + 1}>
         <colgroup>
           {#if writable}<col style:width="32px" />{/if}
           {#each widths as w, i (columns[i])}<col style:width={`${w}px`} />{/each}
@@ -421,23 +526,42 @@
           {#if win.padTop > 0}
             <tr class="spacer" aria-hidden="true"><td colspan={columns.length + 1} style:height={`${win.padTop}px`}></td></tr>
           {/if}
-          {#each rows.slice(win.start, win.end) as doc, i (doc._id)}
+          {#each display.slice(win.start, win.end) as { doc, ghost }, i (ghost ? `ghost:${doc._id}` : doc._id)}
             {@const id = doc._id as string}
-            <tr class:selected={id === selectedId} onclick={() => open(id)} aria-rowindex={win.start + i + 2} data-row={win.start + i}>
-              {#if writable}
-                <td class="check" onclick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    aria-label={`Select ${id}`}
-                    checked={selected.has(id)}
-                    onchange={(e) => toggle(id, e.currentTarget.checked)}
-                  />
-                </td>
-              {/if}
-              {#each columns as c (c)}
-                <td><JsonValue value={doc[c]} field={c} /></td>
-              {/each}
-            </tr>
+            {@const change = ghost ? undefined : recent.get(id)}
+            {#if ghost}
+              {@const gone = ghosts.find((g) => g.id === id)}
+              <tr class="ghost" aria-hidden="true" data-testid="removed-row" use:flash={gone && { kind: "removed", at: gone.at }}>
+                {#if writable}<td class="check"></td>{/if}
+                {#each columns as c (c)}
+                  <td><JsonValue value={doc[c]} field={c} /></td>
+                {/each}
+              </tr>
+            {:else}
+              <tr
+                class:selected={id === selectedId}
+                onclick={() => open(id)}
+                aria-rowindex={win.start + i + 2}
+                data-row={win.start + i}
+                use:flash={change?.kind === "inserted" ? change : undefined}
+              >
+                {#if writable}
+                  <td class="check" onclick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${id}`}
+                      checked={selected.has(id)}
+                      onchange={(e) => toggle(id, e.currentTarget.checked)}
+                    />
+                  </td>
+                {/if}
+                {#each columns as c (c)}
+                  <td use:flash={change?.kind === "changed" && change.fields.includes(c) ? change : undefined}>
+                    <JsonValue value={doc[c]} field={c} />
+                  </td>
+                {/each}
+              </tr>
+            {/if}
           {/each}
           {#if win.padBottom > 0}
             <tr class="spacer" aria-hidden="true"><td colspan={columns.length + 1} style:height={`${win.padBottom}px`}></td></tr>
@@ -537,6 +661,12 @@
     line-height: 31px;
     vertical-align: middle;
     max-width: none;
+  }
+  .vgrid tr.ghost {
+    cursor: default;
+    pointer-events: none;
+    text-decoration: line-through;
+    text-decoration-color: var(--err);
   }
   .vgrid tr.spacer td {
     padding: 0;

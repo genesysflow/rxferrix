@@ -25,7 +25,8 @@ edges acceptable) · **Started:** 2026-10-09 · **Updated:** 2026-10-11
 - Multi-node or horizontal scaling. One process, one SQLite file.
 - Multi-tenancy or a hosted cloud.
 - Running user code in JS/TS, WASM, or a sandbox.
-- Raw SQL access from user functions. Functions go through the document query API so reactivity stays correct.
+- Raw SQL access to the live database from user functions. Functions go through the document query API so reactivity
+  stays correct. (Read-only SQL over the analytics copy, §7.6, is allowed in actions: that copy is not reactive.)
 - Offline-first, local-first sync. Optimistic updates are in scope; offline persistence is not.
 - Declarative access rules. Authorization lives in function code.
 
@@ -485,6 +486,57 @@ Admins are stored in the `_admins` table and created with `ferrix admin create e
   Beyond that, `kind = "hnsw"` adds an in-memory HNSW graph kept consistent with the committed `vec0` table (done in
   Phase 8; ~0.4 ms per query at 200k × 384), with per-index `m`, `ef_construction`, `ef_search` and a per-search `ef`.
 
+### 7.6 Analytics (OLAP; planned, Phase 11)
+
+Ad-hoc analytical queries (group-bys, joins, time series over millions of documents) run on a **columnar copy** of
+the data in an embedded DuckDB, a few hundred milliseconds behind the live database, never on the live SQLite file:
+its row store of JSON documents is the wrong shape for scans, and long scans would hold reader connections and WAL
+snapshots that subscriptions and checkpoints need. Behind the cargo feature `olap` (off by default: DuckDB adds
+roughly 25–40 MB and minutes of C++ build to a binary that is 23 MB today), and on at runtime with `--olap`.
+
+```rust
+#[action]
+pub async fn revenue_by_day(ctx: &ActionCtx, since: f64) -> Result<Vec<DayRevenue>> {
+    ctx.olap
+        .query_as::<DayRevenue>(
+            "SELECT date_trunc('day', to_timestamp(_creationTime / 1000)) AS day, sum(amount) AS total
+             FROM orders WHERE _creationTime >= ? GROUP BY day ORDER BY day",
+            (since,),
+        )
+        .await
+}
+// After a mutation, wait until the copy has it: ctx.olap.at_least(ts).query_as::<T>(..)
+```
+
+- **Feed: the change journal** (`_journal`, built for continuous replication in Phase 9; `db::journal`): exactly once, in commit order, the final state of
+  every document a commit wrote. `--olap` turns journaling on like `--replicate-to` does. Trimming waits for every
+  consumer (the replicator's shipped ts and the copy's applied ts); a copy that falls too far behind (a row or byte
+  budget) gives up its cursor and is rebuilt instead, so the live database never waits for analytics.
+- **Loading**: on first start, after a restore (generation change or ts going backwards), when a table's shape
+  changes, or after falling behind, a table is rebuilt from one reader snapshot at ts `S` (DuckDB's Appender), then
+  catches up from the journal after `S`, and is swapped in atomically.
+- **Applying**: batches of journal rows (every ~250 ms or N rows) become, per table, a delete of the written ids plus
+  an append of their new states, in one DuckDB transaction that also records the applied ts. A query runs on one
+  DuckDB snapshot, so it sees whole commits, and reports the ts it is current to (`as_of_ts`).
+- **Columns come from the Rust types.** `#[table]` / `#[object]` emit a structured shape (field names and types)
+  alongside the TS type; today only a TS string and a validator exist at runtime. Mapping: strings → VARCHAR, ints →
+  BIGINT, floats → DOUBLE, bool → BOOLEAN, `Bytes` → BLOB, `Id<T>` → VARCHAR, `Option<T>` → nullable, nested
+  objects → STRUCT, `Vec<T>` → LIST, unit enums → VARCHAR, anything else → JSON. System fields `_id`,
+  `_creationTime` and `_ts` (commit ts) come first. A changed shape (a fingerprint per table) rebuilds that table.
+- **What is copied**: every user table. System tables only from an allowlist, with secrets never copied (password
+  hashes, session and refresh tokens, `_settings` secrets): SQL in actions could otherwise read them.
+- **The sandbox**: only statements that prepare as a single `SELECT` (CTEs included) run, each in a read-only
+  transaction that is rolled back; `enable_external_access = false` (no files, no HTTP: `read_csv('/etc/passwd')`
+  must fail), no extension autoloading, `lock_configuration = true`; a memory limit (`--olap-memory`), a thread
+  limit and a timeout (`--olap-timeout`, enforced with DuckDB's interrupt). Not available in queries or mutations:
+  results lag the data and are not reactive.
+- **Operations**: the copy is derived data in `<data dir>/olap.duckdb`; backups and replication skip it and a
+  restore rebuilds it. Its lag (ts and seconds), size, rows applied and rebuilds go to `/metrics`, the stats endpoint
+  and the dashboard. `TestApp::olap_sync()` waits until the copy is current, so tests are deterministic.
+- **Later**: a dashboard SQL console on the same sandbox (admin only, audited); `COPY … TO 'x.parquet'` exports
+  through an admin endpoint; live in-app aggregates maintained in the write transaction, which are a separate,
+  reactive feature.
+
 ---
 
 ## 8. Operations
@@ -820,6 +872,32 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   them. Depends on the checkout it was built from (path dependency, @ferrix packages packed into `web/vendor`) or on
   the published versions. Tested end to end by `cargo test -p ferrix-cli --test new -- --ignored`.
 
+### Phase 11 — Analytics (OLAP) (L) — planned
+Design: §7.6. Each step ends with tests and docs (README, docs/CONTRACT.md).
+- [ ] **Spike (S), go/no-go**: the `duckdb` crate (bundled) builds in the workspace, for `x86_64-unknown-linux-musl`
+  with cargo-zigbuild (the release target) as well as glibc; binary size and build time with and without the
+  feature; Appender throughput for 1M documents; a delete-and-append batch of 1k changes; a 1M-row group-by. If musl
+  or the size fails, the fallbacks are a glibc-only `olap` build, or DataFusion over Parquet files.
+- [ ] **Shapes from the macros (M)**: `#[table]` and `#[object]` emit a structured shape of their fields (a `Shape`
+  trait for the primitives, `Option`, `Vec`, `Id<T>`, `Bytes`, maps and enums), with a fingerprint per table; the
+  DuckDB column mapping and the JSON fallback; macro snapshot tests. The dashboard's schema view can show it too.
+- [ ] **The copy (M)**: `AppOptions::olap` / `--olap`; journal consumers with coordinated trimming (replicator and
+  copy) and the fall-behind budget; per-table rebuilds from a snapshot plus catch-up, swapped in atomically; batched
+  apply in DuckDB transactions with the applied ts; restore and generation detection; shape changes rebuild the
+  table; system-table allowlist and secret columns.
+  Tests: a model test (random inserts, patches, deletes and migrations; once caught up, every table's count and
+  per-group sums match the live data), rebuilding while writes continue, restarts resuming from the cursor, falling
+  behind, a point-in-time restore, replication and the copy trimming one journal.
+- [ ] **`ctx.olap` in actions (S–M)**: `query` (rows as JSON, column names and types, `as_of_ts`), `query_as::<T>`,
+  positional parameters, `at_least(ts)` for read-your-writes after `run_mutation`; the sandbox (single SELECT,
+  read-only, no external access or extensions, memory, threads, timeout); errors as user errors with DuckDB's
+  message; `TestApp::olap_sync`. Tests: file and HTTP access blocked, writes and `ATTACH` rejected, timeouts
+  interrupt, secrets absent, results typed.
+- [ ] **Operations and release (S)**: lag, size, applied rows and rebuilds in `/metrics`, the stats endpoint and the
+  dashboard Overview; a CI job that builds and tests with `--features olap` (cached: DuckDB's first build takes
+  minutes); an `olap` release artifact next to the default binary; the chat or todo example gets one analytics action.
+- **Later**: the dashboard SQL console (same sandbox, admin only, audited); Parquet exports; live in-app aggregates.
+
 ---
 
 ## 11. Risks and open questions
@@ -833,6 +911,9 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 | **Reactive pagination correctness.** | Pin each page's end cursor and cover it with model-based tests. |
 | **Schema evolution** with existing data. | Validate at startup and refuse to start on mismatch. Provide `#[migration]` batches and dev-mode dashboard links to bad documents. |
 | **SQLite build flags.** rusqlite's bundled SQLite (`SQLITE_ENABLE_MEMORY_MANAGEMENT`, memstatus on) serializes reader connections on global mutexes. | The workspace sets `LIBSQLITE3_FLAGS` in `.cargo/config.toml`, and `ferrix new` gives every app the same file (a dependency can't set it for them); memstatus is also turned off at runtime. Apps created otherwise must add it (ferrix logs a warning at startup). A runtime-only fix would be a custom page cache (`SQLITE_CONFIG_PCACHE2`), or upstreaming a feature to `libsqlite3-sys`. |
+| **DuckDB in a static musl binary** (C++, size, build time). | Phase 11 starts with a go/no-go spike; the feature is off by default; fallbacks are a glibc-only `olap` build or DataFusion over Parquet. |
+| **SQL in actions reaching data or files it shouldn't.** | One read-only SELECT per call, `enable_external_access = false`, no extensions, locked configuration, limits and a timeout; secrets never copied; sandbox escape tests. |
+| **The analytics copy holding back the live database.** | It only reads the journal; trimming gives up on a copy past its budget, which is rebuilt from a snapshot instead. |
 | Write-log and subscription memory growth. | Trim the log to the oldest in-flight `ts`. Cap result sizes (for example, 8MB per query) and documents scanned per query. |
 
 **Defaults I chose; easy to revisit:**

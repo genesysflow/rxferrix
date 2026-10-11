@@ -144,7 +144,15 @@ pub struct TableDef {
     pub vector_indexes: Vec<VectorIndexDef>,
     pub ts: fn() -> String,
     pub validate: fn(&serde_json::Value) -> std::result::Result<(), String>,
+    pub shape: fn() -> shape::Shape,
 }
+
+/// `ferrix::Bytes` (for `shape`).
+pub struct Bytes(pub Vec<u8>);
+
+/// The real `ferrix::shape`, so expansions use exactly its items.
+#[path = "../../../../ferrix/src/shape.rs"]
+pub mod shape;
 impl PartialEq for TableDef {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name

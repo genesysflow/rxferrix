@@ -16,3 +16,11 @@ pub enum Status {
     InProgress,
     Done { at: f64 },
 }
+impl ::ferrix::shape::HasShape for Status {
+    fn shape() -> ::ferrix::shape::Shape {
+        ::ferrix::shape::guard(
+            ::core::any::type_name::<Self>(),
+            || ::ferrix::shape::Shape::Json,
+        )
+    }
+}

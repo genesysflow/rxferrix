@@ -19,7 +19,14 @@ impl ::ferrix::Table for Item {
             ::ferrix::IndexDef { name: "by_name", fields: vec!["name"] },
         ], search_indexes: vec![], vector_indexes: vec![],
         ts: || ::ferrix::__private::ts_inline::<Item>(),
-        validate: ::ferrix::__private::validate_doc::<Item> }
+        validate: ::ferrix::__private::validate_doc::<Item>,
+        shape: || {
+            let mut s = ::ferrix::shape::StructShape::default();
+            s.field("group", ::ferrix::shape::Shape::Int);
+            s.field("score", ::ferrix::shape::Shape::Int);
+            s.field("name", ::ferrix::shape::Shape::Text);
+            ::ferrix::shape::Shape::Struct(s)
+        } }
     }
 }
 

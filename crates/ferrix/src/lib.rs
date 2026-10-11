@@ -43,6 +43,7 @@ pub mod scheduler;
 pub mod schema;
 pub mod server;
 pub mod settings;
+pub mod shape;
 pub mod storage;
 pub mod sync;
 pub mod testing;

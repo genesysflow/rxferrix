@@ -20,3 +20,36 @@ pub struct MessageView {
     pub author_name: String,
     pub reactions: Vec<ReactionGroup>,
 }
+impl ::ferrix::shape::HasShape for MessageView {
+    fn shape() -> ::ferrix::shape::Shape {
+        ::ferrix::shape::guard(
+            ::core::any::type_name::<Self>(),
+            || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.flatten({
+                    #[allow(unused_imports)]
+                    use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                    (&&::ferrix::shape::ShapeProbe::<Doc<Message>>::new()).probe_shape()
+                });
+                s.field(
+                    "authorName",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "reactions",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Vec<ReactionGroup>>::new())
+                            .probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
+        )
+    }
+}

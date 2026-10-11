@@ -27,6 +27,18 @@ impl ::ferrix::Table for User {
             vector_indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<User>(),
             validate: ::ferrix::__private::validate_doc::<User>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field(
+                    "name",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
         }
     }
 }

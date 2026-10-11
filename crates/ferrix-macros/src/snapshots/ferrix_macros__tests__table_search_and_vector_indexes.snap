@@ -45,6 +45,53 @@ impl ::ferrix::Table for Message {
             ],
             ts: || ::ferrix::__private::ts_inline::<Message>(),
             validate: ::ferrix::__private::validate_doc::<Message>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field(
+                    "channel",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "body",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "title",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
+                            .probe_shape()
+                    },
+                );
+                s.field(
+                    "author",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
+                            .probe_shape()
+                    },
+                );
+                s.field(
+                    "embedding",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<Vec<f32>>>::new())
+                            .probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
         }
     }
 }

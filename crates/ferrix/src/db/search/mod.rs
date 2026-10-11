@@ -874,6 +874,7 @@ mod tests {
             }],
             ts: || "{ }".into(),
             validate: |_| Ok(()),
+            shape: crate::shape::Shape::unknown,
         }
     }
 

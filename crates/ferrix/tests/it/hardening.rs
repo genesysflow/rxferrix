@@ -112,6 +112,7 @@ pub mod lossy {
                 vector_indexes: vec![],
                 ts: || ::ferrix::__private::ts_inline::<Lossy>(),
                 validate: ::ferrix::__private::validate_doc::<Lossy>,
+                shape: ::ferrix::shape::Shape::unknown,
             }
         }
     }

@@ -40,6 +40,44 @@ impl ::ferrix::Table for TodoItem {
             vector_indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<TodoItem>(),
             validate: ::ferrix::__private::validate_doc::<TodoItem>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field(
+                    "owner",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "dueAt",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<f64>>::new())
+                            .probe_shape()
+                    },
+                );
+                s.field(
+                    "type",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "tags",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Vec<String>>::new())
+                            .probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
         }
     }
 }

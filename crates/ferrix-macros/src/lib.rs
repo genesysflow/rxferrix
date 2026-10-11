@@ -16,6 +16,7 @@ mod function;
 mod migration;
 mod object;
 mod search;
+mod shape;
 mod table;
 mod util;
 

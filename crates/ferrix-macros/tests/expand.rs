@@ -313,7 +313,8 @@ fn assert_send<T: Send>(_: &T) {}
 
 #[test]
 fn tables_are_registered() {
-    let mut defs: Vec<TableDef> = TABLES.iter().map(|f| f()).collect();
+    // `shaped` has a test of its own (`shapes_follow_serde`).
+    let mut defs: Vec<TableDef> = TABLES.iter().map(|f| f()).filter(|d| d.name != "shaped").collect();
     defs.sort_by_key(|d| d.name);
     let summary: Vec<(&str, Vec<IndexDef>, String)> = defs.iter().map(|d| (d.name, d.indexes.clone(), (d.ts)())).collect();
     assert_eq!(
@@ -690,4 +691,83 @@ fn user_fns_stay_callable_and_shadowing_works() {
         block_on(ferrix::ActionCtx::mock().run_query::<shadowing::channel>(())).unwrap(),
         1
     );
+}
+
+/// Shapes emitted by `#[table]` and `#[object]` (`ferrix::shape`).
+pub mod shapes {
+    use ferrix_macros::{object, table};
+
+    /// A plain serde type without `HasShape`: JSON.
+    #[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS, Clone, Debug)]
+    #[serde(crate = "::ferrix::__private::serde")]
+    #[ts(crate = "::ferrix::__private::ts_rs")]
+    pub struct Opaque {
+        pub x: i32,
+    }
+
+    #[object]
+    #[derive(Clone, Debug)]
+    pub enum Level {
+        Low,
+        High,
+    }
+
+    #[object]
+    #[derive(Clone, Debug)]
+    pub struct Meta {
+        pub source_app: String,
+        pub tags: Vec<String>,
+    }
+
+    #[object]
+    #[derive(Clone, Debug)]
+    #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+    pub struct Loud {
+        pub some_field: bool,
+    }
+
+    /// A recursive object: the inner reference is JSON.
+    #[object]
+    #[derive(Clone, Debug)]
+    pub struct Tree {
+        pub children: Vec<Tree>,
+    }
+
+    #[table(name = "shaped")]
+    pub struct Shaped {
+        pub created_by: Option<String>,
+        #[serde(rename = "n")]
+        pub count: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub note: Option<f64>,
+        #[serde(skip)]
+        pub cache: u8,
+        #[serde(flatten)]
+        pub meta: Meta,
+        pub level: Level,
+        pub opaque: Opaque,
+        pub loud: Loud,
+        pub tree: Tree,
+        pub raw: Vec<u8>,
+    }
+}
+
+#[test]
+fn shapes_follow_serde() {
+    use ferrix::shape::{Shape, StructShape};
+    let Shape::Struct(s) = (<shapes::Shaped as Table>::table_def().shape)() else { panic!("a struct") };
+    let names: Vec<&str> = s.fields.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["createdBy", "n", "note", "sourceApp", "tags", "level", "opaque", "loud", "tree", "raw"]);
+    assert!(!s.open);
+    let get = |n: &str| s.fields.iter().find(|(f, _)| f == n).unwrap().1.clone();
+    assert_eq!(get("createdBy"), Shape::Optional(Box::new(Shape::Text)));
+    assert_eq!(get("n"), Shape::Int);
+    assert_eq!(get("note"), Shape::Optional(Box::new(Shape::Float)));
+    assert_eq!(get("tags"), Shape::List(Box::new(Shape::Text)));
+    assert_eq!(get("level"), Shape::Text, "a unit-only enum is its variant names");
+    assert_eq!(get("opaque"), Shape::Json, "no HasShape: JSON");
+    assert_eq!(get("loud"), Shape::Struct(StructShape { fields: vec![("SOME_FIELD".into(), Shape::Bool)], open: false }));
+    let Shape::Struct(tree) = get("tree") else { panic!("a struct") };
+    assert_eq!(tree.fields[0].1, Shape::List(Box::new(Shape::Json)), "recursion stops");
+    assert_eq!(get("raw"), Shape::List(Box::new(Shape::Int)));
 }

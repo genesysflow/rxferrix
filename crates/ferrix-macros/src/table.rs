@@ -520,6 +520,10 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         }
     });
     let static_ident = format_ident!("__FERRIX_TABLE_{}", ident);
+    let shape_expr = match named {
+        Some(named) => crate::shape::struct_shape(named, Some(crate::shape::RenameAll::Camel)),
+        None => quote!(::ferrix::shape::Shape::unknown()),
+    };
 
     Ok(quote! {
         #[derive(
@@ -544,6 +548,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     vector_indexes: ::std::vec![#(#vector_def_exprs),*],
                     ts: || ::ferrix::__private::ts_inline::<#ident>(),
                     validate: ::ferrix::__private::validate_doc::<#ident>,
+                    shape: || #shape_expr,
                 }
             }
         }

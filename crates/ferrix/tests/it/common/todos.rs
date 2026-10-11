@@ -18,7 +18,14 @@ impl ::ferrix::Table for Todo {
             ::ferrix::IndexDef { name: "by_text", fields: vec!["text"] },
         ], search_indexes: vec![], vector_indexes: vec![],
         ts: || ::ferrix::__private::ts_inline::<Todo>(),
-        validate: ::ferrix::__private::validate_doc::<Todo> }
+        validate: ::ferrix::__private::validate_doc::<Todo>,
+        shape: || {
+            let mut s = ::ferrix::shape::StructShape::default();
+            s.field("text", ::ferrix::shape::Shape::Text);
+            s.field("done", ::ferrix::shape::Shape::Bool);
+            s.field("createdBy", ::ferrix::shape::Shape::Text.optional());
+            ::ferrix::shape::Shape::Struct(s)
+        } }
     }
 }
 

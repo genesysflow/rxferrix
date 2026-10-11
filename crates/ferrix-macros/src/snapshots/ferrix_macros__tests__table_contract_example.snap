@@ -29,6 +29,35 @@ impl ::ferrix::Table for Todo {
             vector_indexes: ::std::vec![],
             ts: || ::ferrix::__private::ts_inline::<Todo>(),
             validate: ::ferrix::__private::validate_doc::<Todo>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field(
+                    "text",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "done",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<bool>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "createdBy",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
+                            .probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
         }
     }
 }

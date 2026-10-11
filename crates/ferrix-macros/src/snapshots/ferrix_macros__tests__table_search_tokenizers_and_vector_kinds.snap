@@ -58,6 +58,43 @@ impl ::ferrix::Table for Doc {
             ],
             ts: || ::ferrix::__private::ts_inline::<Doc>(),
             validate: ::ferrix::__private::validate_doc::<Doc>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field(
+                    "channel",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "body",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                    },
+                );
+                s.field(
+                    "title",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
+                            .probe_shape()
+                    },
+                );
+                s.field(
+                    "embedding",
+                    {
+                        #[allow(unused_imports)]
+                        use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        (&&::ferrix::shape::ShapeProbe::<Vec<f32>>::new()).probe_shape()
+                    },
+                );
+                ::ferrix::shape::Shape::Struct(s)
+            },
         }
     }
 }

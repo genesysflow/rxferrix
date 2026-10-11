@@ -38,6 +38,8 @@ pub struct TableDef {
     /// Checks that a stored document (system fields included) deserializes as `Doc<T>`; `Err` carries the serde
     /// error. Used by the startup schema check (`__private::validate_doc::<T>`).
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
+    /// The JSON shape of the table's fields (without system fields), for the analytics copy (`crate::shape`).
+    pub shape: fn() -> crate::shape::Shape,
 }
 
 /// Compares the schema (name and indexes) and the rendered TS type. Function pointers themselves (`ts`, `validate`)

@@ -82,6 +82,7 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             #[ts(rename_all = "camelCase")]
         }
     };
+    let shape_impl = crate::shape::object_impl(&item);
     Ok(quote! {
         #[derive(
             ::ferrix::__private::serde::Serialize,
@@ -92,5 +93,7 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         #[ts(crate = "::ferrix::__private::ts_rs")]
         #rename_all
         #item
+
+        #shape_impl
     })
 }

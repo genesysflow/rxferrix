@@ -164,3 +164,27 @@ pub async fn add_samples(ctx: &ActionCtx, count: u32) -> Result<u32> {
     }
     Ok(count)
 }
+
+/// Todos added and completed per day.
+#[object]
+pub struct DayStats {
+    pub day: String,
+    pub added: i64,
+    pub completed: i64,
+}
+
+/// Todos added and completed per day, in SQL over the analytics copy. Needs `serve --olap` and a binary built with
+/// the `olap` feature (`cargo run -p todo-server --features olap -- serve --dev --olap`); fails with
+/// `olap_unavailable` otherwise.
+#[action]
+pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
+    ctx.olap
+        .query_as::<DayStats>(
+            "SELECT strftime(to_timestamp(_creationTime / 1000), '%Y-%m-%d') AS day,
+                    count(*) AS added,
+                    count(*) FILTER (WHERE done) AS completed
+             FROM todos GROUP BY day ORDER BY day",
+            (),
+        )
+        .await
+}

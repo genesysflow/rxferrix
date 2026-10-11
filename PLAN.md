@@ -4,7 +4,8 @@
 > typed `query` / `mutation` / `action` functions, reactive subscriptions over WebSockets, and an
 > embedded admin dashboard where all data is visible and editable.
 
-**Status:** planning · **Audience:** my own apps (tight scope, rough edges acceptable) · **Date:** 2026-10-09
+**Status:** roadmap done (Phases 0–10), beyond-roadmap work continues · **Audience:** my own apps (tight scope, rough
+edges acceptable) · **Started:** 2026-10-09 · **Updated:** 2026-10-11
 
 ---
 
@@ -612,7 +613,11 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] Password (argon2id), email verification, password reset, magic link and OTP, sessions with rotating refresh
   tokens and reuse detection, SMTP (`lettre`; printed to the log in `--dev`), rate limits, `ctx.auth` (docs/PROTOCOL.md
   "Auth", docs/CONTRACT.md §1.2 and §1.5).
-- [x] OAuth with PKCE: GitHub and Google presets, generic OIDC via discovery (tested against a mock provider only).
+- [x] OAuth with PKCE: GitHub and Google presets, generic OIDC via discovery (flows tested against mock providers).
+- [x] The presets checked against the real providers (no full sign-in: that needs registered apps and a browser):
+  `live_presets_match_the_providers` (`--ignored`, network) compares endpoints, scopes, PKCE, client authentication
+  and signing algorithms with Google's, Apple's and Discord's discovery documents and probes GitHub's endpoints; the
+  JWKS the three published on 2026-10-11 are fixtures that must parse (Discord's key is 4096-bit RSA).
 - [x] Discord and Sign in with Apple presets (`Discord::from_env()`, `Apple::from_env()`, also as `_settings` kinds
   with the Apple `.p8` key encrypted at rest): Discord's verified email only; Apple's ES256 client secret (generated,
   cached, rotated), `form_post` callback (`POST`, state cookie `SameSite=None; Secure` on https), the ID token verified
@@ -653,6 +658,13 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] "Run cron now": `_system/scheduler:run_cron_now { name, force? }` (admin; no pile-up unless forced), with the
   dashboard's "Run now" button (offering to force while the previous run is unfinished), time zone and system
   columns, and cancel for running actions.
+- [x] Workpools (beyond the roadmap): `Ferrix::workpool(Workpool::new(name)
+  .max_parallelism(n).retries(r).backoff(..))`, `ctx.scheduler.pool(name)…enqueue/run_after/run_at`, a pool's own
+  slots (a full pool holds up no other), `on_complete::<mutation>` run exactly once with the outcome, `cancel_pool`.
+- [x] Durable workflows (beyond the roadmap): `#[workflow]` bodies of steps (`run_query` / `run_mutation` /
+  `run_action` with retries and pools, `sleep`, `wait_for_event`, parallel with `try_join!`), replayed from the
+  `_workflow_steps` journal in a mutation as each step finishes; per-step determinism checks, at most 10k steps; the
+  dashboard's Workflows page (docs/CONTRACT.md §1.7).
 
 ### Phase 7 — File storage (M) — done
 - [x] The `_storage` system table (`StoredFile`: sha256, size, content type, `createdBy`, original file name) and the
@@ -681,6 +693,9 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   replacing the ad-hoc background task.
 - [x] Dashboard: downloads through `downloadUrl` and thumbnails added with `&` to signed URLs (private mode works),
   `?thumb=96x96&fit=cover` previews in the Files list.
+- [x] Direct downloads (beyond the roadmap): `ctx.storage.get_download_url(id, ttl)` presigns a SigV4 URL to the S3
+  bucket (signed content type, disposition and cache control; 1 s to 7 days), or the server's own signed URL with local
+  storage. Signed URL expiries in queries count from the app's clock, not the snapshot's (which may be hours old).
 
 ### Phase 8 — Search (M) — done
 - [x] `#[search_index(name, search = f, filter = [..])]` / `#[vector_index(name, field = f, dims = N, filter = [..])]`
@@ -751,6 +766,11 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
   (README "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
 
+- [x] A dev-mode determinism check (§11): `AppOptions::determinism_check` (on in `serve --dev` and `TestApp`, every
+  10 s per query) reruns a query in the same snapshot and warns, in the server log and as a log line of the run, where
+  the two results differ. Runs that read the time are skipped. The whole suite runs with it on: none of ferrix's own
+  queries trips it.
+
 ### Phase 9 — Operations polish (M) — done
 - [x] Backup and restore: online `VACUUM INTO` snapshots as `.tar.zst` (optional `aux.db`, local blobs, and
   `auth_secret.key` only with `--include-secret`), `ferrix backup`, scheduled backups with rotation to a directory or
@@ -780,7 +800,10 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   the table's shape; round-trips the CSV export.
 - [x] Hot reload of `--tls-cert`/`--tls-key` (`--tls-reload-every`, atomic swap, a bad pair keeps the current one).
 - [x] CI: `.github/workflows/release.yml` (gates, the musl release, the Docker image build and smoke test, pushes on
-  tags). Not run here (no usable Docker daemon); the YAML is validated.
+  tags). Its first GitHub run (2026-10-11) failed in `cargo test`: opening a database while another connection to it
+  closed failed with "database is locked", because the FTS5 extension runs SQL during the open, before any busy
+  timeout (fixed: it sets one). Every step of `gates` and `release` has since passed locally (Chromium e2e, a 23 MiB
+  static binary); the `docker` job has not run yet (no Docker daemon here).
 - [x] Incremental, continuous backups with point-in-time restore: a logical change journal (`_journal`, written in
   each commit's own SQLite transaction: exactly once, never a rolled-back write) shipped as checksummed zstd segments
   named by ts range to a directory or S3 (`--replicate-to`, `--replicate-every`), periodic snapshots
@@ -802,7 +825,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 |---|---|
 | **Proc-macro ergonomics.** Async fns with references in ctx, typed field and index handles, and good error messages are hard to get right. | Phase 0 exists to prove this first. Keep the macros thin and the generated code readable. Use `trybuild` tests for compile errors. |
 | **Rust compile times hurt the dev loop.** Every backend change means a rebuild. | Keep the `ferrix` crate precompiled as a dependency so only the app crate rebuilds. Use `mold`/`wild` as the linker, `cargo watch`, and seamless client reconnect. This is accepted as the cost of framework mode. |
-| **Non-deterministic queries** (`SystemTime::now()`, random numbers) silently break caching. | Documented contract, `ctx.now()`, and a debug-mode check that occasionally reruns a query at the same `ts` and warns if the result hash differs. |
+| **Non-deterministic queries** (`SystemTime::now()`, random numbers) silently break caching. | Documented contract, `ctx.now()`, and the dev-mode check (`AppOptions::determinism_check`, done) that reruns a query at the same `ts` now and then and warns if the result differs. |
 | **Holding the writer lock during an async mutation.** | No network in `MutationCtx`, a timeout, and per-mutation duration metrics in the dashboard. Group commit keeps a known-slow mutation from holding back the batch before it, but not the writes queued behind it. The OCC upgrade path stays open. |
 | **Reactive pagination correctness.** | Pin each page's end cursor and cover it with model-based tests. |
 | **Schema evolution** with existing data. | Validate at startup and refuse to start on mismatch. Provide `#[migration]` batches and dev-mode dashboard links to bad documents. |

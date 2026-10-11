@@ -296,6 +296,12 @@ fn parse_jwks(body: &[u8]) -> crate::Result<Vec<Key>> {
     Ok(jwks.keys.into_iter().filter_map(|k| serde_json::from_value(k).ok()).filter_map(parse_jwk).collect())
 }
 
+/// How many keys of a JWKS body ferrix can verify with (the live preset test in `config`).
+#[cfg(test)]
+pub(super) fn usable_keys(body: &[u8]) -> crate::Result<usize> {
+    Ok(parse_jwks(body)?.len())
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Verifier
 // ---------------------------------------------------------------------------------------------------------------------
@@ -536,6 +542,25 @@ fn check_claims(cfg: &JwtProvider, claims: &Value, now_s: u64) -> Result<Externa
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The JWKS Apple, Google and Discord published on 2026-10-11: every key is usable (RS256 with a kid; Discord's
+    /// is 4096-bit, within `RSA_PKCS1_2048_8192_SHA256`).
+    #[test]
+    fn real_provider_jwks_parse() {
+        for (name, body, count, bits) in [
+            ("apple", &include_bytes!("testdata/jwks_apple.json")[..], 3, 2048),
+            ("google", &include_bytes!("testdata/jwks_google.json")[..], 2, 2048),
+            ("discord", &include_bytes!("testdata/jwks_discord.json")[..], 1, 4096),
+        ] {
+            let keys = parse_jwks(body).unwrap();
+            assert_eq!(keys.len(), count, "{name}");
+            for key in keys {
+                assert!(key.kid.is_some() && key.alg.as_deref() == Some("RS256"), "{name}");
+                let PublicKey::Rsa { n, e } = key.key else { panic!("{name}: not RSA") };
+                assert_eq!((n.len() * 8, e), (bits, vec![1, 0, 1]), "{name}");
+            }
+        }
+    }
 
     fn cfg() -> JwtProvider {
         JwtProvider::new("https://idp.test").audience("api")

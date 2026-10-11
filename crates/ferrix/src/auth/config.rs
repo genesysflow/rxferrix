@@ -641,6 +641,75 @@ fn is_localhost(url: &url::Url) -> bool {
 mod tests {
     use super::*;
 
+    /// The presets against what the real providers publish today (network; `cargo test -p ferrix --lib live_ --
+    /// --ignored`): endpoints, scopes, PKCE, client authentication, signing keys. A full sign-in needs registered apps
+    /// and a browser, so this is as close as an unattended test gets.
+    #[tokio::test]
+    #[ignore = "network: the real providers"]
+    async fn live_presets_match_the_providers() {
+        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let get = async |url: &str| -> serde_json::Value { http.get(url).send().await.unwrap().json().await.unwrap() };
+        let strs = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default()
+        };
+        let parses_keys = async |url: &str| {
+            let body = http.get(url).send().await.unwrap().bytes().await.unwrap();
+            assert!(super::super::jwt::usable_keys(&body).unwrap() > 0, "no usable key at {url}");
+        };
+
+        // Google: endpoints known up front.
+        let google = get("https://accounts.google.com/.well-known/openid-configuration").await;
+        let ProviderKind::Oidc(e) = Google::new("id", "secret").kind else { panic!() };
+        assert_eq!(e.authorization_endpoint, google["authorization_endpoint"]);
+        assert_eq!(e.token_endpoint, google["token_endpoint"]);
+        assert_eq!(e.userinfo_endpoint, google["userinfo_endpoint"]);
+        assert!(Google::new("id", "secret").scopes.iter().all(|s| strs(&google["scopes_supported"]).contains(s)));
+        assert!(strs(&google["code_challenge_methods_supported"]).contains(&"S256".into()));
+        assert!(strs(&google["token_endpoint_auth_methods_supported"]).contains(&"client_secret_post".into()));
+
+        // Apple: the client secret is posted; ID tokens are RS256 from `<origin>/auth/keys`; callbacks are posted.
+        let apple = get("https://appleid.apple.com/.well-known/openid-configuration").await;
+        let config = super::super::apple::AppleConfig::new("team".into(), "key".into(), super::super::apple::APPLE_ORIGIN.into());
+        assert_eq!(apple["issuer"], super::super::apple::APPLE_ORIGIN);
+        assert_eq!(config.authorization_endpoint(), apple["authorization_endpoint"]);
+        assert_eq!(config.token_endpoint(), apple["token_endpoint"]);
+        assert_eq!(apple["jwks_uri"], format!("{}/auth/keys", super::super::apple::APPLE_ORIGIN));
+        assert!(strs(&apple["token_endpoint_auth_methods_supported"]).contains(&"client_secret_post".into()));
+        assert!(strs(&apple["id_token_signing_alg_values_supported"]).contains(&"RS256".into()));
+        assert!(strs(&apple["response_modes_supported"]).contains(&"form_post".into()));
+        assert!(["name", "email"].iter().all(|s| strs(&apple["scopes_supported"]).contains(&s.to_string())));
+        parses_keys("https://appleid.apple.com/auth/keys").await;
+
+        // Discord: `/oauth2/authorize` (the page its docs link; discovery names `/api/oauth2/authorize`, which serves the
+        // same) and `/api/oauth2/token`.
+        let discord = get("https://discord.com/.well-known/openid-configuration").await;
+        let ProviderKind::Discord { base } = Discord::new("id", "secret").kind else { panic!() };
+        assert_eq!(format!("{base}/api/oauth2/token"), discord["token_endpoint"]);
+        let page = http.get(format!("{base}/oauth2/authorize?client_id=1&response_type=code&scope=identify")).send().await.unwrap();
+        assert!(page.status().is_success(), "{}", page.status());
+        assert!(strs(&discord["code_challenge_methods_supported"]).contains(&"S256".into()));
+        let unauthorized = http.get(format!("{base}/api/users/@me")).send().await.unwrap();
+        assert_eq!(unauthorized.status(), 401, "the profile endpoint exists and wants a token");
+
+        // GitHub (no discovery): the authorize page sends a signed-out user to sign in, the token endpoint answers JSON
+        // errors with `Accept: application/json`, and the profile API wants a token.
+        let authorize = http.get("https://github.com/login/oauth/authorize?client_id=x").send().await.unwrap();
+        assert_eq!(authorize.status(), 302);
+        let token: serde_json::Value = http
+            .post("https://github.com/login/oauth/access_token")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .form(&[("client_id", "x"), ("client_secret", "y"), ("code", "z")])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(token.get("error").is_some() && token.get("access_token").is_none(), "{token}");
+        let user = http.get("https://api.github.com/user").header(reqwest::header::USER_AGENT, "ferrix-test").send().await.unwrap();
+        assert_eq!(user.status(), 401);
+    }
+
     #[test]
     fn redirect_allowlist() {
         let list = RedirectAllowlist::new(

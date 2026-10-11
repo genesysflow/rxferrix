@@ -41,10 +41,18 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /out/${PACKAGE} /app
 COPY --from=build --chown=65532:65532 /data /data
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+# Zero-downtime rollouts (deploy/docker, deploy/k8s): a container started on a volume another container is serving
+# takes over from it (and starts normally on its own); the one taken over stays up, serving nothing, until it is
+# stopped, so a restart policy doesn't bring it back while it is being replaced.
+ENV FERRIX_TAKEOVER=auto
+ENV FERRIX_AFTER_HANDOVER=wait
 USER 65532:65532
 VOLUME /data
 EXPOSE 8090
 ENTRYPOINT ["/app"]
+# The image has no curl: the binary checks its own health endpoint. (A container still preparing a takeover isn't
+# listening yet, so it reports unhealthy until it serves; the start period covers a long preparation.)
+HEALTHCHECK --interval=2s --timeout=3s --start-period=10m --retries=3 CMD ["/app", "health"]
 # Behind a proxy that terminates TLS. With --https, publish 80 and 443 instead (the user needs no extra rights: the
 # ports inside the container are remapped, e.g. `-p 443:8443 -p 80:8080` with `--https-addr 0.0.0.0:8443
 # --http-redirect 0.0.0.0:8080`).

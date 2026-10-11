@@ -29,7 +29,7 @@ struct Serving {
 async fn serve(dir: &Path, lock: DirLock, app: App, listen: Listen, inherited: tls::Inherited) -> Serving {
     let server = tls::start_with(ferrix::server::router(app.clone()), &listen, inherited).await.unwrap();
     let addr = server.addr;
-    let control = Control::start(app.clone(), dir, server.listener_fds()).await.unwrap();
+    let control = Control::start(app.clone(), dir, server.listener_fds(), server.listener_addrs()).await.unwrap();
     let pauser = server.pauser();
     let a = app.clone();
     let stopped = tokio::spawn(async move {
@@ -60,7 +60,7 @@ async fn start_old(dir: &Path) -> Serving {
 
 /// Take over `dir` with `tables` and serve on the inherited socket.
 async fn take_over(dir: &Path, addr: SocketAddr, tables: Vec<TableDef>) -> ferrix::Result<Serving> {
-    let incoming = takeover::take_over_with(dir, tables).await?;
+    let incoming = takeover::take_over_with(dir, &[("main".to_string(), addr)], tables).await?;
     assert!(incoming.migrating.is_some(), "the copy was swapped in");
     let options = AppOptions { dev: true, prechecked_schema: incoming.migrating, ..Default::default() };
     let app = App::open(dir, options).await?;
@@ -181,6 +181,8 @@ async fn a_takeover_under_load_refuses_nothing_loses_nothing_and_can_happen_agai
     // The new server carries on (commit ts after the old one's), and can itself be taken over.
     let before = count(&new.app).await;
     add(&reqwest::Client::new(), addr, "after the takeover").await.unwrap();
+    // `--takeover=auto` probes first: the probe must not count as a takeover in progress.
+    assert!(takeover::server_running(dir.path()).await);
     let newer = take_over(dir.path(), addr, ferrix::runtime::registered_tables()).await.unwrap();
     new.stopped.await.unwrap();
     assert_eq!(count(&newer.app).await, before + 1);
@@ -281,7 +283,7 @@ async fn check_opens_a_copy_like_a_takeover_while_the_server_runs() {
     // A takeover without a running server says so.
     drop(old);
     let other = tempfile::tempdir().unwrap();
-    let err = takeover::take_over(other.path()).await.err().unwrap();
+    let err = takeover::take_over(other.path(), &[]).await.err().unwrap();
     assert!(format!("{err:#}").contains("no running server to take over"), "{err:#}");
 }
 

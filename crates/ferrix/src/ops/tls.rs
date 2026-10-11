@@ -102,6 +102,20 @@ impl AcmeSettings {
     }
 }
 
+impl Listen {
+    /// The addresses it listens on, by role (`main`, `redirect`).
+    pub fn addrs(&self) -> Vec<(String, SocketAddr)> {
+        match self {
+            Listen::Http(addr) => vec![("main".to_string(), *addr)],
+            Listen::Acme { https, redirect, .. } | Listen::CertFiles { https, redirect, .. } => {
+                let mut out = vec![("main".to_string(), *https)];
+                out.extend(redirect.map(|r| ("redirect".to_string(), r)));
+                out
+            }
+        }
+    }
+}
+
 /// How the server listens.
 #[derive(Debug, Clone)]
 pub enum Listen {
@@ -264,6 +278,13 @@ impl RunningServer {
     #[cfg(unix)]
     pub fn listener_fds(&self) -> Vec<(String, std::os::fd::RawFd)> {
         self.fds.clone()
+    }
+
+    /// The listening addresses by role (`main`, `redirect`).
+    pub fn listener_addrs(&self) -> Vec<(String, SocketAddr)> {
+        let mut out = vec![("main".to_string(), self.addr)];
+        out.extend(self.redirect_addr.map(|a| ("redirect".to_string(), a)));
+        out
     }
 
     /// A handle that stops the server from accepting connections while it keeps serving the open ones (before a
@@ -431,7 +452,7 @@ fn take_inherited(inherited: &mut Inherited, role: &str, addr: SocketAddr) -> Op
     let i = inherited.iter().position(|(r, _)| r == role)?;
     let (_, listener) = inherited.remove(i);
     let bound = listener.local_addr().ok()?;
-    let same = bound.port() == addr.port() && (addr.ip().is_unspecified() || bound.ip() == addr.ip());
+    let same = crate::ops::takeover::serves(bound, addr);
     if !same {
         tracing::warn!(%bound, wanted = %addr, "not reusing the inherited {role} listener: the address changed");
         return None;

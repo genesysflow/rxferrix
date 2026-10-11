@@ -65,8 +65,19 @@ const CARRIED_META: [&str; 5] = [
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Request {
+    /// Is a server here? (`serve --takeover=auto`.) Answered without starting anything.
+    Ping,
     Prepare,
-    Handover,
+    /// `sockets`: the new process takes the listening sockets (same network namespace). Without them (containers),
+    /// the old server keeps accepting until it stops, and the new one binds its own.
+    Handover {
+        #[serde(default = "yes")]
+        sockets: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -80,6 +91,41 @@ struct Reply {
     pid: Option<u32>,
     #[serde(default)]
     roles: Vec<String>,
+    /// The running server's network namespace (`/proc/self/ns/net` on Linux): a new process in another one (another
+    /// container) can't use its sockets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    netns: Option<String>,
+    /// The running server's listening addresses, by role.
+    #[serde(default)]
+    addrs: Vec<(String, std::net::SocketAddr)>,
+}
+
+/// Whether a listener bound to `bound` serves `wanted` (same port; same address unless `wanted` is unspecified).
+pub(crate) fn serves(bound: std::net::SocketAddr, wanted: std::net::SocketAddr) -> bool {
+    bound.port() == wanted.port() && (wanted.ip().is_unspecified() || bound.ip() == wanted.ip())
+}
+
+/// This process's network namespace, where the OS says (Linux).
+fn netns() -> Option<String> {
+    std::fs::read_link("/proc/self/ns/net").ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Whether a server answers on `<dir>/ferrix.control` (`serve --takeover=auto` takes over only then). A socket file
+/// left by a crashed server doesn't answer.
+#[cfg(unix)]
+pub async fn server_running(dir: &Path) -> bool {
+    let ping = async {
+        let stream = tokio::net::UnixStream::connect(dir.join(CONTROL_SOCKET)).await?;
+        let mut conn = Conn::new(stream);
+        conn.send(&Request::Ping, &[]).await?;
+        anyhow::Ok(conn.recv::<Reply>().await?.is_some_and(|r| r.ok))
+    };
+    tokio::time::timeout(Duration::from_secs(5), ping).await.ok().and_then(|r| r.ok()).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub async fn server_running(_dir: &Path) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -91,6 +137,8 @@ struct Reply {
 pub struct Control {
     path: PathBuf,
     handover: Arc<tokio::sync::Notify>,
+    /// The new process took the listening sockets (same network namespace): stop accepting at once.
+    sockets_taken: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     /// The new process's connection after the handover: it learns that this server is gone when it closes, i.e.
     /// when this is dropped (at the end of `serve`, after the database is sealed) or the process exits.
@@ -99,8 +147,13 @@ pub struct Control {
 
 #[cfg(unix)]
 impl Control {
-    /// Listen on `<dir>/ferrix.control`, offering `listeners` (role, fd) to a new process.
-    pub async fn start(app: App, dir: &Path, listeners: Vec<(String, RawFd)>) -> crate::Result<Control> {
+    /// Listen on `<dir>/ferrix.control`, offering `listeners` (role, fd) at `addrs` (role, address) to a new process.
+    pub async fn start(
+        app: App,
+        dir: &Path,
+        listeners: Vec<(String, RawFd)>,
+        addrs: Vec<(String, std::net::SocketAddr)>,
+    ) -> crate::Result<Control> {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(CONTROL_SOCKET);
         let _ = std::fs::remove_file(&path);
@@ -110,33 +163,35 @@ impl Control {
         let handover = Arc::new(tokio::sync::Notify::new());
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notify = handover.clone();
+        let sockets_taken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let taken = sockets_taken.clone();
         let handed_over = Arc::new(std::sync::Mutex::new(None));
         let keep = handed_over.clone();
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                if busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let reply = Reply { error: Some("another takeover is in progress".into()), ..Default::default() };
-                    let _ = send(&stream, &reply, &[]).await;
-                    continue;
-                }
                 let (app, listeners, notify, busy) = (app.clone(), listeners.clone(), notify.clone(), busy.clone());
-                let keep = keep.clone();
+                let (keep, taken, addrs) = (keep.clone(), taken.clone(), addrs.clone());
                 tokio::spawn(async move {
-                    match serve_takeover(&app, stream, &listeners, &notify).await {
+                    match serve_takeover(&app, stream, &listeners, &addrs, &notify, &taken, &busy).await {
                         Ok(Some(conn)) => *keep.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn),
                         Ok(None) => {}
                         Err(e) => tracing::warn!("takeover: {e:#}"),
                     }
-                    busy.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
         });
-        Ok(Control { path, handover, task, handed_over })
+        Ok(Control { path, handover, sockets_taken, task, handed_over })
     }
 
-    /// Resolves when a new process has taken the listening sockets: time to stop.
+    /// Resolves when a new process has taken over: time to stop.
     pub async fn handover_requested(&self) {
         self.handover.notified().await;
+    }
+
+    /// Whether the new process took the listening sockets (then this server stops accepting at once; otherwise, in
+    /// another container, it keeps serving until it stops and the new one binds its own).
+    pub fn sockets_taken(&self) -> bool {
+        self.sockets_taken.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -156,10 +211,35 @@ async fn serve_takeover(
     app: &App,
     stream: tokio::net::UnixStream,
     listeners: &[(String, RawFd)],
+    addrs: &[(String, std::net::SocketAddr)],
     handover: &tokio::sync::Notify,
+    sockets_taken: &std::sync::atomic::AtomicBool,
+    busy: &std::sync::atomic::AtomicBool,
 ) -> crate::Result<Option<Conn>> {
+    use std::sync::atomic::Ordering;
     let mut conn = Conn::new(stream);
-    let Some(Request::Prepare) = conn.recv().await? else { anyhow::bail!("expected `prepare`") };
+    match conn.recv().await? {
+        Some(Request::Ping) => {
+            conn.send(&Reply { ok: true, pid: Some(std::process::id()), ..Default::default() }, &[]).await?;
+            return Ok(None);
+        }
+        Some(Request::Prepare) => {}
+        None => return Ok(None),
+        Some(other) => anyhow::bail!("expected `prepare`, got {other:?}"),
+    }
+    // One takeover at a time, claimed by `prepare` (a probe doesn't count).
+    if busy.swap(true, Ordering::SeqCst) {
+        let reply = Reply { error: Some("another takeover is in progress".into()), ..Default::default() };
+        conn.send(&reply, &[]).await?;
+        return Ok(None);
+    }
+    struct Release<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _release = Release(busy);
     let roles: Vec<String> = listeners.iter().map(|(r, _)| r.clone()).collect();
     let db = app.db();
     let was_enabled = db.journal().is_enabled();
@@ -173,13 +253,23 @@ async fn serve_takeover(
         })
         .await?;
     tracing::info!(ts, "takeover: a new process is preparing to take over; journaling commits for it");
-    let reply = Reply { ok: true, ts: Some(ts), pid: Some(std::process::id()), roles: roles.clone(), error: None };
+    let reply = Reply {
+        ok: true,
+        ts: Some(ts),
+        pid: Some(std::process::id()),
+        roles: roles.clone(),
+        error: None,
+        netns: netns(),
+        addrs: addrs.to_vec(),
+    };
     conn.send(&reply, &[]).await?;
     match conn.recv().await {
-        Ok(Some(Request::Handover)) => {
-            let fds: Vec<RawFd> = listeners.iter().map(|(_, fd)| *fd).collect();
+        Ok(Some(Request::Handover { sockets })) => {
+            let fds: Vec<RawFd> = if sockets { listeners.iter().map(|(_, fd)| *fd).collect() } else { Vec::new() };
+            let roles = if sockets { roles } else { Vec::new() };
+            sockets_taken.store(sockets, std::sync::atomic::Ordering::SeqCst);
             conn.send(&Reply { ok: true, roles, ..Default::default() }, &fds).await?;
-            tracing::info!("takeover: handing over to the new process");
+            tracing::info!(sockets, "takeover: handing over to the new process");
             handover.notify_one();
             Ok(Some(conn))
         }
@@ -221,15 +311,21 @@ pub struct Incoming {
     pub from_pid: u32,
 }
 
-/// Take over the server running on `dir` (see the module docs). Errors before the handover leave it running.
+/// Take over the server running on `dir` (see the module docs), to listen on `wanted` (role, address): its sockets
+/// are taken where they serve those addresses in the same network namespace. Errors before the handover leave it
+/// running.
 #[cfg(unix)]
-pub async fn take_over(dir: &Path) -> crate::Result<Incoming> {
-    take_over_with(dir, crate::runtime::registered_tables()).await
+pub async fn take_over(dir: &Path, wanted: &[(String, std::net::SocketAddr)]) -> crate::Result<Incoming> {
+    take_over_with(dir, wanted, crate::runtime::registered_tables()).await
 }
 
 /// [`take_over`] with the tables the new version serves (tests stand in a changed schema this way).
 #[cfg(unix)]
-pub async fn take_over_with(dir: &Path, tables: Vec<crate::schema::TableDef>) -> crate::Result<Incoming> {
+pub async fn take_over_with(
+    dir: &Path,
+    wanted: &[(String, std::net::SocketAddr)],
+    tables: Vec<crate::schema::TableDef>,
+) -> crate::Result<Incoming> {
     recover(dir)?;
     if crate::ops::restore::pending(dir)?.is_some() {
         anyhow::bail!("a restore is staged on this data directory: restart the server normally to apply it");
@@ -245,6 +341,15 @@ pub async fn take_over_with(dir: &Path, tables: Vec<crate::schema::TableDef>) ->
         anyhow::bail!("the running server refused: {}", reply.error.unwrap_or_default());
     }
     let from_pid = reply.pid.unwrap_or(0);
+    // In another network namespace (another container or pod), the old server's sockets lead nowhere useful: this
+    // process binds its own and the orchestrator moves the traffic.
+    let same_netns = match (&reply.netns, netns()) {
+        (Some(theirs), Some(ours)) => *theirs == ours,
+        _ => true,
+    };
+    // Its sockets are worth taking only if this process listens on the same addresses.
+    let reuse = same_netns
+        && wanted.iter().any(|(role, want)| reply.addrs.iter().any(|(r, bound)| r == role && serves(*bound, *want)));
     let started = Instant::now();
     tracing::info!(pid = from_pid, "takeover: copying the database and opening it with this version");
     let abort = |e: anyhow::Error| {
@@ -259,7 +364,12 @@ pub async fn take_over_with(dir: &Path, tables: Vec<crate::schema::TableDef>) ->
     );
     while staged.catch_up(dir, false).await.map_err(abort)? >= ROUND {}
 
-    conn.send(&Request::Handover, &[]).await?;
+    if !same_netns {
+        tracing::info!("takeover: the running server is in another network namespace; listening on our own sockets");
+    } else if !reuse {
+        tracing::info!("takeover: listening on other addresses than the running server; binding our own sockets");
+    }
+    conn.send(&Request::Handover { sockets: reuse }, &[]).await?;
     let (reply, fds) = conn.recv_with_fds::<Reply>().await?;
     let reply = reply.context("the running server closed the control socket during the handover")?;
     anyhow::ensure!(reply.ok, "the handover failed: {}", reply.error.unwrap_or_default());
@@ -299,7 +409,7 @@ pub async fn take_over_with(dir: &Path, tables: Vec<crate::schema::TableDef>) ->
 }
 
 #[cfg(not(unix))]
-pub async fn take_over(_dir: &Path) -> crate::Result<Incoming> {
+pub async fn take_over(_dir: &Path, _wanted: &[(String, std::net::SocketAddr)]) -> crate::Result<Incoming> {
     anyhow::bail!("`serve --takeover` needs a Unix system")
 }
 
@@ -542,6 +652,33 @@ pub async fn check(dir: &Path) -> crate::Result<CheckReport> {
         result
     })
     .await?
+}
+
+/// What a server that handed over answers while it waits to be stopped (`serve --after-handover=wait`): `GET
+/// /api/live` → 200 (alive: an orchestrator mustn't restart it, which would make it take over again), `GET
+/// /api/health` → 503 (not ready: stop routing here), and any other request: the connection is closed without a
+/// response, which a proxy retries elsewhere (a 503 it would pass on).
+pub async fn answer_while_waiting(listener: tokio::net::TcpListener) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    while let Ok((mut stream, _)) = listener.accept().await {
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                Ok(Ok(n)) => n,
+                _ => return,
+            };
+            let request = &buf[..n];
+            let reply: &[u8] = if request.starts_with(b"GET /api/live ") {
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+            } else if request.starts_with(b"GET /api/health ") {
+                b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\ncontent-length: 11\r\nconnection: close\r\n\r\nhanded over"
+            } else {
+                return;
+            };
+            let _ = stream.write_all(reply).await;
+            let _ = stream.shutdown().await;
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

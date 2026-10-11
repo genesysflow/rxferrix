@@ -1,0 +1,59 @@
+# A Ferrix app behind Traefik with Docker Compose, deployable with no downtime (deploy/docker/deploy.sh).
+#
+#   docker build -t todo-server .                 # from the repository root (or your app's image)
+#   docker compose -f deploy/docker/compose.yaml up -d
+#   deploy/docker/deploy.sh                       # after building a new image: roll it out
+#
+# How a rollout works: deploy.sh starts a second `app` container on the same volume. The image runs with
+# FERRIX_TAKEOVER=auto, so it takes over from the running container: it copies the database, opens the copy with the
+# new code (index builds, schema check), catches up, then the old one stops serving and the new one swaps the copy in
+# and starts listening. Traefik health-checks both and retries requests that hit a container that stopped listening,
+# so clients see no errors. If the new version can't serve the data, its container exits and the old one carries on.
+# The old container (FERRIX_AFTER_HANDOVER=wait) stays up, serving nothing, until deploy.sh removes it.
+#
+# Both containers must share the volume on the same host (a local volume): SQLite needs a local disk, and the
+# takeover talks over a Unix socket in the data directory.
+
+services:
+  app:
+    image: ${IMAGE:-todo-server:latest}
+    command: ["serve", "--http", "0.0.0.0:8090", "--dir", "/data", "--public-url", "${PUBLIC_URL:-http://localhost}"]
+    volumes:
+      - data:/data
+    restart: unless-stopped
+    # Secrets and settings (FERRIX_SMTP_URL, AWS_* for S3, ...):
+    env_file:
+      - path: ./app.env
+        required: false
+    # Long enough for open requests to finish on a normal stop.
+    stop_grace_period: 20s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.app.rule=PathPrefix(`/`)
+      - traefik.http.routers.app.entrypoints=web
+      - traefik.http.routers.app.middlewares=app-retry
+      - traefik.http.services.app.loadbalancer.server.port=8090
+      # Readiness: a container answers only while it serves (one preparing a takeover isn't listening yet; one that
+      # handed over answers 503).
+      - traefik.http.services.app.loadbalancer.healthcheck.path=/api/health
+      - traefik.http.services.app.loadbalancer.healthcheck.interval=1s
+      - traefik.http.services.app.loadbalancer.healthcheck.timeout=1s
+      # Requests that reach a container which just stopped listening are retried on the other one. (Traefik retries
+      # only when no response came back, so a mutation never runs twice.)
+      - traefik.http.middlewares.app-retry.retry.attempts=20
+      - traefik.http.middlewares.app-retry.retry.initialinterval=50ms
+
+  proxy:
+    image: traefik:v3.5
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+volumes:
+  data:

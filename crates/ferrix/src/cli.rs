@@ -58,6 +58,32 @@ enum Command {
     /// Check that this version can open the data (works while a server runs): opens a copy of the database exactly
     /// as `serve --takeover` would (index builds, schema check), reports, and deletes the copy.
     Check(CheckArgs),
+    /// Exit 0 if the server answers its health endpoint, 1 otherwise: a container health check (the image has no
+    /// curl).
+    Health(HealthArgs),
+}
+
+/// `serve --takeover[=WHEN]`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum TakeoverMode {
+    /// Take over the running server; fail if there is none.
+    Require,
+    /// Take over if a server is running, else start normally.
+    Auto,
+}
+
+/// `serve --after-handover`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterHandover {
+    Exit,
+    Wait,
+}
+
+#[derive(Args, Debug, Clone)]
+struct HealthArgs {
+    /// The server's health endpoint.
+    #[arg(default_value = "http://127.0.0.1:8090/api/health")]
+    url: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -220,10 +246,16 @@ struct ServeArgs {
     #[arg(long, env = "FERRIX_MIGRATE")]
     migrate: bool,
     /// Take over from the server running on this data directory with no downtime: copy the database, open the copy
-    /// with this version (index builds, schema check), catch up, then take the listening sockets and swap the copy in.
-    /// If this version can't serve the data, it exits and the running server carries on.
-    #[arg(long)]
-    takeover: bool,
+    /// with this version (index builds, schema check), catch up, then take over (its listening sockets too, in the
+    /// same network namespace) and swap the copy in. If this version can't serve the data, it exits and the running
+    /// server carries on. `--takeover=auto`: take over if a server is running, else start normally (containers).
+    #[arg(long, env = "FERRIX_TAKEOVER", value_enum, num_args = 0..=1, default_missing_value = "require", value_name = "WHEN")]
+    takeover: Option<TakeoverMode>,
+    /// What this server does once a new process took over from it: `exit` (default), or `wait`: stay alive, serving
+    /// nothing and holding nothing, until SIGTERM (containers and pods, so the orchestrator doesn't restart it while it
+    /// replaces it).
+    #[arg(long, env = "FERRIX_AFTER_HANDOVER", value_enum, default_value = "exit", value_name = "WHAT")]
+    after_handover: AfterHandover,
     /// Where uploaded files are stored: a directory (default: <dir>/storage), file:///dir, or s3://bucket/prefix
     /// (S3, R2, MinIO; credentials, region and endpoint from the standard AWS_* environment variables).
     #[arg(long, env = "FERRIX_STORAGE", value_name = "LOCATION")]
@@ -407,6 +439,7 @@ impl Ferrix {
             ),
             Some(Command::Migrate(args)) => migrate(args, self.auth, self.storage, self.scheduler),
             Some(Command::Check(args)) => check(args),
+            Some(Command::Health(args)) => health(args),
             Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler, self.web),
             None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web),
         }
@@ -430,6 +463,19 @@ fn print_functions() -> crate::Result<()> {
 fn codegen(out: &Path) -> crate::Result<()> {
     let changed = crate::codegen::write(out)?;
     println!("ferrix codegen: wrote {} ({} file(s) changed)", out.display(), changed.len());
+    Ok(())
+}
+
+fn health(args: HealthArgs) -> crate::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let ok = rt.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build()?;
+        anyhow::Ok(client.get(&args.url).send().await.map(|r| r.status().is_success()).unwrap_or(false))
+    })?;
+    if !ok {
+        eprintln!("unhealthy: {}", args.url);
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -784,8 +830,19 @@ fn serve(
         args.ops.apply(&mut options);
         let listen = args.ops.listen(args.http, &args.dir)?;
         // Held while serving: `restore` refuses to run under a server. A takeover gets it from the old process.
-        let (_lock, inherited) = if args.takeover {
-            let incoming = crate::ops::takeover::take_over(&args.dir).await?;
+        let takeover = match args.takeover {
+            Some(TakeoverMode::Require) => true,
+            Some(TakeoverMode::Auto) => {
+                let running = crate::ops::takeover::server_running(&args.dir).await;
+                if !running {
+                    tracing::info!("no server running on this data directory: starting normally");
+                }
+                running
+            }
+            None => false,
+        };
+        let (_lock, inherited) = if takeover {
+            let incoming = crate::ops::takeover::take_over(&args.dir, &listen.addrs()).await?;
             options.prechecked_schema = incoming.migrating;
             tracing::info!(from = incoming.from_pid, "took over the data directory");
             (incoming.lock, incoming.listeners)
@@ -837,7 +894,14 @@ fn serve(
             crate::ops::tls::start_with(crate::ops::web::router(app.clone(), &web), &listen, inherited).await?;
         // A later version can take over from this process (`serve --takeover`, `crate::ops::takeover`).
         #[cfg(unix)]
-        let control = match crate::ops::takeover::Control::start(app.clone(), &args.dir, server.listener_fds()).await {
+        let control = match crate::ops::takeover::Control::start(
+            app.clone(),
+            &args.dir,
+            server.listener_fds(),
+            server.listener_addrs(),
+        )
+        .await
+        {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::warn!("no zero-downtime takeover possible: {e:#}");
@@ -889,7 +953,15 @@ fn serve(
                 // serving the open ones a moment with `Connection: close`, so keep-alive clients finish and reconnect
                 // instead of racing the shutdown; then close WebSockets (1012) and stop.
                 app.begin_drain();
-                pauser.stop_accepting();
+                // The new process holds the listening sockets now: new connections wait there for it. (In another
+                // container it doesn't: keep serving through the drain; the orchestrator moves the traffic.)
+                #[cfg(unix)]
+                let taken = control.as_ref().is_some_and(|c| c.sockets_taken());
+                #[cfg(not(unix))]
+                let taken = false;
+                if taken || !handed_over.load(std::sync::atomic::Ordering::SeqCst) {
+                    pauser.stop_accepting();
+                }
                 tokio::time::sleep(DRAIN_GRACE).await;
                 app.begin_close();
             })
@@ -903,8 +975,38 @@ fn serve(
         // Nothing may commit after this process lets go of the data directory.
         let last_ts = app.db().seal().await?;
         tracing::info!(ts = last_ts, "stopped");
-        Ok::<_, crate::Error>(restart.is_requested().then(|| restart.exit_code()).flatten())
+        let wait = handed_over.load(std::sync::atomic::Ordering::SeqCst) && args.after_handover == AfterHandover::Wait;
+        #[cfg(unix)]
+        let taken = control.as_ref().is_some_and(|c| c.sockets_taken());
+        #[cfg(not(unix))]
+        let taken = false;
+        // Where to keep answering liveness while waiting: our own address, unless the new process took the socket.
+        let stub = match (&listen, taken) {
+            (crate::ops::tls::Listen::Http(addr), false) => Some(*addr),
+            _ => None,
+        };
+        Ok::<_, crate::Error>((restart.is_requested().then(|| restart.exit_code()).flatten(), wait.then_some(stub)))
     })?;
+    let (exit_code, wait) = exit_code;
+    if let Some(stub) = wait {
+        // Everything is released (lock, sockets, database, control socket) with the runtime: idle until told to go,
+        // answering `/api/live` (200) but not `/api/health` (503) on our own port, so an orchestrator stops routing
+        // here without restarting this process (which would take over again from the new one).
+        drop(rt);
+        tracing::info!("handed over to the new process; waiting for SIGTERM");
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async move {
+            if let Some(addr) = stub {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        tokio::spawn(crate::ops::takeover::answer_while_waiting(listener));
+                    }
+                    Err(e) => tracing::warn!("not answering liveness while waiting ({addr}): {e}"),
+                }
+            }
+            crate::ops::tls::shutdown_signal().await;
+        });
+        return Ok(());
+    }
     // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.
     if let Some(code) = exit_code {
         drop(rt);

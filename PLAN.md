@@ -802,8 +802,11 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 - [x] CI: `.github/workflows/release.yml` (gates, the musl release, the Docker image build and smoke test, pushes on
   tags). Its first GitHub run (2026-10-11) failed in `cargo test`: opening a database while another connection to it
   closed failed with "database is locked", because the FTS5 extension runs SQL during the open, before any busy
-  timeout (fixed: it sets one). Every step of `gates` and `release` has since passed locally (Chromium e2e, a 23 MiB
-  static binary); the `docker` job has not run yet (no Docker daemon here).
+  timeout (fixed: it sets one). Later runs found three more: the runner's disk filled up (freed, and line-tables-only
+  debug info), the writer's WAL-restarting checkpoint was dropped when it collided with the thread's (fixed), and the
+  chat e2e once stalled scrolling back through 200 messages (now a 20 s wait that reports where it stopped, with
+  screenshots; the same scroll took under 1 s on the next run, so a rare race in the example's infinite scroll may
+  remain). All three jobs, Docker included, passed on GitHub on 2026-10-11.
 - [x] Incremental, continuous backups with point-in-time restore: a logical change journal (`_journal`, written in
   each commit's own SQLite transaction: exactly once, never a rolled-back write) shipped as checksummed zstd segments
   named by ts range to a directory or S3 (`--replicate-to`, `--replicate-every`), periodic snapshots

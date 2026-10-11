@@ -14,7 +14,10 @@
 //! writes. So once the WAL passes [`RESTART_PAGES`] and the thread has copied what it could, it asks the writer to
 //! *finish*: right before its next transaction, while no write is in progress, the writer runs a `PASSIVE` checkpoint
 //! itself, which only has the few frames committed since to copy, completes, and lets that transaction restart the
-//! WAL ([`Signal::take_finish`]).
+//! WAL ([`finish_if_asked`]). A `PASSIVE` checkpoint that finds another one running reports it in the pragma's row
+//! (`busy`), not as an error: the writer then keeps the request for its next transaction, and the thread starts no new
+//! checkpoint while a request waits, so the two don't keep colliding (on a slow disk they did, and the WAL grew past
+//! 200 MiB).
 //!
 //! Durability is unchanged: a commit is durable once its WAL frames are (on disk with `synchronous = FULL`, in the OS
 //! with `NORMAL`); checkpoints only move committed frames into the database file.
@@ -91,12 +94,21 @@ pub(crate) fn remove_hook(conn: &Connection) {
     }
 }
 
-impl Signal {
-    /// For the writer, before it begins a transaction: whether to run a `PASSIVE` checkpoint first, on its own
-    /// connection, to let the WAL restart (see the module docs).
-    pub(crate) fn take_finish(&self) -> bool {
-        self.finish.load(Ordering::Relaxed) && self.finish.swap(false, Ordering::AcqRel)
+/// For the writer, before it begins a transaction: if the thread asked, run a `PASSIVE` checkpoint on the writer's
+/// connection, which completes with no write in progress and so lets the next transaction restart the WAL (see the
+/// module docs). Busy (the thread's own checkpoint still runs): the request stays for the next transaction.
+pub(crate) fn finish_if_asked(conn: &Connection, signal: &Signal) {
+    if !(signal.finish.load(Ordering::Relaxed) && signal.finish.swap(false, Ordering::AcqRel)) {
+        return;
     }
+    match conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| r.get::<_, i64>(0)) {
+        Ok(0) => {}
+        Ok(_busy) => signal.finish.store(true, Ordering::Release),
+        Err(e) => tracing::warn!("finishing a WAL checkpoint failed: {e}"),
+    }
+}
+
+impl Signal {
 
     /// The WAL has grown: checkpoint soon.
     pub(crate) fn nudge(&self) {
@@ -163,6 +175,10 @@ fn run(conn: Connection, signal: &Signal) {
             state.pending = false;
             signal.raised.store(false, Ordering::Release);
         }
+        if signal.finish.load(Ordering::Acquire) {
+            // The writer hasn't finished the last one yet: a checkpoint now would only hold the lock it needs.
+            continue;
+        }
         last = Instant::now();
         let checkpointed = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
         if checkpointed.is_ok() && signal.pages.load(Ordering::Relaxed) >= RESTART_PAGES {
@@ -176,5 +192,50 @@ fn run(conn: Connection, signal: &Signal) {
                 last_error = Some(Instant::now());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn
+    }
+
+    /// The writer's finishing checkpoint, colliding with another checkpoint, keeps the request instead of dropping it
+    /// (the pragma reports busy in its row, not as an error).
+    #[test]
+    fn a_busy_finish_is_retried_with_the_next_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let writer = open(&path);
+        writer.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1);").unwrap();
+        // A reader keeps a snapshot open; a TRUNCATE checkpoint waits for it, holding the checkpoint lock meanwhile.
+        let reader = open(&path);
+        reader.execute_batch("BEGIN; SELECT count(*) FROM t;").unwrap();
+        writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
+        let holder = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let conn = open(&path);
+                conn.busy_timeout(Duration::from_millis(600)).unwrap();
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
+            }
+        });
+        std::thread::sleep(Duration::from_millis(200));
+
+        let signal = Signal::default();
+        signal.finish.store(true, Ordering::Release);
+        finish_if_asked(&writer, &signal);
+        assert!(signal.finish.load(Ordering::Acquire), "busy: asked again for the next transaction");
+
+        reader.execute_batch("COMMIT").unwrap();
+        holder.join().unwrap();
+        finish_if_asked(&writer, &signal);
+        assert!(!signal.finish.load(Ordering::Acquire), "done once nothing else checkpoints");
     }
 }

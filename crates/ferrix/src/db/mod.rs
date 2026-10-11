@@ -430,11 +430,7 @@ impl Writer {
         }
         // The checkpoint thread copied most of the WAL; with no write in progress, this one completes, so the
         // transaction below starts the WAL over (`checkpoint`, module docs).
-        if self.checkpoint.take_finish()
-            && let Err(e) = self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
-        {
-            tracing::warn!("finishing a WAL checkpoint failed: {e}");
-        }
+        checkpoint::finish_if_asked(&self.conn, &self.checkpoint);
         storage::exec_cached(&self.conn, "BEGIN IMMEDIATE")?;
         let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
             Ok((

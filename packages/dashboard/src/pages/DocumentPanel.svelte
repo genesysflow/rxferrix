@@ -212,4 +212,14 @@
   .actions {
     margin-top: 4px;
   }
+  /* Phones: the panel covers the page. */
+  @media (max-width: 760px) {
+    .panel {
+      position: fixed;
+      inset: 0;
+      width: auto;
+      z-index: 30;
+      border-left: 0;
+    }
+  }
 </style>

@@ -249,4 +249,9 @@
   .more {
     padding: 12px 20px;
   }
+  @media (max-width: 760px) {
+    .search {
+      width: 100%;
+    }
+  }
 </style>

@@ -290,4 +290,9 @@
   .more {
     padding: 12px 20px;
   }
+  @media (max-width: 760px) {
+    .target {
+      width: 100%;
+    }
+  }
 </style>

@@ -285,4 +285,15 @@
     color: var(--faint, #999);
     font-style: italic;
   }
+  @media (max-width: 760px) {
+    .layout {
+      grid-template-columns: 1fr;
+    }
+    .main {
+      order: -1;
+    }
+    .tables {
+      max-height: 40vh;
+    }
+  }
 </style>

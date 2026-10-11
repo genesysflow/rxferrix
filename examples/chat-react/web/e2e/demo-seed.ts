@@ -94,13 +94,20 @@ async function call(token: Token, kind: "query" | "mutation" | "action", path: s
 }
 
 async function signIn(email: string, name: string): Promise<Token> {
-  try {
-    const r = await post("/api/auth/signup", { email, password: PASSWORD, name });
-    if (r.accessToken) return r.accessToken;
-  } catch (e) {
-    if ((e as { code?: string }).code !== "email_in_use") throw e;
+  // Sign in first (accounts from an earlier run), sign up otherwise; auth is rate limited per client, so wait it out.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      try {
+        return (await post("/api/auth/signin", { email, password: PASSWORD })).accessToken;
+      } catch (e) {
+        if ((e as { code?: string }).code === "rate_limited") throw e;
+        return (await post("/api/auth/signup", { email, password: PASSWORD, name })).accessToken;
+      }
+    } catch (e) {
+      if ((e as { code?: string }).code !== "rate_limited" || attempt >= 12) throw e;
+      await Bun.sleep(10_000);
+    }
   }
-  return (await post("/api/auth/signin", { email, password: PASSWORD })).accessToken;
 }
 
 const pick = <T>(xs: T[]): T => xs[Math.floor(Math.random() * xs.length)]!;

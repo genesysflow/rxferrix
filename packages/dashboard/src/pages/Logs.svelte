@@ -199,4 +199,12 @@
   .more {
     padding: 12px 20px;
   }
+  @media (max-width: 760px) {
+    .filters {
+      padding: 8px 12px;
+    }
+    .filters input.mono {
+      width: 100%;
+    }
+  }
 </style>

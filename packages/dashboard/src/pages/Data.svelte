@@ -77,6 +77,21 @@
   </aside>
 
   <section class="main">
+    {#if ctx.tables !== undefined}
+      <select
+        class="table-picker"
+        aria-label="Table"
+        value={tableName ?? ""}
+        onchange={(e) => router.navigate(href("data", [e.currentTarget.value]))}
+      >
+        <optgroup label="Tables">
+          {#each appTables as t (t.name)}<option value={t.name}>{t.name} ({t.documents})</option>{/each}
+        </optgroup>
+        <optgroup label="System">
+          {#each systemTables as t (t.name)}<option value={t.name}>{t.name} ({t.documents})</option>{/each}
+        </optgroup>
+      </select>
+    {/if}
     {#if table}
       {#key table.name}
         <DocumentGrid
@@ -173,5 +188,21 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+  }
+  .table-picker {
+    display: none;
+  }
+  @media (max-width: 760px) {
+    .tables {
+      display: none;
+    }
+    .main {
+      display: flex;
+      flex-direction: column;
+    }
+    .table-picker {
+      display: block;
+      margin: 10px 12px 0;
+    }
   }
 </style>

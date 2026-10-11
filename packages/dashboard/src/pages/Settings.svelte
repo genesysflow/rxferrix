@@ -520,4 +520,14 @@
   .locked-provider {
     background: var(--panel-2);
   }
+  @media (max-width: 760px) {
+    .field {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+    .secret,
+    .test {
+      width: 100%;
+    }
+  }
 </style>

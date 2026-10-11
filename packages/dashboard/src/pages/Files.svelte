@@ -436,4 +436,16 @@
     font-weight: 600;
     color: var(--accent-text);
   }
+  /* Phones: the file panel covers the page. */
+  @media (max-width: 760px) {
+    .layout.with-panel {
+      grid-template-columns: 1fr;
+    }
+    .panel {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      border-left: 0;
+    }
+  }
 </style>

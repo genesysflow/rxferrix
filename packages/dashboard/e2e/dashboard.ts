@@ -13,7 +13,7 @@
 // showing it, a field locked by a command-line flag, inline validation), the audit log, backups (create, download,
 // delete; the scheduled backup cron), export and import (2000 seeded todos), the virtualized grid scrolled to the
 // end, the search box, a migration (dry run, run), "Run now" on a cron, the latency charts, "open app as user" and
-// live session revocation, the command palette. A second server with private storage checks thumbnails and
+// live session revocation, the command palette, the phone layout. A second server with private storage checks thumbnails and
 // downloads of signed URLs; others a staged restore with "Restart now", continuous replication (the status card and
 // a point-in-time restore by commit ts), and, with a fresh data dir, the printed /_/setup#token=… flow.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -728,6 +728,34 @@ try {
     await page.getByText("No workflows").waitFor();
     await page.keyboard.press("Alt+9");
     await page.getByRole("heading", { name: "Migrations" }).waitFor();
+  });
+
+  // 17b. A phone-sized window: the sidebar is a drawer behind the top bar, master/detail pages show one pane.
+  await step("phone layout: drawer, function list and detail, table picker", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      const menu = page.getByRole("button", { name: "Menu" });
+      await nav(page, "Functions").waitFor({ state: "hidden", timeout: 2000 }); // the drawer, closed
+      await menu.click();
+      await nav(page, "Functions").click();
+      await page.getByRole("searchbox", { name: "Search functions" }).or(page.getByLabel("Search functions")).waitFor();
+      if ((await menu.getAttribute("aria-expanded")) !== "false") throw new Error("the drawer stayed open after navigating");
+      await page.getByRole("link", { name: /add$/ }).first().click();
+      await page.getByRole("heading", { name: "todos:add" }).waitFor();
+      if (await page.getByLabel("Search functions").isVisible()) throw new Error("the function list is shown next to the function");
+      await shot(page, "phone-function");
+      await page.getByRole("link", { name: "← Functions" }).click();
+      await page.getByLabel("Search functions").waitFor();
+      await menu.click();
+      await nav(page, "Data").click();
+      await page.getByRole("combobox", { name: "Table" }).selectOption("_users");
+      await page.getByRole("heading", { name: "_users" }).waitFor();
+      await shot(page, "phone-data");
+      const width = await page.evaluate(() => document.documentElement.scrollWidth);
+      if (width > 390) throw new Error(`the page is ${width}px wide on a 390px screen`);
+    } finally {
+      await page.setViewportSize({ width: 1360, height: 820 });
+    }
   });
 
   // 18. Private storage: list thumbnails and downloads use the signed URLs the API returns.

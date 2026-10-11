@@ -102,6 +102,13 @@
   const route = $derived(router.route);
   const live = $derived(connection.current.isWebSocketConnected);
   let palette = $state(false);
+  /** On narrow screens the sidebar is a drawer behind the top bar's menu button; it closes on navigation. */
+  let menu = $state(false);
+  const current = $derived(nav.find((item) => item.page === route.page));
+  $effect(() => {
+    void route.page;
+    menu = false;
+  });
 
   const commands = $derived<Command[]>([
     ...nav.map((item, i) => ({
@@ -161,7 +168,15 @@
     <button onclick={signOut}>Sign out</button>
   </div>
 {:else}
-  <div class="shell">
+  <div class="shell" class:menu-open={menu}>
+    <header class="topbar">
+      <button class="ghost menu-button" aria-label="Menu" aria-expanded={menu} onclick={() => (menu = !menu)}>☰</button>
+      <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span></a>
+      <span class="topbar-title">{current?.label ?? ""}</span>
+      <span class="dot" class:on={live} title={live ? "Connected: views update live" : "Reconnecting…"}></span>
+      <button class="ghost menu-button" aria-label="Go to…" onclick={() => (palette = true)}>⌕</button>
+    </header>
+    <button class="scrim" aria-label="Close menu" tabindex="-1" onclick={() => (menu = false)}></button>
     <nav class="sidebar" aria-label="Dashboard">
       <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> ferrix</a>
       <button class="palette-button" onclick={() => (palette = true)} title="Command palette">
@@ -372,6 +387,84 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .topbar,
+  .scrim {
+    display: none;
+  }
+  /* Phones and narrow windows: a top bar, and the sidebar slides in over the page. */
+  @media (max-width: 760px) {
+    .shell {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .topbar .brand {
+      padding: 0;
+    }
+    .topbar-title {
+      flex: 1;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .menu-button {
+      font-size: 18px;
+      width: 40px;
+      height: 40px;
+      justify-content: center;
+      padding: 0;
+    }
+    .sidebar {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: min(280px, 85vw);
+      z-index: 50;
+      transform: translateX(-100%);
+      /* Hidden when closed, so its links are out of the tab order (after the slide-out finishes). */
+      visibility: hidden;
+      transition:
+        transform 0.18s ease,
+        visibility 0s 0.18s;
+      box-shadow: var(--shadow);
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+    .menu-open .sidebar {
+      transform: none;
+      visibility: visible;
+      transition: transform 0.18s ease;
+    }
+    .menu-open .scrim {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      border: 0;
+      border-radius: 0;
+      background: rgb(0 0 0 / 0.35);
+    }
+    .palette-button kbd {
+      display: none;
+    }
+    ul a {
+      padding: 9px 8px;
+    }
+    main {
+      min-height: 0;
+    }
+    .toasts {
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+    }
   }
   .toasts {
     position: fixed;

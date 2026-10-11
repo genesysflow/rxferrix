@@ -76,7 +76,7 @@
 
 <svelte:window {onkeydown} />
 
-<div class="layout">
+<div class="layout" class:has-selection={!!selected}>
   <aside class="list" aria-label="Functions">
     <div class="tools">
       <input bind:this={searchInput} bind:value={search} placeholder="Search functions ( / )" aria-label="Search functions" />
@@ -109,6 +109,7 @@
       <Empty title="Select a function" hint="Pick a function to see its signature and run it with JSON args, as yourself or as a user." />
     {:else}
       <header class="page-header">
+        <a class="back" href={href("functions")} onclick={link}>← Functions</a>
         <h1 class="mono">{selected.path}</h1>
         <span class="badge {selected.kind}">{selected.kind}</span>
         <span class="badge">{selected.visibility}</span>
@@ -254,5 +255,31 @@
   }
   pre.err {
     color: var(--err);
+  }
+  .back {
+    display: none;
+  }
+  /* Phones: the list, or the selected function with a link back to the list. */
+  @media (max-width: 760px) {
+    .list {
+      width: 100%;
+      border-right: 0;
+    }
+    .layout.has-selection .list,
+    .layout:not(.has-selection) .page {
+      display: none;
+    }
+    .back {
+      display: block;
+      flex-basis: 100%;
+      font-size: 13px;
+    }
+    h1.mono {
+      font-size: 15px;
+      word-break: break-all;
+    }
+    .sig {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

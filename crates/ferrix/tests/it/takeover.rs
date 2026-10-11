@@ -61,7 +61,8 @@ async fn start_old(dir: &Path) -> Serving {
 /// Take over `dir` with `tables` and serve on the inherited socket.
 async fn take_over(dir: &Path, addr: SocketAddr, tables: Vec<TableDef>) -> ferrix::Result<Serving> {
     let incoming = takeover::take_over_with(dir, tables).await?;
-    let options = AppOptions { dev: true, prechecked_schema: Some(incoming.migrating), ..Default::default() };
+    assert!(incoming.migrating.is_some(), "the copy was swapped in");
+    let options = AppOptions { dev: true, prechecked_schema: incoming.migrating, ..Default::default() };
     let app = App::open(dir, options).await?;
     Ok(serve(dir, incoming.lock, app, Listen::Http(addr), incoming.listeners).await)
 }
@@ -75,6 +76,28 @@ async fn add(client: &reqwest::Client, addr: SocketAddr, text: &str) -> Result<V
         .map_err(|e| format!("{e}"))?;
     let body: Value = res.json().await.map_err(|e| format!("{e}"))?;
     if body["status"] == "success" { Ok(body) } else { Err(body.to_string()) }
+}
+
+/// Send a mutation over a WebSocket as session `session` with `request_id`; returns the MutationResponse.
+async fn ws_mutation(addr: SocketAddr, session: &str, request_id: u64, text: &str) -> Value {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
+    let connect = json!({ "type": "Connect", "sessionId": session, "connectionCount": 0, "lastCloseReason": null,
+                          "clientVersion": "0.1.0" });
+    ws.send(Message::text(connect.to_string())).await.unwrap();
+    let mutation = json!({ "type": "Mutation", "requestId": request_id, "udfPath": todos::add::path(),
+                           "args": { "text": text } });
+    ws.send(Message::text(mutation.to_string())).await.unwrap();
+    while let Some(frame) = ws.next().await {
+        if let Ok(Message::Text(t)) = frame {
+            let v: Value = serde_json::from_str(t.as_str()).unwrap();
+            if v["type"] == "MutationResponse" {
+                return v;
+            }
+        }
+    }
+    panic!("no MutationResponse");
 }
 
 async fn count(app: &App) -> usize {
@@ -94,9 +117,12 @@ async fn a_takeover_under_load_refuses_nothing_loses_nothing_and_can_happen_agai
     let dir = tempfile::tempdir().unwrap();
     let old = start_old(dir.path()).await;
     let addr = old.addr;
-    for i in 0..50 {
+    for i in 0..49 {
         add(&reqwest::Client::new(), addr, &format!("before {i}")).await.unwrap();
     }
+    // A WebSocket mutation leaves a dedup record (session, request id): it must survive the takeover.
+    let first = ws_mutation(addr, "dedup-session", 7, "over the socket").await;
+    assert_eq!(first["success"], true, "{first}");
 
     // A WebSocket client: told to reconnect (1012) when the old server hands over.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
@@ -143,6 +169,11 @@ async fn a_takeover_under_load_refuses_nothing_loses_nothing_and_can_happen_agai
     let failures = failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{} request(s) failed: {:?}", failures.len(), &failures[..failures.len().min(3)]);
     assert_eq!(count(&new.app).await, 50 + ok.load(Ordering::SeqCst), "every acknowledged write is there");
+    // The client retries its mutation after reconnecting: answered from the dedup record, not run again.
+    let before = count(&new.app).await;
+    let retried = ws_mutation(addr, "dedup-session", 7, "over the socket").await;
+    assert_eq!((retried["success"].clone(), retried["result"].clone()), (json!(true), first["result"].clone()));
+    assert_eq!(count(&new.app).await, before, "the retried mutation didn't run twice");
     assert_eq!(ws_closed.await.unwrap(), 1012);
     assert!(!dir.path().join(takeover::STAGING_DIR).join("data.db").exists());
     assert!(dir.path().join(takeover::STAGING_DIR).join("previous").join("data.db").exists());

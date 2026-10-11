@@ -2410,7 +2410,10 @@ transaction can begin) and exits. The new process waits for the socket to close,
 rows, checks that the copy's ts equals the database's, copies `_mutation_dedup` rows, the replication and analytics
 `_meta` positions and `_journal` (trimmed to what those consumers still need), raises `last_creation_time` if needed,
 then swaps: `<dir>/takeover/swapping` marks it, `data.db*` moves to `takeover/previous/`, the copy moves in, the
-marker goes; a start that finds the marker finishes the move (`takeover::recover`). The app then opens with
+marker goes; a start that finds the marker finishes the move (`takeover::recover`). If anything in this last step
+fails, the new process logs it, completes a swap that had begun (or drops the copy) and opens the database as the
+old server left it, with the usual schema check (`Incoming::migrating` is `None`): once the old server is gone, the
+new one serves regardless. Otherwise the app opens with
 `AppOptions::prechecked_schema` (the copy's migrating tables; the schema check isn't repeated) and serves on the
 inherited sockets (`tls::start_with`; a socket is reused only if the configured address matches). `check` performs the
 copy and open in `<dir>/check-<pid>/` and deletes it. Unix only.

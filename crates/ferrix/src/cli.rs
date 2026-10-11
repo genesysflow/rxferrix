@@ -786,7 +786,7 @@ fn serve(
         // Held while serving: `restore` refuses to run under a server. A takeover gets it from the old process.
         let (_lock, inherited) = if args.takeover {
             let incoming = crate::ops::takeover::take_over(&args.dir).await?;
-            options.prechecked_schema = Some(incoming.migrating);
+            options.prechecked_schema = incoming.migrating;
             tracing::info!(from = incoming.from_pid, "took over the data directory");
             (incoming.lock, incoming.listeners)
         } else {

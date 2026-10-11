@@ -23,7 +23,8 @@
 //!    table, so a retried mutation still runs once; replication and analytics positions; the journal itself for
 //!    replication), checks that the copy is at the old database's ts, and swaps it in: the old `data.db` moves to
 //!    `<dir>/takeover/previous/`. Then it opens the app with the schema check already done and serves on the
-//!    inherited sockets. A crash during the swap is finished on the next start ([`recover`]).
+//!    inherited sockets. A crash during the swap is finished on the next start ([`recover`]). If this last step
+//!    fails, the process still serves: on the database as the old server left it.
 //!
 //! Under systemd the new process reports itself as the service's main process (`sd_notify`, `MAINPID=`; the unit
 //! needs `NotifyAccess=all`): see README "Deploying".
@@ -212,7 +213,10 @@ async fn serve_takeover(
 pub struct Incoming {
     pub lock: DirLock,
     pub listeners: crate::ops::tls::Inherited,
-    pub migrating: Vec<String>,
+    /// The migrating tables of the copy that was swapped in (its schema check passed), or `None` if finishing the
+    /// takeover failed after the handover: the database is then as the old server left it, and opening it runs the
+    /// schema check as usual.
+    pub migrating: Option<Vec<String>>,
     /// The process that was serving.
     pub from_pid: u32,
 }
@@ -270,13 +274,27 @@ pub async fn take_over_with(dir: &Path, tables: Vec<crate::schema::TableDef>) ->
         .await
         .map_err(|_| anyhow::anyhow!("the old server (pid {from_pid}) didn't exit within {EXIT_WAIT:?}"))??;
     let lock = DirLock::acquire_waiting(dir, Duration::from_secs(30)).await?;
-    let migrating = staged.migrating.clone();
-    staged.finish(dir).await.context("finishing the takeover")?;
-    tracing::info!(
-        pause_ms = handover.elapsed().as_millis() as u64,
-        total_ms = started.elapsed().as_millis() as u64,
-        "takeover: the copy is in place"
-    );
+    let copy_migrating = staged.migrating.clone();
+    // The old server is gone: from here on, nothing may stop this process from serving. If finishing fails, the
+    // database is as the old server left it (or the swap is completed, if it had begun), and it opens normally.
+    let migrating = match staged.finish(dir).await {
+        Ok(()) => {
+            tracing::info!(
+                pause_ms = handover.elapsed().as_millis() as u64,
+                total_ms = started.elapsed().as_millis() as u64,
+                "takeover: the copy is in place"
+            );
+            Some(copy_migrating)
+        }
+        Err(e) => {
+            tracing::error!("takeover: finishing failed ({e:#}); serving the database as the old server left it");
+            recover(dir)?;
+            if !dir.join(STAGING_DIR).join(SWAP_MARKER).exists() {
+                let _ = std::fs::remove_file(dir.join(STAGING_DIR).join("data.db"));
+            }
+            None
+        }
+    };
     Ok(Incoming { lock, listeners, migrating, from_pid })
 }
 
@@ -341,7 +359,7 @@ impl Staged {
         drop(source);
         self.db()
             .with_writer(move |c| {
-                for (session, request, created, response) in &carried.dedup {
+                for [session, request, created, response] in &carried.dedup {
                     c.execute(
                         "INSERT OR IGNORE INTO _mutation_dedup (session_id, request_id, created_ms, response) \
                          VALUES (?1, ?2, ?3, ?4)",
@@ -378,7 +396,8 @@ impl Staged {
 
 /// What the old database has that the journal doesn't carry.
 struct Carried {
-    dedup: Vec<(String, String, i64, String)>,
+    /// `(session_id, request_id, created_ms, response)`, as stored.
+    dedup: Vec<[rusqlite::types::Value; 4]>,
     meta: Vec<(&'static str, Option<rusqlite::types::Value>)>,
     last_creation_time: f64,
     journal: Vec<(u64, f64, String)>,
@@ -392,7 +411,7 @@ fn carried_state(source: &rusqlite::Connection) -> crate::Result<Carried> {
     let mut stmt = source.prepare("SELECT session_id, request_id, created_ms, response FROM _mutation_dedup")?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        dedup.push((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?));
+        dedup.push([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]);
     }
     let mut meta = Vec::new();
     for key in CARRIED_META {

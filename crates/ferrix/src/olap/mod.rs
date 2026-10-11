@@ -1,5 +1,5 @@
 //! Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions
-//! (`ctx.olap`). Design: PLAN.md §7.6; contract: docs/CONTRACT.md §1.12.
+//! (`ctx.olap`). Design: PLAN.md §7.6; contract: docs/CONTRACT.md §1.11.
 //!
 //! The copy lives in `<data dir>/olap.duckdb` and follows the live database through the change journal
 //! (`crate::db::journal`, consumer `Olap`): batches of commits are applied in DuckDB transactions, a few hundred

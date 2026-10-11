@@ -490,3 +490,36 @@ async fn status_rebuild_and_metrics_over_http() {
     let st: Value = req(Method::GET, "/api/admin/olap").send().await.unwrap().json().await.unwrap();
     assert_eq!((st["state"].clone(), st["rebuilds"].clone()), (json!("ready"), json!(2)));
 }
+
+/// Writes keep coming while the copy is built, then rebuilt, in the background: once caught up, it matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuilding_while_writes_continue() {
+    let mut options = olap(true);
+    options.olap.apply_every = Duration::from_millis(5);
+    let t = TestApp::with_options(options).await.unwrap();
+    let write = |from: i64, to: i64| {
+        let app = t.app().clone();
+        tokio::spawn(async move {
+            for i in from..to {
+                app.mutation::<add>((format!("c{}", i % 5), 1.0, i)).await.unwrap();
+            }
+        })
+    };
+    // The first build runs while these land.
+    write(0, 150).await.unwrap();
+    let olap = t.app().olap().unwrap().clone();
+    for _ in 0..500 {
+        if olap.status(t.app()).await.state == "ready" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // A rebuild while more land.
+    let writes = write(150, 300);
+    olap.request_rebuild("a rebuild in the middle of the writes");
+    writes.await.unwrap();
+    t.olap_sync().await.unwrap();
+    assert_eq!(rows(&t, "SELECT count(*) AS n, sum(quantity) AS q FROM olap_orders").await[0], json!({ "n": 300, "q": 44850 }));
+    let st = olap.status(t.app()).await;
+    assert_eq!((st.rebuilds, st.state.as_str()), (2, "ready"));
+}

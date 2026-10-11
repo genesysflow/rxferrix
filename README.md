@@ -384,6 +384,45 @@ prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18
 HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
 `_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).
 
+## Analytics (OLAP)
+
+For group-bys, joins and time series over many documents, `serve --olap` keeps a columnar copy of the data in an
+embedded DuckDB (`<data dir>/olap.duckdb`), a few hundred milliseconds behind, and actions query it with read-only
+SQL. It needs the cargo feature `olap` (DuckDB is built from source: a static binary grows from ~25 to ~57 MB, and a
+first build takes a few minutes): `ferrix = { version = "…", features = ["olap"] }`.
+
+```rust
+#[object]
+pub struct DayStats { pub day: String, pub added: i64, pub completed: i64 }
+
+#[action]
+pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
+    ctx.olap.query_as::<DayStats>(
+        "SELECT strftime(to_timestamp(_creationTime / 1000), '%Y-%m-%d') AS day,
+                count(*) AS added, count(*) FILTER (WHERE done) AS completed
+         FROM todos GROUP BY day ORDER BY day",
+        (),
+    ).await
+}
+```
+
+- Tables are named like yours, with `_id`, `_creationTime` (ms) and `_ts` (commit ts) first, then the fields with
+  types from the Rust struct: numbers, booleans, strings, `Vec<T>` as lists, nested `#[object]` structs as STRUCTs
+  (`address.city`), anything else as JSON. `_users`, `_storage`, `_scheduled_jobs` and a few other system tables are
+  there too; tables holding secrets (credentials, sessions, settings) never are.
+- Actions only, one SELECT per call, `?` parameters. No files, network, extensions or settings; at most 100k rows;
+  interrupted after `--olap-timeout` (30s). Errors are user errors: `olap_unavailable`, `olap_query_failed`,
+  `olap_timeout`.
+- The copy follows the change journal and reports `as_of_ts` with each result. After `ctx.run_mutation`, query
+  through `ctx.olap.latest()` to see its writes. It rebuilds itself from a snapshot when there is none yet, after a
+  restore, when a table's Rust type changes (that table only), or when it falls more than `--olap-max-lag` (512 MB of
+  changes) behind. Backups skip it: it is derived data.
+- `--olap-memory 2GB` and `--olap-threads N` bound DuckDB. `GET /api/admin/olap` shows the state, lag, tables and
+  size (also on the dashboard Overview and in `/metrics`); `POST /api/admin/olap/rebuild` starts over.
+- In tests: `AppOptions { olap: OlapOptions { enabled: true, background: false, ..Default::default() }, .. }`, then
+  `t.olap_sync().await?` before querying. The todo example has `todos:stats_by_day`
+  (`cargo run -p todo-server --features olap -- serve --dev --olap`). Details: docs/CONTRACT.md §1.11.
+
 ## Migrations
 
 At startup, a table whose Rust type changed has its documents validated; if some don't match, the server refuses to
@@ -527,7 +566,7 @@ SSD (btrfs, encrypted), one-insert mutations: 8.9k/s with 1 writer, 16.2k/s with
 **Release binary.** `scripts/release.sh` builds the web app and a static `x86_64-unknown-linux-musl` binary of
 `todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 20 MB). C code is
 cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not installed. For your app:
-`PACKAGE=my-server WEB=web scripts/release.sh`.
+`PACKAGE=my-server WEB=web scripts/release.sh`; `FEATURES=olap` adds the analytics copy (DuckDB; about 57 MB).
 
 **systemd.** [`deploy/ferrix.service`](deploy/ferrix.service) runs the binary as a dynamic unprivileged user with
 its data in `/var/lib/ferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM, and restarts
@@ -549,8 +588,9 @@ docker run --rm todo-server functions             # any CLI command
 ```
 
 **CI.** [`.github/workflows/release.yml`](.github/workflows/release.yml) runs every gate of [Tests](#tests) (end-to-end
-tests included, in Chromium), then builds the static musl binary with `scripts/release.sh` (an artifact; attached to
-the GitHub release for `v*` tags) and the Docker image, which it smoke-tests (`functions`, `/api/health` with a
+tests included, in Chromium) and, in a job of its own, the tests with the `olap` feature; then builds the static musl
+binaries with `scripts/release.sh`, `todo-server` and `todo-server-olap` (artifacts; attached to the GitHub release
+for `v*` tags) and the Docker image, which it smoke-tests (`functions`, `/api/health` with a
 volume) and pushes to `ghcr.io/<owner>/todo-server` for `v*` tags.
 
 **Logs.** `serve` writes JSON lines when stdout isn't a terminal (systemd, Docker): `timestamp`, `level`, `target`,
@@ -629,7 +669,8 @@ and objects, an empty cell is `null` (or `""` for a non-optional string). Admins
 
 **Metrics.** `serve --metrics [--metrics-token T]` exposes Prometheus metrics at `/metrics`: requests by route and
 status, function executions and durations, commit ts and rate, sockets, subscriptions, reruns, database file sizes,
-scheduler queue depth, dropped log entries and, with `--replicate-to`, the replication lag.
+scheduler queue depth, dropped log entries and, with `--replicate-to` and `--olap`, the replication and analytics
+lag.
 
 ## Things to know
 
@@ -687,6 +728,7 @@ app on :5180) with a self-contained e2e test: `cd examples/chat-react/web && bun
 cargo test --workspace                                          # Rust: unit, proptests, model-based reactivity, WS e2e
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # generated TS type-checks with tsc
 cargo test -p ferrix-cli --test new -- --ignored                 # `ferrix new` apps build, typecheck; no SQLite warning
+cargo test -p ferrix --features olap --lib --test it             # with the analytics copy (builds DuckDB: minutes)
 FUZZ_SCALE=20 cargo test --release -p ferrix --test it fuzz     # longer randomized protocol/WebSocket/HTTP fuzzing
 bun run typecheck && bun run test                               # TS packages (dashboard included)
 bun run check:dashboard                                         # the committed dashboard build matches its sources

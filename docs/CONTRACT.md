@@ -117,6 +117,8 @@ pub struct TableDef {
     /// Ok iff a stored document (system fields included) deserializes as `Doc<Self>`; Err = the serde error.
     /// Used by the startup schema check (§1.4). Emitted as `__private::validate_doc::<Self>`.
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
+    /// The fields' JSON shape (`ferrix::shape::Shape`, §3 "Shapes"): the analytics copy's columns (§1.11).
+    pub shape: fn() -> ferrix::shape::Shape,
 }   // PartialEq compares name, all index definitions and the rendered `ts()`, never the fn pointers
 pub struct IndexDef { pub name: &'static str, pub fields: Vec<&'static str> }   // JSON field names
 pub struct SearchIndexDef { pub name: &'static str, pub search_field: &'static str, pub filter_fields: Vec<&'static str> }
@@ -411,6 +413,7 @@ pub struct AppOptions {
     pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
     pub fsync_commits: bool,          // false: commits wait for the disk (SQLite synchronous = FULL); `--fsync-commits`
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
+    pub olap: ferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
@@ -1518,6 +1521,80 @@ pub struct MigrationReport {   // camelCase JSON
   (an `eq` prefix plus a `_creationTime` bound, `take(n)`: a limited scan records only what it scanned); prefer
   `Query::count()` (no documents read) to collecting a range just to count it.
 
+### 1.11 Analytics (OLAP)
+
+With `AppOptions::olap.enabled` (`serve --olap`) and the cargo feature `olap` (DuckDB, built from source; ~32 MB more
+in a static binary), the app keeps a **columnar copy** of its data in `<data dir>/olap.duckdb` and actions query it
+with read-only SQL. Without the feature the API below still compiles and `--olap` fails at startup.
+
+```rust
+#[object]
+pub struct DayStats { pub day: String, pub added: i64, pub completed: i64 }
+
+#[action]
+pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
+    ctx.olap.query_as::<DayStats>(
+        "SELECT strftime(to_timestamp(_creationTime / 1000), '%Y-%m-%d') AS day,
+                count(*) AS added, count(*) FILTER (WHERE done) AS completed
+         FROM todos WHERE _creationTime >= ? GROUP BY day ORDER BY day",
+        (since,),
+    ).await
+}
+
+impl ActionCtx { pub olap: ferrix::olap::Olap }
+impl Olap {
+    pub async fn query(&self, sql: &str, params: impl OlapParams) -> Result<OlapResult>;
+    pub async fn query_as<T: DeserializeOwned>(&self, sql: &str, params: impl OlapParams) -> Result<Vec<T>>;
+    pub fn at_least(&self, ts: u64) -> Olap;   // wait (up to the timeout) until the copy has applied commit `ts`
+    pub fn latest(&self) -> Olap;              // at_least(the newest commit)
+}
+pub struct OlapResult { pub columns: Vec<OlapColumn>, pub rows: Vec<Map<String, Value>>, pub as_of_ts: u64 }
+pub struct OlapColumn { pub name: String, pub type_name: String }
+// OlapParams: (), tuples of up to 8 `Into<OlapValue>` (bool, integers, floats, strings, Id<T>, Bytes, Option<_>),
+// Vec<OlapValue>. Positional `?` placeholders.
+```
+- **Actions only**, not queries or mutations: the copy lags the data (a few hundred milliseconds) and is not
+  reactive. `as_of_ts`: the copy reflects every commit up to it and none after (a query sees whole commits). After
+  `ctx.run_mutation`, `ctx.olap.latest()` (or `at_least(ts)` with a known commit ts) reads its writes.
+- **Tables** are named like ferrix's: every user table, and the system tables `_users`, `_accounts`, `_storage`,
+  `_scheduled_jobs`, `_crons`, `_workflows`, `_workflow_steps`, `_migrations`. The others hold secrets (password and
+  token hashes, settings) or admin-only history (`_audit_log`) and are never copied. Columns: `_id` VARCHAR,
+  `_creationTime` DOUBLE (ms), `_ts` BIGINT (the document's commit ts), then the fields in declaration order, typed
+  from the table's shape (§3.1 "Shapes"): Bool → BOOLEAN, Int → BIGINT, UInt → UBIGINT, Float → DOUBLE, Text →
+  VARCHAR, Bytes → BLOB, List → `T[]`, a closed Struct → `STRUCT(...)` (fields in order), Json and open structs →
+  JSON; Optional is the inner type, nullable. A table whose shape is open also gets `_extra` JSON with the keys that
+  have no column. Values are converted by DuckDB (`TRY_CAST`, `json_transform`): one that doesn't fit its column
+  reads as NULL. Unit enums of system tables (`state`, `kind`) are VARCHAR.
+- **Results**: one object per row keyed by column name; lists and structs as arrays and objects; JSON columns
+  parsed; DATE / TIMESTAMP / TIME as ISO 8601 strings; BLOB as `{"$bytes": "<base64>"}`; HUGEINT and DECIMAL as
+  numbers (a float past 2^53); NaN as null.
+- **The sandbox**: exactly one SELECT per call (`WITH ... SELECT` included; checked with DuckDB's own parser,
+  `json_serialize_sql`), run in a transaction that is rolled back, on a database with `enable_external_access =
+  false` (no files, no network: `read_csv`, `glob`, `COPY`, `ATTACH` fail), extension installing and autoloading off,
+  and the configuration locked. At most `max_result_rows` rows (100k; more is an error asking for a LIMIT), at most
+  `max_concurrent_queries` at once (4), interrupted after `query_timeout` (30s).
+- **Errors** are user errors: `olap_unavailable` (off, not built with the feature, or the copy is being built),
+  `olap_query_failed` (not one SELECT, or DuckDB's message), `olap_timeout` (interrupted, or `at_least` waited too
+  long).
+- **How the copy follows the data.** It reads the change journal (§4.4, consumer `olap`) every `apply_every`
+  (250ms) and applies each batch (the final state of every document written) in one DuckDB transaction. A journal
+  row is deleted once every active consumer (replication, the copy) has applied or shipped it; journaling is on while
+  either is. A table is **rebuilt** from one snapshot when there is no copy yet, after a restore (`journal::scrub`
+  removes the copy's id), when the journal can't continue the copy (commits made without `--olap` or replication),
+  when more than `max_lag_bytes` (512 MiB) of journal wait to be applied, or alone when its shape changed (a
+  fingerprint per table). Queries during a rebuild fail with `olap_unavailable`. The copy is derived data: backups
+  and replication skip it; deleting the file rebuilds it.
+- **Options** (`AppOptions::olap: OlapOptions`; flags): `enabled` (`--olap`, `FERRIX_OLAP`), `memory_limit`
+  (`--olap-memory 2GB`; default DuckDB's, 80% of RAM), `threads` (`--olap-threads`), `query_timeout`
+  (`--olap-timeout 30s`), `max_lag_bytes` (`--olap-max-lag 512MB`), `max_concurrent_queries`, `max_result_rows`,
+  `apply_every`, `background` (off: tests drive it with `TestApp::olap_sync()`).
+- **Operations**: `GET /api/admin/olap` (`{ enabled: false }` or the status: `state` building / ready / failed,
+  `detail`, `appliedTs`, `latestTs`, `lagMs`, tables with row counts and columns, `sizeBytes`, `rowsApplied`,
+  `rebuilds`), `POST /api/admin/olap/rebuild` (202; rebuilds every table in the background; audited), the
+  `ferrix_olap_*` metrics (§4.4), `olap` in `/api/admin/stats` and the dashboard Overview.
+- **Tests**: `TestApp::with_options(AppOptions { olap: OlapOptions { enabled: true, background: false, .. }, .. })`
+  and `t.olap_sync().await?` before querying.
+
 ---
 
 ## 2. `::ferrix::__private` items (used ONLY by macro output)
@@ -1613,7 +1690,14 @@ impl ::ferrix::Table for Todo {
         ::ferrix::TableDef { name: "todos", indexes: vec![
             ::ferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
         ], ts: || ::ferrix::__private::ts_inline::<Todo>(),
-        validate: ::ferrix::__private::validate_doc::<Todo> }
+        validate: ::ferrix::__private::validate_doc::<Todo>,
+        shape: || {
+            let mut s = ::ferrix::shape::StructShape::default();
+            s.field("text", SHAPE_OF!(String));          // see "Shapes" below
+            s.field("done", SHAPE_OF!(bool));
+            s.field("createdBy", SHAPE_OF!(Option<String>));
+            ::ferrix::shape::Shape::Struct(s)
+        } }
     }
 }
 
@@ -1635,6 +1719,19 @@ static __FERRIX_TABLE_Todo: fn() -> ::ferrix::TableDef = <Todo as ::ferrix::Tabl
 Compile errors (with spans) for: tuple or unit structs, enums, generics, an index naming an unknown field, a duplicate
 index name, an index named `by_id` or `by_creation_time`, and an existing `#[serde(rename_all)]` other than camelCase.
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
+
+**Shapes.** `SHAPE_OF!(T)` above stands for the block
+`{ use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _}; #[allow(clippy::needless_borrow)] let shape =
+(&&::ferrix::shape::ShapeProbe::<T>::new()).probe_shape(); shape }`: `T`'s `HasShape::shape()` when `T` implements
+`ferrix::shape::HasShape`, else `Shape::Json` (autoref specialization), so a field of a type without one still
+compiles. Field names follow serde: the struct's `rename_all` (camelCase for tables), `rename = "x"`; `skip` /
+`skip_serializing` fields are left out, `skip_serializing_if` ones become `optional_field` (they may be missing),
+`flatten` fields `s.flatten(SHAPE_OF!(T))` (a struct's fields join, anything else makes the shape open: `s.open()`),
+`with` / `serialize_with` fields are `Shape::Json`, and a field whose name can't be read makes the shape open.
+`HasShape` is implemented for `bool` (Bool), `i8`..`i64`, `u8`..`u32`, `isize` (Int), `u64`, `usize` (UInt), `f32`,
+`f64` (Float), `String`, `str`, `char`, `Id<T>` (Text), `Bytes` (Bytes), `Option<T>` (Optional), `Vec`, `VecDeque`,
+`BTreeSet`, `HashSet`, slices and arrays (List), `Box`, `Arc`, `&T` (as `T`), `Doc<T>` (system fields, then the
+table's), and `serde_json::Value`, maps, `i128`, `u128`, `()` (Json).
 
 **Search and vector indexes.** `#[search_index(name, search = field, filter = [f, ...], tokenizer = "...", language =
 "...", diacritics = "...")]` and `#[vector_index(name, field = f, dims = N, filter = [f, ...], kind = "...", m = N,
@@ -1842,6 +1939,22 @@ Output:
 #[derive(Clone, Debug)]
 pub struct MessageView { #[serde(flatten)] pub message: Doc<Message>, pub author_name: String }
 ```
+and, for a type without generics, its shape (§3.1 "Shapes"):
+```rust
+impl ::ferrix::shape::HasShape for MessageView {
+    fn shape() -> ::ferrix::shape::Shape {
+        ::ferrix::shape::guard(::core::any::type_name::<Self>(), || {
+            let mut s = ::ferrix::shape::StructShape::default();
+            s.flatten(SHAPE_OF!(Doc<Message>));
+            s.field("authorName", SHAPE_OF!(String));
+            ::ferrix::shape::Shape::Struct(s)
+        })
+    }
+}
+```
+(an enum whose variants are all units, without `tag` / `content` / `untagged`: `Shape::Text`; another enum, a tuple
+struct of several fields or a unit struct: `Shape::Json`; a newtype or `transparent` struct: its field's shape;
+`guard` returns `Shape::Json` for a type already being computed, so recursive types terminate).
 - Structs (named, tuple, unit) and enums, generic or not; for an enum, `rename_all` renames the variants
   (`InProgress` → `"inProgress"`). A `#[serde(rename_all = "...")]` (or `#[ts(...)]`) on the item replaces the camelCase
   default; other `#[serde]` / `#[ts]` attributes are kept (ts-rs follows serde's, e.g. `rename`, `skip`, `flatten`).
@@ -2095,6 +2208,8 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
 | `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error, pointInTime }`; `pointInTime` (null for an archive) = `PointInTimeInfo` `{ generation, snapshot, snapshotTs, requestedTs, requestedTime, ts, time, replayed, segments, reached }` (`reached: false`: the point asked for is beyond the newest replicated commit, which was restored instead); `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
 | `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
+| `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
+| `POST /api/admin/olap/rebuild` | 202 `{ rebuilding: true }`: every table of the analytics copy is rebuilt from a snapshot in the background (audited `olap_rebuild`); 404 `olap_off` without `--olap`. |
 | `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
 | `POST /api/admin/replication/snapshot` | 201 `SnapshotInfo`: a snapshot of the current generation now (after shipping), then retention. 404 `replication_off`. Audited (`replication_snapshot`). |
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
@@ -2190,8 +2305,11 @@ blobs) and `generations/<g>/journal/<from ts>-<to ts>.zst` (ts zero-padded to 20
 `{ format: "ferrix-journal", version: 1, generation, from, to, fromTime, toTime, entries, bytes, sha256 }` (the size
 and SHA-256 of the body) and one `<ts>\t<time>\t<changes>` line per commit (at most 10 000 commits or ~16 MiB per
 segment). *Shipping*: every `--replicate-every` the rows after the shipped ts are read on a reader snapshot, uploaded
-as a segment, and only then deleted locally, with `_meta.replication_shipped_ts` (and `_generation`, `_shipped_time`)
-updated in the same transaction. An upload whose answer is lost is retried and may overlap the earlier segment;
+as a segment, and only then released, with `_meta.replication_shipped_ts` (and `_generation`, `_shipped_time`)
+updated in the same transaction. *Consumers*: the analytics copy (§1.11) reads the same journal; each consumer
+records its position (`replication_shipped_ts`, `olap_applied_ts`) and a row is deleted once every active one has
+released it (`journal::release`). With the copy on, journaling stays on when the replicator gives up on an unreachable
+target (only rows the copy no longer needs are dropped). An upload whose answer is lost is retried and may overlap the earlier segment;
 restores pick the segments that reach furthest and verify the overlap is identical. *Generations*: at start the
 replicator resumes the generation in `_meta` only if the target has it, holds nothing beyond this database's ts, and
 the journal holds every commit after the shipped ts (adopting a segment uploaded right before a crash); otherwise it

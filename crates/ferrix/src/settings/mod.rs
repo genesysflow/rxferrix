@@ -556,8 +556,8 @@ impl Changes {
 
 /// The execution log's copy of a system function's arguments: every object field whose name contains `password`,
 /// `secret` or `token` (case-insensitive) is replaced by `"••••"`, and so is the password of any URL with credentials
-/// (`smtp://user:pass@host`), recursively (so `run_function`'s nested `args` are covered too). App functions'
-/// arguments are logged as given.
+/// (`smtp://user:pass@host`), recursively (so `run_function`'s nested `args` are covered too), and the `value` of
+/// `_system/env:*` (environment variables). App functions' arguments are logged as given.
 pub fn redact_args<'a>(path: &str, args: &'a Value) -> Cow<'a, Value> {
     /// A URL with credentials (`smtp://user:pass@host`), with the password masked.
     fn url_without_password(s: &str) -> Option<String> {
@@ -596,6 +596,23 @@ pub fn redact_args<'a>(path: &str, args: &'a Value) -> Cow<'a, Value> {
             }
             _ => {}
         }
+    }
+    // Environment variable values (`_system/env:set` and `put`; `crate::env`), also when run through the
+    // dashboard's `run_function` (`{ path, args }`).
+    fn env_value(path: &str, args: &Value) -> bool {
+        path.starts_with("_system/env:") && args.get("value").is_some_and(|v| !v.is_null())
+    }
+    if env_value(path, args) {
+        let mut v = args.clone();
+        v["value"] = Value::String(MASK.into());
+        return Cow::Owned(v);
+    }
+    if let (Some(Value::String(inner)), Some(inner_args)) = (args.get("path"), args.get("args"))
+        && env_value(inner, inner_args)
+    {
+        let mut v = args.clone();
+        v["args"]["value"] = Value::String(MASK.into());
+        return Cow::Owned(v);
     }
     if !crate::private::is_system_path(path) || !sensitive(args) {
         return Cow::Borrowed(args);

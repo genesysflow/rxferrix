@@ -13,7 +13,7 @@
 // showing it, a field locked by a command-line flag, inline validation), the audit log, backups (create, download,
 // delete; the scheduled backup cron), export and import (2000 seeded todos), the virtualized grid scrolled to the
 // end, the search box, a migration (dry run, run), "Run now" on a cron, the latency charts, "open app as user" and
-// live session revocation, the command palette, the phone layout. A second server with private storage checks thumbnails and
+// live session revocation, the command palette, the phone layout, environment variables. A second server with private storage checks thumbnails and
 // downloads of signed URLs; others a staged restore with "Restart now", continuous replication (the status card and
 // a point-in-time restore by commit ts), and, with a fresh data dir, the printed /_/setup#token=… flow.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -782,6 +782,40 @@ try {
     } finally {
       await page.setViewportSize({ width: 1360, height: 820 });
     }
+  });
+
+  // 17c. Environment variables: add, reveal, edit, paste a .env, remove; values masked in the data browser.
+  await step("environment variables: add, reveal, edit, paste a .env, remove", async () => {
+    await nav(page, "Environment").click();
+    await page.getByRole("heading", { name: "Environment" }).waitFor();
+    await page.getByLabel("Name").fill("E2E_KEY");
+    await page.getByLabel("Value", { exact: true }).fill("first value");
+    await page.getByRole("button", { name: "Add" }).click();
+    const row = page.locator("[data-env=E2E_KEY]");
+    await row.waitFor();
+    if (await row.getByText("first value").count()) throw new Error("the value is shown before it is revealed");
+    await row.getByRole("button", { name: "Show E2E_KEY" }).click();
+    await row.getByText("first value").waitFor();
+    await row.getByRole("button", { name: "Edit E2E_KEY" }).click();
+    await row.getByLabel("Value of E2E_KEY").fill("second value");
+    await row.getByRole("button", { name: "Save" }).click();
+    await row.getByText("second value").waitFor();
+    const list = await call(base, "query", "_system/env:list", {}, admin);
+    if ((list.body.value as { name: string; value: string }[]).find((v) => v.name === "E2E_KEY")?.value !== "second value") {
+      throw new Error(`env:list: ${JSON.stringify(list.body)}`);
+    }
+    await page.getByRole("button", { name: "Paste .env…" }).click();
+    await page.getByLabel(".env contents").fill("# pasted\nA_ONE=1\nexport B_TWO='two'");
+    await page.getByRole("button", { name: "Set 2 variables" }).click();
+    await page.locator("[data-env=B_TWO]").waitFor();
+    await shot(page, "environment");
+    // The data browser shows the sealed value masked.
+    await page.goto(`${base}/_/data/_env`);
+    await page.getByTestId("document-grid").getByText("E2E_KEY").waitFor();
+    if (await page.getByTestId("document-grid").getByText("second value").count()) throw new Error("the data browser shows a value");
+    await nav(page, "Environment").click();
+    await row.getByRole("button", { name: "Remove E2E_KEY" }).click();
+    await row.waitFor({ state: "detached" });
   });
 
   // 18. Private storage: list thumbnails and downloads use the signed URLs the API returns.

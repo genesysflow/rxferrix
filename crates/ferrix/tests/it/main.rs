@@ -16,6 +16,7 @@ mod dashboard;
 mod determinism;
 mod diff_fixtures;
 mod dx;
+mod env;
 mod fuzz;
 mod group_commit;
 mod hardening;

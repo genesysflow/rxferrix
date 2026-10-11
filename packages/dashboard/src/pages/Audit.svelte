@@ -93,6 +93,9 @@
     revoke_session: "revoke session",
     delete_user: "delete user",
     settings_update: "settings",
+    env_create: "env: add",
+    env_update: "env: change",
+    env_delete: "env: remove",
     impersonate: "impersonate",
     run_function: "run function",
   };
@@ -102,6 +105,7 @@
     if (!d || typeof d !== "object" || Array.isArray(d)) return "";
     if (e.action === "run_function") return `${d.path ?? ""}${d.asUser ? ` as ${d.asUser}` : ""} · ${d.outcome ?? ""}`;
     if (e.action === "settings_update" && Array.isArray(d.keys)) return (d.keys as string[]).join(", ");
+    if (e.action.startsWith("env_") && typeof d.name === "string") return d.name;
     if (e.action === "impersonate") return `${d.purpose ?? ""}${d.expiresAt ? ` · until ${formatTime(d.expiresAt as number)}` : ""}`;
     return "";
   }
@@ -259,7 +263,9 @@
   }
   .badge.act.patch,
   .badge.act.replace,
-  .badge.act.settings_update {
+  .badge.act.settings_update,
+  .badge.act.env_create,
+  .badge.act.env_update {
     color: var(--link);
   }
   .badge.act.impersonate {

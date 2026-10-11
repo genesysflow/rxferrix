@@ -1,8 +1,8 @@
 /**
  * A tiny path router under `/_/` (the server answers every `/_/…` path with index.html).
  *
- * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs`, `/_/users`,
- * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/workflows[?state=<state>&id=<id>]`, `/_/migrations`, `/_/backups`, `/_/analytics`, `/_/settings`,
+ * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs[?fn=<path>]`, `/_/users`,
+ * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/workflows[?state=<state>&id=<id>]`, `/_/migrations`, `/_/backups`, `/_/analytics`, `/_/environment`, `/_/settings`,
  * `/_/audit[?action=…&table=…&target=…&admin=…]`, `/_/setup#token=…`.
  */
 export const BASE = "/_/";
@@ -19,6 +19,7 @@ export type Page =
   | "migrations"
   | "backups"
   | "analytics"
+  | "environment"
   | "settings"
   | "audit"
   | "setup";
@@ -44,6 +45,7 @@ export function parseRoute(pathname: string, search: string): Route {
     "migrations",
     "backups",
     "analytics",
+    "environment",
     "settings",
     "audit",
     "setup",

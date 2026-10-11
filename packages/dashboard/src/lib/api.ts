@@ -1,7 +1,7 @@
 /**
  * Hand-written references to the admin-only system functions and the types they return (codegen leaves system
  * functions out of app APIs): `_system/dashboard:*` (crates/ferrix/src/dashboard/mod.rs), `_system/storage:*`,
- * `_system/scheduler:*`, `_system/workflow:*`, `_system/migrations:*`, `_system/settings:*` and `_system/audit:list`, plus the types of
+ * `_system/scheduler:*`, `_system/workflow:*`, `_system/migrations:*`, `_system/settings:*`, `_system/env:*` and `_system/audit:list`, plus the types of
  * the `/api/admin/*` endpoints (lib/admin.ts). See docs/CONTRACT.md §4.
  */
 import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@ferrix/client";
@@ -492,6 +492,26 @@ export const settings = {
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Environment variables (`_system/env:*`, crates/ferrix/src/env.rs)
+
+export interface EnvVarView {
+  name: string;
+  value: string;
+  updatedAt: number;
+  /** `Id<Admin>` of the last editor (null: the command line). */
+  updatedBy: string | null;
+}
+
+export const env = {
+  list: makeFunctionReference<"query", Record<string, never>, EnvVarView[]>("query", "_system/env:list"),
+  set: makeFunctionReference<"mutation", { name: string; value: string }, null>("mutation", "_system/env:set"),
+  remove: makeFunctionReference<"mutation", { name: string }, null>("mutation", "_system/env:remove"),
+} as const;
+
+/** A valid variable name: what the server accepts (`env::validate_name`). */
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Audit log (`_system/audit:list`, crates/ferrix/src/audit.rs)
 
 export const AUDIT_ACTIONS = [
@@ -502,6 +522,9 @@ export const AUDIT_ACTIONS = [
   "revoke_session",
   "delete_user",
   "settings_update",
+  "env_create",
+  "env_update",
+  "env_delete",
   "impersonate",
   "run_function",
 ] as const;

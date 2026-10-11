@@ -8,6 +8,17 @@ import { AccessError } from "./AccessError";
 import { InsightsView } from "./InsightsView";
 import { Sidebar } from "./Sidebar";
 
+/** The `CHAT_ANNOUNCEMENT` environment variable, live (`announcement:get`): edit it on the dashboard's Environment page. */
+function Announcement() {
+  const text = useQuery(api.announcement.get);
+  if (!text) return null;
+  return (
+    <div className="announcement" role="status" data-testid="announcement">
+      <span aria-hidden="true">📣</span> {text}
+    </div>
+  );
+}
+
 /** The signed-in app: sidebar plus the open channel. */
 export function Chat() {
   const ensure = useMutation(api.profiles.ensure);
@@ -57,6 +68,7 @@ export function Chat() {
         onInsights={() => (window.location.hash = "#/insights")}
       />
       <main className="main">
+        <Announcement />
         {insights ? (
           <InsightsView channels={channels} />
         ) : channelId ? (

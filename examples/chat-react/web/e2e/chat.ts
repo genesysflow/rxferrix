@@ -41,8 +41,13 @@ async function waitFor(url: string, what: string) {
   throw new Error(`${what} did not start (${url})`);
 }
 
+const ADMIN = { email: "admin@chat.test", password: "admin password for e2e" };
+
 async function startServers() {
   dataDir = mkdtempSync(join(tmpdir(), "chat-e2e-"));
+  // An administrator, to set environment variables (the announcement banner).
+  const admin = Bun.spawnSync([BIN, "admin", "create", ADMIN.email, "--password", ADMIN.password, "--dir", dataDir]);
+  if (admin.exitCode !== 0) throw new Error(`admin create failed: ${admin.stderr.toString()}`);
   const server = Bun.spawn(
     [BIN, "serve", "--dev", "--http", `127.0.0.1:${BACKEND_PORT}`, "--dir", dataDir, ...(OLAP ? ["--olap"] : [])],
     { stdout: "ignore", stderr: "ignore" },
@@ -123,6 +128,23 @@ async function openChannel(page: Page, name: string) {
 }
 
 /** The HTTP function API, called as the user signed in on `page` (its access token from localStorage). */
+/** Set (or with `null`, remove) an environment variable as the administrator. */
+async function setEnv(name: string, value: string | null) {
+  const post = async (path: string, body: unknown, token?: string) => {
+    const res = await fetch(`${BACKEND}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json()) as { accessToken?: string };
+    if (!res.ok) throw new Error(`${path}: ${res.status} ${JSON.stringify(json)}`);
+    return json;
+  };
+  const { accessToken } = await post("/api/auth/admin/signin", ADMIN);
+  const [fn, args] = value === null ? ["_system/env:remove", { name }] : ["_system/env:set", { name, value }];
+  await post("/api/mutation", { path: fn, args }, accessToken);
+}
+
 async function callAs(page: Page, kind: "query" | "mutation" | "action", path: string, args: unknown) {
   const token = await page.evaluate(() => {
     for (let i = 0; i < localStorage.length; i++) {
@@ -221,6 +243,20 @@ try {
     a.getByTestId(`count-${room}`).filter({ hasText: /^2$/ }).waitFor({ timeout: 3000 }),
   );
   await a.getByTestId("message-count").filter({ hasText: /^2 messages$/ }).waitFor({ timeout: 3000 });
+
+  console.log("announcement: an environment variable, live in every open chat");
+  if (!EXTERNAL) {
+    const banner = (p: Page) => p.getByTestId("announcement");
+    if (await banner(b).count()) failures.push("an announcement is shown before one is set");
+    await setEnv("CHAT_ANNOUNCEMENT", `Maintenance tonight ${run}`);
+    await timed("env set -> banner in A", () => banner(a).filter({ hasText: `Maintenance tonight ${run}` }).waitFor({ timeout: 3000 }));
+    await banner(b).filter({ hasText: `Maintenance tonight ${run}` }).waitFor({ timeout: 3000 });
+    await setEnv("CHAT_ANNOUNCEMENT", `Maintenance moved to Friday ${run}`);
+    await timed("env changed -> banner in B", () => banner(b).filter({ hasText: "moved to Friday" }).waitFor({ timeout: 3000 }));
+    await shot(a, "announcement");
+    await setEnv("CHAT_ANNOUNCEMENT", null);
+    await timed("env removed -> banner gone in A", () => banner(a).waitFor({ state: "detached", timeout: 3000 }));
+  }
 
   console.log("edit and delete");
   const edited = `${hello} (now with charts)`;

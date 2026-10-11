@@ -152,6 +152,7 @@ mod tests {
             (User::table_def(), vec![]),
             (Account::table_def(), vec![]),
             (crate::settings::model::Setting::table_def(), vec!["encrypted"]),
+            (crate::env::EnvVar::table_def(), vec!["valueEncrypted"]),
         ];
         for (def, fields) in expect {
             let info = TableInfo {

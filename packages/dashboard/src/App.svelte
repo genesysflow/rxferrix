@@ -20,6 +20,7 @@
   import Scheduler from "./pages/Scheduler.svelte";
   import Workflows from "./pages/Workflows.svelte";
   import Settings from "./pages/Settings.svelte";
+  import Environment from "./pages/Environment.svelte";
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
 
@@ -90,6 +91,7 @@
     {
       label: "Admin",
       items: [
+        { page: "environment", label: "Environment", icon: "$", keywords: "env variables secrets api keys config" },
         { page: "settings", label: "Settings", icon: "✱", keywords: "smtp oauth cors redirect signups tokens" },
         { page: "audit", label: "Audit log", icon: "✎", keywords: "history changes" },
       ],
@@ -237,6 +239,8 @@
         <Backups />
       {:else if route.page === "analytics"}
         <Analytics />
+      {:else if route.page === "environment"}
+        <Environment />
       {:else if route.page === "settings"}
         <Settings />
       {:else if route.page === "audit"}

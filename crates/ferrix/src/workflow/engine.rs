@@ -223,7 +223,7 @@ async fn run_query(ctx: &MutationCtx, path: &str, args: Value) -> Result<Value, 
         return Err(format!("no query is registered at `{path}`"));
     };
     let storage = crate::storage::QueryStorage::new(ctx.db.share(), ctx.storage.service().clone());
-    let qctx = QueryCtx::internal(ctx.db.share(), storage, ctx.is_dev());
+    let qctx = QueryCtx::internal(ctx.db.share(), storage, ctx.env.secret_box(), ctx.is_dev());
     crate::runtime::catch_panics(handler(qctx, args)).await.map_err(|e| format!("{e:#}"))
 }
 

@@ -1,13 +1,14 @@
 //! The Ferrix chat example backend (a Slack-lite): channels, messages with attachments and reactions, unread
 //! counts, typing indicators, search, `/remind`, and password / email-code / GitHub sign-in. Live message and member
 //! counts come from aggregates; the Insights view runs SQL over the analytics copy (build with `--features olap`
-//! and serve with `--olap`).
+//! and serve with `--olap`); the announcement banner is an environment variable (`ctx.env`).
 //!
 //! ```sh
 //! cargo run -p chat-server -- serve --dev --http 127.0.0.1:8097 \
 //!   --codegen-out examples/chat-react/web/src/ferrix
 //! ```
 
+mod announcement;
 mod channels;
 mod dev;
 mod insights;

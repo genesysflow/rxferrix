@@ -29,6 +29,8 @@ Open http://localhost:5180 in two browser profiles (or one normal and one privat
 - Slash commands: `/remind me in 10 seconds to stretch` (also `minutes`, `hours`), and `/seed 200`, which adds 200
   numbered sample messages through an action so there is history to scroll through.
 - The admin dashboard is at http://127.0.0.1:8097/_/ (the backend prints a one-time setup link on first start).
+- Set `CHAT_ANNOUNCEMENT` on the dashboard's Environment page (or `chat-server env set CHAT_ANNOUNCEMENT` before
+  starting): it shows as a banner above every channel, and changing or removing it updates open chats at once.
 
 ### Insights (OLAP) and demo traffic
 
@@ -63,6 +65,7 @@ as one of them to watch the counts and the charts move. To serve the built app f
 | `/remind` | `messages.rs` (`run_after::<deliver_reminder>`) | `Composer.tsx` (shows the notice) |
 | Connection state | | `ConnectionStatus.tsx` (`useConnectionState`) |
 | Live counts: messages per channel, members, top posters | `model.rs` (`#[aggregate]`), `channels.rs` (`aggregate(..).get`, `groups`) | `Sidebar.tsx`, `ChannelView.tsx` |
+| Announcement banner (an environment variable, live) | `announcement.rs` (`ctx.env.get("CHAT_ANNOUNCEMENT")`) | `Chat.tsx` (`Announcement`) |
 | Insights: activity, busiest hours, rankings | `insights.rs` (an action using `ctx.olap.query_as`, scoped to readable channels) | `InsightsView.tsx` (polls `useAction`) |
 
 Every function starts with `ctx.auth.require_user()`; channel access fails with the `UserError` codes
@@ -85,4 +88,5 @@ The e2e drives three users in separate browser contexts: two sign up with passwo
 emailed code. It covers live messages, reactions, edits and deletes, unread badges, attachments, search, infinite
 scroll over 200 seeded messages, a typing indicator that appears and expires, a `/remind` that arrives a few seconds
 later, a private channel that a non-member can't read (in the UI and over the HTTP API) until invited, live message
-counts in the sidebar and header, and the Insights view (its totals with `CHAT_OLAP=1`, the how-to otherwise).
+counts in the sidebar and header, an announcement banner that follows an environment variable (set, changed and
+removed by an administrator), and the Insights view (its totals with `CHAT_OLAP=1`, the how-to otherwise).

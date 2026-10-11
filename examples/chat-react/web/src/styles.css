@@ -1198,3 +1198,19 @@ mark {
     grid-template-columns: 1fr;
   }
 }
+
+/* The announcement banner (the CHAT_ANNOUNCEMENT environment variable). */
+.announcement {
+  padding: 8px 20px;
+  background: #fff7e0;
+  border-bottom: 1px solid #f1dfa6;
+  color: #6b4e00;
+  font-size: 14px;
+  animation: announcement-in 0.25s ease-out;
+}
+@keyframes announcement-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}

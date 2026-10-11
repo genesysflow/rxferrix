@@ -409,6 +409,26 @@ Integer sums are exact; float sums are running `f64` totals. Adding or changing 
 existing documents at startup (docs/CONTRACT.md §1.12). Cost: about 2 µs per aggregate per write; reading a group of
 10k documents takes ~16 µs instead of ~10 ms to count and sum them.
 
+## Environment variables
+
+API keys, URLs and switches that functions read at run time, set on the dashboard's **Environment** page (or with
+`<server> env set NAME` before the first start) instead of in the process environment:
+
+```rust
+#[query]
+pub async fn banner(ctx: &QueryCtx) -> Result<Option<String>> {
+    ctx.env.get("ANNOUNCEMENT").await          // ctx.env.require("NAME") fails with a clear error when unset
+}
+```
+
+They are reactive: a query that reads a variable depends on it like on a document, so changing, adding or removing it
+on the dashboard reruns those queries and every client sees the new result at once (no restart, no redeploy).
+Mutations read them in their transaction and actions read the latest value. Values are encrypted at rest with the
+server key (`auth_secret.key`), masked in the data browser and the execution log, and changes are audited. Names are
+letters, digits and `_` (up to 64), values up to 8 KB, at most 200 variables. From the command line (offline):
+`env list [--values]`, `env set NAME [VALUE]` (the value is read from stdin when omitted), `env unset NAME`.
+`std::env::var` still works, but it is fixed at startup and invisible to the dependency tracking.
+
 ## Analytics (OLAP)
 
 For group-bys, joins and time series over many documents, `serve --olap` keeps a columnar copy of the data in an
@@ -534,6 +554,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
 - **Analytics** (with `--olap`): the copy's state and lag, its tables and columns, a SQL editor (one SELECT, the
   sandbox of `ctx.olap`, audited) with the results as a table, and the whole result as a CSV or Parquet download;
   rebuild the copy.
+- **Environment**: environment variables (`ctx.env`): add, edit, reveal, copy, remove, paste a `.env`; live, and
+  queries that read a variable rerun as soon as it changes.
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
   sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.

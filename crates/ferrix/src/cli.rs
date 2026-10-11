@@ -40,6 +40,10 @@ enum Command {
     /// Manage dashboard administrators.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Manage environment variables (`ctx.env`) offline, e.g. before the first start; the dashboard's Environment
+    /// page changes them on a running server.
+    #[command(subcommand)]
+    Env(EnvCommand),
     /// Take a consistent backup (.tar.zst) of the data directory; works while the server runs.
     Backup(crate::ops::cli::BackupArgs),
     /// Restore a backup into the data directory (offline: refuses while a server uses it).
@@ -95,6 +99,34 @@ enum AdminCommand {
     Create(AdminArgs),
     /// Set an administrator's password and end their sessions.
     ResetPassword(AdminArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum EnvCommand {
+    /// List the variables' names (and values with --values).
+    List {
+        /// Print `NAME=value` lines.
+        #[arg(long)]
+        values: bool,
+        /// Data directory.
+        #[arg(long, default_value = "fx_data")]
+        dir: PathBuf,
+    },
+    /// Set a variable. Without VALUE, the value is read from stdin (one line), so it stays out of the shell history.
+    Set {
+        name: String,
+        value: Option<String>,
+        /// Data directory.
+        #[arg(long, default_value = "fx_data")]
+        dir: PathBuf,
+    },
+    /// Remove a variable.
+    Unset {
+        name: String,
+        /// Data directory.
+        #[arg(long, default_value = "fx_data")]
+        dir: PathBuf,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -350,6 +382,7 @@ impl Ferrix {
             Some(Command::Functions) => print_functions(),
             Some(Command::Codegen(args)) => codegen(&args.out),
             Some(Command::Admin(cmd)) => admin(cmd, self.auth),
+            Some(Command::Env(cmd)) => env(cmd, self.auth),
             Some(Command::Backup(args)) => crate::ops::cli::run_backup(args, self.storage),
             Some(Command::Restore(args)) => crate::ops::cli::run_restore(args, self.storage),
             Some(Command::Export(args)) => crate::ops::cli::run_export(args, self.storage),
@@ -531,6 +564,58 @@ async fn print_migration_status(app: &App) -> crate::Result<()> {
 }
 
 /// Read a password from stdin (one line). Prompts on stderr when stdin is a terminal (the input is echoed).
+fn env(cmd: EnvCommand, auth: AuthConfig) -> crate::Result<()> {
+    let dir = match &cmd {
+        EnvCommand::List { dir, .. } | EnvCommand::Set { dir, .. } | EnvCommand::Unset { dir, .. } => dir.clone(),
+    };
+    // Offline: a running server wouldn't see the change (`crate::ops::lock`).
+    let _lock = crate::ops::DirLock::acquire(&dir)?;
+    let value = match &cmd {
+        EnvCommand::Set { value: None, .. } => Some(read_line("Value: ")?),
+        _ => None,
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let app = App::open(&dir, AppOptions { auth, ..Default::default() }).await?;
+        let cli = crate::auth::Identity::anonymous();
+        match cmd {
+            EnvCommand::List { values, .. } => {
+                for (name, value) in crate::env::list_all(&app).await? {
+                    if values {
+                        println!("{name}={value}");
+                    } else {
+                        println!("{name}");
+                    }
+                }
+            }
+            EnvCommand::Set { name, value: given, .. } => {
+                let value = given.or(value).unwrap_or_default();
+                let (changed, _) =
+                    app.typed_mutation::<crate::env::put>((name.clone(), Some(value)).into(), &cli).await?;
+                println!("{}", if changed { format!("Set {name}") } else { format!("{name} already had that value") });
+            }
+            EnvCommand::Unset { name, .. } => {
+                let (changed, _) = app.typed_mutation::<crate::env::put>((name.clone(), None).into(), &cli).await?;
+                println!("{}", if changed { format!("Removed {name}") } else { format!("{name} is not set") });
+            }
+        }
+        Ok(())
+    })
+}
+
+/// One line from stdin (prompting with `prompt` on a terminal), without the line ending.
+fn read_line(prompt: &str) -> crate::Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+    }
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn read_password() -> crate::Result<String> {
     use std::io::{BufRead, IsTerminal, Write};
     let stdin = std::io::stdin();

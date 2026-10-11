@@ -169,10 +169,10 @@ objects.
 ### 1.2 Contexts and database API
 
 ```rust
-pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage,    /* private */ }
-pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, pub workflows: Workflows, /* private */ }
-pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, pub workflows: Workflows, /* private: runtime handle */ }
-// ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7.
+pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage, pub env: Env,    /* private */ }
+pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, pub workflows: Workflows, pub env: Env, /* private */ }
+pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, pub workflows: Workflows, pub olap: Olap, pub env: Env, /* private: runtime handle */ }
+// ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7. ctx.env: environment variables, §1.13.
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit
 // (in a query: the snapshot's commit time, NOT a reactive clock; see §1.10).
 // ctx.is_dev() -> bool on all three: the app runs in dev mode (`serve --dev`; `TestApp` too).
@@ -1666,6 +1666,32 @@ pub enum AggregateSum { Int(i64), Float(f64) }
 
 ---
 
+### 1.13 Environment variables
+
+Named string values set at run time by an administrator (the dashboard's Environment page, `_system/env:set`) or
+offline from the command line, read by functions through `ctx.env` (`ferrix::env::Env`):
+
+```rust
+impl Env {
+    pub async fn get(&self, name: &str) -> Result<Option<String>>;   // None when not set
+    pub async fn require(&self, name: &str) -> Result<String>;       // a server error naming the variable when unset
+}
+```
+
+- **Reactive.** In a query, `get` is an indexed read of the variable's `_env` row (index `by_name`, `eq(name)`), so it
+  joins the query's read set: setting, changing or removing that variable reruns the query on every subscription; other
+  variables don't. In a mutation it reads in the transaction (a concurrent change is serialized like any read). In an
+  action it reads the latest commit.
+- **Deterministic**: the value is a function of the snapshot, so the query cache and the determinism check treat it
+  like any document read.
+- **Names**: 1–64 ASCII letters, digits and `_`, not starting with a digit (`invalid_name`). **Values**: UTF-8, at most
+  8 KiB (`invalid_value`); at most 200 variables (`too_many_variables`).
+- **Command line** (offline: refuses while a server holds the data directory): `<binary> env list [--values] [--dir]`,
+  `env set NAME [VALUE] [--dir]` (one line from stdin when VALUE is omitted; prints `Set NAME` or `NAME already had that
+  value`), `env unset NAME [--dir]` (`Removed NAME` / `NAME is not set`). They run the internal mutation
+  `_system/env:put`, so the write is audited (with no administrator) like a dashboard edit.
+- `std::env::var` is unaffected: process environment variables are fixed at startup and not tracked.
+
 ## 2. `::ferrix::__private` items (used ONLY by macro output)
 
 ```rust
@@ -2266,6 +2292,23 @@ entries older than `AuthConfig::audit_retention` (90 days) are swept at startup 
 | Path | Kind | Args → result |
 |---|---|---|
 | `_system/audit:list` | query (admin) | `{ admin?, action?, table?, target?, since?, until?, paginationOpts }` → `PaginationResult<Doc<"_audit_log">>`, newest first, live. The most selective filter picks the index (`target` > `admin` > `action` > `table` > time); the others are applied while scanning; `since` / `until` bound `at` (ms, inclusive). |
+
+### 4.1.6 Environment variables (`_env`, `_system/env:*`)
+
+Defined in `crates/ferrix/src/env.rs` (API: §1.13). **`_env`** (`EnvVar`): `{ name, valueEncrypted, updatedAt,
+updatedBy: string | null }`, index `by_name`. `valueEncrypted` is sealed like `_settings` secrets (§4.1.4: XChaCha20-
+Poly1305 under the settings key derived from `auth_secret.key`), with `env:<name>` as associated data. The data
+browser shows it as `"••••"`; generic writes are refused (`read_only_table`). The execution log masks the `value`
+argument of `_system/env:*` (also inside `run_function`'s `args`). Audit actions `env_create`, `env_update`,
+`env_delete`: target the `_env` row, `details: { name }`, never the value. Setting a variable to the value it already
+has writes nothing.
+
+| Path | Kind | Args → result |
+|---|---|---|
+| `_system/env:list` | query (admin) | `{}` → `{ name, value, updatedAt, updatedBy }[]` by name, values in clear, live. |
+| `_system/env:set` | mutation (admin) | `{ name, value }` → `null`. Creates or replaces. |
+| `_system/env:remove` | mutation (admin) | `{ name }` → `null`. A no-op when not set. |
+| `_system/env:put` | internal mutation | `{ name, value: string \| null }` → `boolean` (changed). What `env set` / `env unset` run. |
 
 ### 4.2 Admin HTTP endpoints
 

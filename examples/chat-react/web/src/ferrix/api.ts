@@ -5,6 +5,9 @@ import type { ChannelInfo, ChannelSummary, Doc, Id, Insights, MessageView, Pagin
 
 /** References to every public function, for `useQuery(api.module.fn, args)` and friends. */
 export const api = {
+  announcement: {
+    get: makeFunctionReference<"query", Record<string, never>, string | null>("query", "announcement:get"),
+  },
   channels: {
     create: makeFunctionReference<"mutation", { name: string, topic?: string | null, private: boolean, }, Id<"channels">>("mutation", "channels:create"),
     get: makeFunctionReference<"query", { channel: Id<"channels">, }, ChannelInfo>("query", "channels:get"),

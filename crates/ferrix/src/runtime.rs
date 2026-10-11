@@ -36,13 +36,21 @@ pub struct QueryCtx {
     pub auth: Auth,
     /// File storage: `get_url`, `get_metadata` (`crate::storage`).
     pub storage: crate::storage::QueryStorage,
+    /// Environment variables, set from the dashboard; reading one makes the query depend on it (`crate::env`).
+    pub env: crate::env::Env,
     dev: bool,
 }
 
 impl QueryCtx {
     /// A query context over `db` (e.g. a mutation's transaction: a workflow's query steps), with no identity.
-    pub(crate) fn internal(db: QueryDb, storage: crate::storage::QueryStorage, dev: bool) -> QueryCtx {
-        QueryCtx { db, auth: Auth::new(Identity::anonymous()), storage, dev }
+    pub(crate) fn internal(
+        db: QueryDb,
+        storage: crate::storage::QueryStorage,
+        sbox: Arc<crate::auth::secretbox::SecretBox>,
+        dev: bool,
+    ) -> QueryCtx {
+        let env = crate::env::Env::in_db(db.share(), sbox);
+        QueryCtx { db, auth: Auth::new(Identity::anonymous()), storage, env, dev }
     }
 
     /// The commit time (ms since the epoch) of the snapshot the query runs at. Deterministic per ts.
@@ -71,6 +79,8 @@ pub struct MutationCtx {
     pub scheduler: crate::scheduler::Scheduler,
     /// Start, cancel and signal workflows, in this mutation's transaction (`crate::workflow`).
     pub workflows: crate::workflow::Workflows,
+    /// Environment variables, read in this mutation's transaction (`crate::env`).
+    pub env: crate::env::Env,
     now: f64,
     dev: bool,
 }
@@ -98,6 +108,8 @@ pub struct ActionCtx {
     pub workflows: crate::workflow::Workflows,
     /// Read-only SQL over the analytics copy (`--olap`; [`crate::olap::Olap`]).
     pub olap: crate::olap::Olap,
+    /// Environment variables, at their latest values (`crate::env`).
+    pub env: crate::env::Env,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -635,6 +647,11 @@ impl App {
     }
 
     /// Auth state and operations (token validation, sign-in, admins).
+    /// The key that seals environment variables (`crate::env`), for a context.
+    pub(crate) fn env_box(&self) -> Arc<crate::auth::secretbox::SecretBox> {
+        Arc::new(self.auth().keys.secret_box())
+    }
+
     pub fn auth(&self) -> &crate::auth::AuthService {
         &self.inner.auth
     }
@@ -798,8 +815,9 @@ impl App {
         let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
         let read_set = db.read_set_handle();
         let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
+        let env = crate::env::Env::in_db(db.share(), self.env_box());
         let (auth, auth_access) = Auth::tracked(identity.clone());
-        let ctx = QueryCtx { db, auth, storage, dev: self.options().dev };
+        let ctx = QueryCtx { db, auth, storage, env, dev: self.options().dev };
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let check = self.inner.determinism.as_ref().filter(|c| c.due(path));
         let rerun_args = check.map(|_| args.clone());
@@ -812,7 +830,8 @@ impl App {
             check.start(path);
             let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
             let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
-            let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), storage, dev: self.options().dev };
+            let env = crate::env::Env::in_db(db.share(), self.env_box());
+            let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), storage, env, dev: self.options().dev };
             let again = crate::log::discard(self.run_query_handler(handler, ctx, args, path)).await;
             if let Some(warning) = crate::determinism::compare(path, ts, &result, &again) {
                 tracing::warn!(path, ts, "{warning}");
@@ -908,6 +927,7 @@ impl App {
             storage,
             scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path, pools.clone()),
             workflows: crate::workflow::Workflows::in_mutation(txn.clone(), path, pools),
+            env: crate::env::Env::in_db(MutationDb::new(txn.clone()).share(), self.env_box()),
             now: txn.now(),
             dev: self.options().dev,
         };
@@ -979,6 +999,7 @@ impl App {
             scheduler: crate::scheduler::Scheduler::in_action(self.clone(), identity.clone(), path),
             workflows: crate::workflow::Workflows::in_action(self.clone(), identity.clone(), path),
             olap: crate::olap::Olap::new(self.clone()),
+            env: crate::env::Env::in_action(self.clone()),
             app: self.clone(),
             identity: identity.clone(),
         };

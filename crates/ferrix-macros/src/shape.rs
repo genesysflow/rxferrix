@@ -124,7 +124,10 @@ pub fn shape_of(ty: &syn::Type) -> TokenStream {
     quote! {{
         #[allow(unused_imports)]
         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-        (&&::ferrix::shape::ShapeProbe::<#ty>::new()).probe_shape()
+        // The double borrow picks `HasShape` when the type has it, else the fallback.
+        #[allow(clippy::needless_borrow)]
+        let shape = (&&::ferrix::shape::ShapeProbe::<#ty>::new()).probe_shape();
+        shape
     }}
 }
 

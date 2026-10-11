@@ -20,9 +20,10 @@
 //! Whether a transaction is journaled is decided when it begins, under the writer lock, and the flag only changes
 //! under that lock, so a transaction is never half journaled.
 //!
-//! The replicator reads rows on a reader snapshot (each row is a whole commit), ships them, and deletes them
-//! ([`trim`]) under the writer lock once the upload succeeded, recording the shipped ts in `_meta` in the same
-//! transaction.
+//! **Consumers.** The replicator (`crate::ops::replicate`) and the analytics copy (`crate::olap`) read rows on a
+//! reader snapshot (each row is a whole commit) and, once they are done with them, [`release`] them under the writer
+//! lock, recording their position in `_meta`. A row is deleted once every active consumer has released it: the
+//! replicator after uploading it, the copy after applying it. Journaling stays on while either is active.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,6 +42,27 @@ pub const META_GENERATION: &str = "replication_generation";
 pub const META_SHIPPED_TS: &str = "replication_shipped_ts";
 /// `_meta` key: the commit time (ms) of [`META_SHIPPED_TS`].
 pub const META_SHIPPED_TIME: &str = "replication_shipped_time";
+/// `_meta` key: the newest ts the analytics copy has applied (`crate::olap`; rows up to it may be trimmed).
+pub const META_OLAP_TS: &str = "olap_applied_ts";
+/// `_meta` key: the id of the analytics copy built from this database (a restored database has none: it rebuilds).
+pub const META_OLAP_ID: &str = "olap_id";
+
+/// A reader of the journal ([`release`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consumer {
+    Replication,
+    Olap,
+}
+
+impl Consumer {
+    /// The `_meta` key holding its position.
+    fn meta_key(self) -> &'static str {
+        match self {
+            Consumer::Replication => META_SHIPPED_TS,
+            Consumer::Olap => META_OLAP_TS,
+        }
+    }
+}
 
 /// The journaling switch and the size of the unshipped rows. Lives in the `Database`.
 #[derive(Debug, Default)]
@@ -48,6 +70,9 @@ pub struct Journal {
     enabled: AtomicBool,
     /// Bytes of `changes` in `_journal` (approximate: set when replication starts, then kept up to date).
     pending_bytes: AtomicU64,
+    /// Which consumers currently need rows ([`release`]).
+    replication: AtomicBool,
+    olap: AtomicBool,
 }
 
 impl Journal {
@@ -75,6 +100,43 @@ impl Journal {
     pub(crate) fn sub_pending_bytes(&self, bytes: u64) {
         let _ = self.pending_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |b| Some(b.saturating_sub(bytes)));
     }
+
+    fn flag(&self, consumer: Consumer) -> &AtomicBool {
+        match consumer {
+            Consumer::Replication => &self.replication,
+            Consumer::Olap => &self.olap,
+        }
+    }
+
+    /// Whether `consumer` needs the journal's rows. An inactive consumer's position doesn't hold rows back.
+    pub fn is_consumer(&self, consumer: Consumer) -> bool {
+        self.flag(consumer).load(Ordering::SeqCst)
+    }
+
+    /// Only change it while holding the writer lock, like [`Journal::set_enabled`].
+    pub(crate) fn set_consumer(&self, consumer: Consumer, active: bool) {
+        self.flag(consumer).store(active, Ordering::SeqCst);
+    }
+
+    /// Whether a consumer other than `consumer` is active.
+    pub(crate) fn others_active(&self, consumer: Consumer) -> bool {
+        [Consumer::Replication, Consumer::Olap].into_iter().any(|c| c != consumer && self.is_consumer(c))
+    }
+}
+
+/// `consumer` is done with the rows up to `ts`: record that in `_meta` and delete the rows no active consumer still
+/// needs. Run under the writer lock. Returns the bytes of changes removed (also taken off the pending count).
+pub(crate) fn release(conn: &Connection, journal: &Journal, consumer: Consumer, ts: u64) -> anyhow::Result<u64> {
+    crate::db::storage::write_meta(conn, consumer.meta_key(), rusqlite::types::Value::Integer(ts as i64))?;
+    let mut floor = ts;
+    for other in [Consumer::Replication, Consumer::Olap] {
+        if other != consumer && journal.is_consumer(other) {
+            floor = floor.min(crate::db::storage::read_meta_u64(conn, other.meta_key())?);
+        }
+    }
+    let removed = trim(conn, floor)?;
+    journal.sub_pending_bytes(removed);
+    Ok(removed)
 }
 
 /// The changes a write transaction collects while journaling: the final state of each document it wrote.
@@ -142,11 +204,11 @@ pub struct Change {
 }
 
 /// `[table, id, document | null]` as stored.
-type RawChange = (String, String, Option<Map<String, Value>>);
+type StoredChange = (String, String, Option<Map<String, Value>>);
 
 impl JournalEntry {
     pub fn parse_changes(&self) -> anyhow::Result<Vec<Change>> {
-        let raw: Vec<RawChange> =
+        let raw: Vec<StoredChange> =
             serde_json::from_str(&self.changes).with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
         raw.into_iter()
             .map(|(table, id, doc)| {
@@ -154,6 +216,24 @@ impl JournalEntry {
                 Ok(Change { table, id, doc })
             })
             .collect()
+    }
+}
+
+/// A change with the document as stored (JSON text), for consumers that don't need it parsed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawChange {
+    pub table: String,
+    /// The encoded document id.
+    pub id: String,
+    pub doc: Option<String>,
+}
+
+impl JournalEntry {
+    /// [`JournalEntry::parse_changes`], keeping each document's JSON text as it is.
+    pub fn parse_raw_changes(&self) -> anyhow::Result<Vec<RawChange>> {
+        let raw: Vec<(String, String, Option<Box<serde_json::value::RawValue>>)> =
+            serde_json::from_str(&self.changes).with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
+        Ok(raw.into_iter().map(|(table, id, doc)| RawChange { table, id, doc: doc.map(|d| d.get().to_string()) }).collect())
     }
 }
 
@@ -204,7 +284,8 @@ pub(crate) fn trim(conn: &Connection, ts: u64) -> anyhow::Result<u64> {
 
 /// Remove every replication trace from a database file that is not open elsewhere (a backup's copy, a restored
 /// database): the journal rows and the generation and shipped ts in `_meta`. A restored database then starts a new
-/// replication generation instead of continuing (and contradicting) the one it was copied from.
+/// replication generation instead of continuing (and contradicting) the one it was copied from, and rebuilds its
+/// analytics copy (its id and position go too).
 pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
     let has_journal: bool =
         conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_journal')", [], |r| r.get(0))?;
@@ -215,8 +296,8 @@ pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
         conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta')", [], |r| r.get(0))?;
     if has_meta {
         conn.execute(
-            "DELETE FROM _meta WHERE k IN (?1, ?2, ?3)",
-            params![META_GENERATION, META_SHIPPED_TS, META_SHIPPED_TIME],
+            "DELETE FROM _meta WHERE k IN (?1, ?2, ?3, ?4, ?5)",
+            params![META_GENERATION, META_SHIPPED_TS, META_SHIPPED_TIME, META_OLAP_TS, META_OLAP_ID],
         )?;
     }
     Ok(())
@@ -225,6 +306,29 @@ pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_go_once_every_active_consumer_released_them() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap();
+        conn.execute_batch("CREATE TABLE _meta (k TEXT PRIMARY KEY, v)").unwrap();
+        for ts in 1..=5 {
+            insert(&conn, ts, 0.0, "[]").unwrap();
+        }
+        let oldest = || stats(&conn).unwrap().map(|s| s.0);
+        let journal = Journal::default();
+        journal.set_consumer(Consumer::Replication, true);
+        journal.set_consumer(Consumer::Olap, true);
+        release(&conn, &journal, Consumer::Olap, 4).unwrap();
+        assert_eq!(oldest(), Some(1), "replication hasn't released anything");
+        release(&conn, &journal, Consumer::Replication, 2).unwrap();
+        assert_eq!(oldest(), Some(3), "both are past 2");
+        journal.set_consumer(Consumer::Replication, false);
+        release(&conn, &journal, Consumer::Olap, 4).unwrap();
+        assert_eq!(oldest(), Some(5), "an inactive consumer holds nothing back");
+        assert!(journal.others_active(Consumer::Replication));
+        assert!(!journal.others_active(Consumer::Olap));
+    }
 
     #[test]
     fn changes_keep_the_final_state_and_drop_transient_documents() {

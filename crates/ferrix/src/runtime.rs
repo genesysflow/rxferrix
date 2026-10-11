@@ -96,6 +96,8 @@ pub struct ActionCtx {
     pub scheduler: crate::scheduler::Scheduler,
     /// Start, cancel and signal workflows; takes effect immediately (`crate::workflow`).
     pub workflows: crate::workflow::Workflows,
+    /// Read-only SQL over the analytics copy (`--olap`; [`crate::olap::Olap`]).
+    pub olap: crate::olap::Olap,
     pub(crate) app: App,
     identity: Identity,
 }
@@ -238,6 +240,8 @@ pub struct AppOptions {
     /// results are wrong. Runs that read the time (`ctx.now()`, signed URLs) are not checked. Default: off;
     /// `ferrix serve --dev` and [`TestApp`](crate::testing::TestApp) check every 10 s.
     pub determinism_check: Option<Duration>,
+    /// The analytics copy and `ctx.olap` (`--olap`; [`crate::olap`]). Needs the `olap` cargo feature.
+    pub olap: crate::olap::OlapOptions,
 }
 
 /// [`AppOptions::determinism_check`] in `ferrix serve --dev` and `TestApp`.
@@ -282,6 +286,7 @@ impl Default for AppOptions {
             query_cache: QueryCacheOptions::default(),
             fsync_commits: false,
             determinism_check: None,
+            olap: Default::default(),
         }
     }
 }
@@ -343,6 +348,8 @@ struct AppInner {
     replication: OnceLock<Arc<crate::ops::replicate::Replicator>>,
     /// With `AppOptions::determinism_check`.
     determinism: Option<crate::determinism::DeterminismCheck>,
+    /// The analytics copy, with `AppOptions::olap.enabled` (`crate::olap`).
+    olap: OnceLock<Arc<crate::olap::OlapService>>,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -488,8 +495,9 @@ impl App {
             crate::db::OpenOptions {
                 readers: options.readers,
                 skip_schema_check: options.skip_schema_check,
-                // Replication journals every commit from the very first one (`crate::ops::replicate`).
-                journal: options.ops.replication.is_some(),
+                // Replication and the analytics copy read every commit from the very first one in the journal
+                // (`crate::ops::replicate`, `crate::olap`).
+                journal: options.ops.replication.is_some() || options.olap.enabled,
                 fsync_commits: options.fsync_commits,
             };
         let retention = options.log_retention.clone();
@@ -499,6 +507,9 @@ impl App {
             Ok((db, logs))
         })
         .await??;
+        // Before anything releases journal rows: each active consumer holds back the rows it hasn't read.
+        db.journal().set_consumer(crate::db::journal::Consumer::Replication, options.ops.replication.is_some());
+        db.journal().set_consumer(crate::db::journal::Consumer::Olap, options.olap.enabled);
         let started_at = crate::db::wall_clock_ms();
         let metrics = Arc::new(Metrics::default());
         let subscriptions = OnceLock::new();
@@ -534,6 +545,7 @@ impl App {
                 subscriptions,
                 replication: OnceLock::new(),
                 determinism,
+                olap: OnceLock::new(),
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
@@ -542,6 +554,9 @@ impl App {
         // Last, so the replicator's first snapshot is taken after the startup commits above (system crons, migration and
         // auth bookkeeping). They are journaled either way (journaling is on from `Database::open`); starting earlier
         // only made whether they land in the first snapshot or in its first segment depend on timing.
+        if let Some(o) = crate::olap::start(&app).await? {
+            let _ = app.inner.olap.set(o);
+        }
         if let Some(r) = crate::ops::replicate::start(&app, app.downgrade())? {
             let _ = app.inner.replication.set(r);
         }
@@ -550,6 +565,11 @@ impl App {
 
     pub(crate) fn downgrade(&self) -> WeakApp {
         WeakApp(Arc::downgrade(&self.inner))
+    }
+
+    /// The analytics copy, when the app runs with `AppOptions::olap.enabled` (`--olap`).
+    pub fn olap(&self) -> Option<&Arc<crate::olap::OlapService>> {
+        self.inner.olap.get()
     }
 
     /// The replicator, when the app runs with `AppOptions::ops.replication` (`--replicate-to`).
@@ -926,6 +946,7 @@ impl App {
             storage,
             scheduler: crate::scheduler::Scheduler::in_action(self.clone(), identity.clone(), path),
             workflows: crate::workflow::Workflows::in_action(self.clone(), identity.clone(), path),
+            olap: crate::olap::Olap::new(self.clone()),
             app: self.clone(),
             identity: identity.clone(),
         };

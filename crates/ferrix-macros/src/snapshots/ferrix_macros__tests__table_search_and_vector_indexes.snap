@@ -52,7 +52,10 @@ impl ::ferrix::Table for Message {
                     {
                         #[allow(unused_imports)]
                         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::ferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
                     },
                 );
                 s.field(
@@ -60,7 +63,10 @@ impl ::ferrix::Table for Message {
                     {
                         #[allow(unused_imports)]
                         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-                        (&&::ferrix::shape::ShapeProbe::<String>::new()).probe_shape()
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::ferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
                     },
                 );
                 s.field(
@@ -68,8 +74,12 @@ impl ::ferrix::Table for Message {
                     {
                         #[allow(unused_imports)]
                         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
-                            .probe_shape()
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::ferrix::shape::ShapeProbe::<
+                            Option<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
                     },
                 );
                 s.field(
@@ -77,8 +87,12 @@ impl ::ferrix::Table for Message {
                     {
                         #[allow(unused_imports)]
                         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-                        (&&::ferrix::shape::ShapeProbe::<Option<String>>::new())
-                            .probe_shape()
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::ferrix::shape::ShapeProbe::<
+                            Option<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
                     },
                 );
                 s.field(
@@ -86,8 +100,12 @@ impl ::ferrix::Table for Message {
                     {
                         #[allow(unused_imports)]
                         use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
-                        (&&::ferrix::shape::ShapeProbe::<Option<Vec<f32>>>::new())
-                            .probe_shape()
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::ferrix::shape::ShapeProbe::<
+                            Option<Vec<f32>>,
+                        >::new())
+                            .probe_shape();
+                        shape
                     },
                 );
                 ::ferrix::shape::Shape::Struct(s)

@@ -26,6 +26,7 @@ mod macros;
 mod migrations;
 mod model;
 mod oauth_presets;
+mod olap;
 mod ops;
 mod pagination;
 mod query_cache;

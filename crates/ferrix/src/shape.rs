@@ -4,7 +4,7 @@
 //! `#[table]` and `#[object]` emit the shape of their fields (names as serde writes them: `rename_all`, `rename`,
 //! `skip`, `flatten`); everything else implements [`HasShape`] here. A type without an implementation (a plain serde
 //! type of the app's own) doesn't fail to compile: it is [`Shape::Json`], kept as JSON. So is anything whose JSON form
-//! the type doesn't pin down (`serialize_with`, tagged enums, maps, tuples, integers past `i64`).
+//! the type doesn't pin down (`serialize_with`, tagged enums, maps, tuples, 128-bit integers).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -16,6 +16,8 @@ pub enum Shape {
     Bool,
     /// A JSON number without a fraction that fits an `i64`.
     Int,
+    /// A JSON number without a fraction that fits a `u64`.
+    UInt,
     Float,
     /// A JSON string.
     Text,
@@ -108,10 +110,11 @@ macro_rules! shapes {
 }
 shapes!(Shape::Bool => bool);
 shapes!(Shape::Int => i8, i16, i32, i64, isize, u8, u16, u32);
+shapes!(Shape::UInt => u64, usize);
 shapes!(Shape::Float => f32, f64);
 shapes!(Shape::Text => String, str, char);
 shapes!(Shape::Bytes => crate::Bytes);
-shapes!(Shape::Json => serde_json::Value, serde_json::Map<String, serde_json::Value>, u64, u128, i128, usize, ());
+shapes!(Shape::Json => serde_json::Value, serde_json::Map<String, serde_json::Value>, u128, i128, ());
 
 impl<T> HasShape for crate::Id<T> {
     fn shape() -> Shape {
@@ -261,13 +264,15 @@ mod tests {
     struct NoShape;
 
     #[test]
+    #[allow(clippy::needless_borrow)] // the double borrow selects the fallback
     fn known_types_and_the_fallback() {
         assert_eq!((&&ShapeProbe::<i64>::new()).probe_shape(), Shape::Int);
         assert_eq!((&&ShapeProbe::<Option<Vec<String>>>::new()).probe_shape(), Shape::Optional(Box::new(Shape::List(Box::new(Shape::Text)))));
         assert_eq!((&&ShapeProbe::<Option<Option<f64>>>::new()).probe_shape(), Shape::Optional(Box::new(Shape::Float)));
         assert_eq!((&&ShapeProbe::<NoShape>::new()).probe_shape(), Shape::Json);
         assert_eq!((&&ShapeProbe::<Vec<NoShape>>::new()).probe_shape(), Shape::Json, "a list of unknowns is JSON as a whole");
-        assert_eq!((&&ShapeProbe::<u64>::new()).probe_shape(), Shape::Json, "may not fit a BIGINT");
+        assert_eq!((&&ShapeProbe::<u64>::new()).probe_shape(), Shape::UInt);
+        assert_eq!((&&ShapeProbe::<i128>::new()).probe_shape(), Shape::Json, "fits no 64-bit column");
         assert_eq!((&&ShapeProbe::<crate::Id<NoShape>>::new()).probe_shape(), Shape::Text);
     }
 

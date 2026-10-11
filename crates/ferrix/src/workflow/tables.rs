@@ -129,3 +129,22 @@ pub struct WorkflowStep {
     pub started_at: f64,
     pub completed_at: Option<f64>,
 }
+
+// Unit enums: their variant names (the analytics copy's column is text).
+impl crate::shape::HasShape for WorkflowState {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}
+
+impl crate::shape::HasShape for StepKind {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}
+
+impl crate::shape::HasShape for StepState {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}

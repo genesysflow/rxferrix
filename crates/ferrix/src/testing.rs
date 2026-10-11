@@ -57,6 +57,13 @@ impl TestApp {
         Ok(TestApp { app, dir, options })
     }
 
+    /// Bring the analytics copy up to the newest commit (building it first if needed), so `ctx.olap` queries see
+    /// everything written so far. Panics unless the app runs with `AppOptions::olap.enabled`.
+    pub async fn olap_sync(&self) -> crate::Result<()> {
+        let olap = self.app.olap().expect("olap_sync needs AppOptions::olap.enabled");
+        olap.sync(&self.app).await
+    }
+
     /// Run the scheduled jobs and crons that are due now, until none are (see [`App::run_due_jobs`]). Returns how
     /// many jobs ran.
     pub async fn run_due_jobs(&self) -> crate::Result<usize> {

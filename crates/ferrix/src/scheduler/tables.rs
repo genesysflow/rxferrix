@@ -137,3 +137,16 @@ pub struct Cron {
     // The job it enqueued last; while that one is pending or in progress, runs are skipped.
     pub last_job: Option<Id<ScheduledJob>>,
 }
+
+// Unit enums: their variant names (the analytics copy's column is text).
+impl crate::shape::HasShape for JobKind {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}
+
+impl crate::shape::HasShape for JobState {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}

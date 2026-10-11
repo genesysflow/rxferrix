@@ -70,3 +70,10 @@ pub struct MigrationRecord {
     // Null when the table didn't need one (its documents already matched when the server started).
     pub schema_check: Option<String>,
 }
+
+// Unit enums: their variant names (the analytics copy's column is text).
+impl crate::shape::HasShape for MigrationState {
+    fn shape() -> crate::shape::Shape {
+        crate::shape::Shape::Text
+    }
+}

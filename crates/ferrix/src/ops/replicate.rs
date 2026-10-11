@@ -770,6 +770,7 @@ impl Replicator {
             .with_writer(move |conn| {
                 // From here on every commit is journaled (a no-op when it already was, since the database opened).
                 journal_switch.set_enabled(true);
+                journal_switch.set_consumer(journal::Consumer::Replication, true);
                 let ts = storage::read_meta_u64(conn, storage::META_TS)?;
                 let Some(generation) = meta_text(conn, journal::META_GENERATION)? else {
                     return Ok(Resume::NewGeneration("this database has not been replicated yet".into()));
@@ -802,8 +803,8 @@ impl Replicator {
                         "the journal doesn't hold every commit after ts {shipped} (commits were made without journaling)"
                     )));
                 }
-                journal::trim(conn, shipped)?;
                 set_shipped(conn, &generation, shipped, shipped_time)?;
+                journal::release(conn, &journal_switch, journal::Consumer::Replication, shipped)?;
                 let pending_bytes = journal::stats(conn)?.map(|s| s.3).unwrap_or(0);
                 Ok(Resume::Continue { generation, shipped_ts: shipped, shipped_time, pending_bytes })
             })
@@ -835,11 +836,12 @@ impl Replicator {
         // Journaling is on (`begin`): every commit after the snapshot's ts is in the journal.
         let (snapshot, manifest) = self.upload_snapshot(app, &id).await?;
         let (gen2, ts, time) = (id.clone(), manifest.ts, manifest.commit_time);
+        let switch = app.db().journal().clone();
         let pending_bytes = app
             .db()
             .with_writer(move |conn| {
-                journal::trim(conn, ts)?;
                 set_shipped(conn, &gen2, ts, time)?;
+                journal::release(conn, &switch, journal::Consumer::Replication, ts)?;
                 Ok(journal::stats(conn)?.map(|s| s.3).unwrap_or(0))
             })
             .await?;
@@ -938,16 +940,13 @@ impl Replicator {
             let bytes = tokio::task::spawn_blocking(move || encode_segment(&gen2, &entries)).await??;
             let size = bytes.len() as u64;
             put(&self.target, &segment_rel(&generation, from, to), bytes).await?;
-            let gen2 = generation.clone();
-            let removed = app
-                .db()
+            let (gen2, switch) = (generation.clone(), app.db().journal().clone());
+            app.db()
                 .with_writer(move |conn| {
-                    let removed = journal::trim(conn, to)?;
                     set_shipped(conn, &gen2, to, to_time)?;
-                    Ok(removed)
+                    journal::release(conn, &switch, journal::Consumer::Replication, to)
                 })
                 .await?;
-            app.db().journal().sub_pending_bytes(removed);
             let now = app.db().clock().now_ms();
             let mut st = self.state();
             st.shipped_ts = to;
@@ -963,17 +962,27 @@ impl Replicator {
     }
 
     /// The target has been unreachable for too long: stop journaling and drop the journal. The next successful step
-    /// starts a new generation (with a snapshot) and journals again.
+    /// starts a new generation (with a snapshot) and journals again. While the analytics copy reads the journal,
+    /// journaling stays on and only the rows the copy no longer needs go.
     async fn drop_journal(&self, app: &App) -> crate::Result<()> {
         let switch = app.db().journal().clone();
         let max = self.options.max_pending_bytes;
-        app.db()
+        let pending = app
+            .db()
             .with_writer(move |conn| {
+                switch.set_consumer(journal::Consumer::Replication, false);
+                if switch.others_active(journal::Consumer::Replication) {
+                    let olap = storage::read_meta_u64(conn, journal::META_OLAP_TS)?;
+                    let removed = journal::trim(conn, olap)?;
+                    switch.sub_pending_bytes(removed);
+                    return Ok(switch.pending_bytes());
+                }
                 switch.set_enabled(false);
-                journal::scrub(conn)
+                journal::scrub(conn)?;
+                Ok(0)
             })
             .await?;
-        app.db().journal().set_pending_bytes(0);
+        app.db().journal().set_pending_bytes(pending);
         self.state().generation = None;
         tracing::error!(
             target = %self.target.location,

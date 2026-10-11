@@ -2245,7 +2245,8 @@ until the secret is entered again.
 | Path `_system/settings:…` | Kind | Args → result |
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
-| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.ferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
 ```ts
@@ -2376,6 +2377,20 @@ blocks the writer; the copy's replication journal and state are removed, below),
 `auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`: `{ format: "ferrix-backup", version: 1,
 createdAt, ferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
 "remote", missingBlobs, files: [{ path, bytes, sha256 }] }`.
+
+**Backups from the dashboard** (`_settings` key `backups`, `crates/ferrix/src/settings/backups.rs`): `update { backups:
+{ everySecs: number | null (60 s – 30 days; null: no schedule), keep? (1–1000, default 7), includeAux?, includeFiles?,
+destination, secretAccessKey? } }` where `destination` is `{ kind: "default" }` (`<data dir>/backups`), `{ kind:
+"local", path }` (absolute) or `{ kind: "s3", bucket, prefix?, region?, endpoint?, accessKeyId? }` (without
+`accessKeyId`, the server's `AWS_*` environment; with it, `secretAccessKey` is required the first time and kept when
+omitted or `"••••"`; stored as the row's encrypted part, never in the cron's arguments). `clear: ["backups"]` removes
+it. Applied at startup and after every change: the `ferrix-backup` cron is declared, rescheduled or withdrawn at
+runtime (`_crons` updated at once; it then runs with `{ schedule: { to: null, keep, includeAux, includeFiles } }`
+and reads the destination from the app), and the destination is used for scheduled and manual backups, the listing,
+downloads and restores. The command line wins part by part: `--backup-every` fixes the schedule, `--backup-to` the
+destination; `SettingsView.locked` then lists `backups.schedule` / `backups.destination`, `backups` shows what is
+stored, and `effective.backups` (`{ target, everySecs, keep, includeAux, includeFiles, s3Available }`) what runs.
+Replication (`--replicate-to`) stays a command-line setting.
 
 **Scheduled backups**: `serve --backup-every 6h --backup-keep 7 [--backup-to LOCATION] [--backup-with-aux]
 [--backup-with-files]` declares the interval cron `ferrix-backup` running the internal system action

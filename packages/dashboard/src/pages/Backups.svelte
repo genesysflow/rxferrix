@@ -1,9 +1,11 @@
 <script lang="ts">
   import { FerrixError } from "@ferrix/client";
-  import { useMutation, useQuery } from "@ferrix/svelte";
+  import { useAction, useMutation, useQuery } from "@ferrix/svelte";
   import { onMount } from "svelte";
   import {
     scheduler,
+    settings,
+    type SettingsView,
     type BackupInfo,
     type ExportFormat,
     type ImportMode,
@@ -34,6 +36,7 @@
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatRelative, formatSeconds, formatTime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
+  import BackupSettings from "../components/BackupSettings.svelte";
   import Empty from "../components/Empty.svelte";
 
   /** Backups (`/api/admin/backups*`), per-table export and JSONL/CSV import (`/api/admin/export|import/{table}`). */
@@ -45,6 +48,19 @@
     const a = schedule?.args as { schedule?: { to?: string | null; keep?: number; includeAux?: boolean; includeFiles?: boolean } } | null;
     return a?.schedule ?? null;
   });
+
+  // The `backups` setting (schedule and destination), edited in the BackupSettings dialog.
+  const getSettings = useAction(settings.get);
+  let settingsView = $state<SettingsView | null>(null);
+  let configuring = $state(false);
+  async function loadSettings() {
+    try {
+      settingsView = await getSettings({});
+    } catch {
+      // Shown as unavailable; the rest of the page works without it.
+    }
+  }
+  onMount(() => void loadSettings());
 
   let target = $state<string | null>(null);
   let backups = $state<BackupInfo[] | null>(null);
@@ -353,7 +369,12 @@
       </div>
       <dl class="facts">
         <dt>Stored in</dt>
-        <dd class="mono" data-testid="backup-target">{target ?? "…"}</dd>
+        <dd>
+          <span class="mono" data-testid="backup-target">{target ?? "…"}</span>
+          {#if settingsView}
+            <button class="small configure" onclick={() => (configuring = true)} data-testid="configure-backups">Configure…</button>
+          {/if}
+        </dd>
         <dt>Schedule</dt>
         <dd data-testid="backup-schedule">
           {#if schedule}
@@ -363,7 +384,7 @@
             · <button class="small" onclick={runScheduledNow}>Run now</button>
             · <a href={href("scheduler")} onclick={link}>cron <code>ferrix-backup</code></a>
           {:else}
-            <span class="muted">No scheduled backups. Start the server with <code>--backup-every 6h --backup-keep 7</code> (optionally <code>--backup-to s3://bucket/prefix</code>).</span>
+            <span class="muted">No scheduled backups. Turn them on with <strong>Configure…</strong> (or start the server with <code>--backup-every 6h</code>).</span>
           {/if}
         </dd>
       </dl>
@@ -432,7 +453,7 @@
       {:else if backups === null}
         <p class="faint">Loading…</p>
       {:else if backups.length === 0}
-        <Empty title="No backups yet" hint="Create one now, or schedule them with --backup-every." />
+        <Empty title="No backups yet" hint="Create one now, or schedule them with Configure… above." />
       {:else}
         <table class="grid" data-testid="backups">
           <thead><tr><th>Archive</th><th>Size</th><th>Created</th><th>Kind</th><th>Commit ts</th><th></th></tr></thead>
@@ -671,6 +692,17 @@
   </div>
 </div>
 
+{#if configuring && settingsView}
+  <BackupSettings
+    view={settingsView}
+    onclose={() => (configuring = false)}
+    onsaved={(v) => {
+      settingsView = v;
+      void refresh();
+    }}
+  />
+{/if}
+
 <style>
   .small {
     font-size: 12.5px;
@@ -766,5 +798,8 @@
     margin: 10px 0 4px;
     gap: 10px;
     flex-wrap: wrap;
+  }
+  .configure {
+    margin-left: 8px;
   }
 </style>

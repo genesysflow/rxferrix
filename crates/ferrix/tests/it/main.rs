@@ -6,6 +6,7 @@ mod aggregates;
 mod audit;
 mod auth;
 mod authkit;
+mod backup_settings;
 mod bench;
 mod bench_features;
 mod bytes;

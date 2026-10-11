@@ -427,7 +427,10 @@ export interface SettingsView {
   accessTokenTtlSecs: number | null;
   sessionTtlSecs: number | null;
   corsOrigins: string[] | null;
-  /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `oauth.<id>`. */
+  /** Scheduled backups and their destination (crates/ferrix/src/settings/backups.rs). */
+  backups: BackupsView | null;
+  /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `oauth.<id>`,
+   * `backups.schedule`, `backups.destination`. */
   locked: string[];
   effective: {
     signups: boolean;
@@ -438,7 +441,56 @@ export interface SettingsView {
     emailConfigured: boolean;
     /** null: any origin. */
     corsOrigins: string[] | null;
+    backups: BackupsEffective;
   };
+}
+
+/** Where backups go. */
+export type BackupDestination =
+  | { kind: "default" }
+  | { kind: "local"; path: string }
+  | {
+      kind: "s3";
+      bucket: string;
+      prefix?: string;
+      /** Default: the server's AWS_REGION, else us-east-1. */
+      region?: string | null;
+      /** A non-AWS endpoint (R2, MinIO, …). */
+      endpoint?: string | null;
+      /** Empty: the server's AWS_* environment credentials. */
+      accessKeyId?: string | null;
+    };
+
+export interface BackupsView {
+  /** null: no schedule. */
+  everySecs: number | null;
+  keep: number;
+  includeAux: boolean;
+  includeFiles: boolean;
+  destination: BackupDestination;
+  /** `"••••"` when stored. */
+  secretAccessKey: string | null;
+}
+
+export interface BackupsInput {
+  everySecs: number | null;
+  keep?: number;
+  includeAux?: boolean;
+  includeFiles?: boolean;
+  destination: BackupDestination;
+  /** Omitted, null or `"••••"`: keep the stored one. */
+  secretAccessKey?: string | null;
+}
+
+/** Backups as they run (settings and command line merged). */
+export interface BackupsEffective {
+  target: string;
+  everySecs: number | null;
+  keep: number;
+  includeAux: boolean;
+  includeFiles: boolean;
+  /** The server was built with S3 support. */
+  s3Available: boolean;
 }
 
 export interface OAuthProviderInput {
@@ -469,7 +521,8 @@ export type SettingsKey =
   | "signups"
   | "accessTokenTtlSecs"
   | "sessionTtlSecs"
-  | "corsOrigins";
+  | "corsOrigins"
+  | "backups";
 
 export interface SettingsUpdate {
   oauth?: OAuthProviderInput[];
@@ -479,6 +532,7 @@ export interface SettingsUpdate {
   accessTokenTtlSecs?: number;
   sessionTtlSecs?: number;
   corsOrigins?: string[];
+  backups?: BackupsInput;
   clear?: SettingsKey[];
 }
 
@@ -488,6 +542,11 @@ export const settings = {
   sendTestEmail: makeFunctionReference<"action", { to: string; smtp?: SmtpInput | null }, null>(
     "action",
     "_system/settings:send_test_email",
+  ),
+  /** Write, read back and delete a probe object at a destination (the one in effect without `backups`). */
+  testBackupDestination: makeFunctionReference<"action", { backups?: BackupsInput | null }, string>(
+    "action",
+    "_system/settings:test_backup_destination",
   ),
 } as const;
 

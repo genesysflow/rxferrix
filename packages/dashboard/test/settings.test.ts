@@ -11,6 +11,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
     accessTokenTtlSecs: null,
     sessionTtlSecs: null,
     corsOrigins: null,
+    backups: null,
     locked: [],
     effective: {
       signups: true,
@@ -20,6 +21,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
       oauthProviders: [],
       emailConfigured: false,
       corsOrigins: null,
+      backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
     },
     ...over,
   };

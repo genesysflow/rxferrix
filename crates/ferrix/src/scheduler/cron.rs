@@ -105,6 +105,19 @@ impl CronSpec {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// The function's arguments (an error if they didn't serialize).
+    pub(crate) fn args_value(&self) -> Result<&Value, &str> {
+        self.args.as_ref().map_err(String::as_str)
+    }
+
+    /// The interval in whole seconds, for an interval cron.
+    pub(crate) fn interval_secs(&self) -> Option<u64> {
+        match self.schedule {
+            Every::Interval(d) => Some(d.as_secs()),
+            Every::Expr(_) => None,
+        }
+    }
 }
 
 /// The crons ferrix declares itself, from the app's options: `_storage_sweep` (the storage orphan sweep, every
@@ -121,6 +134,7 @@ pub(crate) fn system_crons(options: &AppOptions) -> Vec<CronSpec> {
 pub const SWEEP_CRON: &str = "_storage_sweep";
 
 /// A validated [`CronSpec`].
+#[derive(Clone)]
 pub(crate) struct ParsedCron {
     pub name: String,
     /// What `_crons.schedule` shows: the expression, or `every <duration>`.
@@ -133,6 +147,7 @@ pub(crate) struct ParsedCron {
     pub args: Value,
 }
 
+#[derive(Clone)]
 enum Parsed {
     Expr { schedule: Box<cron::Schedule>, tz: Option<Tz> },
     IntervalMs(f64),
@@ -292,42 +307,62 @@ pub(crate) async fn reconcile(app: &App, crons: &[ParsedCron], now: f64) -> crat
             }
         }
         for c in crons {
-            match existing.iter().find(|r| r.name == c.name) {
-                Some(row)
-                    if row.schedule == c.display
-                        && row.timezone == c.timezone
-                        && row.path == c.path
-                        && row.args == c.args =>
-                {
-                    // Unchanged: keep `nextRun`. If it passed while the server was down, the first tick runs it once.
-                }
-                Some(row) => {
-                    let mut value = row.value.clone();
-                    value.schedule = c.display.clone();
-                    value.timezone = c.timezone.clone();
-                    value.path = c.path.clone();
-                    value.args = c.args.clone();
-                    value.next_run = c.next_after(now);
-                    db.replace(row.id, value).await?;
-                }
-                None => {
-                    db.insert(Cron {
-                        name: c.name.clone(),
-                        schedule: c.display.clone(),
-                        timezone: c.timezone.clone(),
-                        path: c.path.clone(),
-                        args: c.args.clone(),
-                        last_run: None,
-                        next_run: c.next_after(now),
-                        last_job: None,
-                    })
-                    .await?;
-                }
-            }
+            upsert(&db, existing.iter().find(|r| r.name == c.name), c, now).await?;
         }
         Ok(())
     })
     .await
+}
+
+/// Make the `_crons` row of `name` match `cron` (`None`: delete it): a cron declared or withdrawn at runtime
+/// (`App::set_runtime_cron`).
+pub(crate) async fn reconcile_one(app: &App, name: &str, cron: Option<&ParsedCron>, now: f64) -> crate::Result<()> {
+    store::write(app, |db| async move {
+        let row = db.query::<Cron>().with_index(Cron::by_name, |q| q.eq(Cron::name, name.to_string())).first().await?;
+        match (cron, row) {
+            (Some(c), row) => upsert(&db, row.as_ref(), c, now).await,
+            (None, Some(row)) => db.delete(row.id).await,
+            (None, None) => Ok(()),
+        }
+    })
+    .await
+}
+
+/// Insert `c`'s row, or update `row` if the schedule, zone, function or args changed (a change gets a fresh
+/// `nextRun`; an unchanged row keeps it, so if it passed while the server was down, the first tick runs it once).
+async fn upsert(
+    db: &crate::db::query::MutationDb,
+    row: Option<&crate::schema::Doc<Cron>>,
+    c: &ParsedCron,
+    now: f64,
+) -> crate::Result<()> {
+    match row {
+        Some(row)
+            if row.schedule == c.display && row.timezone == c.timezone && row.path == c.path && row.args == c.args => {}
+        Some(row) => {
+            let mut value = row.value.clone();
+            value.schedule = c.display.clone();
+            value.timezone = c.timezone.clone();
+            value.path = c.path.clone();
+            value.args = c.args.clone();
+            value.next_run = c.next_after(now);
+            db.replace(row.id, value).await?;
+        }
+        None => {
+            db.insert(Cron {
+                name: c.name.clone(),
+                schedule: c.display.clone(),
+                timezone: c.timezone.clone(),
+                path: c.path.clone(),
+                args: c.args.clone(),
+                last_run: None,
+                next_run: c.next_after(now),
+                last_job: None,
+            })
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Enqueue a run of the cron in `row` now, in the caller's transaction (`_system/scheduler:run_cron_now`): skipped

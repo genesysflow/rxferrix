@@ -356,12 +356,28 @@ impl BackupTarget {
         Self::parse(dir.to_str().context("data dir is not valid UTF-8")?, data_dir)
     }
 
-    /// The target configured for `app` (`AppOptions::ops.backup_target`, `--backup-to`), or `<data dir>/backups`.
+    /// The target configured for `app`: `AppOptions::ops.backup_target` (`--backup-to`), else the destination of the
+    /// `backups` setting (the dashboard; `crate::settings::backups`), else `<data dir>/backups`.
     pub fn for_app(app: &App) -> crate::Result<BackupTarget> {
-        match app.options().ops.backup_target.as_deref().filter(|t| !t.trim().is_empty()) {
-            Some(t) => Self::parse(t, app.dir()),
+        if let Some(t) = app.options().ops.backup_target.as_deref().filter(|t| !t.trim().is_empty()) {
+            return Self::parse(t, app.dir());
+        }
+        match app.backup_settings() {
+            Some(settings) => settings.target(app.dir()),
             None => Self::default_for(app.dir()),
         }
+    }
+
+    /// Check that archives can be stored here: write a small object, find it in a listing, delete it.
+    pub async fn probe(&self) -> crate::Result<()> {
+        let name = format!(".ferrix-probe-{}", rand::random::<u64>());
+        let path = self.path(&name);
+        self.store.put(&path, b"ferrix backup destination check".to_vec().into()).await.context("writing")?;
+        let head = self.store.head(&path).await.context("reading it back");
+        let deleted = self.store.delete(&path).await.context("deleting it");
+        head?;
+        deleted?;
+        Ok(())
     }
 
     /// Any object store, with archives under `prefix` (tests, custom setups).

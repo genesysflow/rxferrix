@@ -16,7 +16,7 @@
 // live session revocation, the command palette, the phone layout, environment variables. A second server with private storage checks thumbnails and
 // downloads of signed URLs; others a staged restore with "Restart now", continuous replication (the status card and
 // a point-in-time restore by commit ts), and, with a fresh data dir, the printed /_/setup#token=… flow.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -532,6 +532,28 @@ try {
     await page.locator("[data-testid=backups] td", { hasText: name }).waitFor({ state: "detached" });
     const listed = await fetch(`${base}/api/admin/backups`, { headers: { authorization: `Bearer ${admin}` } }).then((r) => r.json());
     if ((listed as { backups: { name: string }[] }).backups.some((b) => b.name === name)) throw new Error("not deleted");
+  });
+
+  // 10b. The destination set from the dashboard (the schedule is fixed by --backup-every, so it is locked).
+  await step("backups: destination configured from the dashboard", async () => {
+    const elsewhere = tempDir();
+    await page.getByTestId("configure-backups").click();
+    const dialog = page.getByTestId("backup-settings");
+    await dialog.getByText("Set on the command line").first().waitFor();
+    await page.getByLabel("Another directory on the server").check();
+    await page.getByLabel("Directory", { exact: true }).fill(elsewhere);
+    await page.getByRole("button", { name: "Test destination" }).click();
+    await page.getByTestId("backup-test-result").filter({ hasText: "✓" }).waitFor();
+    await shot(page, "backup-settings");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await page.getByTestId("backup-target").filter({ hasText: elsewhere }).waitFor();
+    await page.getByRole("button", { name: "Create backup" }).click();
+    for (let i = 0; i < 100 && !readdirSync(elsewhere).some((f) => f.endsWith(".tar.zst")); i++) await Bun.sleep(100);
+    if (!readdirSync(elsewhere).some((f) => f.endsWith(".tar.zst"))) throw new Error("the backup did not go to the configured directory");
+    // Removing the settings goes back to <data dir>/backups.
+    await page.getByTestId("configure-backups").click();
+    await page.getByRole("button", { name: "Remove settings" }).click();
+    await page.getByTestId("backup-target").filter({ hasText: /backups$/ }).waitFor();
   });
 
   // 11. Export the todos table (JSONL and CSV); import JSONL: a bad file is refused whole, then 2000 seeded todos.

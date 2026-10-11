@@ -35,8 +35,9 @@ pub const SIGNUPS: &str = "signups";
 pub const ACCESS_TTL: &str = "accessTokenTtlSecs";
 pub const SESSION_TTL: &str = "sessionTtlSecs";
 pub const CORS_ORIGINS: &str = "corsOrigins";
+pub const BACKUPS: &str = "backups";
 /// Every setting key.
-pub const KEYS: &[&str] = &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SESSION_TTL, CORS_ORIGINS];
+pub const KEYS: &[&str] = &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SESSION_TTL, CORS_ORIGINS, BACKUPS];
 
 /// The kind of an OAuth provider configured at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -109,6 +110,8 @@ pub struct StoredSettings {
     pub access_token_ttl_secs: Option<u64>,
     pub session_ttl_secs: Option<u64>,
     pub cors_origins: Option<Vec<String>>,
+    /// Scheduled backups and their destination (`super::backups`).
+    pub backups: Option<super::backups::StoredBackups>,
 }
 
 impl StoredSettings {
@@ -153,6 +156,11 @@ impl StoredSettings {
             ACCESS_TTL => self.access_token_ttl_secs = Some(serde_json::from_value(value)?),
             SESSION_TTL => self.session_ttl_secs = Some(serde_json::from_value(value)?),
             CORS_ORIGINS => self.cors_origins = Some(serde_json::from_value(value)?),
+            BACKUPS => {
+                let mut backups: super::backups::StoredBackups = serde_json::from_value(value)?;
+                backups.secret_access_key = secret.map(String::from_utf8).transpose()?;
+                self.backups = Some(backups);
+            }
             other => anyhow::bail!("unknown setting `{other}`"),
         }
         Ok(())
@@ -186,6 +194,13 @@ impl StoredSettings {
             (ACCESS_TTL, self.access_token_ttl_secs.and_then(|v| json(v.into()))),
             (SESSION_TTL, self.session_ttl_secs.and_then(|v| json(v.into()))),
             (CORS_ORIGINS, self.cors_origins.clone().and_then(|v| json(v.into()))),
+            (
+                BACKUPS,
+                self.backups.as_ref().map(|b| {
+                    let secret = b.secret_access_key.as_ref().filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec());
+                    (serde_json::to_value(b).expect("serializes"), secret)
+                }),
+            ),
         ]
     }
 }

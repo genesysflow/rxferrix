@@ -22,6 +22,7 @@
 //! | `update` | action (admin) | partial update → [`SettingsView`] |
 //! | `send_test_email` | action (admin) | `{ to, smtp? }` → `null`; sends with the current (or the given, unsaved) SMTP settings |
 
+pub mod backups;
 pub mod model;
 
 use std::borrow::Cow;
@@ -94,6 +95,9 @@ pub struct EffectiveView {
     pub email_configured: bool,
     /// null: any origin.
     pub cors_origins: Option<Vec<String>>,
+    /// Backups as they run: destination, schedule (`backups::BackupsEffective`).
+    #[ts(type = "any")]
+    pub backups: backups::BackupsEffective,
 }
 
 /// The stored settings (secrets masked; null = not set), the fields the configuration locks, and the result.
@@ -108,8 +112,11 @@ pub struct SettingsView {
     pub access_token_ttl_secs: Option<u64>,
     pub session_ttl_secs: Option<u64>,
     pub cors_origins: Option<Vec<String>>,
+    /// Scheduled backups and their destination, the secret masked (`backups::BackupsView`).
+    #[ts(type = "any")]
+    pub backups: Option<backups::BackupsView>,
     /// Fields fixed by the configuration: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`,
-    /// `oauth.<id>`.
+    /// `oauth.<id>`, `backups.schedule`, `backups.destination`.
     pub locked: Vec<String>,
     pub effective: EffectiveView,
 }
@@ -172,12 +179,22 @@ pub async fn update(
     access_token_ttl_secs: Option<u64>,
     session_ttl_secs: Option<u64>,
     cors_origins: Option<Vec<String>>,
+    backups: Option<backups::BackupsInput>,
     clear: Option<Vec<String>>,
 ) -> Result<SettingsView> {
     let admin = ctx.auth.require_admin()?;
     let app = ctx.app.clone();
-    let changes =
-        Changes { oauth, smtp, redirect_urls, signups, access_token_ttl_secs, session_ttl_secs, cors_origins, clear };
+    let changes = Changes {
+        oauth,
+        smtp,
+        redirect_urls,
+        signups,
+        access_token_ttl_secs,
+        session_ttl_secs,
+        cors_origins,
+        backups,
+        clear,
+    };
     let auth = app.auth();
     let sbox = auth.keys.secret_box();
     let dev = app.options().dev;
@@ -235,7 +252,24 @@ pub async fn update(
     })
     .await?;
     auth.reload_settings(&app).await?;
+    backups::apply(&app, stored.backups.as_ref()).await?;
     Ok(view(&app, &stored))
+}
+
+/// Check a backup destination before saving it: write a small object there, read it back and delete it. Without
+/// `backups`, the destination in effect. Returns where it went; fails with `invalid_settings` and the store's error.
+#[action]
+pub async fn test_backup_destination(ctx: &ActionCtx, backups: Option<backups::BackupsInput>) -> Result<String> {
+    ctx.auth.require_admin()?;
+    let app = &ctx.app;
+    match backups {
+        Some(input) => {
+            let stored = load(app).await?;
+            let candidate = backups::from_input(input, stored.backups.as_ref())?;
+            backups::test_destination(app, Some(&candidate)).await
+        }
+        None => backups::test_destination(app, None).await,
+    }
 }
 
 /// Send a test email to `to` through the SMTP settings in effect, or through `smtp` (not saved; a missing password
@@ -292,7 +326,8 @@ fn mask_secret(s: &Option<String>) -> Option<String> {
 
 fn view(app: &App, stored: &StoredSettings) -> SettingsView {
     let auth = app.auth();
-    let locked = crate::auth::effective::locked_fields(&auth.config);
+    let mut locked = crate::auth::effective::locked_fields(&auth.config);
+    locked.extend(backups::locked(app));
     let e = auth.current();
     SettingsView {
         oauth: stored
@@ -321,6 +356,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
         access_token_ttl_secs: stored.access_token_ttl_secs,
         session_ttl_secs: stored.session_ttl_secs,
         cors_origins: stored.cors_origins.clone(),
+        backups: stored.backups.as_ref().map(backups::StoredBackups::view),
         locked,
         effective: EffectiveView {
             signups: e.signups,
@@ -330,6 +366,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
             oauth_providers: e.oauth.keys().cloned().collect(),
             email_configured: e.mailer.is_some(),
             cors_origins: e.cors_origins.clone(),
+            backups: backups::effective(app),
         },
     }
 }
@@ -352,6 +389,7 @@ fn masked_json(s: &StoredSettings) -> Value {
         "accessTokenTtlSecs": s.access_token_ttl_secs,
         "sessionTtlSecs": s.session_ttl_secs,
         "corsOrigins": s.cors_origins,
+        "backups": s.backups.as_ref().map(backups::StoredBackups::view),
     })
 }
 
@@ -407,6 +445,7 @@ struct Changes {
     access_token_ttl_secs: Option<u64>,
     session_ttl_secs: Option<u64>,
     cors_origins: Option<Vec<String>>,
+    backups: Option<backups::BackupsInput>,
     clear: Option<Vec<String>>,
 }
 
@@ -422,6 +461,7 @@ impl Changes {
                 model::ACCESS_TTL => s.access_token_ttl_secs = None,
                 model::SESSION_TTL => s.session_ttl_secs = None,
                 model::CORS_ORIGINS => s.cors_origins = None,
+                model::BACKUPS => s.backups = None,
                 other => return Err(invalid(format!("unknown setting `{other}` in clear"))),
             }
         }
@@ -549,6 +589,9 @@ impl Changes {
                 return Err(invalid(format!("at most {MAX_LIST} CORS origins")));
             }
             s.cors_origins = Some(out);
+        }
+        if let Some(input) = self.backups {
+            s.backups = Some(backups::from_input(input, before.backups.as_ref())?);
         }
         Ok(s)
     }

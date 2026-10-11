@@ -77,6 +77,7 @@ describe("Settings page", () => {
     accessTokenTtlSecs: null,
     sessionTtlSecs: null,
     corsOrigins: null,
+    backups: null,
     locked: ["redirectUrls"],
     effective: {
       signups: true,
@@ -86,6 +87,7 @@ describe("Settings page", () => {
       oauthProviders: [],
       emailConfigured: true,
       corsOrigins: null,
+      backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
     },
   };
 

@@ -76,7 +76,10 @@ impl Slots {
 /// The scheduler's in-memory state, one per `App`.
 pub struct SchedulerState {
     options: SchedulerOptions,
-    crons: Vec<ParsedCron>,
+    /// The declared crons, then those set at runtime (`App::set_runtime_cron`).
+    crons: std::sync::RwLock<Arc<Vec<ParsedCron>>>,
+    /// Names of the crons declared at startup (`SchedulerOptions::crons` and the system crons): not changeable.
+    declared: std::collections::BTreeSet<String>,
     /// The declared workpools, by name.
     pools: Arc<BTreeMap<String, Workpool>>,
     /// Slots of the default pool (`None`), the declared pools, and pools that pending jobs name but the app no longer
@@ -97,6 +100,7 @@ impl SchedulerState {
         let mut specs = options.crons.clone();
         specs.extend(cron::system_crons(app_options));
         let crons = cron::parse_all(&specs)?;
+        let declared = crons.iter().map(|c| c.name.clone()).collect();
         let mut pools = BTreeMap::new();
         let mut slots = BTreeMap::from([(None, Slots::new(options.concurrency))]);
         for pool in &options.pools {
@@ -112,7 +116,8 @@ impl SchedulerState {
         }
         Ok(SchedulerState {
             options: options.clone(),
-            crons,
+            crons: std::sync::RwLock::new(Arc::new(crons)),
+            declared,
             pools: Arc::new(pools),
             slots: std::sync::Mutex::new(slots),
             notify: Notify::new(),
@@ -121,6 +126,16 @@ impl SchedulerState {
             dispatch: tokio::sync::Mutex::new(()),
             last_cleanup: std::sync::Mutex::new(None),
         })
+    }
+
+    /// The crons in effect now.
+    pub(crate) fn crons(&self) -> Arc<Vec<ParsedCron>> {
+        self.crons.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether `name` is declared at startup (by the app, its options or ferrix), so not settable at runtime.
+    pub(crate) fn is_declared(&self, name: &str) -> bool {
+        self.declared.contains(name)
     }
 
     /// Wake the background loop (it re-reads what is due).
@@ -186,11 +201,44 @@ impl App {
                     tracing::warn!("{recovered} scheduled action(s) were interrupted by a restart and marked failed");
                 }
                 discover_pools(self).await?;
-                cron::reconcile(self, &self.scheduler_state().crons, now).await?;
+                cron::reconcile(self, &self.scheduler_state().crons(), now).await?;
                 maybe_cleanup(self, now).await?;
                 Ok::<_, crate::Error>(())
             })
             .await?;
+        Ok(())
+    }
+
+    /// Declare (`Some`) or withdraw (`None`) the cron `name` while the app runs (settings-driven crons such as the
+    /// backup schedule). Crons declared at startup can't be replaced. `_crons` is updated now if the scheduler has
+    /// started (else at its startup reconcile), and the loop wakes up to pick up the new `nextRun`.
+    pub(crate) async fn set_runtime_cron(
+        &self,
+        name: &str,
+        spec: Option<crate::scheduler::CronSpec>,
+    ) -> crate::Result<()> {
+        let st = self.scheduler_state();
+        anyhow::ensure!(
+            !st.is_declared(name),
+            "the cron `{name}` is declared at startup and can't be changed at runtime"
+        );
+        let parsed = match spec {
+            Some(spec) => {
+                anyhow::ensure!(spec.name() == name, "cron name mismatch: `{}` set as `{name}`", spec.name());
+                cron::parse_all(std::slice::from_ref(&spec))?.pop()
+            }
+            None => None,
+        };
+        {
+            let mut crons = st.crons.write().unwrap_or_else(|e| e.into_inner());
+            let mut list: Vec<ParsedCron> = crons.iter().filter(|c| c.name != name).cloned().collect();
+            list.extend(parsed.clone());
+            *crons = Arc::new(list);
+        }
+        if st.init.initialized() {
+            cron::reconcile_one(self, name, parsed.as_ref(), self.db().clock().now_ms()).await?;
+            st.notify();
+        }
         Ok(())
     }
 
@@ -308,7 +356,7 @@ async fn dispatch(app: &App) -> crate::Result<usize> {
     if let Err(e) = maybe_cleanup(app, clock.now_ms()).await {
         tracing::error!("scheduled job cleanup failed: {e:#}");
     }
-    cron::fire_due(app, &st.crons, clock.now_ms()).await?;
+    cron::fire_due(app, &st.crons(), clock.now_ms()).await?;
     let mut started = 0;
     loop {
         let mut round = run_due_mutations(app).await?;

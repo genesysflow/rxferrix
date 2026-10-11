@@ -358,6 +358,8 @@ struct AppInner {
     subscriptions: OnceLock<SubscriptionManager>,
     /// The replicator, with `AppOptions::ops.replication` (`crate::ops::replicate`).
     replication: OnceLock<Arc<crate::ops::replicate::Replicator>>,
+    /// The `backups` setting in effect (`crate::settings::backups`).
+    backup_settings: std::sync::RwLock<Option<crate::settings::backups::StoredBackups>>,
     /// With `AppOptions::determinism_check`.
     determinism: Option<crate::determinism::DeterminismCheck>,
     /// The analytics copy, with `AppOptions::olap.enabled` (`crate::olap`).
@@ -561,6 +563,7 @@ impl App {
                 scheduler,
                 subscriptions,
                 replication: OnceLock::new(),
+                backup_settings: std::sync::RwLock::new(None),
                 determinism,
                 olap: OnceLock::new(),
             }),
@@ -568,6 +571,9 @@ impl App {
         crate::storage::service::ensure_schema(&app).await?;
         crate::migrations::startup(&app).await?;
         crate::auth::start(&app).await?;
+        // The `backups` setting: its destination, and the `ferrix-backup` cron unless the command line declares it.
+        let stored = crate::settings::load(&app).await?;
+        crate::settings::backups::apply(&app, stored.backups.as_ref()).await?;
         // Last, so the replicator's first snapshot is taken after the startup commits above (system crons, migration and
         // auth bookkeeping). They are journaled either way (journaling is on from `Database::open`); starting earlier
         // only made whether they land in the first snapshot or in its first segment depend on timing.
@@ -647,6 +653,15 @@ impl App {
     }
 
     /// Auth state and operations (token validation, sign-in, admins).
+    /// The `backups` setting in effect (destination and schedule; `crate::settings::backups`).
+    pub(crate) fn backup_settings(&self) -> Option<crate::settings::backups::StoredBackups> {
+        self.inner.backup_settings.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn set_backup_settings(&self, settings: Option<crate::settings::backups::StoredBackups>) {
+        *self.inner.backup_settings.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
     /// The key that seals environment variables (`crate::env`), for a context.
     pub(crate) fn env_box(&self) -> Arc<crate::auth::secretbox::SecretBox> {
         Arc::new(self.auth().keys.secret_box())

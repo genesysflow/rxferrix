@@ -548,7 +548,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints on first st
   run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
 - **Backups**: create (optionally with `aux.db` and files), download, delete and **restore** backups (a stored one
   or an archive from your computer: checked completely, then applied at the next start; cancel, or "Restart now"
-  under systemd/Docker); the target and the `--backup-every` schedule; with `--replicate-to`, the replication status
+  under systemd/Docker); **Configure…** sets the schedule (interval, how many to keep, files and `aux.db`) and the
+  destination (the data directory, another directory, or an S3-compatible bucket with its own credentials, with a
+  "Test destination" check), applied at once; with `--replicate-to`, the replication status
   (target, lag, last segment and snapshot, generations) and a point-in-time restore picker (a time or a commit ts);
   export a table (JSONL/CSV) and import JSONL or CSV (insert, upsert or replace).
 - **Analytics** (with `--olap`): the copy's state and lag, its tables and columns, a SQL editor (one SELECT, the
@@ -666,7 +668,10 @@ snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a 
 the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
 can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
 in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
-schedule (the cron `ferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones; admins can list,
+schedule (the cron `ferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones. The same schedule
+and destination can be set on the dashboard instead (Backups, Configure…; stored in `_settings`, the S3 secret key
+encrypted like the other settings secrets): it takes effect without a restart, and a command-line flag wins over it
+(`--backup-every` for the schedule, `--backup-to` for the destination). Admins can list,
 create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md §4.2). `todo-server restore
 <archive|s3://…>` is offline: it refuses while a server holds the data directory, checks the archive (checksums,
 SQLite integrity, schema, indexes) and only then swaps the database, keeping the old files in

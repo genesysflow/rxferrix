@@ -1378,7 +1378,9 @@ async fn deleted_files_are_kept_for_keep_deleted_then_swept() {
 /// A tiny S3-compatible server: stores objects in memory (path-style, no auth on the API calls), and serves
 /// **presigned** GETs only if their SigV4 signature checks out and they haven't expired, applying the
 /// `response-*` header overrides the way S3 does.
-mod fake_s3 {
+/// An in-memory S3 (path-style): objects, listing, multipart uploads, presigned GETs (also used by the backup
+/// settings tests).
+pub(crate) mod fake_s3 {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -1397,6 +1399,10 @@ mod fake_s3 {
     #[derive(Default)]
     pub struct Fake {
         pub objects: Mutex<HashMap<String, Bytes>>,
+        /// Multipart uploads in progress: upload id → parts by number.
+        pub uploads: Mutex<HashMap<String, std::collections::BTreeMap<u32, Bytes>>>,
+        /// The access key ids of header-signed requests (`Authorization: AWS4-HMAC-SHA256 Credential=<id>/…`).
+        pub signed_by: Mutex<Vec<String>>,
         /// Presigned GETs served (signature valid, not expired).
         pub served: Mutex<usize>,
     }
@@ -1419,8 +1425,52 @@ mod fake_s3 {
     ) -> Response {
         let path = uri.path().to_string();
         let presigned = uri.query().is_some_and(|q| q.contains("X-Amz-Signature="));
+        if let Some(id) = headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.split("Credential=").nth(1))
+            .and_then(|c| c.split('/').next())
+        {
+            fake.signed_by.lock().unwrap().push(id.to_string());
+        }
+        let query: HashMap<String, String> = url::Url::parse(&format!("http://h{uri}"))
+            .unwrap()
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
         let mut objects = fake.objects.lock().unwrap();
         match method {
+            // Multipart: create, upload a part, complete.
+            Method::POST if query.contains_key("uploads") => {
+                let id = format!("upload-{}", rand::random::<u32>());
+                fake.uploads.lock().unwrap().insert(id.clone(), Default::default());
+                format!("{XML}<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>")
+                    .into_response()
+            }
+            Method::PUT if query.contains_key("uploadId") => {
+                let n: u32 = query["partNumber"].parse().unwrap();
+                fake.uploads.lock().unwrap().get_mut(&query["uploadId"]).unwrap().insert(n, body);
+                (StatusCode::OK, [("etag", format!("\"part{n}\""))]).into_response()
+            }
+            Method::POST if query.contains_key("uploadId") => {
+                let parts = fake.uploads.lock().unwrap().remove(&query["uploadId"]).unwrap();
+                let whole: Vec<u8> = parts.into_values().flat_map(|b| b.to_vec()).collect();
+                objects.insert(path, Bytes::from(whole));
+                format!("{XML}<CompleteMultipartUploadResult><ETag>\"fake\"</ETag></CompleteMultipartUploadResult>")
+                    .into_response()
+            }
+            Method::HEAD => match objects.get(&path) {
+                Some(o) => (
+                    StatusCode::OK,
+                    [
+                        ("content-length", o.len().to_string()),
+                        ("etag", "\"fake\"".to_string()),
+                        ("last-modified", "Thu, 01 Jan 2026 00:00:00 GMT".to_string()),
+                    ],
+                )
+                    .into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            },
             Method::PUT => {
                 objects.insert(path, body);
                 (StatusCode::OK, [("etag", "\"fake\"")]).into_response()
@@ -1459,6 +1509,16 @@ mod fake_s3 {
                 let list = format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>");
                 format!("{XML}{list}").into_response()
             }
+            // A header-signed GET (object_store's own reads; presigned ones are checked below).
+            Method::GET if !presigned => match objects.get(&path) {
+                Some(o) => (
+                    StatusCode::OK,
+                    [("etag", "\"fake\"".to_string()), ("last-modified", "Thu, 01 Jan 2026 00:00:00 GMT".to_string())],
+                    o.clone(),
+                )
+                    .into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            },
             Method::GET if presigned => {
                 let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
                 if let Err(why) = verify(&uri, host) {

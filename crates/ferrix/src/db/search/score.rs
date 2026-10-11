@@ -103,6 +103,10 @@ unsafe extern "C" fn register(
     let mut stmt = ptr::null_mut();
     // SAFETY: plain SQLite C API calls on the connection being opened; the bound pointer outlives the statement.
     unsafe {
+        // The statement runs while the connection opens, before its owner can set a busy timeout: without one, opening
+        // a WAL database while another connection to it closes (and checkpoints) fails with "database is locked".
+        // Owners set their own timeout afterwards, which replaces this one.
+        ffi::sqlite3_busy_timeout(db, 5000);
         let rc = ffi::sqlite3_prepare_v2(db, c"SELECT fts5(?1)".as_ptr(), -1, &mut stmt, ptr::null_mut());
         if rc != ffi::SQLITE_OK {
             return rc;
@@ -150,6 +154,35 @@ mod tests {
         assert_eq!(score(&[], 4), 0.0);
         // Saturation: each extra occurrence adds less.
         assert!(score(&[2], 8) - score(&[1], 8) > score(&[3], 8) - score(&[2], 8));
+    }
+
+    /// Opening a connection runs the extension's `SELECT fts5(?1)` before the caller can set a busy timeout. While
+    /// another connection to the same WAL database closes (the last one checkpoints and deletes the WAL under an
+    /// exclusive lock), that must wait, not fail the open with "database is locked".
+    #[test]
+    fn opening_while_another_connection_closes_waits() {
+        super::super::register_extensions();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let setup = rusqlite::Connection::open(&path).unwrap();
+        setup.pragma_update(None, "journal_mode", "WAL").unwrap();
+        setup.execute_batch("CREATE TABLE t (x BLOB)").unwrap();
+        drop(setup);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closer = {
+            let (path, stop) = (path.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let Ok(conn) = rusqlite::Connection::open(&path) else { continue };
+                    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                    let _ = conn.execute("INSERT INTO t VALUES (zeroblob(65536))", []);
+                }
+            })
+        };
+        let opened = (0..300).map(|_| rusqlite::Connection::open(&path).map(drop)).collect::<Result<Vec<_>, _>>();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        closer.join().unwrap();
+        opened.unwrap();
     }
 
     #[test]

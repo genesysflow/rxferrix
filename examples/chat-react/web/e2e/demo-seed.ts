@@ -89,8 +89,22 @@ async function post(path: string, body: unknown, token?: Token): Promise<any> {
   return json;
 }
 
-async function call(token: Token, kind: "query" | "mutation" | "action", path: string, args: unknown = {}): Promise<any> {
-  return (await post(`/api/${kind}`, { path, args }, token)).value;
+interface Person {
+  name: string;
+  email: string;
+  token: Token;
+  chattiness: number;
+}
+
+/** Calls a function as `who`, signing in again when the access token has expired. */
+async function call(who: Person, kind: "query" | "mutation" | "action", path: string, args: unknown = {}): Promise<any> {
+  try {
+    return (await post(`/api/${kind}`, { path, args }, who.token)).value;
+  } catch (e) {
+    if ((e as { code?: string }).code !== "invalid_token") throw e;
+    who.token = await signIn(who.email, who.name);
+    return (await post(`/api/${kind}`, { path, args }, who.token)).value;
+  }
 }
 
 async function signIn(email: string, name: string): Promise<Token> {
@@ -117,12 +131,12 @@ const weighted = <T>(xs: [T, number][]): T => {
   return xs[xs.length - 1]![0];
 };
 
-const people: { name: string; token: Token; chattiness: number }[] = [];
+const people: Person[] = [];
 for (const p of PEOPLE) {
-  const token = await signIn(p.email, p.name);
-  await call(token, "mutation", "profiles:ensure");
-  await call(token, "mutation", "profiles:rename", { name: p.name });
-  people.push({ name: p.name, token, chattiness: p.chattiness });
+  const person = { ...p, token: await signIn(p.email, p.name) };
+  await call(person, "mutation", "profiles:ensure");
+  await call(person, "mutation", "profiles:rename", { name: p.name });
+  people.push(person);
 }
 console.log(`${people.length} people signed in`);
 
@@ -131,16 +145,16 @@ const owner = people[0]!;
 for (const [name, c] of Object.entries(CHANNELS)) {
   if (name === "general") continue;
   try {
-    await call(owner.token, "mutation", "channels:create", { name, topic: c.topic, private: false });
+    await call(owner, "mutation", "channels:create", { name, topic: c.topic, private: false });
   } catch {
     // already there
   }
 }
-const list: { _id: string; name: string }[] = await call(owner.token, "query", "channels:list");
+const list: { _id: string; name: string }[] = await call(owner, "query", "channels:list");
 const ids = new Map(list.filter((c) => c.name in CHANNELS).map((c) => [c.name, c._id]));
 for (const p of people) {
   for (const id of ids.values()) {
-    await call(p.token, "mutation", "channels:join", { channel: id }).catch(() => {});
+    await call(p, "mutation", "channels:join", { channel: id }).catch(() => {});
   }
 }
 console.log(`channels: ${[...ids.keys()].map((n) => `#${n}`).join(", ")}`);
@@ -154,13 +168,13 @@ while (Date.now() < stop) {
   const person = weighted(people.map((p) => [p, p.chattiness] as [typeof p, number]));
   if (recent.length > 0 && Math.random() < 0.35) {
     const reactor = pick(people);
-    await call(reactor.token, "mutation", "reactions:toggle", { message: pick(recent.slice(-12)), emoji: pick(EMOJIS) }).catch(() => {});
+    await call(reactor, "mutation", "reactions:toggle", { message: pick(recent.slice(-12)), emoji: pick(EMOJIS) }).catch(() => {});
     reactions += 1;
   } else {
     const channel = weighted(Object.entries(CHANNELS).map(([n, c]) => [n, c.weight] as [string, number]));
     const id = ids.get(channel);
     if (id) {
-      const r = await call(person.token, "mutation", "messages:send", { channel: id, body: pick(CHANNELS[channel]!.lines), attachment: null });
+      const r = await call(person, "mutation", "messages:send", { channel: id, body: pick(CHANNELS[channel]!.lines), attachment: null });
       if (r?.message) recent.push(r.message);
       messages += 1;
     }

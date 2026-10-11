@@ -35,9 +35,12 @@ export async function check(client: FerrixClient, taskId: Id<"tasks">, noteId: I
   assertType<
     Equals<
       TableNames,
+      | "agg_orders"
       | "ann_items"
       | "attachments"
       | "audited_items"
+      | "bench_aggregated"
+      | "bench_plain"
       | "blobs"
       | "dash_items"
       | "dx_notes"

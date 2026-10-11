@@ -9,6 +9,7 @@ import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js"
 import CommandPalette from "../src/components/CommandPalette.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
 import Backups from "../src/pages/Backups.svelte";
+import Overview from "../src/pages/Overview.svelte";
 import Settings from "../src/pages/Settings.svelte";
 import Workflows from "../src/pages/Workflows.svelte";
 
@@ -438,5 +439,37 @@ describe("CommandPalette", () => {
     expect(target.querySelector("[aria-selected=true]")?.textContent).toContain("Data");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(onclose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Overview page", () => {
+  it("shows the analytics copy when the server keeps one", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+    };
+    const olap = {
+      state: "ready", detail: null, appliedTs: 40, latestTs: 42, appliedTime: Date.now() - 300, lagMs: 300,
+      tables: [{ name: "orders", rows: 1200, columns: [] }, { name: "_users", rows: 34, columns: [] }],
+      sizeBytes: 3 << 20, rowsApplied: 1234, rebuilds: 1,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("/api/admin/stats?") || url === "/api/admin/stats"
+          ? new Response(JSON.stringify({ since: 0, functions: [], overview, olap }))
+          : new Response(JSON.stringify({ points: [] })),
+      ),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const card = target.querySelector("[data-testid=stat-olap]")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    expect(card).toContain("Analytics copy");
+    expect(card).toContain("ready");
+    expect(card).toContain("2 commits behind (300ms)");
+    expect(card).toContain("1234 rows");
+    expect(card).toContain("3.0 MB");
   });
 });

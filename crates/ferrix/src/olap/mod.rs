@@ -338,7 +338,16 @@ impl OlapService {
         }
     }
 
-    /// Rebuild every table from a snapshot (admin; also what a restore or a journal gap does).
+    /// Ask for every table to be rebuilt from a snapshot; the background loop (or the next [`OlapService::sync`])
+    /// does it.
+    pub fn request_rebuild(&self, why: &str) {
+        #[cfg(feature = "olap")]
+        self.engine.request_rebuild(why);
+        #[cfg(not(feature = "olap"))]
+        let _ = why;
+    }
+
+    /// Rebuild every table from a snapshot now (admin; also what a restore or a journal gap does).
     pub async fn rebuild(&self, app: &App) -> Result<()> {
         #[cfg(feature = "olap")]
         {

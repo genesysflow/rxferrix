@@ -10,6 +10,8 @@
 //!   system tables masked as in the dashboard).
 //! - `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv` with a JSONL or CSV body (at most
 //!   256 MiB) → `ImportReport`. App tables only.
+//! - `GET /api/admin/olap` → `{ enabled: false }` or `{ enabled: true, ...OlapStatus }` (`crate::olap`);
+//!   `POST /api/admin/olap/rebuild` → 202: every table is rebuilt from a snapshot in the background.
 //! - `GET /api/admin/replication` → `{ enabled: false }` or `{ enabled: true, ...ReplicationStatus }`
 //!   (`super::replicate`); `POST /api/admin/replication/snapshot` → `SnapshotInfo` (201).
 //! - `POST /api/admin/restore/point-in-time` with `{ toTs?, toTime?, generation? }` → `{ pendingRestore, restart }`:
@@ -51,6 +53,8 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/restore", get(get_restore).post(stage_upload).delete(cancel_restore))
         .route("/api/admin/restore/restart", post(restart))
         .route("/api/admin/restore/point-in-time", post(stage_point_in_time))
+        .route("/api/admin/olap", get(olap_status))
+        .route("/api/admin/olap/rebuild", post(olap_rebuild))
         .route("/api/admin/replication", get(replication_status))
         .route("/api/admin/replication/snapshot", post(replication_snapshot))
         .route("/api/admin/export/{table}", get(export_table))
@@ -68,7 +72,7 @@ fn failure(e: crate::Error) -> Response {
         let status = match u.code.as_str() {
             "not_found" => 404,
             "restore_pending" | "no_pending_restore" => 409,
-            "replication_off" => 404,
+            "replication_off" | "olap_off" => 404,
             _ => 400,
         };
         return AuthFailure::new(status, &u.code, u.message.clone()).into_response();
@@ -379,6 +383,33 @@ async fn replication_status(State(app): State<App>, headers: HeaderMap) -> Respo
         None => json!({ "enabled": false }),
     };
     (no_store(), axum::Json(body)).into_response()
+}
+
+async fn olap_status(State(app): State<App>, headers: HeaderMap) -> Response {
+    admin!(app, headers);
+    let body = match app.olap() {
+        Some(o) => {
+            let mut v = json!(o.status(&app).await);
+            v["enabled"] = json!(true);
+            v
+        }
+        None => json!({ "enabled": false }),
+    };
+    (no_store(), axum::Json(body)).into_response()
+}
+
+/// `POST /api/admin/olap/rebuild`: rebuild the analytics copy from a snapshot, in the background (202).
+async fn olap_rebuild(State(app): State<App>, headers: HeaderMap) -> Response {
+    let admin = match admin_of(&app, &headers).await {
+        Ok(a) => a,
+        Err(f) => return f.into_response(),
+    };
+    let Some(olap) = app.olap().cloned() else {
+        return AuthFailure::new(404, "olap_off", "Analytics are off: start the server with --olap").into_response();
+    };
+    olap.request_rebuild("an administrator asked for it");
+    audit_ops(&app, admin, "olap_rebuild", json!({})).await;
+    (StatusCode::ACCEPTED, no_store(), axum::Json(json!({ "rebuilding": true }))).into_response()
 }
 
 /// `POST /api/admin/replication/snapshot`: take a snapshot of the current generation now.

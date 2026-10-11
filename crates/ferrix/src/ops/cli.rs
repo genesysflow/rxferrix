@@ -59,6 +59,23 @@ pub struct OpsServeArgs {
     #[arg(long, value_name = "SIZE", default_value = "1GB", value_parser = crate::cli::parse_size)]
     pub replicate_max_pending: u64,
 
+    /// Keep an analytics copy of the data in DuckDB (`<data dir>/olap.duckdb`) for read-only SQL from actions
+    /// (`ctx.olap`). Needs a binary built with the `olap` feature.
+    #[arg(long, env = "FERRIX_OLAP")]
+    pub olap: bool,
+    /// With --olap: DuckDB's memory limit, e.g. `2GB` (default: 80% of RAM).
+    #[arg(long, value_name = "SIZE", requires = "olap", value_parser = crate::cli::parse_size)]
+    pub olap_memory: Option<u64>,
+    /// With --olap: DuckDB's worker threads (default: one per core).
+    #[arg(long, value_name = "N", requires = "olap")]
+    pub olap_threads: Option<usize>,
+    /// With --olap: interrupt an analytics query after this long.
+    #[arg(long, value_name = "DURATION", default_value = "30s", value_parser = super::parse_duration)]
+    pub olap_timeout: Duration,
+    /// With --olap: past this much journal waiting to be applied, rebuild the copy instead of following it.
+    #[arg(long, value_name = "SIZE", default_value = "512MB", value_parser = crate::cli::parse_size)]
+    pub olap_max_lag: u64,
+
     /// Serve HTTPS for DOMAIN (comma-separated for several) with automatic Let's Encrypt certificates.
     #[arg(long, value_name = "DOMAIN", value_delimiter = ',', env = "FERRIX_HTTPS")]
     pub https: Vec<String>,
@@ -117,6 +134,13 @@ impl OpsServeArgs {
             replication.keep = self.replicate_keep;
             replication.max_pending_bytes = self.replicate_max_pending;
             options.ops.replication = Some(replication);
+        }
+        if self.olap {
+            options.olap.enabled = true;
+            options.olap.memory_limit = self.olap_memory;
+            options.olap.threads = self.olap_threads;
+            options.olap.query_timeout = self.olap_timeout.max(Duration::from_millis(100));
+            options.olap.max_lag_bytes = self.olap_max_lag;
         }
         if let Some(every) = self.backup_every {
             let schedule = ScheduledBackup {

@@ -569,9 +569,27 @@ export interface FunctionStats {
   p95Us: number;
 }
 
+/** `OlapStatus` (crates/ferrix/src/olap/mod.rs): the analytics copy (`--olap`). */
+export interface OlapStatus {
+  /** `building`, `ready` or `failed` (retried). */
+  state: string;
+  /** Why it is being built, or the last error. */
+  detail: string | null;
+  appliedTs: number;
+  latestTs: number;
+  appliedTime: number;
+  lagMs: number;
+  tables: { name: string; rows: number; columns: { name: string; typeName: string }[] }[];
+  sizeBytes: number;
+  rowsApplied: number;
+  rebuilds: number;
+}
+
 export interface Stats {
   since: number;
   functions: FunctionStats[];
+  /** The analytics copy, or null without `--olap` (absent from older servers). */
+  olap?: OlapStatus | null;
   overview: {
     now: number;
     startedAt: number;

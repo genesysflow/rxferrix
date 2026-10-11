@@ -442,3 +442,51 @@ async fn replication_and_the_copy_share_the_journal() {
     assert_eq!(journal(&t), 0);
     assert_eq!(rows(&t, "SELECT count(*) AS n FROM olap_orders").await[0]["n"], 8);
 }
+
+/// `GET /api/admin/olap`, `POST /api/admin/olap/rebuild` and the `ferrix_olap_*` metrics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_rebuild_and_metrics_over_http() {
+    use ferrix::auth::AuthConfig;
+    use reqwest::Method;
+
+    let mut options = olap(false);
+    options.auth = AuthConfig::password().rate_limits(None);
+    options.ops.metrics.enabled = true;
+    let t = TestApp::with_options(options).await.unwrap();
+    let base = format!("http://{}", t.serve().await.unwrap());
+    let app = t.app().clone();
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let client = reqwest::Client::new();
+    let signin: Value = client
+        .post(format!("{base}/api/auth/admin/signin"))
+        .json(&json!({ "email": "admin@example.com", "password": "admin password" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = signin["accessToken"].as_str().unwrap().to_string();
+    let req = |m: Method, p: &str| client.request(m, format!("{base}{p}")).bearer_auth(&token);
+
+    t.mutation::<add>(("ann".to_string(), 3.0, 1)).await.unwrap();
+    t.olap_sync().await.unwrap();
+    assert_eq!(client.get(format!("{base}/api/admin/olap")).send().await.unwrap().status(), 401, "admins only");
+    let st: Value = req(Method::GET, "/api/admin/olap").send().await.unwrap().json().await.unwrap();
+    assert_eq!((st["enabled"].clone(), st["state"].clone()), (json!(true), json!("ready")));
+    assert_eq!(st["appliedTs"], st["latestTs"]);
+    let orders = st["tables"].as_array().unwrap().iter().find(|t| t["name"] == "olap_orders").unwrap();
+    assert_eq!(orders["rows"], 1);
+
+    let metrics = req(Method::GET, "/metrics").send().await.unwrap().text().await.unwrap();
+    assert!(metrics.contains("ferrix_olap_ready 1"), "{metrics}");
+    assert!(metrics.contains("ferrix_olap_lag_commits 0"), "{metrics}");
+
+    let r = req(Method::POST, "/api/admin/olap/rebuild").send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    let st: Value = req(Method::GET, "/api/admin/olap").send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["state"], "building");
+    t.olap_sync().await.unwrap();
+    let st: Value = req(Method::GET, "/api/admin/olap").send().await.unwrap().json().await.unwrap();
+    assert_eq!((st["state"].clone(), st["rebuilds"].clone()), (json!("ready"), json!(2)));
+}

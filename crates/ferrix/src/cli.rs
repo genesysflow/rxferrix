@@ -863,4 +863,21 @@ mod tests {
         let Some(Command::Serve(a)) = parse(&["serve", "--fsync-commits"]).unwrap().command else { panic!("serve") };
         assert!(a.fsync_commits);
     }
+
+    #[test]
+    fn olap_flags() {
+        let mut options = AppOptions::default();
+        let Some(Command::Serve(a)) = parse(&["serve"]).unwrap().command else { panic!("serve") };
+        a.ops.apply(&mut options);
+        assert!(!options.olap.enabled);
+        let args = ["serve", "--olap", "--olap-memory", "2GB", "--olap-threads", "3", "--olap-timeout", "5s", "--olap-max-lag", "64MB"];
+        let Some(Command::Serve(a)) = parse(&args).unwrap().command else { panic!("serve") };
+        a.ops.apply(&mut options);
+        let o = &options.olap;
+        assert_eq!(
+            (o.enabled, o.memory_limit, o.threads, o.query_timeout, o.max_lag_bytes),
+            (true, Some(2 << 30), Some(3), Duration::from_secs(5), 64 << 20)
+        );
+        assert!(parse(&["serve", "--olap-memory", "1GB"]).is_err(), "needs --olap");
+    }
 }

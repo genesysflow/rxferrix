@@ -40,6 +40,10 @@
 //! | `ferrix_replication_failures` | gauge | consecutive failed attempts (0 when healthy) |
 //! | `ferrix_replication_segments_shipped_total`, `ferrix_replication_snapshots_total` | counter | since the start |
 //! | `ferrix_replication_last_snapshot_timestamp_seconds` | gauge | when the newest snapshot of the current generation was taken |
+//! | `ferrix_olap_ready` | gauge | 1 while the analytics copy answers queries (`--olap`) |
+//! | `ferrix_olap_applied_ts`, `ferrix_olap_lag_commits`, `ferrix_olap_lag_seconds` | gauge | how far the copy is behind |
+//! | `ferrix_olap_size_bytes` | gauge | `olap.duckdb` and its WAL |
+//! | `ferrix_olap_rows_applied_total`, `ferrix_olap_rebuilds_total` | counter | since the start |
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -294,6 +298,22 @@ pub async fn render(app: &App) -> crate::Result<String> {
         header(&mut out, "ferrix_replication_last_snapshot_timestamp_seconds", "gauge", "When the newest snapshot was taken.");
         let last = st.last_snapshot.map(|s| s.created_at / 1000.0).unwrap_or(0.0);
         let _ = writeln!(out, "ferrix_replication_last_snapshot_timestamp_seconds {last:.3}");
+    }
+    if let Some(olap) = app.olap() {
+        let st = olap.status(app).await;
+        let gauges: [(&str, &str, &str, f64); 7] = [
+            ("ferrix_olap_ready", "gauge", "1 while the analytics copy answers queries.", if st.state == "ready" { 1.0 } else { 0.0 }),
+            ("ferrix_olap_applied_ts", "gauge", "The analytics copy reflects every commit up to this ts.", st.applied_ts as f64),
+            ("ferrix_olap_lag_commits", "gauge", "Commits not in the analytics copy yet.", st.latest_ts.saturating_sub(st.applied_ts) as f64),
+            ("ferrix_olap_lag_seconds", "gauge", "How far the analytics copy is behind the newest commit.", st.lag_ms / 1000.0),
+            ("ferrix_olap_size_bytes", "gauge", "Size of olap.duckdb and its WAL.", st.size_bytes as f64),
+            ("ferrix_olap_rows_applied_total", "counter", "Documents written into the analytics copy since the start.", st.rows_applied as f64),
+            ("ferrix_olap_rebuilds_total", "counter", "Analytics copy rebuilds since the start.", st.rebuilds as f64),
+        ];
+        for (name, kind, help, v) in gauges {
+            header(&mut out, name, kind, help);
+            let _ = writeln!(out, "{name} {v}");
+        }
     }
     Ok(out)
 }

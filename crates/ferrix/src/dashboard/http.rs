@@ -6,7 +6,8 @@
 //!   `event: log` per entry with the `LogEntry` as JSON, `event: lagged` with the number of skipped entries when the
 //!   client fell behind, `event: expired` right before the stream ends at the access token's expiry, and
 //!   `event: revoked` when it ends because the admin's session ended: signed out or revoked).
-//! - `GET /api/admin/stats?since=<ms>`: per-function stats since `since` (default: the last 24 hours) and an overview.
+//! - `GET /api/admin/stats?since=<ms>`: per-function stats since `since` (default: the last 24 hours), an overview,
+//!   and the analytics copy's status (`olap`, null without `--olap`).
 //! - `GET /api/admin/stats/timeseries?path=<fn>&bucket=<1m|15m|1h|ms>&since=<ms>&until=<ms>`: calls, errors and
 //!   p50/p95/max duration per time bucket for one function (or every app function without `path`), oldest first,
 //!   only buckets with executions: `{ path, bucket, since, until, points: [TimePoint] }`. Defaults: the last hour in
@@ -202,9 +203,14 @@ async fn stats(
         let subscriptions = metrics.subscription_stats();
         let (queue_depth, running_jobs) = crate::ops::metrics::scheduler_counts(&app).await?;
         let commits_per_second = app.db().write_log().commits_within(Duration::from_secs(10)) as f64 / 10.0;
+        let olap = match app.olap() {
+            Some(o) => json!(o.status(&app).await),
+            None => serde_json::Value::Null,
+        };
         Ok(json!({
             "since": since,
             "functions": functions,
+            "olap": olap,
             "overview": {
                 "now": now,
                 "startedAt": app.started_at(),

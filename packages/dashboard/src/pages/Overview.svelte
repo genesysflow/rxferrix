@@ -3,7 +3,7 @@
   import type { FunctionStats, Stats } from "../lib/api.js";
   import { fetchStats } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
-  import { formatBytes, formatDuration, formatTime, formatUptime } from "../lib/format.js";
+  import { formatBytes, formatDuration, formatSpan, formatTime, formatUptime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
 
@@ -142,6 +142,17 @@
             <div class="value" data-testid="stat-queue">{o.queueDepth ?? 0}</div>
             <div class="sub">pending jobs · {o.runningJobs ?? 0} running</div>
           </a>
+          {#if stats.olap}
+            {@const a = stats.olap}
+            <div class="card stat" class:warn={a.state === "failed"} data-testid="stat-olap" title={a.detail ?? ""}>
+              <div class="label">Analytics copy</div>
+              <div class="value small-value">{a.state}</div>
+              <div class="sub">
+                {a.latestTs - a.appliedTs} commits behind{a.lagMs > 0 ? ` (${formatSpan(a.lagMs)})` : ""} ·
+                {a.tables.reduce((n, t) => n + t.rows, 0)} rows · {formatBytes(a.sizeBytes)}
+              </div>
+            </div>
+          {/if}
           <div class="card stat">
             <div class="label">Prometheus</div>
             <div class="value small-value">{o.metricsEnabled ? "on" : "off"}</div>

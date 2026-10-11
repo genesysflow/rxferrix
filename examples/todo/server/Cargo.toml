@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 ferrix = { path = "../../../crates/ferrix" }
+
+[features]
+olap = ["ferrix/olap"]

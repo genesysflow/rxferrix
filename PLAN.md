@@ -874,10 +874,18 @@ Goal: a todo list that updates live across two browser tabs, with as little code
 
 ### Phase 11 — Analytics (OLAP) (L) — planned
 Design: §7.6. Each step ends with tests and docs (README, docs/CONTRACT.md).
-- [ ] **Spike (S), go/no-go**: the `duckdb` crate (bundled) builds in the workspace, for `x86_64-unknown-linux-musl`
-  with cargo-zigbuild (the release target) as well as glibc; binary size and build time with and without the
-  feature; Appender throughput for 1M documents; a delete-and-append batch of 1k changes; a 1M-row group-by. If musl
-  or the size fails, the fallbacks are a glibc-only `olap` build, or DataFusion over Parquet files.
+- [x] **Spike (S), go/no-go: go** (2026-10-11, branch `spike/olap`; `tests/olap_spike.rs`, `olap_probe`). DuckDB 1.5.6
+  (`duckdb` 1.10506.0, `bundled` + `json`) builds and runs in the static musl release binary: 57.0 MB with `olap`
+  against 24.7 MB without (+32 MB; nothing calling DuckDB, the linker drops it all, so the feature costs nothing
+  unused); a clean musl build takes about 9 minutes with it, 3 without, and a rebuild 2.5 minutes. Measured (release,
+  16 threads): the Appender loads 1M rows in 2.0 s (~510k rows/s); a batch of 1k changes (delete the ids, append the
+  new states, one transaction) takes ~50 ms; group-bys over 1M rows take 2–14 ms (342 ms bucketing by day through
+  `to_timestamp`); 24 MiB on disk. A second connection only ever sees whole transactions. The lockdown settings
+  (`enable_external_access = false`, extension autoload off, `lock_configuration`) block files, HTTP, `ATTACH`,
+  `COPY TO` and `INSTALL`, but not writes, and `prepare()` accepts several statements: the SELECT-only check is
+  `json_serialize_sql`, which rejects anything but one SELECT (CTEs pass). `interrupt()` stops a query within
+  milliseconds. Still to check in the sandbox step: side effects reachable from a SELECT (`query()`, `nextval`,
+  `setseed`, `checkpoint()`), and that the check sees exactly the string that runs.
 - [ ] **Shapes from the macros (M)**: `#[table]` and `#[object]` emit a structured shape of their fields (a `Shape`
   trait for the primitives, `Option`, `Vec`, `Id<T>`, `Bytes`, maps and enums), with a fingerprint per table; the
   DuckDB column mapping and the JSON fallback; macro snapshot tests. The dashboard's schema view can show it too.

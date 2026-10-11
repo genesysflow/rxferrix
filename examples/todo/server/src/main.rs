@@ -21,6 +21,12 @@ mod todos;
 struct Web;
 
 fn main() -> ferrix::Result<()> {
+    // Phase 11 spike (throwaway): `FERRIX_OLAP_PROBE=1 todo-server` runs a DuckDB round trip and exits.
+    #[cfg(feature = "olap")]
+    if std::env::var_os("FERRIX_OLAP_PROBE").is_some() {
+        println!("{}", ferrix::olap_probe::probe()?);
+        return Ok(());
+    }
     let mut app = ferrix::Ferrix::new()
         // Every hour, on the hour (UTC): delete todos completed more than a day ago.
         .cron::<todos::purge_completed>("purge-completed", "0 0 * * * *", ());

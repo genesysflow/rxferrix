@@ -12,6 +12,7 @@
 #             for todo-server). The app embeds its dist/ with rust-embed (see examples/todo/server/src/main.rs).
 #   TARGET    target triple (default: x86_64-unknown-linux-musl; aarch64-unknown-linux-musl works the same way)
 #   PROFILE   cargo profile (default: dist = release + LTO, one codegen unit, stripped)
+#   FEATURES  cargo features of the package to enable (e.g. `olap`; default: none)
 #   OUT       output directory (default: dist)
 #
 # Toolchain: C code (SQLite, sqlite-vec, aws-lc, zstd) is cross-compiled for musl with `zig cc` through
@@ -52,6 +53,9 @@ fi
 target_env="$(echo "$TARGET" | tr '-' '_')"
 export "CFLAGS_${target_env}=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
 build=(cargo zigbuild --locked --profile "$PROFILE" -p "$PACKAGE" --target "$TARGET")
+if [[ -n "${FEATURES:-}" ]]; then
+  build+=(--features "$FEATURES")
+fi
 echo "==> ${build[*]}"
 if zig version >/dev/null 2>&1 && cargo-zigbuild --version >/dev/null 2>&1; then
   "${build[@]}"

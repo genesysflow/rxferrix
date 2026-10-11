@@ -50,6 +50,9 @@ pub mod workflow;
 pub mod writelog;
 
 mod private;
+#[cfg(feature = "olap")]
+#[doc(hidden)]
+pub mod olap_probe;
 
 /// Items used by `ferrix-macros` output only (docs/CONTRACT.md §2).
 #[doc(hidden)]

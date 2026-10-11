@@ -60,6 +60,9 @@ axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "webpki-roots", "axum"] }
 
+# DuckDB, compiled from its bundled C++ sources (feature `olap`).
+duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = true }
+
 [features]
 default = ["dashboard", "s3"]
 # S3-compatible file storage (AWS, R2, MinIO): `--storage s3://bucket/prefix`.
@@ -67,6 +70,8 @@ s3 = ["object_store/aws"]
 # The admin dashboard SPA, embedded from `dashboard-dist/` and served at `/_/`. Its admin-only system functions and
 # `/api/admin/*` endpoints exist either way.
 dashboard = []
+# Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions (`--olap`).
+olap = ["dep:duckdb"]
 
 [dev-dependencies]
 # Paused time in tests (`#[tokio::test(start_paused = true)]`).

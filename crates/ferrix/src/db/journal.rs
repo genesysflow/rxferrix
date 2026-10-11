@@ -264,7 +264,7 @@ pub fn read_after(conn: &Connection, after: u64, max_entries: usize, max_bytes: 
 /// `(oldest ts, newest ts, rows, bytes of changes)` of the journal (`None` when empty).
 pub fn stats(conn: &Connection) -> anyhow::Result<Option<(u64, u64, u64, u64)>> {
     let (min, max, n, bytes) = conn.query_row(
-        "SELECT MIN(ts), MAX(ts), COUNT(*), SUM(LENGTH(changes)) FROM _journal",
+        "SELECT MIN(ts), MAX(ts), COUNT(*), SUM(octet_length(changes)) FROM _journal",
         [],
         |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?)),
     )?;
@@ -274,10 +274,11 @@ pub fn stats(conn: &Connection) -> anyhow::Result<Option<(u64, u64, u64, u64)>> 
     })
 }
 
-/// Delete the rows up to `ts` (inclusive); returns the bytes of changes removed.
+/// Delete the rows up to `ts` (inclusive); returns the bytes of changes removed. (`octet_length` reads the size from
+/// the record header; `length` would read every row's text to count its characters, under the writer lock.)
 pub(crate) fn trim(conn: &Connection, ts: u64) -> anyhow::Result<u64> {
     let bytes: Option<i64> =
-        conn.query_row("SELECT SUM(LENGTH(changes)) FROM _journal WHERE ts <= ?1", [ts as i64], |r| r.get(0))?;
+        conn.query_row("SELECT SUM(octet_length(changes)) FROM _journal WHERE ts <= ?1", [ts as i64], |r| r.get(0))?;
     conn.execute("DELETE FROM _journal WHERE ts <= ?1", [ts as i64])?;
     Ok(bytes.unwrap_or(0) as u64)
 }

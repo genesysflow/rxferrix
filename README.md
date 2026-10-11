@@ -406,7 +406,8 @@ pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<(u64, f6
 `groups(range, Order::Desc, 10)` lists them, `total()` adds up all of them. They are reactive and narrow: a new order
 for Ann reruns the queries that read Ann's group, not Bob's, and editing a field that isn't aggregated reruns none.
 Integer sums are exact; float sums are running `f64` totals. Adding or changing an aggregate builds it from the
-existing documents at startup (docs/CONTRACT.md §1.12).
+existing documents at startup (docs/CONTRACT.md §1.12). Cost: about 2 µs per aggregate per write; reading a group of
+10k documents takes ~16 µs instead of ~10 ms to count and sum them.
 
 ## Analytics (OLAP)
 
@@ -441,6 +442,8 @@ pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
   through `ctx.olap.latest()` to see its writes. It rebuilds itself from a snapshot when there is none yet, after a
   restore, when a table's Rust type changes (that table only), or when it falls more than `--olap-max-lag` (512 MB of
   changes) behind. Backups skip it: it is derived data.
+- Cost on writes: the journal (~8% on tiny inserts, as with replication) plus ~2% for the copy following; measured
+  47k → 43k one-document inserts/s at 16 writers.
 - `--olap-memory 2GB` and `--olap-threads N` bound DuckDB. `GET /api/admin/olap` shows the state, lag, tables and
   size (also on the dashboard Overview and in `/metrics`); `POST /api/admin/olap/rebuild` starts over. The dashboard's
   Analytics page runs SQL as an administrator, and `POST /api/admin/olap/query` (`format` csv or parquet) downloads a

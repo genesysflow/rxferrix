@@ -7,6 +7,7 @@ mod audit;
 mod auth;
 mod authkit;
 mod bench;
+mod bench_features;
 mod bytes;
 mod catalog;
 mod codegen;

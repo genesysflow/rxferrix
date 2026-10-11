@@ -976,6 +976,21 @@ Design: §7.7.
   listings, a model test against the documents, read sets narrowed to the changed groups, live updates over a socket
   only for the changed group, rollbacks, mutations reading their own writes, backfill, redefinition, removal and
   tamper detection; `TestApp::query_run` (a query with its read set). The dashboard's schema view lists aggregates.
+### Performance check after Phases 11–12 (2026-10-11)
+Release builds, same machine, today's start (`be3fd1c`) against the result, alternating: `bench_writes` (every
+scenario within ~1%: 44.6k against 44.3k one-insert mutations/s at 16 writers, replication 34.7k against 34.5k,
+with 100 subscribed clients 38.9k against 39.2k), `bench_subscriptions` (identical executions per commit, latencies
+within noise), `bench_parallel_reads` (76.3k against 75.8k queries/s at 8 readers), `bench_journal_overhead` (-2 to
+-4% for journaling on both sides). The new paths (`bench_features`):
+- Aggregates: one-document inserts 46.9k/s without, 37.2k/s with three aggregates (~2.2 µs per aggregate per
+  write); one group of 10k documents read in ~16 µs instead of 10.2 ms by counting and summing them. A
+  one-statement upsert adding the sums in SQL (`json_each`) was slower (27.5k/s) and was not kept.
+- `--olap`: 47.4k inserts/s without, 43.7k with the journal alone, 42.7k with the copy following (p99 0.47 → 0.59
+  ms); the copy is current ~20 ms after writes stop. Found and fixed on the way: the copy parsed journal rows on the
+  async threads the writers' tasks run on, released (trimmed) the journal after every batch (each a writer-lock
+  transaction), and sized rows with `length()`, which reads the text; now parsing runs on a blocking thread,
+  releases happen once a second in chunks of 2048 commits, and sizes come from `octet_length()` (p99 was 0.8 ms).
+
 ---
 
 ## 11. Risks and open questions

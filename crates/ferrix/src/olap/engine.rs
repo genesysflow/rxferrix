@@ -31,6 +31,8 @@ const BATCH_BYTES: usize = 32 << 20;
 const REBUILD_CHUNK: usize = 50_000;
 /// How often the journal is released (rows trimmed) while applying.
 const RELEASE_EVERY: Duration = Duration::from_secs(1);
+/// Commits released per hold of the writer lock: writes wait while rows are deleted, so a big backlog goes in steps.
+const RELEASE_CHUNK: u64 = 2048;
 /// How often the waiting journal's size is compared with `max_lag_bytes`.
 const LAG_CHECK_EVERY: Duration = Duration::from_secs(5);
 
@@ -59,6 +61,8 @@ struct State {
     rows_applied: u64,
     rebuilds: u64,
     last_release: Option<Instant>,
+    /// The newest ts released to the journal (rows up to it may be gone).
+    released: u64,
     last_lag_check: Option<Instant>,
 }
 
@@ -255,6 +259,7 @@ impl Engine {
                 rows_applied: 0,
                 rebuilds: 0,
                 last_release: None,
+                released: cursor,
                 last_lag_check: None,
             }),
             running: tokio::sync::Mutex::new(()),
@@ -303,16 +308,21 @@ impl Engine {
         tracing::info!(tables = indexes.len(), full, reason = why, "olap: rebuilding");
         self.state().phase = Phase::Building(why.to_string());
         let (id, journal) = (self.copy_id.clone(), app.db().journal().clone());
-        app.db()
+        let released = app
+            .db()
             .with_writer(move |conn| {
                 storage::write_meta(conn, journal::META_OLAP_ID, rusqlite::types::Value::Text(id))?;
-                if full {
-                    let ts = storage::read_meta_u64(conn, storage::META_TS)?;
-                    journal::release(conn, &journal, Consumer::Olap, ts)?;
+                if !full {
+                    return Ok(None);
                 }
-                Ok(())
+                let ts = storage::read_meta_u64(conn, storage::META_TS)?;
+                journal::release(conn, &journal, Consumer::Olap, ts)?;
+                Ok(Some(ts))
             })
             .await?;
+        if let Some(ts) = released {
+            self.state().released = ts;
+        }
         let snapshot = app.db().snapshot().await?;
         let ts = snapshot.ts;
         if full {
@@ -365,52 +375,21 @@ impl Engine {
         let check_lag = self.state().last_lag_check.is_none_or(|t| t.elapsed() >= LAG_CHECK_EVERY);
         if check_lag {
             self.state().last_lag_check = Some(Instant::now());
-            let waiting: i64 = snapshot.with_conn(|c| {
-                Ok(c.query_row("SELECT COALESCE(SUM(LENGTH(changes)), 0) FROM _journal WHERE ts > ?1", [cursor as i64], |r| r.get(0))?)
-            })?;
-            if waiting as u64 > self.options.max_lag_bytes {
-                self.request_rebuild(&format!(
-                    "it fell behind by {} MiB of changes (--olap-max-lag)",
-                    waiting as u64 >> 20
-                ));
-                return Ok(true);
-            }
         }
-        let entries = snapshot.with_conn(|c| journal::read_after(c, cursor, BATCH_ENTRIES, BATCH_BYTES))?;
-        let latest = snapshot.ts;
-        drop(snapshot);
-        let Some(first) = entries.first() else {
-            self.request_rebuild(&format!(
-                "the journal has no commits after {cursor} although the database is at {latest} (journaling was off)"
-            ));
-            return Ok(true);
-        };
-        if first.ts != cursor + 1 {
-            self.request_rebuild(&format!(
-                "the journal starts at commit {} but the copy needs {} (rows were dropped)",
-                first.ts,
-                cursor + 1
-            ));
-            return Ok(true);
-        }
-        let last = entries.last().map_or(cursor, |e| e.ts);
-
-        // The final state of each document in the batch, for tables that are behind it.
         let (applied_by_table, plans): (HashMap<String, u64>, Vec<TablePlan>) = {
             let st = self.state();
             (st.tables.iter().map(|t| (t.plan.name.clone(), t.applied)).collect(), st.tables.iter().map(|t| t.plan.clone()).collect())
         };
-        let mut latest_state: HashMap<(String, String), (u64, Option<String>)> = HashMap::new();
-        for entry in &entries {
-            for change in entry.parse_raw_changes()? {
-                match applied_by_table.get(&change.table) {
-                    Some(applied) if entry.ts > *applied => {
-                        latest_state.insert((change.table, change.id), (entry.ts, change.doc));
-                    }
-                    _ => {}
-                }
+        // Reading and parsing the journal is CPU work: off the async threads, where the writers' tasks run.
+        let max_lag = self.options.max_lag_bytes;
+        let batch = tokio::task::spawn_blocking(move || read_batch(&snapshot, cursor, check_lag, max_lag, &applied_by_table)).await??;
+        let (latest_state, last) = match batch {
+            Batch::Rebuild(why) => {
+                self.request_rebuild(&why);
+                return Ok(true);
             }
-        }
+            Batch::Changes { latest_state, last } => (latest_state, last),
+        };
         let writer = self.writer.clone();
         let n = tokio::task::spawn_blocking(move || apply_batch(&writer, &plans, latest_state, last)).await??;
         {
@@ -422,17 +401,28 @@ impl Engine {
             st.rows_applied += n;
         }
         self.applied.send_replace(last);
-        let due = self.state().last_release.is_none_or(|t| t.elapsed() >= RELEASE_EVERY);
-        if due || last >= latest {
+        // Releasing takes the writer lock: once a second, not after every batch.
+        if self.state().last_release.is_none_or(|t| t.elapsed() >= RELEASE_EVERY) {
             self.release(app, last).await?;
         }
         Ok(true)
     }
 
-    /// The journal rows up to `ts` are applied: let them go (if replication doesn't need them).
+    /// The journal rows up to `ts` are applied: let them go (if replication doesn't need them), at most
+    /// [`RELEASE_CHUNK`] commits per hold of the writer lock.
     async fn release(&self, app: &App, ts: u64) -> crate::Result<()> {
-        let journal = app.db().journal().clone();
-        app.db().with_writer(move |conn| journal::release(conn, &journal, Consumer::Olap, ts)).await?;
+        let mut from = self.state().released.min(ts);
+        loop {
+            let to = (from + RELEASE_CHUNK).min(ts);
+            let journal = app.db().journal().clone();
+            app.db().with_writer(move |conn| journal::release(conn, &journal, Consumer::Olap, to)).await?;
+            from = to;
+            self.state().released = to;
+            if to >= ts {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         self.state().last_release = Some(Instant::now());
         Ok(())
     }
@@ -453,7 +443,8 @@ impl Engine {
                 st.queryable() && st.cursor >= app.db().write_log().latest()
             };
             if caught_up && !more {
-                return Ok(());
+                let cursor = self.state().cursor;
+                return self.release(app, cursor).await;
             }
         }
         anyhow::bail!("olap: the copy didn't catch up")
@@ -609,6 +600,56 @@ pub(super) async fn run(engine: Arc<Engine>, weak: WeakApp) {
             }
         }
     }
+}
+
+/// What the next journal rows mean for the copy.
+enum Batch {
+    /// The final state of each document they wrote (tables already past a row skip it), and the last ts.
+    Changes { latest_state: HashMap<(String, String), (u64, Option<String>)>, last: u64 },
+    /// The copy can't follow: rebuild it, for this reason.
+    Rebuild(String),
+}
+
+/// Read and parse the journal rows after `cursor` on `snapshot` (blocking).
+fn read_batch(
+    snapshot: &crate::db::Snapshot,
+    cursor: u64,
+    check_lag: bool,
+    max_lag: u64,
+    applied_by_table: &HashMap<String, u64>,
+) -> crate::Result<Batch> {
+    if check_lag {
+        let waiting: i64 = snapshot.with_conn(|c| {
+            Ok(c.query_row("SELECT COALESCE(SUM(octet_length(changes)), 0) FROM _journal WHERE ts > ?1", [cursor as i64], |r| r.get(0))?)
+        })?;
+        if waiting as u64 > max_lag {
+            return Ok(Batch::Rebuild(format!("it fell behind by {} MiB of changes (--olap-max-lag)", waiting as u64 >> 20)));
+        }
+    }
+    let entries = snapshot.with_conn(|c| journal::read_after(c, cursor, BATCH_ENTRIES, BATCH_BYTES))?;
+    let Some(first) = entries.first() else {
+        return Ok(Batch::Rebuild(format!(
+            "the journal has no commits after {cursor} although the database is at {} (journaling was off)",
+            snapshot.ts
+        )));
+    };
+    if first.ts != cursor + 1 {
+        return Ok(Batch::Rebuild(format!(
+            "the journal starts at commit {} but the copy needs {} (rows were dropped)",
+            first.ts,
+            cursor + 1
+        )));
+    }
+    let last = entries.last().map_or(cursor, |e| e.ts);
+    let mut latest_state = HashMap::new();
+    for entry in &entries {
+        for change in entry.parse_raw_changes()? {
+            if applied_by_table.get(&change.table).is_some_and(|applied| entry.ts > *applied) {
+                latest_state.insert((change.table, change.id), (entry.ts, change.doc));
+            }
+        }
+    }
+    Ok(Batch::Changes { latest_state, last })
 }
 
 /// Stage `rows` (`(table, id, ts, doc, extra)`) in `_ferrix_stage`.

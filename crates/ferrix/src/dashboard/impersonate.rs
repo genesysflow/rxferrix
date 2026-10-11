@@ -44,13 +44,18 @@ pub(crate) async fn impersonate(
         if !app.auth().config().impersonation {
             return Err(AuthFailure::new(403, "impersonation_disabled", "Impersonation is disabled on this server"));
         }
-        let admin: Id<Admin> = auth.identity.admin_id.as_deref().and_then(|a| a.parse().ok()).ok_or_else(|| {
-            AuthFailure::new(403, crate::auth::FORBIDDEN, "Only administrators may do this")
-        })?;
+        let admin: Id<Admin> = auth
+            .identity
+            .admin_id
+            .as_deref()
+            .and_then(|a| a.parse().ok())
+            .ok_or_else(|| AuthFailure::new(403, crate::auth::FORBIDDEN, "Only administrators may do this"))?;
         let body: Body = serde_json::from_slice(&body)
             .map_err(|e| AuthFailure::new(400, "invalid_request", format!("Invalid request body: {e}")))?;
-        let user: Id<User> =
-            body.user.parse().map_err(|_| AuthFailure::new(400, "invalid_id", format!("`{}` is not a user id", body.user)))?;
+        let user: Id<User> = body
+            .user
+            .parse()
+            .map_err(|_| AuthFailure::new(400, "invalid_id", format!("`{}` is not a user id", body.user)))?;
         let ttl = body.ttl_seconds.map(std::time::Duration::from_secs).unwrap_or(DEFAULT_IMPERSONATION_TTL);
         if ttl.is_zero() || ttl > MAX_IMPERSONATION_TTL {
             return Err(AuthFailure::new(400, "invalid_request", "ttlSeconds must be between 1 and 3600"));

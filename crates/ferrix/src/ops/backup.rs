@@ -42,9 +42,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::Table as _;
 use crate::id::DocId;
 use crate::prelude::*;
-use crate::Table as _;
 use crate::runtime::App;
 use crate::storage::{StorageBackend, StorageConfig};
 
@@ -190,7 +190,12 @@ impl<R: Read> Read for Hashing<R> {
     }
 }
 
-fn append_file<W: Write>(tar: &mut tar::Builder<W>, path: &Path, name: &str, mtime: u64) -> crate::Result<ManifestFile> {
+fn append_file<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &Path,
+    name: &str,
+    mtime: u64,
+) -> crate::Result<ManifestFile> {
     let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let len = file.metadata()?.len();
     let mut header = tar::Header::new_gnu();
@@ -201,7 +206,11 @@ fn append_file<W: Write>(tar: &mut tar::Builder<W>, path: &Path, name: &str, mti
     let mut reader = Hashing { inner: file.take(len), hasher: Sha256::new(), bytes: 0 };
     tar.append_data(&mut header, name, &mut reader).with_context(|| format!("archiving {name}"))?;
     anyhow::ensure!(reader.bytes == len, "{} changed size while it was archived", path.display());
-    Ok(ManifestFile { path: name.to_string(), bytes: len, sha256: data_encoding::HEXLOWER.encode(&reader.hasher.finalize()) })
+    Ok(ManifestFile {
+        path: name.to_string(),
+        bytes: len,
+        sha256: data_encoding::HEXLOWER.encode(&reader.hasher.finalize()),
+    })
 }
 
 /// The ids of every `_storage` document in the database at `db`.
@@ -271,7 +280,9 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
                 }
             }
             if missing_blobs > 0 {
-                tracing::warn!("backup: {missing_blobs} stored file(s) have no blob; their documents are backed up anyway");
+                tracing::warn!(
+                    "backup: {missing_blobs} stored file(s) have no blob; their documents are backed up anyway"
+                );
             }
             "included"
         }
@@ -360,14 +371,22 @@ impl BackupTarget {
     }
 
     fn path(&self, name: &str) -> ObjectPath {
-        if self.prefix.is_empty() { ObjectPath::from(name) } else { ObjectPath::from(format!("{}/{name}", self.prefix)) }
+        if self.prefix.is_empty() {
+            ObjectPath::from(name)
+        } else {
+            ObjectPath::from(format!("{}/{name}", self.prefix))
+        }
     }
 
     /// The same store with archives under `<prefix>/<sub>` (replication keeps each generation's snapshots there).
     pub fn child(&self, sub: &str) -> BackupTarget {
         let sub = sub.trim_matches('/');
         let prefix = if self.prefix.is_empty() { sub.to_string() } else { format!("{}/{sub}", self.prefix) };
-        BackupTarget { store: self.store.clone(), location: format!("{}/{sub}", self.location.trim_end_matches('/')), prefix }
+        BackupTarget {
+            store: self.store.clone(),
+            location: format!("{}/{sub}", self.location.trim_end_matches('/')),
+            prefix,
+        }
     }
 
     /// The object store and the path of `rel` under the prefix (`crate::ops::replicate`).
@@ -432,7 +451,8 @@ impl BackupTarget {
     pub async fn open(
         &self,
         name: &str,
-    ) -> crate::Result<Option<(u64, futures::stream::BoxStream<'static, object_store::Result<axum::body::Bytes>>)>> {
+    ) -> crate::Result<Option<(u64, futures::stream::BoxStream<'static, object_store::Result<axum::body::Bytes>>)>>
+    {
         validate_name(name)?;
         match self.store.get(&self.path(name)).await {
             Ok(r) => Ok(Some((r.meta.size, r.into_stream()))),
@@ -443,7 +463,8 @@ impl BackupTarget {
 
     /// Download an archive to a local file.
     pub async fn download(&self, name: &str, dest: &Path) -> crate::Result<()> {
-        let (_, mut stream) = self.open(name).await?.with_context(|| format!("backup {name} not found in {}", self.location))?;
+        let (_, mut stream) =
+            self.open(name).await?.with_context(|| format!("backup {name} not found in {}", self.location))?;
         let mut f = tokio::fs::File::create(dest).await?;
         while let Some(chunk) = stream.next().await {
             tokio::io::AsyncWriteExt::write_all(&mut f, &chunk?).await?;
@@ -574,7 +595,8 @@ pub async fn run_scheduled(ctx: &ActionCtx, schedule: ScheduledBackup) -> Result
         Some(t) => BackupTarget::parse(t, app.dir())?,
         None => BackupTarget::for_app(app)?,
     };
-    let spec = BackupSpec { include_aux: schedule.include_aux, include_files: schedule.include_files, include_secret: false };
+    let spec =
+        BackupSpec { include_aux: schedule.include_aux, include_files: schedule.include_files, include_secret: false };
     let info = create(app, &spec, &target, true).await?;
     let deleted = target.rotate(schedule.keep.max(1) as usize).await?;
     if !deleted.is_empty() {
@@ -642,7 +664,8 @@ fn extract(archive: &Path, staging: &Path) -> crate::Result<Manifest> {
         let sha256 = data_encoding::HEXLOWER.encode(&reader.hasher.finalize());
         seen.insert(name.clone(), ManifestFile { path: name, bytes: reader.bytes, sha256 });
     }
-    let raw = std::fs::read(staging.join("manifest.json")).context("the archive has no manifest.json: not a ferrix backup?")?;
+    let raw = std::fs::read(staging.join("manifest.json"))
+        .context("the archive has no manifest.json: not a ferrix backup?")?;
     let manifest: Manifest = serde_json::from_slice(&raw).context("invalid manifest.json")?;
     if manifest.format != MANIFEST_FORMAT {
         bail!("not a ferrix backup (format `{}`)", manifest.format);
@@ -675,9 +698,11 @@ fn extract(archive: &Path, staging: &Path) -> crate::Result<Manifest> {
             // Ferrix never creates triggers or views; one in a backup was put there by hand, and would run (or be
             // read) with every later write.
             let extra: Option<String> = conn
-                .query_row("SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'view') LIMIT 1", [], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'view') LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if let Some(extra) = extra {
                 bail!("{db} in the archive contains a {extra}, which ferrix never creates: refusing it");
@@ -840,7 +865,11 @@ mod tests {
         assert!(validate_name(&n).is_ok());
         assert!(archive_name(0.0, true).starts_with("ferrix-auto-"));
         let with_ts = archive_name_with_ts(1_760_011_200_123.0, true, 4321);
-        assert!(validate_name(&with_ts).is_ok() && with_ts.starts_with("ferrix-auto-") && with_ts.ends_with("-ts4321.tar.zst"));
+        assert!(
+            validate_name(&with_ts).is_ok()
+                && with_ts.starts_with("ferrix-auto-")
+                && with_ts.ends_with("-ts4321.tar.zst")
+        );
         assert_eq!(ts_from_name(&with_ts), Some(4321));
         assert_eq!(ts_from_name(&n), None, "older names have no ts");
         for bad in ["../ferrix-x.tar.zst", "ferrix-a/b.tar.zst", "x.tar.zst", "ferrix-x.tar", "ferrix-..tar.zst"] {

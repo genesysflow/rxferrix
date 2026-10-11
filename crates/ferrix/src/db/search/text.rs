@@ -154,7 +154,9 @@ impl<'a, T: Table> SearchQuery<'a, T> {
 
     fn plan(&self) -> anyhow::Result<(Arc<TableInfo>, SearchPlan)> {
         if self.conflict {
-            bail!("with_search_index cannot be combined with with_index or order: search results are ordered by relevance");
+            bail!(
+                "with_search_index cannot be combined with with_index or order: search results are ordered by relevance"
+            );
         }
         let table = self.db.catalog().table(T::NAME)?.clone();
         let plan = SearchPlan::new(&table, self.index, &self.constraints.search, &self.constraints.eqs)?;
@@ -214,8 +216,15 @@ impl<'a> RawSearchQuery<'a> {
 
     pub async fn take(self, n: usize) -> crate::Result<Vec<Value>> {
         let (table, plan) = self.plan()?;
-        run_search(self.db, &table, &plan, n.min(MAX_SEARCH_RESULTS), |json| parse_value(&table, json), self.filter.as_deref())
-            .await
+        run_search(
+            self.db,
+            &table,
+            &plan,
+            n.min(MAX_SEARCH_RESULTS),
+            |json| parse_value(&table, json),
+            self.filter.as_deref(),
+        )
+        .await
     }
 
     pub async fn collect(self) -> crate::Result<Vec<Value>> {
@@ -225,8 +234,15 @@ impl<'a> RawSearchQuery<'a> {
     /// One page of matches; see [`SearchQuery::paginate`].
     pub async fn paginate(self, opts: PaginationOpts) -> crate::Result<PaginationResult<Value>> {
         let (table, plan) = self.plan()?;
-        super::paginate::paginate(self.db, &table, &plan, opts, |json| parse_value(&table, json), self.filter.as_deref())
-            .await
+        super::paginate::paginate(
+            self.db,
+            &table,
+            &plan,
+            opts,
+            |json| parse_value(&table, json),
+            self.filter.as_deref(),
+        )
+        .await
     }
 
     fn plan(&self) -> anyhow::Result<(Arc<TableInfo>, SearchPlan)> {
@@ -257,7 +273,10 @@ impl SearchPlan {
             .find(|i| i.name == index)
             .with_context(|| format!("search index `{index}` not found on table `{}`", table.name))?;
         let SpecialIndexKind::Search { search_field, filter_fields, tokenizer, .. } = &info.kind else {
-            bail!("`{index}` on table `{}` is a vector index; use ctx.db.vector_search (or ctx.vector_search in an action)", table.name);
+            bail!(
+                "`{index}` on table `{}` is a vector index; use ctx.db.vector_search (or ctx.vector_search in an action)",
+                table.name
+            );
         };
         let ctx = || format!("invalid search on index `{index}` of table `{}`", table.name);
         let [(field, text)] = search else {

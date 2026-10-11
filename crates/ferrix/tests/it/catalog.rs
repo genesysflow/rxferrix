@@ -57,7 +57,8 @@ async fn reconcile_and_backfill() {
     drop(db);
 
     // Invalid definitions are rejected.
-    let bad = TableDef { name: "items", indexes: vec![IndexDef { name: "by_id", fields: vec!["x"] }], ..items_v2.clone() };
+    let bad =
+        TableDef { name: "items", indexes: vec![IndexDef { name: "by_id", fields: vec!["x"] }], ..items_v2.clone() };
     assert!(Database::open(dir.path(), &[bad], 1).is_err());
     let dup = TableDef { name: "items", indexes: vec![], ..items_v2.clone() };
     assert!(Database::open(dir.path(), &[items_v2, dup], 1).is_err());

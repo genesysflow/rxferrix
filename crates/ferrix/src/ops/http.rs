@@ -38,8 +38,8 @@ use super::export::{self, ExportFormat, ImportMode, ImportOptions};
 use super::restore;
 use crate::audit;
 use crate::auth::{Admin, AuthFailure};
-use crate::id::Id;
 use crate::dashboard::http::require_admin;
+use crate::id::Id;
 use crate::runtime::App;
 
 /// Largest accepted import body.
@@ -230,7 +230,8 @@ async fn admin_of(app: &App, headers: &HeaderMap) -> Result<Option<Id<Admin>>, B
 /// Record an operations action in the audit log (best effort: the action already happened).
 async fn audit_ops(app: &App, admin: Option<Id<Admin>>, action: &'static str, details: serde_json::Value) {
     let rec = audit::Record::new(action).details(details);
-    if let Err(e) = crate::auth::store::write(app, move |db| async move { audit::record(&db, admin, rec).await }).await {
+    if let Err(e) = crate::auth::store::write(app, move |db| async move { audit::record(&db, admin, rec).await }).await
+    {
         tracing::warn!("recording `{action}` in the audit log failed: {e:#}");
     }
 }
@@ -240,7 +241,11 @@ async fn staged(app: &App, admin: Option<Id<Admin>>, archive: &std::path::Path, 
     staged_marker(app, admin, marker).await
 }
 
-async fn staged_marker(app: &App, admin: Option<Id<Admin>>, marker: crate::Result<restore::PendingRestore>) -> Response {
+async fn staged_marker(
+    app: &App,
+    admin: Option<Id<Admin>>,
+    marker: crate::Result<restore::PendingRestore>,
+) -> Response {
     let marker = match marker {
         Ok(m) => m,
         Err(e) => return failure(e),
@@ -298,7 +303,9 @@ async fn stage_upload(
         source = "uploaded archive".into();
     }
     if restore::pending(app.dir()).ok().flatten().is_some() {
-        return failure(crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into());
+        return failure(
+            crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into(),
+        );
     }
     let spool = try_or!(tempfile::Builder::new().prefix(".ferrix-upload-").tempfile_in(app.dir()));
     let mut file = try_or!(tokio::fs::File::create(spool.path()).await);
@@ -307,11 +314,17 @@ async fn stage_upload(
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
             Ok(c) => c,
-            Err(e) => return AuthFailure::new(400, "invalid_request", format!("reading the body failed: {e}")).into_response(),
+            Err(e) => {
+                return AuthFailure::new(400, "invalid_request", format!("reading the body failed: {e}"))
+                    .into_response();
+            }
         };
         size += chunk.len() as u64;
         if size > MAX_RESTORE_UPLOAD_BYTES {
-            let message = format!("uploaded archives are limited to {} GiB; use `ferrix restore`", MAX_RESTORE_UPLOAD_BYTES >> 30);
+            let message = format!(
+                "uploaded archives are limited to {} GiB; use `ferrix restore`",
+                MAX_RESTORE_UPLOAD_BYTES >> 30
+            );
             return AuthFailure::new(413, "too_large", message).into_response();
         }
         try_or!(tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await);
@@ -360,17 +373,22 @@ async fn stage_point_in_time(State(app): State<App>, headers: HeaderMap, body: B
             Ok(t) => Some(t),
             Err(e) => return AuthFailure::new(400, "invalid_request", e).into_response(),
         },
-        Some(_) => return AuthFailure::new(400, "invalid_request", "toTime must be an RFC 3339 string or ms").into_response(),
+        Some(_) => {
+            return AuthFailure::new(400, "invalid_request", "toTime must be an RFC 3339 string or ms").into_response();
+        }
     };
     if restore::pending(app.dir()).ok().flatten().is_some() {
-        return failure(crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into());
+        return failure(
+            crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into(),
+        );
     }
     // The newest commits first, so "the newest point" includes them (best effort: the target may be down).
     if let Err(e) = replicator.flush(&app).await {
         tracing::warn!("replication: shipping before a point-in-time restore failed: {e:#}");
     }
     let point = super::replicate::PointInTime { to_ts: body.to_ts, to_time, generation: body.generation };
-    let marker = restore::stage_point_in_time(app.dir(), replicator.target(), &point, admin.map(|a| a.to_string())).await;
+    let marker =
+        restore::stage_point_in_time(app.dir(), replicator.target(), &point, admin.map(|a| a.to_string())).await;
     staged_marker(&app, admin, marker).await
 }
 
@@ -436,7 +454,10 @@ async fn olap_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
     };
     let req: OlapQueryBody = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return AuthFailure::new(400, "invalid_request", format!("Expected {{ sql, params?, format? }}: {e}")).into_response(),
+        Err(e) => {
+            return AuthFailure::new(400, "invalid_request", format!("Expected {{ sql, params?, format? }}: {e}"))
+                .into_response();
+        }
     };
     let params: Vec<OlapValue> = req.params.into_iter().map(OlapValue::from_json).collect();
     let logged: String = req.sql.chars().take(2000).collect();
@@ -445,7 +466,12 @@ async fn olap_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
         "csv" => Some(OlapExportFormat::Csv),
         "parquet" => Some(OlapExportFormat::Parquet),
         other => {
-            return AuthFailure::new(400, "invalid_request", format!("Unknown format `{other}` (json, csv or parquet)")).into_response();
+            return AuthFailure::new(
+                400,
+                "invalid_request",
+                format!("Unknown format `{other}` (json, csv or parquet)"),
+            )
+            .into_response();
         }
     };
     let Some(format) = format else {
@@ -462,7 +488,8 @@ async fn olap_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
             .map_err(anyhow::Error::from)
     );
     let export = try_or!(olap.export(&req.sql, params, format, file.path()).await);
-    audit_ops(&app, admin, "olap_export", json!({ "sql": logged, "rows": export.rows, "format": format.extension() })).await;
+    audit_ops(&app, admin, "olap_export", json!({ "sql": logged, "rows": export.rows, "format": format.extension() }))
+        .await;
     let reader = try_or!(tokio::fs::File::open(file.path()).await.map_err(anyhow::Error::from));
     let size = try_or!(reader.metadata().await.map_err(anyhow::Error::from)).len();
     let stream = futures::stream::unfold((reader, file, false), |(mut reader, file, done)| async move {
@@ -542,14 +569,16 @@ async fn restart(State(app): State<App>, headers: HeaderMap) -> Response {
     match try_or!(restore::pending(app.dir())) {
         None => return failure(crate::UserError::new("no_pending_restore", "No restore is staged").into()),
         Some(p) if p.error.is_some() => {
-            return AuthFailure::new(400, "invalid_backup", "The staged restore can't be applied; cancel it").into_response();
+            return AuthFailure::new(400, "invalid_backup", "The staged restore can't be applied; cancel it")
+                .into_response();
         }
         Some(_) => {}
     }
     audit_ops(&app, admin, "restore_restart", json!({ "exitCode": code })).await;
     tracing::warn!("restart requested by an administrator to apply the staged restore; exiting with code {code}");
     // Answer first; the shutdown lets open requests finish.
-    let response = (StatusCode::ACCEPTED, no_store(), axum::Json(json!({ "restarting": true, "exitCode": code }))).into_response();
+    let response =
+        (StatusCode::ACCEPTED, no_store(), axum::Json(json!({ "restarting": true, "exitCode": code }))).into_response();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         handle.request();
@@ -669,12 +698,19 @@ async fn import_table(
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
             Ok(c) => c,
-            Err(e) => return AuthFailure::new(400, "invalid_request", format!("reading the body failed: {e}")).into_response(),
+            Err(e) => {
+                return AuthFailure::new(400, "invalid_request", format!("reading the body failed: {e}"))
+                    .into_response();
+            }
         };
         size += chunk.len() as u64;
         if size > MAX_IMPORT_BYTES {
-            return AuthFailure::new(413, "too_large", format!("imports over HTTP are limited to {} MiB", MAX_IMPORT_BYTES >> 20))
-                .into_response();
+            return AuthFailure::new(
+                413,
+                "too_large",
+                format!("imports over HTTP are limited to {} MiB", MAX_IMPORT_BYTES >> 20),
+            )
+            .into_response();
         }
         try_or!(tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await);
     }

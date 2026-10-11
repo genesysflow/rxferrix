@@ -96,7 +96,11 @@ impl Scheduler {
     }
 
     /// Run `F` with `args` at `at_ms` (ms since the epoch; a time in the past means "as soon as possible").
-    pub async fn run_at<F: SchedulableFunction>(&self, at_ms: f64, args: impl Into<F::Args>) -> crate::Result<Id<ScheduledJob>> {
+    pub async fn run_at<F: SchedulableFunction>(
+        &self,
+        at_ms: f64,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<Id<ScheduledJob>> {
         self.options().run_at::<F>(at_ms, args).await
     }
 
@@ -268,7 +272,11 @@ impl<'a> ScheduleWith<'a> {
         scheduler.schedule(F::path(), args, When::After(delay), options).await
     }
 
-    pub async fn run_at<F: SchedulableFunction>(self, at_ms: f64, args: impl Into<F::Args>) -> crate::Result<Id<ScheduledJob>> {
+    pub async fn run_at<F: SchedulableFunction>(
+        self,
+        at_ms: f64,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<Id<ScheduledJob>> {
         let args = serde_json::to_value(args.into())?;
         let (scheduler, options) = self.split();
         scheduler.schedule(F::path(), args, When::At(at_ms), options).await

@@ -21,11 +21,7 @@ pub struct UserError {
 }
 impl UserError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            data: serde_json::Value::Null,
-        }
+        Self { code: code.into(), message: message.into(), data: serde_json::Value::Null }
     }
 }
 impl fmt::Display for UserError {
@@ -44,10 +40,7 @@ pub struct Id<T> {
 }
 impl<T> Id<T> {
     pub fn from_raw(raw: [u8; 16]) -> Self {
-        Self {
-            raw,
-            _t: PhantomData,
-        }
+        Self { raw, _t: PhantomData }
     }
     pub fn table_number(&self) -> u32 {
         u32::from_be_bytes([self.raw[0], self.raw[1], self.raw[2], self.raw[3]])
@@ -272,10 +265,7 @@ pub struct SearchIndex<T> {
 }
 impl<T> SearchIndex<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            _t: PhantomData,
-        }
+        Self { name, _t: PhantomData }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -294,10 +284,7 @@ pub struct VectorIndex<T> {
 }
 impl<T> VectorIndex<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            _t: PhantomData,
-        }
+        Self { name, _t: PhantomData }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -316,10 +303,7 @@ pub struct Field<T, V> {
 }
 impl<T, V> Field<T, V> {
     pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            _t: PhantomData,
-        }
+        Self { name, _t: PhantomData }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -338,10 +322,7 @@ pub struct Index<T> {
 }
 impl<T> Index<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            _t: PhantomData,
-        }
+        Self { name, _t: PhantomData }
     }
     pub fn name(&self) -> &'static str {
         self.name
@@ -386,9 +367,7 @@ pub struct ActionCtx {
 }
 impl QueryCtx {
     pub fn mock() -> Self {
-        Self {
-            auth: Auth::default(),
-        }
+        Self { auth: Auth::default() }
     }
     pub fn now(&self) -> f64 {
         1.0
@@ -396,9 +375,7 @@ impl QueryCtx {
 }
 impl MutationCtx {
     pub fn mock() -> Self {
-        Self {
-            auth: Auth::default(),
-        }
+        Self { auth: Auth::default() }
     }
     pub fn now(&self) -> f64 {
         2.0
@@ -406,38 +383,24 @@ impl MutationCtx {
 }
 impl ActionCtx {
     pub fn mock() -> Self {
-        Self {
-            auth: Auth::default(),
-        }
+        Self { auth: Auth::default() }
     }
     /// Mock: runs the query's registered handler in-process.
     pub async fn run_query<F: QueryFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output> {
         let def = __private::find(&F::path()).expect("query not registered");
-        let __private::Handler::Query(h) = def.handler else {
-            panic!("not a query")
-        };
+        let __private::Handler::Query(h) = def.handler else { panic!("not a query") };
         let out = h(QueryCtx::mock(), serde_json::to_value(args.into())?).await?;
         Ok(serde_json::from_value(out)?)
     }
-    pub async fn run_mutation<F: MutationFunction>(
-        &self,
-        args: impl Into<F::Args>,
-    ) -> Result<F::Output> {
+    pub async fn run_mutation<F: MutationFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output> {
         let def = __private::find(&F::path()).expect("mutation not registered");
-        let __private::Handler::Mutation(h) = def.handler else {
-            panic!("not a mutation")
-        };
+        let __private::Handler::Mutation(h) = def.handler else { panic!("not a mutation") };
         let out = h(MutationCtx::mock(), serde_json::to_value(args.into())?).await?;
         Ok(serde_json::from_value(out)?)
     }
-    pub async fn run_action<F: ActionFunction>(
-        &self,
-        args: impl Into<F::Args>,
-    ) -> Result<F::Output> {
+    pub async fn run_action<F: ActionFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output> {
         let def = __private::find(&F::path()).expect("action not registered");
-        let __private::Handler::Action(h) = def.handler else {
-            panic!("not an action")
-        };
+        let __private::Handler::Action(h) = def.handler else { panic!("not an action") };
         let out = h(ActionCtx::mock(), serde_json::to_value(args.into())?).await?;
         Ok(serde_json::from_value(out)?)
     }
@@ -458,9 +421,7 @@ pub trait SchedulableFunction: FunctionRef {}
 
 pub mod prelude {
     pub use crate::migrations::DocChange;
-    pub use crate::{
-        ActionCtx, Doc, Error, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError,
-    };
+    pub use crate::{ActionCtx, Doc, Error, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError};
 }
 
 /// `#[migration]` items (CONTRACT.md §1.9).
@@ -526,10 +487,8 @@ pub mod __private {
     #[linkme::distributed_slice]
     pub static MIGRATIONS: [MigrationDef];
 
-    pub type MigrationHandler = for<'a> fn(
-        &'a MutationCtx,
-        serde_json::Value,
-    ) -> BoxFuture<'a, Result<crate::migrations::DocChange>>;
+    pub type MigrationHandler =
+        for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, Result<crate::migrations::DocChange>>;
 
     pub struct MigrationDef {
         pub module_path: &'static str,
@@ -553,9 +512,7 @@ pub mod __private {
         serde_json::from_value(doc).map_err(|e| anyhow::anyhow!("the document does not deserialize: {e}"))
     }
 
-    pub fn migration_output<O: crate::migrations::MigrationOutput>(
-        out: O,
-    ) -> Result<crate::migrations::DocChange> {
+    pub fn migration_output<O: crate::migrations::MigrationOutput>(out: O) -> Result<crate::migrations::DocChange> {
         Ok(out.into_change())
     }
 
@@ -572,12 +529,9 @@ pub mod __private {
         Internal,
     }
 
-    pub type QueryHandler =
-        fn(QueryCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
-    pub type MutationHandler =
-        fn(MutationCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
-    pub type ActionHandler =
-        fn(ActionCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
+    pub type QueryHandler = fn(QueryCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
+    pub type MutationHandler = fn(MutationCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
+    pub type ActionHandler = fn(ActionCtx, serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value>>;
 
     pub enum Handler {
         Query(QueryHandler),
@@ -612,9 +566,7 @@ pub mod __private {
     }
 
     pub fn find(path: &str) -> Option<&'static FunctionDef> {
-        FUNCTIONS
-            .iter()
-            .find(|f| function_path(f.module_path, f.name) == path)
+        FUNCTIONS.iter().find(|f| function_path(f.module_path, f.name) == path)
     }
 
     pub fn decode_args<A: DeserializeOwned>(name: &str, args: serde_json::Value) -> Result<A> {
@@ -662,11 +614,7 @@ pub mod __private {
     sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
     pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
 
-    pub fn validate_doc<T: crate::Table>(
-        doc: &serde_json::Value,
-    ) -> std::result::Result<(), String> {
-        <crate::Doc<T> as serde::Deserialize>::deserialize(doc)
-            .map(drop)
-            .map_err(|e| e.to_string())
+    pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
+        <crate::Doc<T> as serde::Deserialize>::deserialize(doc).map(drop).map_err(|e| e.to_string())
     }
 }

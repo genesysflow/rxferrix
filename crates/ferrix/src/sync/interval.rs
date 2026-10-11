@@ -53,10 +53,11 @@ impl Interval {
 
     /// The bytes its bounds hold (for memory estimates).
     pub fn size_bytes(&self) -> usize {
-        self.start.len() + match &self.end {
-            End::Key(e) => e.len(),
-            End::Unbounded => 0,
-        }
+        self.start.len()
+            + match &self.end {
+                End::Key(e) => e.len(),
+                End::Unbounded => 0,
+            }
     }
 
     /// Does this range contain `key`?

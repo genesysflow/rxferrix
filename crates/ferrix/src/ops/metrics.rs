@@ -54,9 +54,9 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 
+use crate::Table as _;
 use crate::exec_log::LogOutcome;
 use crate::private::FunctionKind;
-use crate::Table as _;
 use crate::runtime::App;
 
 /// `GET /metrics` settings (`AppOptions::ops.metrics`).
@@ -70,7 +70,10 @@ pub struct MetricsOptions {
 
 impl std::fmt::Debug for MetricsOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MetricsOptions").field("enabled", &self.enabled).field("token", &self.token.as_ref().map(|_| "…")).finish()
+        f.debug_struct("MetricsOptions")
+            .field("enabled", &self.enabled)
+            .field("token", &self.token.as_ref().map(|_| "…"))
+            .finish()
     }
 }
 
@@ -183,8 +186,6 @@ pub(crate) async fn scheduler_counts(app: &App) -> crate::Result<(u64, u64)> {
     })
 }
 
-
-
 /// The metrics of `app` in the Prometheus text format.
 pub async fn render(app: &App) -> crate::Result<String> {
     let mut out = String::with_capacity(8192);
@@ -195,14 +196,16 @@ pub async fn render(app: &App) -> crate::Result<String> {
 
     let counters = &app.metrics().ops;
     header(&mut out, "ferrix_http_requests_total", "counter", "HTTP requests by matched route and status.");
-    let mut requests: Vec<_> = counters.requests.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
+    let mut requests: Vec<_> =
+        counters.requests.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
     requests.sort();
     for ((route, status), n) in requests {
         let _ = writeln!(out, "ferrix_http_requests_total{{route=\"{}\",status=\"{status}\"}} {n}", label(&route));
     }
 
     header(&mut out, "ferrix_function_executions_total", "counter", "Function executions by path, kind and outcome.");
-    let mut executions: Vec<_> = counters.executions.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
+    let mut executions: Vec<_> =
+        counters.executions.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
     executions.sort();
     for ((path, kind, outcome), n) in executions {
         let _ = writeln!(
@@ -213,7 +216,8 @@ pub async fn render(app: &App) -> crate::Result<String> {
     }
 
     header(&mut out, "ferrix_function_duration_seconds", "histogram", "Function execution time.");
-    let mut durations: Vec<_> = counters.durations.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
+    let mut durations: Vec<_> =
+        counters.durations.lock().unwrap_or_else(|e| e.into_inner()).clone().into_iter().collect();
     durations.sort_by(|a, b| a.0.cmp(&b.0));
     for ((path, kind), h) in durations {
         let labels = format!("path=\"{}\",kind=\"{kind}\"", label(&path));
@@ -276,38 +280,108 @@ pub async fn render(app: &App) -> crate::Result<String> {
     header(&mut out, "ferrix_scheduler_running_jobs", "gauge", "Scheduled actions in progress.");
     let _ = writeln!(out, "ferrix_scheduler_running_jobs {running}");
 
-    header(&mut out, "ferrix_exec_log_dropped_total", "counter", "Execution log entries dropped because the writer fell behind.");
+    header(
+        &mut out,
+        "ferrix_exec_log_dropped_total",
+        "counter",
+        "Execution log entries dropped because the writer fell behind.",
+    );
     let _ = writeln!(out, "ferrix_exec_log_dropped_total {}", app.logs().dropped());
 
     if let Some(replicator) = app.replication() {
         let st = replicator.status(app).await;
         let gauges: [(&str, &str, &str, f64); 8] = [
-            ("ferrix_replication_shipped_ts", "gauge", "The newest commit ts stored in the replication target.", st.shipped_ts as f64),
-            ("ferrix_replication_lag_commits", "gauge", "Commits not shipped to the replication target yet.", st.lag_commits as f64),
-            ("ferrix_replication_lag_seconds", "gauge", "Age of the oldest unshipped commit (0 when caught up).", st.lag_ms / 1000.0),
-            ("ferrix_replication_pending_bytes", "gauge", "Journal bytes kept locally until shipped.", st.pending_bytes as f64),
-            ("ferrix_replication_journaling", "gauge", "1 while commits are journaled.", if st.journaling { 1.0 } else { 0.0 }),
+            (
+                "ferrix_replication_shipped_ts",
+                "gauge",
+                "The newest commit ts stored in the replication target.",
+                st.shipped_ts as f64,
+            ),
+            (
+                "ferrix_replication_lag_commits",
+                "gauge",
+                "Commits not shipped to the replication target yet.",
+                st.lag_commits as f64,
+            ),
+            (
+                "ferrix_replication_lag_seconds",
+                "gauge",
+                "Age of the oldest unshipped commit (0 when caught up).",
+                st.lag_ms / 1000.0,
+            ),
+            (
+                "ferrix_replication_pending_bytes",
+                "gauge",
+                "Journal bytes kept locally until shipped.",
+                st.pending_bytes as f64,
+            ),
+            (
+                "ferrix_replication_journaling",
+                "gauge",
+                "1 while commits are journaled.",
+                if st.journaling { 1.0 } else { 0.0 },
+            ),
             ("ferrix_replication_failures", "gauge", "Consecutive failed replication attempts.", st.failures as f64),
-            ("ferrix_replication_segments_shipped_total", "counter", "Journal segments shipped since the start.", st.segments_shipped as f64),
-            ("ferrix_replication_snapshots_total", "counter", "Snapshots stored since the start.", st.snapshots_taken as f64),
+            (
+                "ferrix_replication_segments_shipped_total",
+                "counter",
+                "Journal segments shipped since the start.",
+                st.segments_shipped as f64,
+            ),
+            (
+                "ferrix_replication_snapshots_total",
+                "counter",
+                "Snapshots stored since the start.",
+                st.snapshots_taken as f64,
+            ),
         ];
         for (name, kind, help, v) in gauges {
             header(&mut out, name, kind, help);
             let _ = writeln!(out, "{name} {v}");
         }
-        header(&mut out, "ferrix_replication_last_snapshot_timestamp_seconds", "gauge", "When the newest snapshot was taken.");
+        header(
+            &mut out,
+            "ferrix_replication_last_snapshot_timestamp_seconds",
+            "gauge",
+            "When the newest snapshot was taken.",
+        );
         let last = st.last_snapshot.map(|s| s.created_at / 1000.0).unwrap_or(0.0);
         let _ = writeln!(out, "ferrix_replication_last_snapshot_timestamp_seconds {last:.3}");
     }
     if let Some(olap) = app.olap() {
         let st = olap.status(app).await;
         let gauges: [(&str, &str, &str, f64); 7] = [
-            ("ferrix_olap_ready", "gauge", "1 while the analytics copy answers queries.", if st.state == "ready" { 1.0 } else { 0.0 }),
-            ("ferrix_olap_applied_ts", "gauge", "The analytics copy reflects every commit up to this ts.", st.applied_ts as f64),
-            ("ferrix_olap_lag_commits", "gauge", "Commits not in the analytics copy yet.", st.latest_ts.saturating_sub(st.applied_ts) as f64),
-            ("ferrix_olap_lag_seconds", "gauge", "How far the analytics copy is behind the newest commit.", st.lag_ms / 1000.0),
+            (
+                "ferrix_olap_ready",
+                "gauge",
+                "1 while the analytics copy answers queries.",
+                if st.state == "ready" { 1.0 } else { 0.0 },
+            ),
+            (
+                "ferrix_olap_applied_ts",
+                "gauge",
+                "The analytics copy reflects every commit up to this ts.",
+                st.applied_ts as f64,
+            ),
+            (
+                "ferrix_olap_lag_commits",
+                "gauge",
+                "Commits not in the analytics copy yet.",
+                st.latest_ts.saturating_sub(st.applied_ts) as f64,
+            ),
+            (
+                "ferrix_olap_lag_seconds",
+                "gauge",
+                "How far the analytics copy is behind the newest commit.",
+                st.lag_ms / 1000.0,
+            ),
             ("ferrix_olap_size_bytes", "gauge", "Size of olap.duckdb and its WAL.", st.size_bytes as f64),
-            ("ferrix_olap_rows_applied_total", "counter", "Documents written into the analytics copy since the start.", st.rows_applied as f64),
+            (
+                "ferrix_olap_rows_applied_total",
+                "counter",
+                "Documents written into the analytics copy since the start.",
+                st.rows_applied as f64,
+            ),
             ("ferrix_olap_rebuilds_total", "counter", "Analytics copy rebuilds since the start.", st.rebuilds as f64),
         ];
         for (name, kind, help, v) in gauges {

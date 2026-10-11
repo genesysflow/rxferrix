@@ -59,7 +59,8 @@ fn input_error(code: &'static str) -> impl FnOnce(Error) -> Error {
 }
 
 fn table_of(db: &crate::QueryDb, id: &str) -> Result<std::sync::Arc<TableInfo>> {
-    let doc_id = crate::id::DocId::decode(id).map_err(|_| user_error("invalid_id", format!("`{id}` is not a document id")))?;
+    let doc_id =
+        crate::id::DocId::decode(id).map_err(|_| user_error("invalid_id", format!("`{id}` is not a document id")))?;
     db.catalog()
         .table_by_number(doc_id.table_number())
         .cloned()
@@ -189,11 +190,13 @@ pub async fn tables(ctx: &QueryCtx) -> Result<Vec<TableSummary>> {
             access: access(&t),
             analytics: crate::olap::columns::copied(&t.name),
             columns: match &t.def {
-                Some(d) if crate::olap::columns::copied(&t.name) => crate::olap::columns::TablePlan::new(&t.name, &(d.shape)())
-                    .columns
-                    .into_iter()
-                    .map(|c| ColumnSummary { name: c.name, sql_type: c.sql_type })
-                    .collect(),
+                Some(d) if crate::olap::columns::copied(&t.name) => {
+                    crate::olap::columns::TablePlan::new(&t.name, &(d.shape)())
+                        .columns
+                        .into_iter()
+                        .map(|c| ColumnSummary { name: c.name, sql_type: c.sql_type })
+                        .collect()
+                }
                 _ => Vec::new(),
             },
             aggregates: t
@@ -401,7 +404,9 @@ fn user_profile_patch(old: &Value, new: &Map<String, Value>, replace: bool) -> R
             ("name", Value::String(s)) if s.chars().count() > 200 => {
                 return Err(user_error("invalid_name", "Name must be at most 200 characters"));
             }
-            ("image", Value::String(s)) if !(s.starts_with("https://") || s.starts_with("http://")) || s.len() > 2048 => {
+            ("image", Value::String(s))
+                if !(s.starts_with("https://") || s.starts_with("http://")) || s.len() > 2048 =>
+            {
                 return Err(user_error("invalid_image", "Image must be an http(s) URL"));
             }
             _ => {}
@@ -424,7 +429,9 @@ async fn write_existing(ctx: &MutationCtx, id: &str, document: Value, replace: b
         return Err(user_error("not_found", format!("Document {id} does not exist")));
     };
     if table.name == USERS {
-        let Value::Object(new) = user_fields(document, Some(id))? else { unreachable!("user_fields returns an object") };
+        let Value::Object(new) = user_fields(document, Some(id))? else {
+            unreachable!("user_fields returns an object")
+        };
         let patch = user_profile_patch(&old, &new, replace)?;
         if patch.is_empty() {
             return Ok(());
@@ -471,7 +478,11 @@ pub async fn delete_documents(ctx: &MutationCtx, ids: Vec<String>) -> Result<u32
         let before = ctx.db.get_raw(id).await?;
         ctx.db.delete_raw(id).await.map_err(input_error("not_found"))?;
         if let Some((table, doc)) = before {
-            let rec = audit::Record::new("delete").target(&table.name, Some(id.clone())).documents(&table.name, Some(doc), None);
+            let rec = audit::Record::new("delete").target(&table.name, Some(id.clone())).documents(
+                &table.name,
+                Some(doc),
+                None,
+            );
             audit::record(&ctx.db, Some(admin), rec).await?;
         }
     }
@@ -549,7 +560,12 @@ pub struct RunResult {
 /// as for the user. Every run is audited (`run_function`; for a mutation, in the mutation's own transaction). A
 /// failing function still returns normally, with `success: false`, its error, its log lines and its duration.
 #[action]
-pub async fn run_function(ctx: &ActionCtx, path: String, args: Option<Value>, as_user: Option<String>) -> Result<RunResult> {
+pub async fn run_function(
+    ctx: &ActionCtx,
+    path: String,
+    args: Option<Value>,
+    as_user: Option<String>,
+) -> Result<RunResult> {
     let admin = ctx.auth.require_admin()?;
     let app = &ctx.app;
     let Some(def) = app.registry().get(&path) else {
@@ -704,8 +720,13 @@ pub async fn users(
     for u in &page.page {
         let accounts =
             ctx.db.query::<Account>().with_index(Account::by_user, |q| q.eq(Account::user, u.id)).collect().await?;
-        let has_password =
-            ctx.db.query::<Credential>().with_index(Credential::by_user, |q| q.eq(Credential::user, u.id)).first().await?.is_some();
+        let has_password = ctx
+            .db
+            .query::<Credential>()
+            .with_index(Credential::by_user, |q| q.eq(Credential::user, u.id))
+            .first()
+            .await?
+            .is_some();
         let sessions = ctx
             .db
             .query::<Session>()
@@ -788,7 +809,11 @@ pub async fn revoke_session(ctx: &MutationCtx, session: String) -> Result<()> {
     };
     let before = serde_json::to_value(&doc)?;
     store::delete_session_in(&ctx.db, id).await?;
-    let rec = audit::Record::new("revoke_session").target("_sessions", Some(session)).documents("_sessions", Some(before), None);
+    let rec = audit::Record::new("revoke_session").target("_sessions", Some(session)).documents(
+        "_sessions",
+        Some(before),
+        None,
+    );
     audit::record(&ctx.db, Some(admin), rec).await
 }
 

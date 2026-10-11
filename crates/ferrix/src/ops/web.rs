@@ -150,9 +150,11 @@ pub fn looks_hashed(rel: &str) -> bool {
     }
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-    stem.split(['.', '-'])
-        .skip(1)
-        .any(|part| (8..=64).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && part.chars().any(|c| c.is_ascii_digit()))
+    stem.split(['.', '-']).skip(1).any(|part| {
+        (8..=64).contains(&part.len())
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && part.chars().any(|c| c.is_ascii_digit())
+    })
 }
 
 fn cache_control(rel: &str) -> &'static str {
@@ -169,7 +171,8 @@ fn content_type(rel: &str) -> HeaderValue {
     let mime = mime_guess::from_path(rel).first_or_octet_stream();
     let text = mime.type_() == mime_guess::mime::TEXT
         || matches!(mime.subtype().as_str(), "javascript" | "json" | "xml" | "svg+xml" | "manifest+json");
-    let value = if text && mime.get_param("charset").is_none() { format!("{mime}; charset=utf-8") } else { mime.to_string() };
+    let value =
+        if text && mime.get_param("charset").is_none() { format!("{mime}; charset=utf-8") } else { mime.to_string() };
     HeaderValue::from_str(&value).unwrap_or(HeaderValue::from_static("application/octet-stream"))
 }
 
@@ -196,15 +199,17 @@ async fn lookup(files: &StaticFiles, rel: &str) -> Option<Found> {
 }
 
 fn accepts(headers: &HeaderMap, coding: &str) -> bool {
-    headers.get_all(header::ACCEPT_ENCODING).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).any(|item| {
-        let mut parts = item.split(';');
-        let name = parts.next().unwrap_or("").trim();
-        let q_zero = parts.any(|p| {
-            let p = p.trim();
-            p.strip_prefix("q=").is_some_and(|q| q.trim().parse::<f32>().is_ok_and(|q| q == 0.0))
-        });
-        (name.eq_ignore_ascii_case(coding) || name == "*") && !q_zero
-    })
+    headers.get_all(header::ACCEPT_ENCODING).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).any(
+        |item| {
+            let mut parts = item.split(';');
+            let name = parts.next().unwrap_or("").trim();
+            let q_zero = parts.any(|p| {
+                let p = p.trim();
+                p.strip_prefix("q=").is_some_and(|q| q.trim().parse::<f32>().is_ok_and(|q| q == 0.0))
+            });
+            (name.eq_ignore_ascii_case(coding) || name == "*") && !q_zero
+        },
+    )
 }
 
 fn etag_matches(headers: &HeaderMap, etag: &str) -> bool {
@@ -272,10 +277,7 @@ pub async fn serve_static(files: &StaticFiles, method: &Method, path: &str, head
         return respond(files, &rel, found, headers, head).await;
     }
     let last = rel.rsplit('/').next().unwrap_or("");
-    let wants_html = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("text/html"));
+    let wants_html = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
     if last.contains('.') && !wants_html {
         return not_found();
     }

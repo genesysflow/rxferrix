@@ -324,9 +324,13 @@ pub(crate) enum ProviderKind {
     /// Endpoints known up front (Google).
     Oidc(OidcEndpoints),
     /// Endpoints from `<issuer>/.well-known/openid-configuration`, fetched on first use.
-    OidcDiscovery { discovery_url: String },
+    OidcDiscovery {
+        discovery_url: String,
+    },
     /// Discord: OAuth 2 with the `/users/@me` profile. `base` is `https://discord.com` (or a mock).
-    Discord { base: String },
+    Discord {
+        base: String,
+    },
     /// Sign in with Apple: a signed client secret, `form_post` callbacks, the ID token as the profile.
     Apple(Arc<super::apple::AppleConfig>),
 }
@@ -385,7 +389,9 @@ impl OAuthProvider {
     /// startup log.
     pub(crate) fn problem(&self) -> Option<String> {
         match &self.kind {
-            ProviderKind::Apple(_) if self.is_configured() => super::apple::parse_private_key(&self.client_secret).err(),
+            ProviderKind::Apple(_) if self.is_configured() => {
+                super::apple::parse_private_key(&self.client_secret).err()
+            }
             _ => None,
         }
     }
@@ -520,7 +526,12 @@ impl Apple {
                 String::new()
             });
         }
-        Self::new(env("FERRIX_AUTH_APPLE_CLIENT_ID"), env("FERRIX_AUTH_APPLE_TEAM_ID"), env("FERRIX_AUTH_APPLE_KEY_ID"), key)
+        Self::new(
+            env("FERRIX_AUTH_APPLE_CLIENT_ID"),
+            env("FERRIX_AUTH_APPLE_TEAM_ID"),
+            env("FERRIX_AUTH_APPLE_KEY_ID"),
+            key,
+        )
     }
 }
 
@@ -605,7 +616,8 @@ impl RedirectAllowlist {
         if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
             return None;
         }
-        let allowed = self.entries.iter().any(|e| Self::matches(e, &url)) || (self.allow_localhost && is_localhost(&url));
+        let allowed =
+            self.entries.iter().any(|e| Self::matches(e, &url)) || (self.allow_localhost && is_localhost(&url));
         if !allowed {
             return None;
         }
@@ -669,7 +681,11 @@ mod tests {
 
         // Apple: the client secret is posted; ID tokens are RS256 from `<origin>/auth/keys`; callbacks are posted.
         let apple = get("https://appleid.apple.com/.well-known/openid-configuration").await;
-        let config = super::super::apple::AppleConfig::new("team".into(), "key".into(), super::super::apple::APPLE_ORIGIN.into());
+        let config = super::super::apple::AppleConfig::new(
+            "team".into(),
+            "key".into(),
+            super::super::apple::APPLE_ORIGIN.into(),
+        );
         assert_eq!(apple["issuer"], super::super::apple::APPLE_ORIGIN);
         assert_eq!(config.authorization_endpoint(), apple["authorization_endpoint"]);
         assert_eq!(config.token_endpoint(), apple["token_endpoint"]);
@@ -685,7 +701,11 @@ mod tests {
         let discord = get("https://discord.com/.well-known/openid-configuration").await;
         let ProviderKind::Discord { base } = Discord::new("id", "secret").kind else { panic!() };
         assert_eq!(format!("{base}/api/oauth2/token"), discord["token_endpoint"]);
-        let page = http.get(format!("{base}/oauth2/authorize?client_id=1&response_type=code&scope=identify")).send().await.unwrap();
+        let page = http
+            .get(format!("{base}/oauth2/authorize?client_id=1&response_type=code&scope=identify"))
+            .send()
+            .await
+            .unwrap();
         assert!(page.status().is_success(), "{}", page.status());
         assert!(strs(&discord["code_challenge_methods_supported"]).contains(&"S256".into()));
         let unauthorized = http.get(format!("{base}/api/users/@me")).send().await.unwrap();
@@ -706,7 +726,12 @@ mod tests {
             .await
             .unwrap();
         assert!(token.get("error").is_some() && token.get("access_token").is_none(), "{token}");
-        let user = http.get("https://api.github.com/user").header(reqwest::header::USER_AGENT, "ferrix-test").send().await.unwrap();
+        let user = http
+            .get("https://api.github.com/user")
+            .header(reqwest::header::USER_AGENT, "ferrix-test")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(user.status(), 401);
     }
 
@@ -718,7 +743,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list.resolve(None).as_deref(), Some("https://app.example.com/"));
-        assert_eq!(list.resolve(Some("https://app.example.com/x?y=1#frag")).as_deref(), Some("https://app.example.com/x?y=1"));
+        assert_eq!(
+            list.resolve(Some("https://app.example.com/x?y=1#frag")).as_deref(),
+            Some("https://app.example.com/x?y=1")
+        );
         assert!(list.resolve(Some("https://other.example.com/auth/cb")).is_some());
         assert!(list.resolve(Some("https://other.example.com/auth")).is_some());
         // Path prefix must end at a segment boundary; other hosts, schemes, ports and userinfo are rejected.

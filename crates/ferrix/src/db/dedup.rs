@@ -46,7 +46,10 @@ impl IdempotencyKey {
     /// session id, so a recorded response is only ever replayed to the identity that ran the mutation. The runtime
     /// applies this itself; callers pass the plain key.
     pub fn scoped_to(&self, identity: &crate::auth::Identity) -> IdempotencyKey {
-        IdempotencyKey { session_id: format!("{}|{}", identity.principal_key(), self.session_id), request_id: self.request_id }
+        IdempotencyKey {
+            session_id: format!("{}|{}", identity.principal_key(), self.session_id),
+            request_id: self.request_id,
+        }
     }
 }
 

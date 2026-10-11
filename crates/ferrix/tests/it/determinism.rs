@@ -72,7 +72,8 @@ async fn reruns_queries_and_warns_when_results_differ() {
 
     // The warning is in the execution log, which has one entry per run (reruns are not executions).
     app.logs().flush().await.unwrap();
-    let logged = app.logs().query(LogFilter { path_prefix: Some(fns::counter::path()), ..Default::default() }).await.unwrap();
+    let logged =
+        app.logs().query(LogFilter { path_prefix: Some(fns::counter::path()), ..Default::default() }).await.unwrap();
     assert_eq!(logged.len(), 2);
     assert_eq!(warnings(&logged[1].log_lines).len(), 1, "the oldest entry, the checked run");
 }
@@ -91,7 +92,9 @@ async fn off_unless_asked_for() {
     let t = TestApp::with_options(AppOptions { dev: true, ..Default::default() }).await.unwrap();
     let run = t.app().run_query(&fns::counter::path(), json!({}), &Identity::anonymous()).await;
     assert_eq!(run.log_lines, vec!["[INFO] counting"]);
-    let t = TestApp::with_options(AppOptions { determinism_check: Some(Duration::ZERO), ..Default::default() }).await.unwrap();
+    let t = TestApp::with_options(AppOptions { determinism_check: Some(Duration::ZERO), ..Default::default() })
+        .await
+        .unwrap();
     for _ in 0..2 {
         let run = t.app().run_query(&fns::counter::path(), json!({}), &Identity::anonymous()).await;
         assert_eq!(warnings(&run.log_lines).len(), 1, "every run with a zero interval, dev mode or not");

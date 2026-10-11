@@ -92,7 +92,11 @@ pub struct PaginationResult<T> {
 impl<T> PaginationResult<T> {
     /// Transforms the documents of the page, keeping the cursors.
     pub fn map<U>(self, f: impl FnMut(T) -> U) -> PaginationResult<U> {
-        PaginationResult { page: self.page.into_iter().map(f).collect(), is_done: self.is_done, continue_cursor: self.continue_cursor }
+        PaginationResult {
+            page: self.page.into_iter().map(f).collect(),
+            is_done: self.is_done,
+            continue_cursor: self.continue_cursor,
+        }
     }
 
     /// Transforms the documents with an async function, one after the other, keeping the cursors:
@@ -142,7 +146,8 @@ impl<T> PaginationResult<T> {
         Fut: Future<Output = Result<U, E>>,
     {
         use futures::{StreamExt, TryStreamExt};
-        let page = futures::stream::iter(self.page.into_iter().map(f)).buffered(concurrency.max(1)).try_collect().await?;
+        let page =
+            futures::stream::iter(self.page.into_iter().map(f)).buffered(concurrency.max(1)).try_collect().await?;
         Ok(PaginationResult { page, is_done: self.is_done, continue_cursor: self.continue_cursor })
     }
 }
@@ -328,7 +333,8 @@ pub(super) async fn paginate<D: Send>(
                     batch = batch.min(n - page.len());
                 }
             }
-            let rows = db.with_conn(|c| storage::scan_index_batch(c, index.id, &scan, order, last.as_deref(), batch))?;
+            let rows =
+                db.with_conn(|c| storage::scan_index_batch(c, index.id, &scan, order, last.as_deref(), batch))?;
             let exhausted = rows.len() < batch;
             for (key, json) in rows {
                 let doc = decode(&table, &json)?;
@@ -419,8 +425,14 @@ mod tests {
         let r = range();
         let after = |k: u8| Position::After(vec![k]);
         assert_eq!(span(&r, Order::Asc, None, None), r);
-        assert_eq!(span(&r, Order::Asc, Some(&after(4)), Some(&after(5))), KeyRange { start: vec![4, 0], end: Some(vec![5, 0]) });
-        assert_eq!(span(&r, Order::Asc, Some(&after(4)), Some(&Position::End)), KeyRange { start: vec![4, 0], end: Some(vec![7]) });
+        assert_eq!(
+            span(&r, Order::Asc, Some(&after(4)), Some(&after(5))),
+            KeyRange { start: vec![4, 0], end: Some(vec![5, 0]) }
+        );
+        assert_eq!(
+            span(&r, Order::Asc, Some(&after(4)), Some(&Position::End)),
+            KeyRange { start: vec![4, 0], end: Some(vec![7]) }
+        );
         assert_eq!(span(&r, Order::Desc, None, Some(&after(4))), KeyRange { start: vec![4], end: Some(vec![7]) });
         assert_eq!(span(&r, Order::Desc, Some(&after(5)), None), KeyRange { start: vec![3], end: Some(vec![5]) });
         assert!(span(&r, Order::Asc, Some(&Position::End), None).is_empty());

@@ -40,7 +40,10 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     for p in &paths {
                         let last = p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                         if ADDED_DERIVES.contains(&last.as_str()) {
-                            errors.error(p, format_args!("#[object] already derives `{last}`; remove it from this #[derive]"));
+                            errors.error(
+                                p,
+                                format_args!("#[object] already derives `{last}`; remove it from this #[derive]"),
+                            );
                         }
                     }
                 }
@@ -56,9 +59,10 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             let mut kept_items = Vec::new();
             for item in items {
                 match item.key().map(|k| k.to_string()).as_deref() {
-                    Some("crate") => {
-                        errors.error(&item.tokens, format_args!("#[object] sets `#[{which}(crate = ...)]` itself; remove this"))
-                    }
+                    Some("crate") => errors.error(
+                        &item.tokens,
+                        format_args!("#[object] sets `#[{which}(crate = ...)]` itself; remove this"),
+                    ),
                     Some("rename_all") => {
                         custom_rename_all = true;
                         kept_items.push(item);

@@ -42,9 +42,9 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::Table as _;
 use crate::db::catalog::TableInfo;
 use crate::id::DocId;
-use crate::Table as _;
 use crate::runtime::App;
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD};
 
@@ -326,7 +326,8 @@ pub async fn export_to_dir(
             Some(names) => {
                 let mut v = Vec::new();
                 for name in names {
-                    let t = all.iter().find(|t| &t.name == name).with_context(|| format!("there is no table `{name}`"))?;
+                    let t =
+                        all.iter().find(|t| &t.name == name).with_context(|| format!("there is no table `{name}`"))?;
                     if !v.contains(t) {
                         v.push(t.clone());
                     }
@@ -404,7 +405,12 @@ pub struct ImportOptions {
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        ImportOptions { mode: ImportMode::Insert, batch_size: DEFAULT_BATCH_SIZE, allow_system_tables: false, format: None }
+        ImportOptions {
+            mode: ImportMode::Insert,
+            batch_size: DEFAULT_BATCH_SIZE,
+            allow_system_tables: false,
+            format: None,
+        }
     }
 }
 
@@ -538,7 +544,11 @@ type Record = crate::Result<(usize, crate::Result<Value>)>;
 
 /// The documents of an import file: JSONL (one per line, blank lines skipped) or CSV with a header
 /// (`super::csv`; cells are typed with the table's shape).
-fn records(path: &Path, format: ExportFormat, table: &TableInfo) -> crate::Result<Box<dyn Iterator<Item = Record> + Send>> {
+fn records(
+    path: &Path,
+    format: ExportFormat,
+    table: &TableInfo,
+) -> crate::Result<Box<dyn Iterator<Item = Record> + Send>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     Ok(match format {
@@ -602,9 +612,11 @@ async fn check_file(
                 }
                 let mut full = doc.fields.clone();
                 full.insert(ID_FIELD.into(), Value::String(doc.id.encode()));
-                let ct = serde_json::Number::from_f64(doc.creation_time.unwrap_or(0.0)).context("bad `_creationTime`")?;
+                let ct =
+                    serde_json::Number::from_f64(doc.creation_time.unwrap_or(0.0)).context("bad `_creationTime`")?;
                 full.insert(CREATION_TIME_FIELD.into(), ct.into());
-                validate(&Value::Object(full)).map_err(|e| anyhow::anyhow!("does not match table `{}`: {e}", t.name))?;
+                validate(&Value::Object(full))
+                    .map_err(|e| anyhow::anyhow!("does not match table `{}`: {e}", t.name))?;
                 ids.push(doc.id);
                 Ok(())
             });
@@ -731,8 +743,9 @@ pub async fn import_file(
             let mut replaced = 0;
             for doc in pending.drain(..) {
                 let existed = s.put_imported(&table, doc.id, doc.fields, doc.creation_time, overwrite, |full| {
-                    validate(&Value::Object(full.clone()))
-                        .map_err(|e| anyhow::anyhow!("imported document {} does not match table `{}`: {e}", doc.id, table.name))
+                    validate(&Value::Object(full.clone())).map_err(|e| {
+                        anyhow::anyhow!("imported document {} does not match table `{}`: {e}", doc.id, table.name)
+                    })
                 })?;
                 replaced += existed as u64;
                 result.documents += 1;
@@ -747,7 +760,12 @@ pub async fn import_file(
 
 /// Import a path: an export directory (with `manifest.json`: its tables, ids rewritten as needed, `files/`), a
 /// directory of `<table>.jsonl` files, or one JSONL file (into `table`, default: the file's stem).
-pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &ImportOptions) -> crate::Result<ImportReport> {
+pub async fn import_path(
+    app: &App,
+    path: &Path,
+    table: Option<&str>,
+    options: &ImportOptions,
+) -> crate::Result<ImportReport> {
     let mut report = ImportReport::default();
     let mut jobs: Vec<(String, PathBuf)> = Vec::new();
     let mut remap = IdRemap::default();
@@ -756,7 +774,8 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
     if path.is_dir() {
         let manifest_path = path.join("manifest.json");
         if manifest_path.exists() {
-            let manifest: ExportManifest = serde_json::from_slice(&std::fs::read(&manifest_path)?).context("invalid manifest.json")?;
+            let manifest: ExportManifest =
+                serde_json::from_slice(&std::fs::read(&manifest_path)?).context("invalid manifest.json")?;
             if manifest.format != EXPORT_FORMAT {
                 bail!("{} is not a ferrix export manifest", manifest_path.display());
             }
@@ -797,7 +816,11 @@ pub async fn import_path(app: &App, path: &Path, table: Option<&str>, options: &
     } else {
         let name = match table {
             Some(t) => t.to_string(),
-            None => path.file_stem().and_then(|s| s.to_str()).context("can't tell the table from the file name; pass --table")?.to_string(),
+            None => path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .context("can't tell the table from the file name; pass --table")?
+                .to_string(),
         };
         jobs.push((name, path.to_path_buf()));
     }

@@ -97,7 +97,9 @@ impl Effective {
 pub(crate) fn locked_fields(config: &AuthConfig) -> Vec<String> {
     let mut out = Vec::new();
     let e = config.explicit;
-    for (set, name) in [(e.signups, "signups"), (e.access_token_ttl, "accessTokenTtlSecs"), (e.session_ttl, "sessionTtlSecs")] {
+    for (set, name) in
+        [(e.signups, "signups"), (e.access_token_ttl, "accessTokenTtlSecs"), (e.session_ttl, "sessionTtlSecs")]
+    {
         if set {
             out.push(name.to_string());
         }

@@ -140,7 +140,12 @@ impl OAuthFlows {
     }
 
     /// Start a flow; returns the provider's authorization URL and the `state`.
-    pub async fn start(&self, provider: &OAuthProvider, redirect_to: String, callback_url: &str) -> AuthResult<(String, String)> {
+    pub async fn start(
+        &self,
+        provider: &OAuthProvider,
+        redirect_to: String,
+        callback_url: &str,
+    ) -> AuthResult<(String, String)> {
         let endpoints = self.endpoints(provider).await?;
         let mut url = url::Url::parse(&endpoints.authorization())
             .map_err(|e| provider_error(&provider.id, "invalid authorization endpoint", e))?;
@@ -221,7 +226,9 @@ impl OAuthFlows {
             AuthFailure::new(400, "oauth_failed", "The sign-in provider rejected the request")
         };
         if let Endpoints::Apple(apple) = &endpoints {
-            let Some(id_token) = response.get("id_token").and_then(Value::as_str) else { return Err(rejected("no id_token")) };
+            let Some(id_token) = response.get("id_token").and_then(Value::as_str) else {
+                return Err(rejected("no id_token"));
+            };
             let nonce = pending.nonce.as_deref().unwrap_or_default();
             let (claims, _) = apple
                 .verify_id_token(&provider.client_id, id_token, nonce, now_s())
@@ -246,7 +253,12 @@ impl OAuthFlows {
         }
     }
 
-    async fn get_json<T: for<'de> Deserialize<'de>>(&self, provider: &OAuthProvider, url: &str, token: &str) -> AuthResult<T> {
+    async fn get_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        provider: &OAuthProvider,
+        url: &str,
+        token: &str,
+    ) -> AuthResult<T> {
         self.http
             .get(url)
             .bearer_auth(token)
@@ -279,7 +291,13 @@ impl OAuthFlows {
             Some(Value::String(s)) => s == "true",
             _ => false,
         };
-        Ok(ExternalProfile { account_id: info.sub, email: info.email, email_verified, name: info.name, image: info.picture })
+        Ok(ExternalProfile {
+            account_id: info.sub,
+            email: info.email,
+            email_verified,
+            name: info.name,
+            image: info.picture,
+        })
     }
 
     async fn github_profile(&self, provider: &OAuthProvider, token: &str) -> AuthResult<ExternalProfile> {

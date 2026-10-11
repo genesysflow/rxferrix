@@ -9,20 +9,20 @@ use serde::Serialize;
 
 use super::config::{AuthConfig, OAuthProvider};
 use super::effective::Effective;
-use super::jwt::JwtVerifier;
-use crate::settings::model::StoredSettings;
 use super::email::{Email, Mailer, Purpose};
 use super::identity::Identity;
+use super::jwt::JwtVerifier;
 use super::oauth::OAuthFlows;
+use super::password;
 use super::rate_limit::{RateLimiter, Rule};
 use super::revocation::{Revocations, SessionWatch};
 use super::store::{self, ClientInfo, Principal, RefreshOutcome};
 use super::tables::{Admin, Session, User};
 use super::tokens::{AccessClaims, Keys, TokenError, ct_eq, random_token};
-use super::password;
 use crate::UserError;
 use crate::id::Id;
 use crate::runtime::App;
+use crate::settings::model::StoredSettings;
 
 /// Tokens returned by every successful sign-in and refresh.
 #[derive(Debug, Clone, Serialize)]
@@ -175,7 +175,8 @@ impl AuthService {
     pub(crate) async fn reload_settings(&self, app: &App) -> crate::Result<()> {
         let snapshot = app.db().snapshot().await?;
         let ts = snapshot.ts;
-        let db = crate::db::query::QueryDb::new(crate::db::query::Source::Snapshot(snapshot), app.db().catalog().clone());
+        let db =
+            crate::db::query::QueryDb::new(crate::db::query::Source::Snapshot(snapshot), app.db().catalog().clone());
         let stored = StoredSettings::load(&db, &self.keys.secret_box()).await?;
         drop(db);
         let next = match Effective::build(&self.config, self.dev, self.config_mailer.clone(), &stored, ts) {
@@ -227,7 +228,9 @@ impl AuthService {
     pub(crate) fn limit(&self, group: Limit, key: &str) -> AuthResult<()> {
         let Some(limits) = self.config.rate_limits else { return Ok(()) };
         let (name, rule) = match group {
-            Limit::Credentials => ("credentials", Rule { burst: limits.credential_burst, per_minute: limits.credential_per_minute }),
+            Limit::Credentials => {
+                ("credentials", Rule { burst: limits.credential_burst, per_minute: limits.credential_per_minute })
+            }
             Limit::Email => ("email", Rule { burst: limits.email_burst, per_minute: limits.email_per_minute }),
             Limit::Refresh => ("refresh", Rule { burst: limits.refresh_burst, per_minute: limits.refresh_per_minute }),
         };
@@ -283,7 +286,9 @@ impl AuthService {
         };
         let watch = watch.then(|| self.revocations.watch(app, session.to_string()));
         match store::session_active(app, session, principal, now_ms()).await {
-            Ok(true) => Ok((Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }, watch)),
+            Ok(true) => {
+                Ok((Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }, watch))
+            }
             Ok(false) => Err(TokenError::SessionEnded),
             Err(e) => {
                 tracing::error!("auth: session lookup failed: {e:#}");
@@ -319,7 +324,13 @@ impl AuthService {
     }
 
     /// Sign tokens for a session. The access token never outlives the session (`session_expires_at`, ms).
-    fn issue(&self, session: Id<Session>, principal: Principal, refresh: String, session_expires_at: f64) -> AuthTokens {
+    fn issue(
+        &self,
+        session: Id<Session>,
+        principal: Principal,
+        refresh: String,
+        session_expires_at: f64,
+    ) -> AuthTokens {
         let left_s = ((session_expires_at - now_ms()) / 1000.0).ceil().max(1.0) as u64;
         let ttl = self.access_ttl_s().min(left_s);
         let (sub, adm, user_id, admin_id) = match principal {
@@ -338,7 +349,9 @@ impl AuthService {
 
     /// Mint tokens for `user` without credentials, e.g. from a test or an admin tool.
     pub async fn sign_in_as(&self, app: &App, user: Id<User>) -> crate::Result<AuthTokens> {
-        self.start_session(app, Principal::User(user), ClientInfo::default()).await.map_err(|f| anyhow::anyhow!(f.error))
+        self.start_session(app, Principal::User(user), ClientInfo::default())
+            .await
+            .map_err(|f| anyhow::anyhow!(f.error))
     }
 
     /// Impersonation: a real session of `user` minted by `admin`, marked `impersonated_by`, expiring after `ttl`
@@ -355,7 +368,8 @@ impl AuthService {
     ) -> crate::Result<Option<(AuthTokens, Id<Session>, f64)>> {
         let ttl_ms = ttl.min(MAX_IMPERSONATION_TTL).max(Duration::from_secs(1)).as_secs_f64() * 1000.0;
         let created =
-            store::create_impersonation_session(app, &self.keys, admin, user, client, now_ms(), ttl_ms, purpose).await?;
+            store::create_impersonation_session(app, &self.keys, admin, user, client, now_ms(), ttl_ms, purpose)
+                .await?;
         Ok(created.map(|(session, refresh, expires_at)| {
             (self.issue(session, Principal::User(user), refresh, expires_at), session, expires_at)
         }))
@@ -395,7 +409,13 @@ impl AuthService {
         Ok(SignUpResult::SignedIn(self.start_session(app, Principal::User(user), client).await?))
     }
 
-    pub async fn sign_in(&self, app: &App, email: &str, password: String, client: ClientInfo) -> AuthResult<AuthTokens> {
+    pub async fn sign_in(
+        &self,
+        app: &App,
+        email: &str,
+        password: String,
+        client: ClientInfo,
+    ) -> AuthResult<AuthTokens> {
         self.require_password()?;
         // An invalid email gets the same answer as a wrong password (no enumeration through validation either).
         let email = store::normalize_email(email).map_err(|_| AuthFailure::invalid_credentials())?;
@@ -420,16 +440,9 @@ impl AuthService {
 
     pub async fn refresh(&self, app: &App, refresh_token: &str, client: ClientInfo) -> AuthResult<AuthTokens> {
         let grace = self.config.refresh_reuse_grace.as_secs_f64() * 1000.0;
-        let outcome = store::rotate_refresh_token(
-            app,
-            &self.keys,
-            refresh_token,
-            client,
-            now_ms(),
-            self.session_ttl_ms(),
-            grace,
-        )
-        .await?;
+        let outcome =
+            store::rotate_refresh_token(app, &self.keys, refresh_token, client, now_ms(), self.session_ttl_ms(), grace)
+                .await?;
         match outcome {
             RefreshOutcome::Rotated { session, principal, refresh, expires_at } => {
                 Ok(self.issue(session, principal, refresh, expires_at))
@@ -443,7 +456,11 @@ impl AuthService {
             )),
             RefreshOutcome::Reused => {
                 tracing::warn!("auth: a rotated refresh token was reused; the session has been revoked");
-                Err(AuthFailure::new(401, "refresh_token_reused", "Refresh token reuse detected; the session was revoked"))
+                Err(AuthFailure::new(
+                    401,
+                    "refresh_token_reused",
+                    "Refresh token reuse detected; the session was revoked",
+                ))
             }
         }
     }
@@ -468,7 +485,10 @@ impl AuthService {
     // Email codes
 
     fn require_mailer(&self) -> AuthResult<Arc<dyn Mailer>> {
-        self.current().mailer.clone().ok_or_else(|| AuthFailure::new(503, "email_not_configured", "Email is not configured on this server"))
+        self.current()
+            .mailer
+            .clone()
+            .ok_or_else(|| AuthFailure::new(503, "email_not_configured", "Email is not configured on this server"))
     }
 
     /// Resolve an app URL for links/redirects. An explicit URL that isn't allowed is an error (never silently
@@ -495,7 +515,8 @@ impl AuthService {
     ) -> AuthResult<()> {
         let mailer = self.require_mailer()?;
         let expires_at = now_ms() + purpose.ttl_ms();
-        let (code, token) = store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, expires_at).await?;
+        let (code, token) =
+            store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, expires_at).await?;
         let link = redirect.map(|r| format!("{r}#{}={token}", purpose.fragment_key()));
         let (subject, body) = purpose.render(&code, link.as_deref());
         let message = Email { to: email, subject, body };
@@ -508,7 +529,12 @@ impl AuthService {
     }
 
     /// Consume a code given either as a link token or as `(email, code)`.
-    async fn consume(&self, app: &App, purpose: Purpose, proof: CodeProof) -> AuthResult<super::tables::VerificationCode> {
+    async fn consume(
+        &self,
+        app: &App,
+        purpose: Purpose,
+        proof: CodeProof,
+    ) -> AuthResult<super::tables::VerificationCode> {
         let now = now_ms();
         let row = match proof {
             CodeProof::Token(t) => store::consume_token(app, &self.keys, purpose.as_str(), &t, now).await?,
@@ -522,7 +548,12 @@ impl AuthService {
 
     /// Send an email verification code to `email` if it belongs to an unverified user. Always succeeds (no
     /// enumeration).
-    pub async fn request_email_verification(&self, app: &App, email: &str, redirect_to: Option<&str>) -> AuthResult<()> {
+    pub async fn request_email_verification(
+        &self,
+        app: &App,
+        email: &str,
+        redirect_to: Option<&str>,
+    ) -> AuthResult<()> {
         self.require_password()?;
         self.require_mailer()?;
         let redirect = self.resolve_redirect(redirect_to)?;
@@ -632,7 +663,13 @@ impl AuthService {
     // -----------------------------------------------------------------------------------------------------------------
     // Admins
 
-    pub async fn admin_sign_in(&self, app: &App, email: &str, password: String, client: ClientInfo) -> AuthResult<AuthTokens> {
+    pub async fn admin_sign_in(
+        &self,
+        app: &App,
+        email: &str,
+        password: String,
+        client: ClientInfo,
+    ) -> AuthResult<AuthTokens> {
         let email = store::normalize_email(email).map_err(|_| AuthFailure::invalid_credentials())?;
         let admin = store::admin_by_email(app, email).await?;
         let stored = admin.as_ref().map(|a| a.password_hash.clone());

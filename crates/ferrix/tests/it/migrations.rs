@@ -225,7 +225,8 @@ async fn summary(app: &App, name: &str) -> ferrix::migrations::MigrationSummary 
 /// forget the table's schema fingerprint (so the next start validates it).
 fn rewrite_documents(dir: &std::path::Path, table: &str, f: impl Fn(&mut serde_json::Map<String, Value>)) {
     let conn = rusqlite::Connection::open(dir.join("data.db")).unwrap();
-    let number: u32 = conn.query_row("SELECT table_number FROM _tables WHERE name = ?1", [table], |r| r.get(0)).unwrap();
+    let number: u32 =
+        conn.query_row("SELECT table_number FROM _tables WHERE name = ?1", [table], |r| r.get(0)).unwrap();
     let rows: Vec<(Vec<u8>, String)> = conn
         .prepare("SELECT id, json FROM documents WHERE table_number = ?1")
         .unwrap()
@@ -236,8 +237,11 @@ fn rewrite_documents(dir: &std::path::Path, table: &str, f: impl Fn(&mut serde_j
     for (id, json) in rows {
         let mut doc: serde_json::Map<String, Value> = serde_json::from_str(&json).unwrap();
         f(&mut doc);
-        conn.execute("UPDATE documents SET json = ?1 WHERE id = ?2", rusqlite::params![serde_json::to_string(&doc).unwrap(), id])
-            .unwrap();
+        conn.execute(
+            "UPDATE documents SET json = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_string(&doc).unwrap(), id],
+        )
+        .unwrap();
     }
     conn.execute("DELETE FROM _schema_fingerprints WHERE table_name = ?1", [table]).unwrap();
 }
@@ -296,7 +300,8 @@ async fn resumes_after_a_crash_between_batches_processing_each_document_once() {
         t.mutation::<add_counted>((n,)).await.unwrap();
     }
     // Two batches of 3, then the process "dies" (the run stops with the migration still running).
-    let r = t.app().run_migration::<count_visits>(RunOptions { max_batches: Some(2), ..Default::default() }).await.unwrap();
+    let r =
+        t.app().run_migration::<count_visits>(RunOptions { max_batches: Some(2), ..Default::default() }).await.unwrap();
     assert_eq!((r.outcome, r.batches, r.processed), (RunOutcome::Stopped, 2, 6));
     let s = summary(t.app(), &count_visits::name()).await;
     assert_eq!((s.state, s.processed, s.documents), (MigrationState::Running, 6, 10));
@@ -451,7 +456,14 @@ async fn old_schema_documents_start_with_the_migration_pending_and_pass_the_chec
     // ...but a valid document can't be made invalid, and inserts are strict.
     let err = t.mutation::<set_priority_raw>((ids[3], "high".to_string())).await.unwrap_err();
     assert!(format!("{err:#}").contains("does not match table `mig_tasks`"), "{err:#}");
-    let err = app.run_mutation("_system/dashboard:insert_document", json!({ "table": "mig_tasks", "document": { "title": "x" } }), &admin()).await.unwrap_err();
+    let err = app
+        .run_mutation(
+            "_system/dashboard:insert_document",
+            json!({ "table": "mig_tasks", "document": { "title": "x" } }),
+            &admin(),
+        )
+        .await
+        .unwrap_err();
     assert!(format!("{err:#}").contains("does not match table `mig_tasks`"), "{err:#}");
     t.mutation::<add_task>(("new".to_string(), 2)).await.unwrap();
 
@@ -512,8 +524,12 @@ async fn dependencies_order_runs_and_refuse_early_runs() {
     let app = t.app();
     // `list` (and the summaries) show the dependencies, in run order.
     let list = app.run_query("_system/migrations:list", json!({}), &admin()).await.result.unwrap();
-    let deps: Vec<&Value> = list.as_array().unwrap().iter().filter(|m| m["name"].as_str().unwrap().starts_with("dep/")).collect();
-    assert_eq!(deps.iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("dep/z_first"), json!("dep/a_second"), json!("dep/m_third")]);
+    let deps: Vec<&Value> =
+        list.as_array().unwrap().iter().filter(|m| m["name"].as_str().unwrap().starts_with("dep/")).collect();
+    assert_eq!(
+        deps.iter().map(|m| m["name"].clone()).collect::<Vec<_>>(),
+        [json!("dep/z_first"), json!("dep/a_second"), json!("dep/m_third")]
+    );
     assert_eq!(deps[0]["after"], json!([]));
     assert_eq!(deps[2]["after"], json!(["dep/a_second", "dep/z_first"]));
 

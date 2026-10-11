@@ -203,7 +203,10 @@ pub(crate) struct ExternalClaims {
 
 #[derive(Debug, Clone)]
 enum PublicKey {
-    Rsa { n: Vec<u8>, e: Vec<u8> },
+    Rsa {
+        n: Vec<u8>,
+        e: Vec<u8>,
+    },
     /// Uncompressed SEC1 point (0x04 || x || y).
     P256(Vec<u8>),
     Ed25519(Vec<u8>),
@@ -455,7 +458,8 @@ impl JwtVerifier {
     }
 
     async fn get(&self, url: &str) -> crate::Result<Vec<u8>> {
-        let mut res = self.http.get(url).header(reqwest::header::ACCEPT, "application/json").send().await?.error_for_status()?;
+        let mut res =
+            self.http.get(url).header(reqwest::header::ACCEPT, "application/json").send().await?.error_for_status()?;
         if res.content_length().is_some_and(|l| l as usize > MAX_JWKS_BYTES) {
             anyhow::bail!("{url}: response too large");
         }
@@ -488,7 +492,9 @@ fn decode_json(part: &str) -> Result<Value, TokenError> {
 fn number(claims: &Value, name: &str) -> Result<Option<u64>, TokenError> {
     match claims.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_f64().filter(|n| n.is_finite() && *n >= 0.0).map(|n| Some(n as u64)).ok_or(TokenError::InvalidClaims),
+        Some(v) => {
+            v.as_f64().filter(|n| n.is_finite() && *n >= 0.0).map(|n| Some(n as u64)).ok_or(TokenError::InvalidClaims)
+        }
     }
 }
 
@@ -506,7 +512,9 @@ fn check_claims(cfg: &JwtProvider, claims: &Value, now_s: u64) -> Result<Externa
     if !cfg.any_audience {
         let ok = match claims.get("aud") {
             Some(Value::String(a)) => cfg.audiences.iter().any(|x| x == a),
-            Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).any(|a| cfg.audiences.iter().any(|x| x == a)),
+            Some(Value::Array(list)) => {
+                list.iter().filter_map(Value::as_str).any(|a| cfg.audiences.iter().any(|x| x == a))
+            }
             _ => false,
         };
         if !ok {

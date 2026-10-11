@@ -550,7 +550,8 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
         let mut acc1 = _mm256_setzero_ps();
         while i + 16 <= n {
             acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i)), _mm256_loadu_ps(b.as_ptr().add(i)), acc0);
-            acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i + 8)), _mm256_loadu_ps(b.as_ptr().add(i + 8)), acc1);
+            acc1 =
+                _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i + 8)), _mm256_loadu_ps(b.as_ptr().add(i + 8)), acc1);
             i += 16;
         }
         while i + 8 <= n {
@@ -709,7 +710,10 @@ mod tests {
             for ef in [32, 64, 96, 128] {
                 let misses = (0..2000).filter(|&i| g.search(&vectors[i], 1, ef, |_| true)[0].1 != i as u32).count();
                 let queries = random_vectors(200, dims, 99);
-                println!("n {n} dims {dims} ef {ef}: self-miss {misses}/2000, recall@10 {:.3}", recall(&g, &vectors, &queries, 10, ef));
+                println!(
+                    "n {n} dims {dims} ef {ef}: self-miss {misses}/2000, recall@10 {:.3}",
+                    recall(&g, &vectors, &queries, 10, ef)
+                );
             }
         }
     }

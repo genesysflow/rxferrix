@@ -34,11 +34,7 @@ impl FnKind {
             FnKind::Action => "action",
             FnKind::Workflow => "workflow",
         };
-        if internal {
-            format!("internal_{base}")
-        } else {
-            base.to_owned()
-        }
+        if internal { format!("internal_{base}") } else { base.to_owned() }
     }
 
     fn handler_variant(self) -> syn::Ident {
@@ -119,13 +115,7 @@ fn is_moved_param_attr(a: &syn::Attribute) -> bool {
 }
 
 /// Checks that the first parameter's type is `&<Kind>Ctx` (matching on the last path segment).
-pub(crate) fn check_ctx_type(
-    ty: &syn::Type,
-    kind: FnKind,
-    macro_name: &str,
-    no_generics: bool,
-    errors: &mut Errors,
-) {
+pub(crate) fn check_ctx_type(ty: &syn::Type, kind: FnKind, macro_name: &str, no_generics: bool, errors: &mut Errors) {
     let ctx_name = kind.ctx_name();
     match ty {
         syn::Type::Reference(r) if r.mutability.is_none() => match ctx_type_name(&r.elem) {
@@ -135,27 +125,32 @@ pub(crate) fn check_ctx_type(
                     errors.error(ty, "the context reference cannot have an explicit lifetime");
                 }
             }
-            Some(id) if ["QueryCtx", "MutationCtx", "ActionCtx", "WorkflowCtx"].iter().any(|c| id == c) => errors.error(
+            Some(id) if ["QueryCtx", "MutationCtx", "ActionCtx", "WorkflowCtx"].iter().any(|c| id == c) => errors
+                .error(
+                    ty,
+                    format_args!(
+                        "#[{macro_name}] functions take `&{ctx_name}` as their first parameter, found `&{id}`"
+                    ),
+                ),
+            _ => errors.error(
                 ty,
-                format_args!("#[{macro_name}] functions take `&{ctx_name}` as their first parameter, found `&{id}`"),
+                format_args!("#[{macro_name}] functions take the context as their first parameter: `ctx: &{ctx_name}`"),
             ),
-            _ => errors.error(ty, format_args!("#[{macro_name}] functions take the context as their first parameter: `ctx: &{ctx_name}`")),
         },
         _ => match ctx_type_name(ty) {
-            Some(id) if id == ctx_name => {
-                errors.error(ty, format_args!("#[{macro_name}] functions take the context by shared reference: `ctx: &{ctx_name}`"))
-            }
-            _ => errors.error(ty, format_args!("#[{macro_name}] functions take the context as their first parameter: `ctx: &{ctx_name}`")),
+            Some(id) if id == ctx_name => errors.error(
+                ty,
+                format_args!("#[{macro_name}] functions take the context by shared reference: `ctx: &{ctx_name}`"),
+            ),
+            _ => errors.error(
+                ty,
+                format_args!("#[{macro_name}] functions take the context as their first parameter: `ctx: &{ctx_name}`"),
+            ),
         },
     }
 }
 
-pub fn expand_function(
-    kind: FnKind,
-    internal: bool,
-    attr: TokenStream,
-    item: TokenStream,
-) -> syn::Result<TokenStream> {
+pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let macro_name = kind.macro_name(internal);
     let mut errors = Errors::default();
     let mut dev_only = false;
@@ -183,10 +178,7 @@ pub fn expand_function(
     let mut func: syn::ItemFn = match syn::parse2(item) {
         Ok(f) => f,
         Err(e) => {
-            errors.push(syn::Error::new(
-                e.span(),
-                format_args!("#[{macro_name}] can only be used on an `async fn`"),
-            ));
+            errors.push(syn::Error::new(e.span(), format_args!("#[{macro_name}] can only be used on an `async fn`")));
             return Err(errors.finish().unwrap_err());
         }
     };
@@ -195,37 +187,25 @@ pub fn expand_function(
     let name = sig.ident.clone();
 
     if sig.asyncness.is_none() {
-        errors.error_at(
-            sig.fn_token.span,
-            format_args!("#[{macro_name}] functions must be `async fn`"),
-        );
+        errors.error_at(sig.fn_token.span, format_args!("#[{macro_name}] functions must be `async fn`"));
     }
     if let Some(c) = &sig.constness {
-        errors.error(
-            c,
-            format_args!("#[{macro_name}] functions cannot be `const`"),
-        );
+        errors.error(c, format_args!("#[{macro_name}] functions cannot be `const`"));
     }
     if let Some(u) = &sig.unsafety {
-        errors.error(
-            u,
-            format_args!("#[{macro_name}] functions cannot be `unsafe`"),
-        );
+        errors.error(u, format_args!("#[{macro_name}] functions cannot be `unsafe`"));
     }
     if let Some(abi) = &sig.abi {
-        errors.error(
-            abi,
-            format_args!("#[{macro_name}] functions cannot have an ABI"),
-        );
+        errors.error(abi, format_args!("#[{macro_name}] functions cannot have an ABI"));
     }
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
-        errors.error(&sig.generics, format_args!("#[{macro_name}] functions cannot be generic (no type, const or lifetime parameters)"));
+        errors.error(
+            &sig.generics,
+            format_args!("#[{macro_name}] functions cannot be generic (no type, const or lifetime parameters)"),
+        );
     }
     if let Some(v) = &sig.variadic {
-        errors.error(
-            v,
-            format_args!("#[{macro_name}] functions cannot be variadic"),
-        );
+        errors.error(v, format_args!("#[{macro_name}] functions cannot be variadic"));
     }
 
     // --- return type
@@ -233,7 +213,9 @@ pub fn expand_function(
         syn::ReturnType::Default => {
             errors.error_at(
                 sig.paren_token.span.close(),
-                format_args!("#[{macro_name}] functions must declare a return type `Result<T>`; use `Result<()>` for no value"),
+                format_args!(
+                    "#[{macro_name}] functions must declare a return type `Result<T>`; use `Result<()>` for no value"
+                ),
             );
             None
         }
@@ -253,10 +235,7 @@ pub fn expand_function(
     let mut typed = Vec::new();
     for input in &sig.inputs {
         match input {
-            syn::FnArg::Receiver(r) => errors.error(
-                r,
-                format_args!("#[{macro_name}] functions cannot take `self`"),
-            ),
+            syn::FnArg::Receiver(r) => errors.error(r, format_args!("#[{macro_name}] functions cannot take `self`")),
             syn::FnArg::Typed(pt) => typed.push(pt),
         }
     }
@@ -282,43 +261,23 @@ pub fn expand_function(
         let ident = match &*pt.pat {
             syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => pi.ident.clone(),
             other => {
-                errors.error(
-                    other,
-                    "parameter patterns must be plain identifiers (they become the argument names)",
-                );
+                errors.error(other, "parameter patterns must be plain identifiers (they become the argument names)");
                 continue;
             }
         };
         check_owned_type(&pt.ty, "argument", &mut errors);
-        let field_attrs: Vec<_> = pt
-            .attrs
-            .iter()
-            .filter(|a| is_moved_param_attr(a))
-            .cloned()
-            .collect();
-        for a in pt
-            .attrs
-            .iter()
-            .filter(|a| is_cfg(a) || a.path().is_ident("cfg_attr"))
-        {
+        let field_attrs: Vec<_> = pt.attrs.iter().filter(|a| is_moved_param_attr(a)).cloned().collect();
+        for a in pt.attrs.iter().filter(|a| is_cfg(a) || a.path().is_ident("cfg_attr")) {
             errors.error(a, "`#[cfg]` is not supported on function parameters");
         }
         let json = camel_case(&ident.unraw().to_string());
         if let Some(prev) = seen_json.insert(json.clone(), ident.clone()) {
             errors.error(
                 &ident,
-                format_args!(
-                    "parameters `{}` and `{}` both serialize as `{json}`",
-                    prev.unraw(),
-                    ident.unraw()
-                ),
+                format_args!("parameters `{}` and `{}` both serialize as `{json}`", prev.unraw(), ident.unraw()),
             );
         }
-        args.push(Arg {
-            ident,
-            ty: (*pt.ty).clone(),
-            field_attrs,
-        });
+        args.push(Arg { ident, ty: (*pt.ty).clone(), field_attrs });
     }
 
     errors.finish()?;
@@ -343,11 +302,7 @@ pub fn expand_function(
 
     // --- args struct
     let field_defs = args.iter().map(|a| {
-        let Arg {
-            ident,
-            ty,
-            field_attrs,
-        } = a;
+        let Arg { ident, ty, field_attrs } = a;
         // `None` is left out rather than sent as `null` (reading treats a missing `Option` as `None` anyway), so a
         // typed call (`ctx.run_query`, the scheduler) sends the same args as a client that omits the field, and both
         // share one subscription and query cache entry, which compare args as JSON.
@@ -360,11 +315,7 @@ pub fn expand_function(
     let arg_idents: Vec<_> = args.iter().map(|a| &a.ident).collect();
     let arg_types: Vec<_> = args.iter().map(|a| &a.ty).collect();
     let tuple_var = syn::Ident::new("__ferrix_tuple", Span::mixed_site());
-    let from_param = if args.is_empty() {
-        quote!(_)
-    } else {
-        quote!(#tuple_var)
-    };
+    let from_param = if args.is_empty() { quote!(_) } else { quote!(#tuple_var) };
     let from_fields = args.iter().enumerate().map(|(i, a)| {
         let ident = &a.ident;
         let index = syn::Index::from(i);
@@ -387,11 +338,7 @@ pub fn expand_function(
             impl ::ferrix::SchedulableFunction for #name {}
         },
     };
-    let visibility = if internal {
-        quote!(Internal)
-    } else {
-        quote!(Public)
-    };
+    let visibility = if internal { quote!(Internal) } else { quote!(Public) };
     // Spanned on the fn name so that e.g. "future cannot be sent between threads safely" points at the function.
     let body = quote_spanned! {name.span()=>
         |#ctx_var, #args_var| ::std::boxed::Box::pin(async move {

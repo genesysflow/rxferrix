@@ -17,11 +17,13 @@ use serde_json::{Map, Value};
 use tokio::sync::{Semaphore, watch};
 
 use super::columns::{TablePlan, copied, ident, literal};
-use super::{OlapColumn, OlapExport, OlapExportFormat, OlapOptions, OlapResult, OlapStatus, OlapTableStatus, OlapValue};
+use super::{
+    OlapColumn, OlapExport, OlapExportFormat, OlapOptions, OlapResult, OlapStatus, OlapTableStatus, OlapValue,
+};
+use crate::UserError;
 use crate::db::journal::{self, Consumer};
 use crate::db::storage;
 use crate::runtime::{App, WeakApp};
-use crate::UserError;
 
 const STAGE: &str = "_ferrix_stage";
 /// Journal rows read per batch, and their bytes.
@@ -147,9 +149,8 @@ impl Engine {
         plans.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         let snapshot = app.db().snapshot().await?;
         let (sqlite_id, sqlite_ts) = snapshot.with_conn(|c| {
-            let id: Option<String> = c
-                .query_row("SELECT v FROM _meta WHERE k = ?1", [journal::META_OLAP_ID], |r| r.get(0))
-                .ok();
+            let id: Option<String> =
+                c.query_row("SELECT v FROM _meta WHERE k = ?1", [journal::META_OLAP_ID], |r| r.get(0)).ok();
             Ok((id, storage::read_meta_u64(c, storage::META_TS)?))
         })?;
         drop(snapshot);
@@ -281,7 +282,8 @@ impl Engine {
     async fn step(&self, app: &App) -> crate::Result<bool> {
         let (all, some) = {
             let st = self.state();
-            let some: Vec<usize> = st.tables.iter().enumerate().filter(|(_, t)| t.rebuild.is_some()).map(|(i, _)| i).collect();
+            let some: Vec<usize> =
+                st.tables.iter().enumerate().filter(|(_, t)| t.rebuild.is_some()).map(|(i, _)| i).collect();
             (st.rebuild_all.clone(), some)
         };
         if let Some(why) = all {
@@ -378,11 +380,16 @@ impl Engine {
         }
         let (applied_by_table, plans): (HashMap<String, u64>, Vec<TablePlan>) = {
             let st = self.state();
-            (st.tables.iter().map(|t| (t.plan.name.clone(), t.applied)).collect(), st.tables.iter().map(|t| t.plan.clone()).collect())
+            (
+                st.tables.iter().map(|t| (t.plan.name.clone(), t.applied)).collect(),
+                st.tables.iter().map(|t| t.plan.clone()).collect(),
+            )
         };
         // Reading and parsing the journal is CPU work: off the async threads, where the writers' tasks run.
         let max_lag = self.options.max_lag_bytes;
-        let batch = tokio::task::spawn_blocking(move || read_batch(&snapshot, cursor, check_lag, max_lag, &applied_by_table)).await??;
+        let batch =
+            tokio::task::spawn_blocking(move || read_batch(&snapshot, cursor, check_lag, max_lag, &applied_by_table))
+                .await??;
         let (latest_state, last) = match batch {
             Batch::Rebuild(why) => {
                 self.request_rebuild(&why);
@@ -463,7 +470,10 @@ impl Engine {
         path: PathBuf,
     ) -> crate::Result<OlapExport> {
         let (sql, max_rows) = (sql.to_string(), self.options.max_export_rows);
-        self.sandboxed(0, self.options.export_timeout, move |conn| run_export(conn, &sql, params, format, &path, max_rows)).await
+        self.sandboxed(0, self.options.export_timeout, move |conn| {
+            run_export(conn, &sql, params, format, &path, max_rows)
+        })
+        .await
     }
 
     /// Run `f` on a connection of its own once the copy has applied commit `at_least` and is consistent, with at most
@@ -480,7 +490,10 @@ impl Engine {
             if !matches!(reached, Ok(Ok(_))) {
                 return Err(UserError::new(
                     "olap_timeout",
-                    format!("The analytics copy didn't reach commit {at_least} within {:?}", self.options.query_timeout),
+                    format!(
+                        "The analytics copy didn't reach commit {at_least} within {:?}",
+                        self.options.query_timeout
+                    ),
                 )
                 .into());
             }
@@ -519,11 +532,21 @@ impl Engine {
                 Phase::Ready => ("ready", None),
                 Phase::Failed(e) => ("failed", Some(e.clone())),
             };
-            (state.to_string(), detail, st.cursor, st.rows_applied, st.rebuilds, st.tables.iter().map(|t| t.plan.clone()).collect::<Vec<_>>())
+            (
+                state.to_string(),
+                detail,
+                st.cursor,
+                st.rows_applied,
+                st.rebuilds,
+                st.tables.iter().map(|t| t.plan.clone()).collect::<Vec<_>>(),
+            )
         };
         let applied_time = match app.db().snapshot().await {
             Ok(s) => s
-                .with_conn(|c| Ok(c.query_row("SELECT time FROM _journal WHERE ts = ?1", [cursor as i64], |r| r.get::<_, f64>(0)).ok()))
+                .with_conn(|c| {
+                    Ok(c.query_row("SELECT time FROM _journal WHERE ts = ?1", [cursor as i64], |r| r.get::<_, f64>(0))
+                        .ok())
+                })
                 .ok()
                 .flatten(),
             Err(_) => None,
@@ -539,7 +562,11 @@ impl Engine {
                         rows: conn
                             .query_row(&format!("SELECT count(*) FROM {}", ident(&p.name)), [], |r| r.get::<_, i64>(0))
                             .unwrap_or(0) as u64,
-                        columns: p.columns.iter().map(|c| OlapColumn { name: c.name.clone(), type_name: c.sql_type.clone() }).collect(),
+                        columns: p
+                            .columns
+                            .iter()
+                            .map(|c| OlapColumn { name: c.name.clone(), type_name: c.sql_type.clone() })
+                            .collect(),
                     })
                     .collect()
             })
@@ -620,10 +647,17 @@ fn read_batch(
 ) -> crate::Result<Batch> {
     if check_lag {
         let waiting: i64 = snapshot.with_conn(|c| {
-            Ok(c.query_row("SELECT COALESCE(SUM(octet_length(changes)), 0) FROM _journal WHERE ts > ?1", [cursor as i64], |r| r.get(0))?)
+            Ok(c.query_row(
+                "SELECT COALESCE(SUM(octet_length(changes)), 0) FROM _journal WHERE ts > ?1",
+                [cursor as i64],
+                |r| r.get(0),
+            )?)
         })?;
         if waiting as u64 > max_lag {
-            return Ok(Batch::Rebuild(format!("it fell behind by {} MiB of changes (--olap-max-lag)", waiting as u64 >> 20)));
+            return Ok(Batch::Rebuild(format!(
+                "it fell behind by {} MiB of changes (--olap-max-lag)",
+                waiting as u64 >> 20
+            )));
         }
     }
     let entries = snapshot.with_conn(|c| journal::read_after(c, cursor, BATCH_ENTRIES, BATCH_BYTES))?;
@@ -653,7 +687,10 @@ fn read_batch(
 }
 
 /// Stage `rows` (`(table, id, ts, doc, extra)`) in `_ferrix_stage`.
-fn stage(conn: &Connection, rows: impl IntoIterator<Item = (String, String, u64, Option<String>, Option<String>)>) -> anyhow::Result<()> {
+fn stage(
+    conn: &Connection,
+    rows: impl IntoIterator<Item = (String, String, u64, Option<String>, Option<String>)>,
+) -> anyhow::Result<()> {
     let mut appender = conn.appender(STAGE)?;
     for (tbl, id, ts, doc, extra) in rows {
         appender.append_row(params![tbl, id, ts as i64, doc, extra])?;
@@ -672,7 +709,11 @@ fn rebuild_table(
 ) -> anyhow::Result<u64> {
     let conn = writer.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = format!("{}__ferrix_rebuild", plan.name);
-    conn.execute_batch(&format!("DROP TABLE IF EXISTS {}; {}; DELETE FROM {STAGE};", ident(&tmp), plan.create_sql(&tmp)))?;
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {}; {}; DELETE FROM {STAGE};",
+        ident(&tmp),
+        plan.create_sql(&tmp)
+    ))?;
     let insert = plan.insert_sql(&tmp, STAGE, "doc IS NOT NULL");
     let flush = |conn: &Connection| -> anyhow::Result<()> {
         conn.execute_batch(&format!("{insert}; DELETE FROM {STAGE};"))?;
@@ -744,7 +785,10 @@ fn apply_batch(
                 insert = plan.insert_sql(name, STAGE, &format!("{filter} AND doc IS NOT NULL")),
             ))?;
         }
-        conn.execute("UPDATE _ferrix_tables SET applied_ts = ? WHERE applied_ts < ?", params![last as i64, last as i64])?;
+        conn.execute(
+            "UPDATE _ferrix_tables SET applied_ts = ? WHERE applied_ts < ?",
+            params![last as i64, last as i64],
+        )?;
         set_meta(&conn, "applied_ts", &last.to_string())?;
         conn.execute_batch(&format!("DELETE FROM {STAGE}; COMMIT;"))?;
         Ok(())
@@ -757,13 +801,13 @@ fn apply_batch(
 
 /// Accept `sql` only if it is exactly one SELECT (DuckDB's own parser: `json_serialize_sql` serializes SELECTs only).
 fn check_select(conn: &Connection, sql: &str) -> crate::Result<()> {
-    let out: String = conn
-        .query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0))
-        .map_err(query_failed)?;
+    let out: String =
+        conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0)).map_err(query_failed)?;
     let parsed: Value = serde_json::from_str(&out).map_err(query_failed)?;
     let statements = parsed["statements"].as_array().map_or(0, Vec::len);
     if parsed["error"] == Value::Bool(true) || statements != 1 {
-        let detail = parsed["error_message"].as_str().filter(|m| !m.is_empty()).map(|m| format!(" ({m})")).unwrap_or_default();
+        let detail =
+            parsed["error_message"].as_str().filter(|m| !m.is_empty()).map(|m| format!(" ({m})")).unwrap_or_default();
         return Err(query_failed(format!(
             "Analytics queries run exactly one SELECT statement (WITH ... SELECT included){detail}"
         )));
@@ -779,7 +823,9 @@ fn type_name(t: &duckdb::core::LogicalTypeHandle) -> String {
 /// commit the copy reflects.
 fn consistent_as_of(conn: &Connection) -> crate::Result<u64> {
     let (lo, hi): (Option<i64>, Option<i64>) =
-        conn.query_row("SELECT min(applied_ts), max(applied_ts) FROM _ferrix_tables", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        conn.query_row("SELECT min(applied_ts), max(applied_ts) FROM _ferrix_tables", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
     if lo != hi {
         return Err(unavailable("a table is being rebuilt"));
     }
@@ -794,7 +840,11 @@ fn in_read_transaction<T>(conn: &Connection, sql: &str, f: impl FnOnce(u64) -> c
     let _ = conn.execute_batch("ROLLBACK");
     result.map_err(|e| {
         let interrupted = e.chain().any(|c| c.to_string().contains("Interrupt"));
-        if interrupted { UserError::new("olap_timeout", "The analytics query was interrupted (it ran too long)").into() } else { e }
+        if interrupted {
+            UserError::new("olap_timeout", "The analytics query was interrupted (it ran too long)").into()
+        } else {
+            e
+        }
     })
 }
 
@@ -835,7 +885,8 @@ fn run_export(
                     crate::ops::export::write_csv_record(&mut out, fields)?;
                 }
                 out.flush()?;
-                let columns = names.into_iter().zip(types).map(|(name, type_name)| OlapColumn { name, type_name }).collect();
+                let columns =
+                    names.into_iter().zip(types).map(|(name, type_name)| OlapColumn { name, type_name }).collect();
                 Ok(OlapExport { rows: count, columns, as_of_ts: as_of })
             }
             OlapExportFormat::Parquet => {
@@ -849,7 +900,8 @@ fn run_export(
                 let props = parquet::file::properties::WriterProperties::builder()
                     .set_compression(parquet::basic::Compression::ZSTD(Default::default()))
                     .build();
-                let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).map_err(anyhow::Error::from)?;
+                let mut writer =
+                    parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).map_err(anyhow::Error::from)?;
                 // The iterator panics when DuckDB fails to fetch a chunk (an interrupt, for one).
                 let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> crate::Result<u64> {
                     let mut count = 0u64;

@@ -48,11 +48,7 @@ impl Mailer for SmtpMailer {
     fn send(&self, email: Email) -> BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
             let to: Mailbox = email.to.parse().map_err(|e| anyhow::anyhow!("invalid recipient: {e}"))?;
-            let message = Message::builder()
-                .from(self.from.clone())
-                .to(to)
-                .subject(email.subject)
-                .body(email.body)?;
+            let message = Message::builder().from(self.from.clone()).to(to).subject(email.subject).body(email.body)?;
             self.transport.send(message).await?;
             Ok(())
         })

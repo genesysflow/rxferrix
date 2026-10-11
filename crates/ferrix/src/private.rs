@@ -86,10 +86,8 @@ impl WorkflowDef {
 pub static MIGRATIONS: [MigrationDef];
 
 /// Runs a migration on one document (the stored JSON, system fields included), inside a batch's transaction.
-pub type MigrationHandler = for<'a> fn(
-    &'a MutationCtx,
-    serde_json::Value,
-) -> BoxFuture<'a, crate::Result<crate::migrations::DocChange>>;
+pub type MigrationHandler =
+    for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, crate::Result<crate::migrations::DocChange>>;
 
 /// A `#[migration]` (docs/CONTRACT.md §3.3).
 pub struct MigrationDef {
@@ -131,9 +129,8 @@ impl std::fmt::Debug for MigrationDef {
 
 /// Deserialize a document for a `#[migration]` whose parameter is not `serde_json::Value` (e.g. `Doc<OldTodo>`).
 pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> crate::Result<T> {
-    serde_json::from_value(doc).map_err(|e| {
-        anyhow::anyhow!("the document does not deserialize as `{}`: {e}", std::any::type_name::<T>())
-    })
+    serde_json::from_value(doc)
+        .map_err(|e| anyhow::anyhow!("the document does not deserialize as `{}`: {e}", std::any::type_name::<T>()))
 }
 
 /// Turn a `#[migration]`'s return value into the change to apply.

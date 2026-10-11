@@ -353,7 +353,8 @@ unsafe extern "C" fn on_word(
 pub(super) unsafe fn register(api: *mut ffi::fts5_api) -> c_int {
     // SAFETY: `api` is valid (caller).
     let Some(create) = (unsafe { (*api).xCreateTokenizer }) else { return ffi::SQLITE_ERROR };
-    let mut methods = ffi::fts5_tokenizer { xCreate: Some(x_create), xDelete: Some(x_delete), xTokenize: Some(x_tokenize) };
+    let mut methods =
+        ffi::fts5_tokenizer { xCreate: Some(x_create), xDelete: Some(x_delete), xTokenize: Some(x_tokenize) };
     let name = c"ferrix_snowball";
     debug_assert_eq!(name.to_str(), Ok(TOKENIZER));
     // SAFETY: FTS5 copies `methods`; the user data is the `fts5_api` itself, which lives as long as the connection
@@ -388,7 +389,12 @@ mod tests {
         ))
         .unwrap();
         conn.execute("INSERT INTO f (t) VALUES (?1)", [text]).unwrap();
-        conn.prepare("SELECT term FROM v ORDER BY term").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+        conn.prepare("SELECT term FROM v ORDER BY term")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     #[test]
@@ -401,7 +407,10 @@ mod tests {
         // Unknown languages and arguments are errors when the table is created.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         for bad in ["klingon", "french remove_diacritics 9", "french extra"] {
-            assert!(conn.execute_batch(&format!("CREATE VIRTUAL TABLE b USING fts5(t, tokenize = '{TOKENIZER} {bad}')")).is_err());
+            assert!(
+                conn.execute_batch(&format!("CREATE VIRTUAL TABLE b USING fts5(t, tokenize = '{TOKENIZER} {bad}')"))
+                    .is_err()
+            );
         }
     }
 
@@ -411,7 +420,11 @@ mod tests {
         // "orașele" stems to "oraş" (folded "oras"), its unaccented spelling "orasele" to "ora".
         assert_eq!(vocabulary("romanian remove_diacritics 2", "orașele"), ["ora", "oras"]);
         assert_eq!(vocabulary("french remove_diacritics 2", "déjà"), ["dej", "deja"]);
-        assert_eq!(vocabulary("romanian remove_diacritics 0", "orașele"), ["oraş"], "no synonyms when diacritics are kept");
+        assert_eq!(
+            vocabulary("romanian remove_diacritics 0", "orașele"),
+            ["oraş"],
+            "no synonyms when diacritics are kept"
+        );
     }
 
     /// Colocated synonyms neither add occurrences nor length: `ferrix_score` is the same as for plain tokens.

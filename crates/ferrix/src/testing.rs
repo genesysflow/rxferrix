@@ -27,7 +27,12 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new() -> crate::Result<TestApp> {
-        Self::with_options(AppOptions { dev: true, determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK), ..Default::default() }).await
+        Self::with_options(AppOptions {
+            dev: true,
+            determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK),
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn with_options(options: AppOptions) -> crate::Result<TestApp> {
@@ -85,11 +90,21 @@ impl TestApp {
 
     /// A dev-mode app with this auth configuration.
     pub async fn with_auth(auth: crate::auth::AuthConfig) -> crate::Result<TestApp> {
-        Self::with_options(AppOptions { dev: true, auth, determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK), ..Default::default() }).await
+        Self::with_options(AppOptions {
+            dev: true,
+            auth,
+            determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK),
+            ..Default::default()
+        })
+        .await
     }
 
     /// Run a query as `identity` (e.g. `Identity::user(id, None)`).
-    pub async fn query_as<F: QueryFunction>(&self, identity: &Identity, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+    pub async fn query_as<F: QueryFunction>(
+        &self,
+        identity: &Identity,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<F::Output> {
         self.app.typed_query::<F>(args.into(), identity).await
     }
 
@@ -103,14 +118,22 @@ impl TestApp {
     }
 
     /// Run an action as `identity`.
-    pub async fn action_as<F: ActionFunction>(&self, identity: &Identity, args: impl Into<F::Args>) -> crate::Result<F::Output> {
+    pub async fn action_as<F: ActionFunction>(
+        &self,
+        identity: &Identity,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<F::Output> {
         self.app.typed_action::<F>(args.into(), identity).await
     }
 
     /// Create a user in `_users` (email verified), with a password credential when `password` is given (so the
     /// user can also sign in with it), without going through sign-up: no auth method needs to be configured and no
     /// email is sent. Errors if the email is taken. Call functions as the user with [`TestApp::as_user`].
-    pub async fn create_user(&self, email: &str, password: Option<&str>) -> crate::Result<crate::Id<crate::auth::User>> {
+    pub async fn create_user(
+        &self,
+        email: &str,
+        password: Option<&str>,
+    ) -> crate::Result<crate::Id<crate::auth::User>> {
         use crate::auth::store;
         let email = store::normalize_email(email)?;
         let user = match password {
@@ -122,8 +145,11 @@ impl TestApp {
             }
             None => {
                 let lookup = email.clone();
-                if store::read(&self.app, |db| async move { store::user_by_email(&db, &lookup).await }).await?.is_some() {
-                    return Err(crate::UserError::new("email_in_use", "An account with this email already exists").into());
+                if store::read(&self.app, |db| async move { store::user_by_email(&db, &lookup).await }).await?.is_some()
+                {
+                    return Err(
+                        crate::UserError::new("email_in_use", "An account with this email already exists").into()
+                    );
                 }
                 store::passwordless_user(&self.app, email, true).await??
             }
@@ -154,7 +180,10 @@ impl TestApp {
 
     /// Run a query (internal ones too) and return the whole run: result, read set, ts and log lines. With
     /// `read_set.overlaps(commit)` a test can check which writes invalidate it.
-    pub async fn query_run<F: QueryFunction>(&self, args: impl Into<F::Args>) -> crate::Result<crate::runtime::QueryRun> {
+    pub async fn query_run<F: QueryFunction>(
+        &self,
+        args: impl Into<F::Args>,
+    ) -> crate::Result<crate::runtime::QueryRun> {
         let args = serde_json::to_value(args.into())?;
         Ok(self.app.call_query(&F::path(), args, &Identity::default(), true).await)
     }

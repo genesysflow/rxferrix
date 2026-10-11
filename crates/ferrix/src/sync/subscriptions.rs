@@ -258,16 +258,37 @@ impl Mailbox {
 /// A request from a connection's worker. Versions have already been validated by the worker.
 #[derive(Debug)]
 pub enum Command {
-    Connect { conn: ConnId, mailbox: Arc<Mailbox> },
+    Connect {
+        conn: ConnId,
+        mailbox: Arc<Mailbox>,
+    },
     /// Apply these modifications (in order) and answer with an update at `query_set`.
-    Modify { conn: ConnId, query_set: u64, modifications: Vec<QuerySetModification> },
+    Modify {
+        conn: ConnId,
+        query_set: u64,
+        modifications: Vec<QuerySetModification>,
+    },
     /// The connection's identity is now `identity`, at identity version `version`.
-    Authenticate { conn: ConnId, version: u64, identity: Identity },
+    Authenticate {
+        conn: ConnId,
+        version: u64,
+        identity: Identity,
+    },
     /// Read-your-writes: send an update at a ts >= `ts` (even an empty one) as soon as possible.
-    Cover { conn: ConnId, ts: u64 },
-    Disconnect { conn: ConnId },
+    Cover {
+        conn: ConnId,
+        ts: u64,
+    },
+    Disconnect {
+        conn: ConnId,
+    },
     /// A run from outside the manager (an HTTP query, `ctx.run_query`) to keep as an idle query.
-    Adopt { path: Arc<str>, args: Value, identity: Identity, run: Box<Adoptee> },
+    Adopt {
+        path: Arc<str>,
+        args: Value,
+        identity: Identity,
+        run: Box<Adoptee>,
+    },
 }
 
 impl Command {
@@ -944,7 +965,9 @@ impl Manager {
                 conn.query_set = query_set;
                 for m in modifications {
                     match m {
-                        QuerySetModification::Add { query_id, udf_path, args } => self.subscribe(c, query_id, udf_path, args),
+                        QuerySetModification::Add { query_id, udf_path, args } => {
+                            self.subscribe(c, query_id, udf_path, args)
+                        }
                         QuerySetModification::Remove { query_id } => self.unsubscribe(c, query_id),
                     }
                 }
@@ -1199,7 +1222,8 @@ impl Manager {
         if let Some(id) = found {
             return id;
         }
-        let key = QueryKey { path: path.clone(), args: args_key.clone(), scope: Scope::of(AuthDeps::Session, identity) };
+        let key =
+            QueryKey { path: path.clone(), args: args_key.clone(), scope: Scope::of(AuthDeps::Session, identity) };
         let id = self.create(key, args, identity.clone());
         self.launch([id]);
         id
@@ -1518,7 +1542,8 @@ impl Manager {
     fn spawn_runner(&mut self, app: &App, snapshot: Arc<Snapshot>, lane: usize) {
         debug_assert_eq!(snapshot.ts, self.ts);
         self.runners[lane] += 1;
-        let (generation, queue, tx, app) = (self.generation, self.queue.clone(), self.events_tx.clone(), app.downgrade());
+        let (generation, queue, tx, app) =
+            (self.generation, self.queue.clone(), self.events_tx.clone(), app.downgrade());
         tokio::spawn(async move {
             let mut guard = RunnerGuard { tx: tx.clone(), generation, lane, job: None };
             loop {
@@ -1724,7 +1749,11 @@ impl Manager {
         };
         debug_assert!(q.versions.back().is_none_or(|v| v.ts < run.ts), "versions in ts order");
         let changed = q.versions.back().is_none_or(|v| v.result.hash != hash);
-        q.versions.push_back(Version { ts: run.ts, through, result: Arc::new(CachedResult { hash, outcome, log_lines }) });
+        q.versions.push_back(Version {
+            ts: run.ts,
+            through,
+            result: Arc::new(CachedResult { hash, outcome, log_lines }),
+        });
         q.deps = run.auth_deps;
         q.reads_clock = run.read_set.reads_clock();
         q.in_flight = None;
@@ -1853,7 +1882,11 @@ impl Manager {
             }
             for (c, qid) in &q.subscribers {
                 assert_eq!(self.conns[c].subs[qid].shared, *id, "subscriber points elsewhere");
-                assert_eq!(q.key.scope, Scope::of(q.key.scope.deps(), &self.conns[c].identity), "subscriber/key mismatch");
+                assert_eq!(
+                    q.key.scope,
+                    Scope::of(q.key.scope.deps(), &self.conns[c].identity),
+                    "subscriber/key mismatch"
+                );
             }
             in_flight += usize::from(q.in_flight.is_some());
             ranges += q.ranges.len();
@@ -1883,7 +1916,15 @@ mod tests {
         let changed = changed
             .iter()
             .map(|(q, v)| {
-                (*q, StateModification::QueryUpdated { query_id: *q, value: json!(v).into(), base: None, log_lines: vec![] })
+                (
+                    *q,
+                    StateModification::QueryUpdated {
+                        query_id: *q,
+                        value: json!(v).into(),
+                        base: None,
+                        log_lines: vec![],
+                    },
+                )
             })
             .collect();
         Update { query_set, identity: 0, ts, removed, changed }

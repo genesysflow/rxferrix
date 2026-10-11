@@ -75,19 +75,40 @@ async fn find(t: &TestApp, index: &str, lang: &str, text: &str) -> Vec<String> {
 async fn seed(app: &App) {
     app.mutation::<stem::add>((
         "ro".to_string(),
-        s(&["Orașul are case noi", "Un oraș mic", "Caselor le trebuie acoperiș", "Cărțile copilului", "O carte veche", "Țările vecine"]),
+        s(&[
+            "Orașul are case noi",
+            "Un oraș mic",
+            "Caselor le trebuie acoperiș",
+            "Cărțile copilului",
+            "O carte veche",
+            "Țările vecine",
+        ]),
     ))
     .await
     .unwrap();
     app.mutation::<stem::add>((
         "fr".to_string(),
-        s(&["Elle chantait souvent", "Nous allons chanter", "Les chevaux courent", "Un cheval blanc", "Les écoles ferment", "Déjà vu"]),
+        s(&[
+            "Elle chantait souvent",
+            "Nous allons chanter",
+            "Les chevaux courent",
+            "Un cheval blanc",
+            "Les écoles ferment",
+            "Déjà vu",
+        ]),
     ))
     .await
     .unwrap();
     app.mutation::<stem::add>((
         "de".to_string(),
-        s(&["Die Häuser sind alt", "Ein kleines Haus", "Die Kinder spielen", "Das Kind lacht", "Breite Straßen", "Die schönsten Bücher"]),
+        s(&[
+            "Die Häuser sind alt",
+            "Ein kleines Haus",
+            "Die Kinder spielen",
+            "Das Kind lacht",
+            "Breite Straßen",
+            "Die schönsten Bücher",
+        ]),
     ))
     .await
     .unwrap();
@@ -174,10 +195,15 @@ async fn changing_the_language_rebuilds_the_index() {
         seed(&app).await;
     }
     let original = StemDoc::table_def();
-    let info = |db: &Database| db.catalog().table("stem_docs").unwrap().search_indexes.iter().find(|i| i.name == "fr").unwrap().clone();
+    let info = |db: &Database| {
+        db.catalog().table("stem_docs").unwrap().search_indexes.iter().find(|i| i.name == "fr").unwrap().clone()
+    };
     let ddl = |n: u32| {
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-        conn.query_row(&format!("SELECT sql FROM sqlite_master WHERE name = '_search_{n}'"), [], |r| r.get::<_, String>(0)).unwrap()
+        conn.query_row(&format!("SELECT sql FROM sqlite_master WHERE name = '_search_{n}'"), [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&original), 1).unwrap();
     let id = info(&db).id;
@@ -196,14 +222,17 @@ async fn changing_the_language_rebuilds_the_index() {
     // Searched with German stems now: "Häusern" finds "Häuser" through the index once named `fr`.
     let found: i64 = rusqlite::Connection::open(dir.path().join("data.db"))
         .unwrap()
-        .query_row(&format!("SELECT count(*) FROM _search_{n} WHERE _search_{n} MATCH '\"häusern\"'"), [], |r| r.get(0))
+        .query_row(&format!("SELECT count(*) FROM _search_{n} WHERE _search_{n} MATCH '\"häusern\"'"), [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(found, 2, "Häuser and Haus");
     drop(db);
 
     // Keeping diacritics is a change too.
     let mut keep = original.clone();
-    keep.search_indexes.iter_mut().find(|s| s.name == "fr").unwrap().tokenizer = Tokenizer::snowball("french").keep_diacritics();
+    keep.search_indexes.iter_mut().find(|s| s.name == "fr").unwrap().tokenizer =
+        Tokenizer::snowball("french").keep_diacritics();
     let db = Database::open(dir.path(), std::slice::from_ref(&keep), 1).unwrap();
     assert!(ddl(n).contains("ferrix_snowball french remove_diacritics 0"), "{}", ddl(n));
     assert_eq!(db.verify_indexes().await.unwrap(), Vec::<String>::new());
@@ -243,10 +272,13 @@ async fn every_connection_has_the_tokenizer() {
     }
     // A fresh read-only connection, opened like the readers.
     let conn = ferrix::db::storage::open_reader(&t.dir().join("data.db")).unwrap();
-    let id = t.app().db().catalog().table("stem_docs").unwrap().search_indexes.iter().find(|i| i.name == "ro").unwrap().id;
+    let id =
+        t.app().db().catalog().table("stem_docs").unwrap().search_indexes.iter().find(|i| i.name == "ro").unwrap().id;
     let n = id - ferrix::db::search::SPECIAL_INDEX_BASE;
     let found: i64 = conn
-        .query_row(&format!("SELECT count(*) FROM _search_{n} WHERE _search_{n} MATCH '\"orașelor\"'"), [], |r| r.get(0))
+        .query_row(&format!("SELECT count(*) FROM _search_{n} WHERE _search_{n} MATCH '\"orașelor\"'"), [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(found, 2);
     // Inside a mutation (the writer connection), too.

@@ -381,7 +381,15 @@ mod tests {
         // Bias towards the interesting bytes: NUL (escaped), 0x7F, and multi-byte chars whose UTF-8 contains 0xFF-ish
         // high bytes.
         prop::collection::vec(
-            prop_oneof![Just('\0'), Just('a'), Just('b'), Just('\u{7f}'), Just('\u{ff}'), Just('\u{10ffff}'), any::<char>()],
+            prop_oneof![
+                Just('\0'),
+                Just('a'),
+                Just('b'),
+                Just('\u{7f}'),
+                Just('\u{ff}'),
+                Just('\u{10ffff}'),
+                any::<char>()
+            ],
             0..6,
         )
         .prop_map(|cs| cs.into_iter().collect())

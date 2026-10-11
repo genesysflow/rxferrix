@@ -158,7 +158,12 @@ static STAGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Stage `archive` for a restore into the data directory `dir` at the next start (see the module docs). Fails with
 /// the user error `restore_pending` if one is staged already, or `invalid_backup` with the reason if the archive
 /// doesn't pass the checks (nothing is changed then).
-pub async fn stage(dir: &Path, archive: &Path, source: &str, staged_by: Option<String>) -> crate::Result<PendingRestore> {
+pub async fn stage(
+    dir: &Path,
+    archive: &Path,
+    source: &str,
+    staged_by: Option<String>,
+) -> crate::Result<PendingRestore> {
     let archive = archive.to_path_buf();
     stage_with(dir, source, staged_by, |work| async move {
         let manifest = backup::prepare(&archive, &work, false)
@@ -195,7 +200,12 @@ pub async fn stage_point_in_time(
 }
 
 /// Stage what `prepare` puts into the (empty) staging directory it is given, with its manifest.
-async fn stage_with<F, Fut>(dir: &Path, source: &str, staged_by: Option<String>, prepare: F) -> crate::Result<PendingRestore>
+async fn stage_with<F, Fut>(
+    dir: &Path,
+    source: &str,
+    staged_by: Option<String>,
+    prepare: F,
+) -> crate::Result<PendingRestore>
 where
     F: FnOnce(PathBuf) -> Fut,
     Fut: std::future::Future<Output = crate::Result<(Manifest, Option<super::replicate::PointInTimeInfo>)>>,
@@ -307,7 +317,11 @@ pub fn apply_pending(dir: &Path, storage_dir: Option<PathBuf>) -> crate::Result<
             anyhow::bail!("the marker lists no staged files");
         }
         for expected in &marker.staged_files {
-            let at = if staging.join(&expected.path).exists() { staging.join(&expected.path) } else { dir.join(&expected.path) };
+            let at = if staging.join(&expected.path).exists() {
+                staging.join(&expected.path)
+            } else {
+                dir.join(&expected.path)
+            };
             let found = sha256_file(&at)?;
             if found.bytes != expected.bytes || found.sha256 != expected.sha256 {
                 anyhow::bail!("{} changed since it was staged", at.display());
@@ -320,7 +334,10 @@ pub fn apply_pending(dir: &Path, storage_dir: Option<PathBuf>) -> crate::Result<
         Ok(m) => m,
         Err(e) => {
             let message = format!("{e:#}");
-            tracing::error!("restore: not applying the staged restore of {}: {message}; starting on the current data", marker.source);
+            tracing::error!(
+                "restore: not applying the staged restore of {}: {message}; starting on the current data",
+                marker.source
+            );
             marker.error = Some(message);
             write_marker(dir, &marker)?;
             return Ok(None);
@@ -355,7 +372,10 @@ pub struct RestartHandle {
 
 impl std::fmt::Debug for RestartHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RestartHandle").field("exit_code", &self.exit_code).field("requested", &self.is_requested()).finish()
+        f.debug_struct("RestartHandle")
+            .field("exit_code", &self.exit_code)
+            .field("requested", &self.is_requested())
+            .finish()
     }
 }
 

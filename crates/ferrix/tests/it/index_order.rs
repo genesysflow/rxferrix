@@ -43,8 +43,12 @@ pub mod posts {
             (Some(kind), Some(t)) => q.with_index(Post::by_channel_kind, |r| {
                 r.eq(Post::channel, channel).eq(Post::kind, kind).gt(Post::_creation_time, t)
             }),
-            (Some(kind), None) => q.with_index(Post::by_channel_kind, |r| r.eq(Post::channel, channel).eq(Post::kind, kind)),
-            (None, Some(t)) => q.with_index(Post::by_channel, |r| r.eq(Post::channel, channel).gt(Post::_creation_time, t)),
+            (Some(kind), None) => {
+                q.with_index(Post::by_channel_kind, |r| r.eq(Post::channel, channel).eq(Post::kind, kind))
+            }
+            (None, Some(t)) => {
+                q.with_index(Post::by_channel, |r| r.eq(Post::channel, channel).gt(Post::_creation_time, t))
+            }
             (None, None) => q.with_index(Post::by_channel, |r| r.eq(Post::channel, channel)),
         };
         Ok(q.order(order).collect().await?.into_iter().map(|d| d.value.body).collect())
@@ -53,7 +57,13 @@ pub mod posts {
     /// A range on `_creationTime` that skips a declared field: refused.
     #[query]
     pub async fn skipping(ctx: &QueryCtx, t: f64) -> Result<usize> {
-        Ok(ctx.db.query::<Post>().with_index(Post::by_channel, |r| r.gt(Post::_creation_time, t)).collect().await?.len())
+        Ok(ctx
+            .db
+            .query::<Post>()
+            .with_index(Post::by_channel, |r| r.gt(Post::_creation_time, t))
+            .collect()
+            .await?
+            .len())
     }
 
     /// One page of a channel's posts.
@@ -123,8 +133,11 @@ async fn equal_fields_are_in_creation_order_both_ways() {
     assert_eq!(bodies_of(&t, None, None, true).await, newest_first);
 
     // Two declared fields: still creation order within them.
-    let y: Vec<String> =
-        a.iter().filter(|b| b.starts_with("batch") || b[1..].parse::<usize>().is_ok_and(|i| i % 4 == 2)).cloned().collect();
+    let y: Vec<String> = a
+        .iter()
+        .filter(|b| b.starts_with("batch") || b[1..].parse::<usize>().is_ok_and(|i| i % 4 == 2))
+        .cloned()
+        .collect();
     assert_eq!(bodies_of(&t, Some("y"), None, false).await, y);
     let mut y_desc = y.clone();
     y_desc.reverse();
@@ -202,8 +215,10 @@ async fn indexes_written_with_the_v2_layout_are_rebuilt_on_open() {
     // Rewrite the user indexes as v2 wrote them: the declared fields, then the id (no `_creationTime`).
     let conn = rusqlite::Connection::open(t.dir().join("data.db")).unwrap();
     let indexes: Vec<(u32, Vec<String>)> = conn
-        .prepare("SELECT i.index_id, i.fields FROM _indexes i JOIN _tables t ON t.table_number = i.table_number \
-             WHERE t.name = 'posts' AND i.name IN ('by_channel', 'by_channel_kind')")
+        .prepare(
+            "SELECT i.index_id, i.fields FROM _indexes i JOIN _tables t ON t.table_number = i.table_number \
+             WHERE t.name = 'posts' AND i.name IN ('by_channel', 'by_channel_kind')",
+        )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, serde_json::from_str(&r.get::<_, String>(1)?).unwrap())))
         .unwrap()

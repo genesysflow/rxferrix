@@ -52,8 +52,9 @@ fn open_retrying(mut open: impl FnMut() -> rusqlite::Result<Connection>) -> rusq
     let deadline = std::time::Instant::now() + OPEN_BUSY_TIMEOUT;
     loop {
         match open() {
-            Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
-                && std::time::Instant::now() < deadline =>
+            Err(e)
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -170,8 +171,11 @@ pub fn delete_document(conn: &Connection, id: &[u8; 16]) -> anyhow::Result<()> {
 }
 
 pub fn insert_index_entry(conn: &Connection, index_id: IndexId, key: &[u8], doc_id: &[u8; 16]) -> anyhow::Result<()> {
-    conn.prepare_cached("INSERT INTO index_entries (index_id, key, doc_id) VALUES (?1, ?2, ?3)")?
-        .execute(params![index_id, key, &doc_id[..]])?;
+    conn.prepare_cached("INSERT INTO index_entries (index_id, key, doc_id) VALUES (?1, ?2, ?3)")?.execute(params![
+        index_id,
+        key,
+        &doc_id[..]
+    ])?;
     Ok(())
 }
 
@@ -213,7 +217,9 @@ pub fn count_documents(conn: &Connection, table_number: u32) -> anyhow::Result<u
         Some(end) => conn
             .prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1 AND id < ?2")?
             .query_row(params![start, end], |r| r.get(0))?,
-        None => conn.prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1")?.query_row(params![start], |r| r.get(0))?,
+        None => conn
+            .prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1")?
+            .query_row(params![start], |r| r.get(0))?,
     };
     Ok(n as u64)
 }

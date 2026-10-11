@@ -45,7 +45,8 @@ pub(crate) fn parse_private_key(pem: &str) -> Result<EcdsaKeyPair, String> {
     if body.is_empty() {
         return Err("the Apple private key is empty (paste the whole .p8 file)".into());
     }
-    let der = BASE64.decode(body.as_bytes()).map_err(|_| "the Apple private key is not a PEM file (.p8)".to_string())?;
+    let der =
+        BASE64.decode(body.as_bytes()).map_err(|_| "the Apple private key is not a PEM file (.p8)".to_string())?;
     EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der)
         .map_err(|_| "the Apple private key is not a P-256 PKCS#8 key (the .p8 file from Apple)".to_string())
 }
@@ -64,7 +65,11 @@ pub(crate) struct AppleConfig {
 
 impl std::fmt::Debug for AppleConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Apple").field("team_id", &self.team_id).field("key_id", &self.key_id).field("base", &self.base).finish()
+        f.debug_struct("Apple")
+            .field("team_id", &self.team_id)
+            .field("key_id", &self.key_id)
+            .field("base", &self.base)
+            .finish()
     }
 }
 
@@ -104,7 +109,9 @@ impl AppleConfig {
             BASE64URL_NOPAD.encode(header.to_string().as_bytes()),
             BASE64URL_NOPAD.encode(claims.to_string().as_bytes())
         );
-        let sig = key.sign(&SystemRandom::new(), input.as_bytes()).map_err(|_| "signing the client secret failed".to_string())?;
+        let sig = key
+            .sign(&SystemRandom::new(), input.as_bytes())
+            .map_err(|_| "signing the client secret failed".to_string())?;
         let secret = format!("{input}.{}", BASE64URL_NOPAD.encode(sig.as_ref()));
         *cached = Some((secret.clone(), exp));
         tracing::debug!(exp, "auth: generated a Sign in with Apple client secret");
@@ -132,7 +139,8 @@ impl AppleConfig {
             })
             .as_ref()
             .map_err(Clone::clone)?;
-        let (claims, raw) = verifier.verify_with_claims(token, now_s).await.map_err(|e| format!("the ID token is invalid: {e}"))?;
+        let (claims, raw) =
+            verifier.verify_with_claims(token, now_s).await.map_err(|e| format!("the ID token is invalid: {e}"))?;
         // Constant-time: the nonce is a secret of the flow until it completes.
         let given = raw.get("nonce").and_then(Value::as_str).unwrap_or_default();
         if !super::tokens::ct_eq(given, nonce) {
@@ -195,7 +203,11 @@ mod tests {
         assert!(parse_private_key(&key_pem.replace('\n', "\\n")).is_ok());
         assert!(parse_private_key(&key_pem.replace('\n', "")).is_ok(), "pasted into a one-line field");
         assert!(parse_private_key("").unwrap_err().contains("empty"));
-        assert!(parse_private_key("-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----").unwrap_err().contains("PEM"));
+        assert!(
+            parse_private_key("-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----")
+                .unwrap_err()
+                .contains("PEM")
+        );
         assert!(parse_private_key(&pem(b"not a key")).unwrap_err().contains("P-256"));
     }
 

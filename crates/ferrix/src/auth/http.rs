@@ -388,7 +388,8 @@ async fn oauth_start(
     let result: AuthResult<(String, String)> = async {
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let auth = app.auth();
-        let provider = auth.oauth_provider(&provider_id).ok_or_else(|| AuthFailure::not_found("This OAuth provider"))?;
+        let provider =
+            auth.oauth_provider(&provider_id).ok_or_else(|| AuthFailure::not_found("This OAuth provider"))?;
         let redirect = auth
             .resolve_redirect(q.redirect_to.as_deref())?
             .ok_or_else(|| AuthFailure::new(400, "invalid_redirect", "No redirect URL given and none configured"))?;
@@ -495,7 +496,8 @@ async fn oauth_complete(
         r
     };
     // Without a valid pending flow there is no trusted app URL to go back to: answer with a plain error.
-    let Some(pending) = q.state.as_deref().and_then(|s| auth.oauth.take(s)).filter(|p| p.provider == provider_id) else {
+    let Some(pending) = q.state.as_deref().and_then(|s| auth.oauth.take(s)).filter(|p| p.provider == provider_id)
+    else {
         let body = "Sign-in failed: this sign-in link is invalid or has expired. Please start again.";
         return (StatusCode::BAD_REQUEST, no_store(), body).into_response();
     };
@@ -507,7 +509,11 @@ async fn oauth_complete(
         return fail("state_mismatch", "The sign-in was started in another browser or has expired");
     }
     if let Some(error) = q.error.as_deref() {
-        let code = if matches!(error, "access_denied" | "user_cancelled_authorize") { "access_denied" } else { "oauth_failed" };
+        let code = if matches!(error, "access_denied" | "user_cancelled_authorize") {
+            "access_denied"
+        } else {
+            "oauth_failed"
+        };
         return fail(code, "The sign-in provider did not grant access");
     }
     let Some(code) = q.code.as_deref() else { return fail("oauth_failed", "The provider returned no code") };

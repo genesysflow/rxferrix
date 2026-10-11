@@ -68,21 +68,31 @@ pub mod msgs {
 
     #[query]
     pub async fn bad_field(ctx: &QueryCtx) -> Result<Vec<Doc<Message>>> {
-        ctx.db.query::<Message>().with_search_index(Message::search_body, |q| q.search(Message::channel, "x")).collect().await
+        ctx.db
+            .query::<Message>()
+            .with_search_index(Message::search_body, |q| q.search(Message::channel, "x"))
+            .collect()
+            .await
     }
 
     #[query]
     pub async fn bad_filter(ctx: &QueryCtx) -> Result<Vec<Doc<Message>>> {
         ctx.db
             .query::<Message>()
-            .with_search_index(Message::search_body, |q| q.search(Message::body, "x").eq(Message::note, Some("n".into())))
+            .with_search_index(Message::search_body, |q| {
+                q.search(Message::body, "x").eq(Message::note, Some("n".into()))
+            })
             .collect()
             .await
     }
 
     #[query]
     pub async fn no_search(ctx: &QueryCtx) -> Result<Vec<Doc<Message>>> {
-        ctx.db.query::<Message>().with_search_index(Message::search_body, |q| q.eq(Message::pinned, true)).collect().await
+        ctx.db
+            .query::<Message>()
+            .with_search_index(Message::search_body, |q| q.eq(Message::pinned, true))
+            .collect()
+            .await
     }
 
     #[query]
@@ -143,10 +153,21 @@ pub mod msgs {
     /// The untyped (dashboard) write path.
     #[mutation]
     pub async fn raw_ops(ctx: &MutationCtx, body: String) -> Result<String> {
-        let id = ctx.db.insert_raw("search_messages", json!({ "channel": "raw", "body": body, "pinned": false, "note": null })).await?;
+        let id = ctx
+            .db
+            .insert_raw("search_messages", json!({ "channel": "raw", "body": body, "pinned": false, "note": null }))
+            .await?;
         ctx.db.patch_raw(&id, json!({ "body": format!("{body} patched") })).await?;
-        let other = ctx.db.insert_raw("search_messages", json!({ "channel": "raw", "body": "temporary raw", "pinned": false, "note": null })).await?;
-        ctx.db.replace_raw(&other, json!({ "channel": "raw", "body": "replaced raw", "pinned": true, "note": null })).await?;
+        let other = ctx
+            .db
+            .insert_raw(
+                "search_messages",
+                json!({ "channel": "raw", "body": "temporary raw", "pinned": false, "note": null }),
+            )
+            .await?;
+        ctx.db
+            .replace_raw(&other, json!({ "channel": "raw", "body": "replaced raw", "pinned": true, "note": null }))
+            .await?;
         ctx.db.delete_raw(&other).await?;
         Ok(id)
     }
@@ -182,7 +203,8 @@ pub mod vecs {
     /// A wrong-dimension insert fails before anything is written; the mutation catches the error and goes on.
     #[mutation]
     pub async fn add_bad_then_good(ctx: &MutationCtx, embedding: Vec<f32>) -> Result<String> {
-        let err = ctx.db.insert(Item { category: "bad".into(), rank: 0, embedding: Some(vec![1.0; 3]) }).await.unwrap_err();
+        let err =
+            ctx.db.insert(Item { category: "bad".into(), rank: 0, embedding: Some(vec![1.0; 3]) }).await.unwrap_err();
         ctx.db.insert(Item { category: "good".into(), rank: 0, embedding: Some(embedding) }).await?;
         Ok(err.to_string())
     }
@@ -303,7 +325,13 @@ async fn ranking_prefix_filters_and_empty_text() {
     assert_eq!(got[0], "hello world");
 
     // Filters: channel (eq on a filter field), across channels, pinned.
-    let all: Vec<Value> = t.app().run_query(&msgs::search::path(), json!({ "text": "hello" }), &Identity::default()).await.result.map(|v| v.as_array().unwrap().clone()).unwrap();
+    let all: Vec<Value> = t
+        .app()
+        .run_query(&msgs::search::path(), json!({ "text": "hello" }), &Identity::default())
+        .await
+        .result
+        .map(|v| v.as_array().unwrap().clone())
+        .unwrap();
     assert_eq!(all.len(), 4);
     let other = t.query::<msgs::bodies>(("hello".to_string(), Some("other".to_string()))).await.unwrap();
     assert_eq!(other, vec!["hello world from another channel"]);
@@ -318,7 +346,8 @@ async fn ranking_prefix_filters_and_empty_text() {
     let top = t.query::<msgs::search>(("world".to_string(), Some("c".to_string()), None, Some(2), None)).await.unwrap();
     assert_eq!(top.len(), 2);
     assert_eq!(top[0].body.as_deref(), Some("hello world"));
-    let long = t.query::<msgs::search>(("world".to_string(), Some("c".to_string()), None, Some(1), Some(15))).await.unwrap();
+    let long =
+        t.query::<msgs::search>(("world".to_string(), Some("c".to_string()), None, Some(1), Some(15))).await.unwrap();
     assert_eq!(long.len(), 1);
     assert!(long[0].body.as_deref().unwrap().len() > 15);
 
@@ -354,10 +383,40 @@ async fn hostile_input_is_never_query_syntax() {
     .unwrap();
     // None of these may error; they are matched as plain words.
     let hostile = [
-        "\"", "\"\"\"", "alpha\"", "alpha\" OR \"beta", "*", "alpha*", "^alpha", "NEAR(alpha beta)", "NEAR", "near",
-        "t:column", "t : column", "{t}: alpha", "-alpha", "(alpha", "alpha)", "((((", "))", "alpha AND", "OR", "NOT",
-        "AND OR NOT", "+", ":", "alpha + beta", "rank", "rowid", "x'00'", "'; DROP TABLE documents; --", "\0", "\\",
-        "a\u{0}b", "%", "_",
+        "\"",
+        "\"\"\"",
+        "alpha\"",
+        "alpha\" OR \"beta",
+        "*",
+        "alpha*",
+        "^alpha",
+        "NEAR(alpha beta)",
+        "NEAR",
+        "near",
+        "t:column",
+        "t : column",
+        "{t}: alpha",
+        "-alpha",
+        "(alpha",
+        "alpha)",
+        "((((",
+        "))",
+        "alpha AND",
+        "OR",
+        "NOT",
+        "AND OR NOT",
+        "+",
+        ":",
+        "alpha + beta",
+        "rank",
+        "rowid",
+        "x'00'",
+        "'; DROP TABLE documents; --",
+        "\0",
+        "\\",
+        "a\u{0}b",
+        "%",
+        "_",
     ];
     for text in hostile {
         let r = t.query::<msgs::bodies>((text.to_string(), Some("c".to_string()))).await;
@@ -381,7 +440,14 @@ async fn unicode() {
     let t = TestApp::new().await.unwrap();
     t.mutation::<msgs::add_many>((
         "c".to_string(),
-        vec!["Café crème".into(), "naïve résumé".into(), "Ünïcödé ÄÖÜ".into(), "Привет мир".into(), "東京タワー".into(), "emoji 🎉 party".into()],
+        vec![
+            "Café crème".into(),
+            "naïve résumé".into(),
+            "Ünïcödé ÄÖÜ".into(),
+            "Привет мир".into(),
+            "東京タワー".into(),
+            "emoji 🎉 party".into(),
+        ],
     ))
     .await
     .unwrap();
@@ -436,7 +502,10 @@ async fn writes_keep_fts_in_sync() {
     assert_eq!(bodies(&t, "edited").await, vec!["first edited"]);
     t.mutation::<msgs::replace>((b, "elsewhere".to_string(), "second moved".to_string())).await.unwrap();
     assert_eq!(bodies(&t, "second").await, Vec::<String>::new());
-    assert_eq!(t.query::<msgs::bodies>(("second".to_string(), Some("elsewhere".to_string()))).await.unwrap(), vec!["second moved"]);
+    assert_eq!(
+        t.query::<msgs::bodies>(("second".to_string(), Some("elsewhere".to_string()))).await.unwrap(),
+        vec!["second moved"]
+    );
     t.mutation::<msgs::set_body>((a, None)).await.unwrap();
     assert_eq!(bodies(&t, "first").await, Vec::<String>::new());
     t.mutation::<msgs::set_body>((none, Some("late text".to_string()))).await.unwrap();
@@ -454,7 +523,8 @@ async fn writes_keep_fts_in_sync() {
     verify().await;
 
     // The checker notices tampering: a missing FTS row, and a leftover storage table.
-    let n = t.app().db().catalog().table("search_messages").unwrap().search_indexes[0].id - ferrix::db::search::SPECIAL_INDEX_BASE;
+    let n = t.app().db().catalog().table("search_messages").unwrap().search_indexes[0].id
+        - ferrix::db::search::SPECIAL_INDEX_BASE;
     let conn = rusqlite::Connection::open(t.dir().join("data.db")).unwrap();
     conn.execute(&format!("DELETE FROM _search_{n} WHERE rowid = (SELECT MIN(rowid) FROM _search_{n})"), []).unwrap();
     conn.execute_batch("CREATE VIRTUAL TABLE _search_999 USING fts5(t)").unwrap();
@@ -658,7 +728,8 @@ impl Ws {
     /// The next query value pushed for query 0.
     async fn next_value(&mut self) -> Value {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(5), self.0.next()).await.expect("no update").unwrap().unwrap();
+            let msg =
+                tokio::time::timeout(Duration::from_secs(5), self.0.next()).await.expect("no update").unwrap().unwrap();
             let WsMessage::Text(text) = msg else { continue };
             let v: Value = serde_json::from_str(text.as_str()).unwrap();
             if v["type"] != "Transition" {
@@ -706,7 +777,8 @@ async fn dashboard_lists_search_and_vector_indexes() {
     let admin = t.app().auth().create_admin(t.app(), "admin@example.com", "admin password".into()).await.unwrap();
     let run = t.app().run_query("_system/dashboard:tables", json!({}), &Identity::admin(admin, None)).await;
     let tables = run.result.unwrap();
-    let find = |name: &str| tables.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["searchIndexes"].clone();
+    let find =
+        |name: &str| tables.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["searchIndexes"].clone();
     assert_eq!(
         find("search_messages"),
         json!([{ "name": "search_body", "kind": "search", "field": "body", "filterFields": ["channel", "pinned"],
@@ -733,9 +805,12 @@ async fn catalog_add_change_remove_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     {
         let app = App::open(dir.path(), AppOptions::default()).await.unwrap();
-        app.mutation::<msgs::add_many>(("c".to_string(), vec!["one apple".into(), "two apples".into(), "three pears".into()]))
-            .await
-            .unwrap();
+        app.mutation::<msgs::add_many>((
+            "c".to_string(),
+            vec!["one apple".into(), "two apples".into(), "three pears".into()],
+        ))
+        .await
+        .unwrap();
         app.mutation::<msgs::add>(("d".to_string(), None)).await.unwrap();
         assert!(app.db().verify_indexes().await.unwrap().is_empty());
     }
@@ -750,8 +825,18 @@ async fn catalog_add_change_remove_across_restarts() {
 
     // Change the filter fields (rebuild in place, same id), and add a second index on `note` (backfilled).
     let changed = messages_def(vec![
-        SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"], tokenizer: Default::default() },
-        SearchIndexDef { name: "search_note", search_field: "note", filter_fields: vec![], tokenizer: Default::default() },
+        SearchIndexDef {
+            name: "search_body",
+            search_field: "body",
+            filter_fields: vec!["channel"],
+            tokenizer: Default::default(),
+        },
+        SearchIndexDef {
+            name: "search_note",
+            search_field: "note",
+            filter_fields: vec![],
+            tokenizer: Default::default(),
+        },
     ]);
     let db = Database::open(dir.path(), std::slice::from_ref(&changed), 1).unwrap();
     let t = db.catalog().table("search_messages").unwrap().clone();
@@ -777,14 +862,29 @@ async fn catalog_add_change_remove_across_restarts() {
 
     // Invalid definitions are refused.
     drop(app);
-    let dup = messages_def(vec![
-        SearchIndexDef { name: "by_channel", search_field: "body", filter_fields: vec![], tokenizer: Default::default() },
-    ]);
+    let dup = messages_def(vec![SearchIndexDef {
+        name: "by_channel",
+        search_field: "body",
+        filter_fields: vec![],
+        tokenizer: Default::default(),
+    }]);
     assert!(Database::open(dir.path(), &[dup], 1).is_err());
-    let sys = messages_def(vec![SearchIndexDef { name: "s", search_field: "_id", filter_fields: vec![], tokenizer: Default::default() }]);
+    let sys = messages_def(vec![SearchIndexDef {
+        name: "s",
+        search_field: "_id",
+        filter_fields: vec![],
+        tokenizer: Default::default(),
+    }]);
     assert!(Database::open(dir.path(), &[sys], 1).is_err());
     let zero = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "v", vector_field: "x", dimensions: 0, filter_fields: vec![], kind: Default::default(), hnsw: Default::default() }],
+        vector_indexes: vec![VectorIndexDef {
+            name: "v",
+            vector_field: "x",
+            dimensions: 0,
+            filter_fields: vec![],
+            kind: Default::default(),
+            hnsw: Default::default(),
+        }],
         ..original.clone()
     };
     assert!(Database::open(dir.path(), &[zero], 1).is_err());
@@ -874,7 +974,9 @@ async fn vector_errors_and_transactional_maintenance() {
     assert_eq!(got.len(), 2, "x and good");
     assert_eq!(got[0].id, id);
     assert!((got[0].score - 1.0).abs() < 1e-5, "identical vector: similarity 1");
-    assert!(t.action::<vecs::nearest>((v.clone(), 10, Some(vec!["rolled_back".into()]), None)).await.unwrap().is_empty());
+    assert!(
+        t.action::<vecs::nearest>((v.clone(), 10, Some(vec!["rolled_back".into()]), None)).await.unwrap().is_empty()
+    );
 
     // Patch the filter field, the vector, null it, delete.
     t.mutation::<vecs::set_category>((id, "y".to_string())).await.unwrap();
@@ -904,7 +1006,14 @@ async fn vector_index_catalog_changes() {
     }
     // Different dimensions: rebuilt; the existing 8-dim vectors don't fit and are skipped (with a warning).
     let four = TableDef {
-        vector_indexes: vec![VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 4, filter_fields: vec![], kind: Default::default(), hnsw: Default::default() }],
+        vector_indexes: vec![VectorIndexDef {
+            name: "by_embedding",
+            vector_field: "embedding",
+            dimensions: 4,
+            filter_fields: vec![],
+            kind: Default::default(),
+            hnsw: Default::default(),
+        }],
         ..Item::table_def()
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&four), 1).unwrap();
@@ -913,7 +1022,8 @@ async fn vector_index_catalog_changes() {
     // Back to the definition in code: backfilled, searchable.
     let app = App::open(dir.path(), AppOptions::default()).await.unwrap();
     assert_eq!(app.db().verify_indexes().await.unwrap(), Vec::<String>::new());
-    let ctx_check = app.action::<vecs::nearest>((random_vector(&mut rng), 100, Some(vec!["c0".into()]), None)).await.unwrap();
+    let ctx_check =
+        app.action::<vecs::nearest>((random_vector(&mut rng), 100, Some(vec!["c0".into()]), None)).await.unwrap();
     assert_eq!(ctx_check.len(), 25);
 }
 
@@ -1011,12 +1121,17 @@ async fn perf_hnsw() {
     // 32 latent dimensions mapped linearly into 384, plus a little noise: a low intrinsic dimension, like real
     // embeddings.
     const LATENT: usize = 32;
-    let basis: Vec<Vec<f32>> = (0..LATENT).map(|_| (0..DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect();
+    let basis: Vec<Vec<f32>> =
+        (0..LATENT).map(|_| (0..DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect();
     let latent = |rng: &mut StdRng, n: usize| -> Vec<Vec<f32>> {
         (0..n)
             .map(|_| {
                 let z: Vec<f32> = (0..LATENT).map(|_| rng.random_range(-1.0f32..1.0)).collect();
-                (0..DIMS).map(|d| z.iter().zip(&basis).map(|(z, b)| z * b[d]).sum::<f32>() + rng.random_range(-0.05f32..0.05)).collect()
+                (0..DIMS)
+                    .map(|d| {
+                        z.iter().zip(&basis).map(|(z, b)| z * b[d]).sum::<f32>() + rng.random_range(-0.05f32..0.05)
+                    })
+                    .collect()
             })
             .collect()
     };
@@ -1036,7 +1151,8 @@ async fn perf_hnsw() {
             .iter()
             .map(|q| {
                 let q = normalized(q);
-                let mut all: Vec<(f32, u32)> = normed.iter().enumerate().map(|(i, v)| (-dot(&q, v), i as u32)).collect();
+                let mut all: Vec<(f32, u32)> =
+                    normed.iter().enumerate().map(|(i, v)| (-dot(&q, v), i as u32)).collect();
                 all.select_nth_unstable_by(10, |a, b| a.0.total_cmp(&b.0));
                 all[..10].iter().map(|(_, i)| *i).collect()
             })
@@ -1056,7 +1172,10 @@ async fn perf_hnsw() {
                 hits += got.iter().filter(|(_, n)| t.contains(n)).count();
             }
             let per = start.elapsed() / QUERIES as u32;
-            println!("hnsw {label}: k=10 ef={ef}: {per:?} per query, recall@10 {:.3}", hits as f64 / (QUERIES * 10) as f64);
+            println!(
+                "hnsw {label}: k=10 ef={ef}: {per:?} per query, recall@10 {:.3}",
+                hits as f64 / (QUERIES * 10) as f64
+            );
         }
         let start = Instant::now();
         let mut bytes = Vec::new();
@@ -1064,15 +1183,21 @@ async fn perf_hnsw() {
         let saved = start.elapsed();
         let start = Instant::now();
         let back = Graph::read_from(&mut bytes.as_slice()).unwrap();
-        println!("hnsw {label}: serialized {} MB in {saved:?}, loaded in {:?}", bytes.len() / 1_000_000, start.elapsed());
+        println!(
+            "hnsw {label}: serialized {} MB in {saved:?}, loaded in {:?}",
+            bytes.len() / 1_000_000,
+            start.elapsed()
+        );
         assert_eq!(back.len(), N);
     }
 
     // The exact vec0 scan at the same size.
     ferrix::db::search::vector::register_extension();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch(&format!("CREATE VIRTUAL TABLE v USING vec0(doc_id text primary key, v float[{DIMS}] distance_metric=cosine)"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE v USING vec0(doc_id text primary key, v float[{DIMS}] distance_metric=cosine)"
+    ))
+    .unwrap();
     conn.execute_batch("BEGIN").unwrap();
     {
         let mut stmt = conn.prepare("INSERT INTO v (doc_id, v) VALUES (?1, ?2)").unwrap();

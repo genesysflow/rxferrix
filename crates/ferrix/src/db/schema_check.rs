@@ -210,9 +210,8 @@ pub fn format_table(t: &BadTable) -> String {
 }
 
 fn format_report(tables: &[BadTable], migrations: &Migrations) -> String {
-    let mut s = String::from(
-        "schema check failed: existing documents do not match the current Rust types of their tables.\n",
-    );
+    let mut s =
+        String::from("schema check failed: existing documents do not match the current Rust types of their tables.\n");
     for t in tables {
         s.push('\n');
         s.push_str(&format_table(t));
@@ -299,7 +298,16 @@ mod tests {
     }
 
     fn def(ts: fn() -> String) -> TableDef {
-        TableDef { name: "rows", indexes: vec![], search_indexes: vec![], vector_indexes: vec![], ts, validate: |_| Ok(()), shape: crate::shape::Shape::unknown, aggregates: vec![] }
+        TableDef {
+            name: "rows",
+            indexes: vec![],
+            search_indexes: vec![],
+            vector_indexes: vec![],
+            ts,
+            validate: |_| Ok(()),
+            shape: crate::shape::Shape::unknown,
+            aggregates: vec![],
+        }
     }
 
     #[test]

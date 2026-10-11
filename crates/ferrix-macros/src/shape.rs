@@ -83,7 +83,12 @@ impl Container {
 /// How serde writes one field.
 enum Field<'a> {
     /// Under this name, in the type's shape (`Optional` when `skip_serializing_if` may leave it out).
-    Named { name: String, ty: &'a syn::Type, maybe_absent: bool, json: bool },
+    Named {
+        name: String,
+        ty: &'a syn::Type,
+        maybe_absent: bool,
+        json: bool,
+    },
     /// `#[serde(flatten)]`.
     Flatten(&'a syn::Type),
     /// Under a name the macro can't tell.
@@ -136,11 +141,7 @@ pub fn struct_shape(fields: &syn::FieldsNamed, rule: Option<RenameAll>) -> Token
     let steps = fields.named.iter().map(|f| match field(f, rule) {
         Field::Named { name, ty, maybe_absent, json } => {
             let shape = if json { quote!(::ferrix::shape::Shape::Json) } else { shape_of(ty) };
-            if maybe_absent {
-                quote!(s.optional_field(#name, #shape);)
-            } else {
-                quote!(s.field(#name, #shape);)
-            }
+            if maybe_absent { quote!(s.optional_field(#name, #shape);) } else { quote!(s.field(#name, #shape);) }
         }
         Field::Flatten(ty) => {
             let shape = shape_of(ty);

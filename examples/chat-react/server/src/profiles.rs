@@ -35,7 +35,13 @@ pub async fn ensure(ctx: &MutationCtx) -> Result<Id<Profile>> {
     let color = COLORS[user.as_str().bytes().map(usize::from).sum::<usize>() % COLORS.len()].to_string();
     let id = ctx.db.insert(Profile { user, name, color }).await?;
 
-    let general = match ctx.db.query::<Channel>().with_index(Channel::by_name, |q| q.eq(Channel::name, "general".to_string())).first().await? {
+    let general = match ctx
+        .db
+        .query::<Channel>()
+        .with_index(Channel::by_name, |q| q.eq(Channel::name, "general".to_string()))
+        .first()
+        .await?
+    {
         Some(channel) => channel.id,
         None => {
             let channel = Channel {

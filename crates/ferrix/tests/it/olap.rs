@@ -145,7 +145,21 @@ async fn typed_columns_and_values() {
     let names: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
         names,
-        ["_id", "_creationTime", "_ts", "customer", "amount", "quantity", "paid", "note", "tags", "address", "tier", "receipt", "extra"]
+        [
+            "_id",
+            "_creationTime",
+            "_ts",
+            "customer",
+            "amount",
+            "quantity",
+            "paid",
+            "note",
+            "tags",
+            "address",
+            "tier",
+            "receipt",
+            "extra"
+        ]
     );
     let types: BTreeMap<&str, &str> = columns.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
     assert_eq!(types["amount"], "DOUBLE");
@@ -228,7 +242,10 @@ async fn the_copy_matches_the_data() {
     let got: BTreeMap<String, (i64, f64, i64)> = got
         .iter()
         .map(|r| {
-            (r["customer"].as_str().unwrap().into(), (r["n"].as_i64().unwrap(), r["total"].as_f64().unwrap(), r["qty"].as_i64().unwrap()))
+            (
+                r["customer"].as_str().unwrap().into(),
+                (r["n"].as_i64().unwrap(), r["total"].as_f64().unwrap(), r["qty"].as_i64().unwrap()),
+            )
         })
         .collect();
     assert_eq!(got.len(), expected.len());
@@ -242,7 +259,10 @@ async fn the_copy_matches_the_data() {
     assert_eq!(ids, live.keys().map(String::as_str).collect::<Vec<_>>(), "exactly the live documents");
     // The journal was released: nothing waits in it.
     let status = t.app().olap().unwrap().status(t.app()).await;
-    assert_eq!((status.state.as_str(), status.applied_ts, status.latest_ts), ("ready", t.app().db().write_log().latest(), t.app().db().write_log().latest()));
+    assert_eq!(
+        (status.state.as_str(), status.applied_ts, status.latest_ts),
+        ("ready", t.app().db().write_log().latest(), t.app().db().write_log().latest())
+    );
     assert_eq!(t.app().db().journal().pending_bytes(), 0, "applied rows are trimmed when replication is off");
 }
 
@@ -519,7 +539,10 @@ async fn rebuilding_while_writes_continue() {
     olap.request_rebuild("a rebuild in the middle of the writes");
     writes.await.unwrap();
     t.olap_sync().await.unwrap();
-    assert_eq!(rows(&t, "SELECT count(*) AS n, sum(quantity) AS q FROM olap_orders").await[0], json!({ "n": 300, "q": 44850 }));
+    assert_eq!(
+        rows(&t, "SELECT count(*) AS n, sum(quantity) AS q FROM olap_orders").await[0],
+        json!({ "n": 300, "q": 44850 })
+    );
     let st = olap.status(t.app()).await;
     assert_eq!((st.rebuilds, st.state.as_str()), (2, "ready"));
 }
@@ -547,13 +570,16 @@ async fn admin_queries_and_exports_over_http() {
         .await
         .unwrap();
     let token = signin["accessToken"].as_str().unwrap().to_string();
-    let query = |body: Value| client.request(Method::POST, format!("{base}/api/admin/olap/query")).bearer_auth(&token).json(&body);
+    let query = |body: Value| {
+        client.request(Method::POST, format!("{base}/api/admin/olap/query")).bearer_auth(&token).json(&body)
+    };
     for i in 0..25 {
         t.mutation::<add>((format!("c{}", i % 3), i as f64, i)).await.unwrap();
     }
     t.olap_sync().await.unwrap();
 
-    let anonymous = client.post(format!("{base}/api/admin/olap/query")).json(&json!({ "sql": "SELECT 1" })).send().await.unwrap();
+    let anonymous =
+        client.post(format!("{base}/api/admin/olap/query")).json(&json!({ "sql": "SELECT 1" })).send().await.unwrap();
     assert_eq!(anonymous.status(), 401);
 
     let r: Value = query(json!({ "sql": "SELECT customer, count(*) AS n FROM olap_orders WHERE quantity >= ? GROUP BY customer ORDER BY customer", "params": [10] }))
@@ -563,23 +589,31 @@ async fn admin_queries_and_exports_over_http() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["rows"], json!([{ "customer": "c0", "n": 5 }, { "customer": "c1", "n": 5 }, { "customer": "c2", "n": 5 }]));
+    assert_eq!(
+        r["rows"],
+        json!([{ "customer": "c0", "n": 5 }, { "customer": "c1", "n": 5 }, { "customer": "c2", "n": 5 }])
+    );
     assert_eq!(r["columns"][1], json!({ "name": "n", "typeName": "BIGINT" }));
 
     let rejected = query(json!({ "sql": "DELETE FROM olap_orders" })).send().await.unwrap();
     assert_eq!(rejected.status(), 400);
     assert_eq!(rejected.json::<Value>().await.unwrap()["errorData"]["code"], "olap_query_failed");
 
-    let csv = query(json!({ "sql": "SELECT customer, quantity, tags FROM olap_orders ORDER BY quantity LIMIT 3", "format": "csv" }))
-        .send()
-        .await
-        .unwrap();
+    let csv = query(
+        json!({ "sql": "SELECT customer, quantity, tags FROM olap_orders ORDER BY quantity LIMIT 3", "format": "csv" }),
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(csv.status(), 200);
     assert_eq!(csv.headers()["content-type"], "text/csv; charset=utf-8");
     assert_eq!(csv.headers()["x-ferrix-rows"], "3");
     assert!(csv.headers()["content-disposition"].to_str().unwrap().contains("query.csv"));
     let text = csv.text().await.unwrap();
-    assert_eq!(text, "customer,quantity,tags\r\nc0,0,\"[\"\"a\"\",\"\"q0\"\"]\"\r\nc1,1,\"[\"\"a\"\",\"\"q1\"\"]\"\r\nc2,2,\"[\"\"a\"\",\"\"q2\"\"]\"\r\n");
+    assert_eq!(
+        text,
+        "customer,quantity,tags\r\nc0,0,\"[\"\"a\"\",\"\"q0\"\"]\"\r\nc1,1,\"[\"\"a\"\",\"\"q1\"\"]\"\r\nc2,2,\"[\"\"a\"\",\"\"q2\"\"]\"\r\n"
+    );
 
     let parquet = query(json!({ "sql": "SELECT * FROM olap_orders", "format": "parquet" })).send().await.unwrap();
     assert_eq!(parquet.status(), 200);
@@ -589,13 +623,25 @@ async fn admin_queries_and_exports_over_http() {
     use parquet::file::reader::FileReader;
     let reader = parquet::file::reader::SerializedFileReader::new(bytes).unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), 25);
-    let fields: Vec<String> = reader.metadata().file_metadata().schema_descr().root_schema().get_fields().iter().map(|f| f.name().to_string()).collect();
+    let fields: Vec<String> = reader
+        .metadata()
+        .file_metadata()
+        .schema_descr()
+        .root_schema()
+        .get_fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert!(fields.contains(&"address".to_string()) && fields.contains(&"tags".to_string()), "{fields:?}");
 
     let too_big = query(json!({ "sql": "SELECT * FROM range(10) LIMIT 5", "format": "xml" })).send().await.unwrap();
     assert_eq!(too_big.status(), 400);
     // The temporary export files are gone.
-    let leftovers: Vec<_> = std::fs::read_dir(t.dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(".olap-export-")).collect();
+    let leftovers: Vec<_> = std::fs::read_dir(t.dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".olap-export-"))
+        .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
@@ -610,6 +656,9 @@ async fn exports_have_their_own_row_cap() {
     let path = t.dir().join("out.csv");
     let ok = olap.export("SELECT * FROM range(50)", vec![], ferrix::olap::OlapExportFormat::Csv, &path).await.unwrap();
     assert_eq!(ok.rows, 50, "beyond the query cap of 10");
-    let e = olap.export("SELECT * FROM range(500)", vec![], ferrix::olap::OlapExportFormat::Parquet, &path).await.unwrap_err();
+    let e = olap
+        .export("SELECT * FROM range(500)", vec![], ferrix::olap::OlapExportFormat::Parquet, &path)
+        .await
+        .unwrap_err();
     assert_eq!(code(&e), "olap_query_failed");
 }

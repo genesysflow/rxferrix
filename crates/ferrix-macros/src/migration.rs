@@ -183,7 +183,8 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
     };
 
     // --- parameters: (ctx: &MutationCtx, doc: T)
-    const PARAMS: &str = "#[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`";
+    const PARAMS: &str =
+        "#[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`";
     let mut typed = Vec::new();
     for input in &sig.inputs {
         match input {

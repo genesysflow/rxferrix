@@ -71,7 +71,11 @@ pub mod app {
 
     #[query]
     pub async fn search_docs(ctx: &QueryCtx, text: String) -> Result<Vec<Doc<OpsDoc>>> {
-        ctx.db.query::<OpsDoc>().with_search_index(OpsDoc::search_title, |q| q.search(OpsDoc::title, text)).take(50).await
+        ctx.db
+            .query::<OpsDoc>()
+            .with_search_index(OpsDoc::search_title, |q| q.search(OpsDoc::title, text))
+            .take(50)
+            .await
     }
 
     #[query]
@@ -181,7 +185,10 @@ async fn backup_during_writes_restores_a_consistent_snapshot() {
     }
     let ts_after = t.app().db().write_log().latest();
     let snapshot_ts = info.ts.unwrap();
-    assert!(written > 0 && snapshot_ts >= ts_before && snapshot_ts < ts_after, "{ts_before} {snapshot_ts} {ts_after} {written}");
+    assert!(
+        written > 0 && snapshot_ts >= ts_before && snapshot_ts < ts_after,
+        "{ts_before} {snapshot_ts} {ts_after} {written}"
+    );
     let listed = &target.list().await.unwrap()[0];
     assert_eq!(listed.name, info.name);
     assert_eq!(listed.ts, Some(snapshot_ts), "listings report the snapshot ts");
@@ -268,13 +275,16 @@ async fn backups_include_files_and_the_secret_only_when_asked() {
     let with_all = backup::create(t.app(), &full, &target, false).await.unwrap();
 
     let dest = tempfile::tempdir().unwrap();
-    let report = backup::restore(&archive_path(target_dir.path(), &plain), dest.path(), &RestoreOptions::default()).await.unwrap();
+    let report = backup::restore(&archive_path(target_dir.path(), &plain), dest.path(), &RestoreOptions::default())
+        .await
+        .unwrap();
     assert_eq!(report.manifest.storage, "excluded");
     assert_eq!(report.manifest.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["data.db"]);
 
     let dest = tempfile::tempdir().unwrap();
-    let report =
-        backup::restore(&archive_path(target_dir.path(), &with_all), dest.path(), &RestoreOptions::default()).await.unwrap();
+    let report = backup::restore(&archive_path(target_dir.path(), &with_all), dest.path(), &RestoreOptions::default())
+        .await
+        .unwrap();
     assert_eq!(report.blobs_restored, 1);
     assert_eq!(
         std::fs::read(dest.path().join("auth_secret.key")).unwrap(),
@@ -287,7 +297,12 @@ async fn backups_include_files_and_the_secret_only_when_asked() {
 #[tokio::test]
 async fn scheduled_backups_rotate() {
     let target_dir = tempfile::tempdir().unwrap();
-    let schedule = ScheduledBackup { to: Some(target_dir.path().to_str().unwrap().into()), keep: 2, include_aux: false, include_files: false };
+    let schedule = ScheduledBackup {
+        to: Some(target_dir.path().to_str().unwrap().into()),
+        keep: 2,
+        include_aux: false,
+        include_files: false,
+    };
     let mut options = AppOptions { dev: true, ..Default::default() };
     options.scheduler.crons.push(schedule.cron(Duration::from_secs(3600)));
     let t = TestApp::with_options(options).await.unwrap();
@@ -304,11 +319,14 @@ async fn scheduled_backups_rotate() {
     assert!(list.iter().any(|b| b.name == manual.name && !b.scheduled));
     // The newest two survive: the newest has all four rounds.
     let dest = tempfile::tempdir().unwrap();
-    backup::restore(&target_dir.path().join(&scheduled[0].name), dest.path(), &RestoreOptions::default()).await.unwrap();
+    backup::restore(&target_dir.path().join(&scheduled[0].name), dest.path(), &RestoreOptions::default())
+        .await
+        .unwrap();
     let app = App::open(dest.path(), AppOptions::default()).await.unwrap();
     assert_eq!(app.query::<all_pairs>(()).await.unwrap().len(), 8);
     // The cron shows on the Scheduler page like any other.
-    let crons = t.app().run_query("_system/scheduler:crons", json!({}), &admin_identity(&t).await).await.result.unwrap();
+    let crons =
+        t.app().run_query("_system/scheduler:crons", json!({}), &admin_identity(&t).await).await.result.unwrap();
     assert!(crons.as_array().unwrap().iter().any(|c| c["name"] == backup::CRON_NAME), "{crons}");
 }
 
@@ -326,7 +344,9 @@ async fn seed_docs(t: &TestApp) -> Vec<ferrix::Id<OpsDoc>> {
     let root = t.mutation::<add_doc>(("root document, with comma".to_string(), 1, Some(file), None)).await.unwrap();
     let mut ids = vec![root];
     for i in 0..4 {
-        ids.push(t.mutation::<add_doc>((format!("child number {i}\nsecond line"), i % 2, None, Some(root))).await.unwrap());
+        ids.push(
+            t.mutation::<add_doc>((format!("child number {i}\nsecond line"), i % 2, None, Some(root))).await.unwrap(),
+        );
     }
     ids
 }
@@ -359,7 +379,10 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     let import = ImportOptions { mode: ImportMode::Insert, batch_size: 2, allow_system_tables: true, format: None };
     let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
     assert!(!report.remapped_ids && report.files == 1);
-    assert_eq!(report.tables.iter().map(|t| (t.table.as_str(), t.documents)).collect::<Vec<_>>(), [("_storage", 1), ("ops_docs", 5)]);
+    assert_eq!(
+        report.tables.iter().map(|t| (t.table.as_str(), t.documents)).collect::<Vec<_>>(),
+        [("_storage", 1), ("ops_docs", 5)]
+    );
     // Batches of 2 through the normal write path: 1 + 3 commits, each in the write log (so subscriptions rerun).
     assert_eq!(b.app().db().write_log().latest(), ts + 4);
     let imported = b.query::<docs>(()).await.unwrap();
@@ -392,7 +415,10 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
         drop(db);
     }
     let c = App::open(dir.path(), AppOptions { dev: true, ..Default::default() }).await.unwrap();
-    assert_ne!(c.db().catalog().table("ops_docs").unwrap().number, a.app().db().catalog().table("ops_docs").unwrap().number);
+    assert_ne!(
+        c.db().catalog().table("ops_docs").unwrap().number,
+        a.app().db().catalog().table("ops_docs").unwrap().number
+    );
     let report = export::import_path(&c, out.path(), None, &import).await.unwrap();
     assert!(report.remapped_ids);
     verify(&c).await;
@@ -402,7 +428,10 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     assert_eq!(root.id.to_string()[7..], original[0].id.to_string()[7..], "same random part");
     assert!(moved.iter().filter(|d| d.parent.is_some()).all(|d| d.parent == Some(root.id)));
     assert_eq!(c.action::<read_text>((root.file.unwrap(),)).await.unwrap().as_deref(), Some("attached"));
-    assert_eq!(moved.iter().map(|d| d.creation_time).collect::<Vec<_>>(), original.iter().map(|d| d.creation_time).collect::<Vec<_>>());
+    assert_eq!(
+        moved.iter().map(|d| d.creation_time).collect::<Vec<_>>(),
+        original.iter().map(|d| d.creation_time).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -426,7 +455,10 @@ async fn import_validates_every_line_first() {
     assert_eq!(t.query::<docs>(()).await.unwrap().len(), 1);
     let users = dir.path().join("_users.jsonl");
     std::fs::write(&users, "{}\n").unwrap();
-    assert!(format!("{:#}", export::import_path(t.app(), &users, None, &ImportOptions::default()).await.unwrap_err()).contains("system table"));
+    assert!(
+        format!("{:#}", export::import_path(t.app(), &users, None, &ImportOptions::default()).await.unwrap_err())
+            .contains("system table")
+    );
 }
 
 #[tokio::test]
@@ -434,7 +466,8 @@ async fn csv_export_escapes_fields() {
     let t = TestApp::new().await.unwrap();
     seed_docs(&t).await;
     let out = tempfile::tempdir().unwrap();
-    let options = ExportOptions { tables: Some(vec!["ops_docs".into()]), format: ExportFormat::Csv, include_files: false };
+    let options =
+        ExportOptions { tables: Some(vec!["ops_docs".into()]), format: ExportFormat::Csv, include_files: false };
     export::export_to_dir(t.dir(), None, out.path(), &options).await.unwrap();
     let csv = std::fs::read_to_string(out.path().join("ops_docs.csv")).unwrap();
     let mut records = csv.split("\r\n");
@@ -483,7 +516,8 @@ async fn csv_import_round_trips_mixed_types() {
     }
     let original = a.query::<mixed>(()).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let options = ExportOptions { tables: Some(vec!["ops_mixed".into()]), format: ExportFormat::Csv, include_files: false };
+    let options =
+        ExportOptions { tables: Some(vec!["ops_mixed".into()]), format: ExportFormat::Csv, include_files: false };
     let manifest = export::export_to_dir(a.dir(), None, out.path(), &options).await.unwrap();
     assert_eq!(manifest.tables[0].documents, names.len() as u64);
 
@@ -492,7 +526,8 @@ async fn csv_import_round_trips_mixed_types() {
     let import = ImportOptions { batch_size: 3, ..Default::default() };
     let report = export::import_path(b.app(), out.path(), None, &import).await.unwrap();
     assert_eq!(report.tables[0].documents, names.len() as u64);
-    let as_json = |docs: &[ferrix::Doc<Mixed>]| docs.iter().map(|d| serde_json::to_value(d).unwrap()).collect::<Vec<_>>();
+    let as_json =
+        |docs: &[ferrix::Doc<Mixed>]| docs.iter().map(|d| serde_json::to_value(d).unwrap()).collect::<Vec<_>>();
     assert_eq!(as_json(&b.query::<mixed>(()).await.unwrap()), as_json(&original), "ids, creation times and values");
     let replace = ImportOptions { mode: ImportMode::Replace, ..import.clone() };
     let report = export::import_path(b.app(), &out.path().join("ops_mixed.csv"), None, &replace).await.unwrap();
@@ -515,8 +550,11 @@ async fn csv_import_round_trips_mixed_types() {
 
     // Bad cells are reported with their line, and nothing is written.
     let ts = b.app().db().write_log().latest();
-    std::fs::write(&file, "name,count,ratio,flag,note,maybe,tags,meta,mood,data,owner\nx,many,1,true,,,[],{},happy,{},\nshort,1\n")
-        .unwrap();
+    std::fs::write(
+        &file,
+        "name,count,ratio,flag,note,maybe,tags,meta,mood,data,owner\nx,many,1,true,,,[],{},happy,{},\nshort,1\n",
+    )
+    .unwrap();
     let err = format!("{:#}", export::import_path(b.app(), &file, Some("ops_mixed"), &csv_insert).await.unwrap_err());
     assert!(err.contains("hand.csv:2") && err.contains("does not match table `ops_mixed`"), "{err}");
     assert!(err.contains("hand.csv:3") && err.contains("but the header has 11 column(s)"), "{err}");
@@ -553,7 +591,8 @@ fn check_prometheus(text: &str) {
         let name_end = line.find(['{', ' ']).unwrap_or_else(|| panic!("no value: {line}"));
         let name = &line[..name_end];
         assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'), "{line}");
-        let family = ["_bucket", "_sum", "_count"].iter().find_map(|s| name.strip_suffix(s)).filter(|f| declared.contains(*f));
+        let family =
+            ["_bucket", "_sum", "_count"].iter().find_map(|s| name.strip_suffix(s)).filter(|f| declared.contains(*f));
         assert!(declared.contains(name) || family.is_some(), "undeclared {name}");
         let mut rest = &line[name_end..];
         if rest.starts_with('{') {
@@ -583,7 +622,10 @@ fn check_prometheus(text: &str) {
 async fn metrics_endpoint_format_and_token() {
     let options = AppOptions {
         dev: true,
-        ops: OpsOptions { metrics: MetricsOptions { enabled: true, token: Some("s3cret".into()) }, ..Default::default() },
+        ops: OpsOptions {
+            metrics: MetricsOptions { enabled: true, token: Some("s3cret".into()) },
+            ..Default::default()
+        },
         ..Default::default()
     };
     let t = TestApp::with_options(options).await.unwrap();
@@ -597,7 +639,12 @@ async fn metrics_endpoint_format_and_token() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let r = client.post(format!("{base}/api/query")).json(&json!({ "path": "nope:nope", "args": {} })).send().await.unwrap();
+    let r = client
+        .post(format!("{base}/api/query"))
+        .json(&json!({ "path": "nope:nope", "args": {} }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 404);
     t.query::<all_pairs>(()).await.unwrap();
 
@@ -664,7 +711,8 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     // A file that would shadow the API if static files came first.
     std::fs::create_dir_all(root.join("api")).unwrap();
     std::fs::write(root.join("api/health"), "shadowed").unwrap();
-    let hook = axum::Router::new().route("/hooks/echo", axum::routing::post(|body: String| async move { format!("hook:{body}") }));
+    let hook = axum::Router::new()
+        .route("/hooks/echo", axum::routing::post(|body: String| async move { format!("hook:{body}") }));
     let options = WebOptions { static_files: Some(StaticFiles::Dir(root.to_path_buf())), routes: Some(hook) };
     let addr = serve(t.app(), &options).await;
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
@@ -678,7 +726,11 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     // SPA fallback for client-side routes, also with an extension when the browser asks for HTML.
     for path in ["/todos/42", "/deep/nested/route", "/user/john.doe"] {
         let r = get(path).header("accept", "text/html,*/*").send().await.unwrap();
-        assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "<html>app index</html>".to_string()), "{path}");
+        assert_eq!(
+            (r.status().as_u16(), r.text().await.unwrap()),
+            (200, "<html>app index</html>".to_string()),
+            "{path}"
+        );
     }
     let r = get("/todos/42").send().await.unwrap();
     assert_eq!(r.status(), 200, "no extension: a route");
@@ -728,14 +780,18 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     assert_eq!(r.status(), 200);
 
     // Embedded files behave the same.
-    let options = WebOptions { static_files: Some(StaticFiles::Embedded(<Fixture as ferrix::rust_embed::RustEmbed>::get)), routes: None };
+    let options = WebOptions {
+        static_files: Some(StaticFiles::Embedded(<Fixture as ferrix::rust_embed::RustEmbed>::get)),
+        routes: None,
+    };
     let addr = serve(t.app(), &options).await;
     let r = client.get(format!("http://{addr}/some/route")).send().await.unwrap();
     assert!(r.text().await.unwrap().contains("embedded index"));
     let r = client.get(format!("http://{addr}/assets/app-1a2b3c4d.js")).send().await.unwrap();
     assert_eq!(r.headers()["cache-control"], "public, max-age=31536000, immutable");
     let etag = r.headers()["etag"].to_str().unwrap().to_string();
-    let r = client.get(format!("http://{addr}/assets/app-1a2b3c4d.js")).header("if-none-match", etag).send().await.unwrap();
+    let r =
+        client.get(format!("http://{addr}/assets/app-1a2b3c4d.js")).header("if-none-match", etag).send().await.unwrap();
     assert_eq!(r.status(), 304);
 }
 
@@ -779,8 +835,13 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     // A key that doesn't match the certificate is refused at startup.
     let other = rcgen::KeyPair::generate().unwrap();
     std::fs::write(&key_path, other.serialize_pem()).unwrap();
-    let bad =
-        Listen::CertFiles { https: "127.0.0.1:0".parse().unwrap(), redirect: None, cert: cert_path, key: key_path, reload_every: None };
+    let bad = Listen::CertFiles {
+        https: "127.0.0.1:0".parse().unwrap(),
+        redirect: None,
+        cert: cert_path,
+        key: key_path,
+        reload_every: None,
+    };
     assert!(tls::start(ferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &bad).await.is_err());
 
     server.shutdown();
@@ -864,7 +925,10 @@ async fn acme_redirect_targets_the_configured_domain() {
     tokio::spawn(async move { axum::serve(listener, router).await });
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let r = client.get(format!("http://{addr}/a?b=c")).header("host", "www.example.com").send().await.unwrap();
-    assert_eq!((r.status().as_u16(), r.headers()["location"].to_str().unwrap()), (308, "https://www.example.com/a?b=c"));
+    assert_eq!(
+        (r.status().as_u16(), r.headers()["location"].to_str().unwrap()),
+        (308, "https://www.example.com/a?b=c")
+    );
     let r = client.post(format!("http://{addr}/x")).header("host", "evil.test").send().await.unwrap();
     assert_eq!(r.headers()["location"], "https://example.com/x");
 }
@@ -964,7 +1028,10 @@ async fn ops_admin_endpoints_are_admin_only() {
     // Nothing was created by the refused calls.
     let r: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["backups"], json!([]));
-    assert_eq!((r["pendingRestore"].clone(), r["restart"].clone()), (Value::Null, json!({ "available": false, "exitCode": null })));
+    assert_eq!(
+        (r["pendingRestore"].clone(), r["restart"].clone()),
+        (Value::Null, json!({ "available": false, "exitCode": null }))
+    );
     assert!(!a.t.dir().join(ferrix::ops::restore::MARKER).exists());
 }
 
@@ -975,14 +1042,25 @@ async fn ops_admin_backup_export_and_import_flows() {
     a.t.mutation::<add_doc>(("exported, \"quoted\"".to_string(), 3, None, None)).await.unwrap();
 
     // Backups: create, list, download, delete.
-    let r = a.req(Method::POST, "/api/admin/backups", Some(&a.admin)).json(&json!({ "includeAux": true })).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/backups", Some(&a.admin))
+        .json(&json!({ "includeAux": true }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 201);
     let info: Value = r.json().await.unwrap();
     let name = info["name"].as_str().unwrap().to_string();
     assert!(name.starts_with("ferrix-") && name.ends_with(".tar.zst") && info["ts"].as_u64().unwrap() > 0, "{info}");
-    let r = a.req(Method::POST, "/api/admin/backups", Some(&a.admin)).json(&json!({ "includeSecret": true })).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/backups", Some(&a.admin))
+        .json(&json!({ "includeSecret": true }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400, "never the secret over HTTP");
-    let list: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    let list: Value =
+        a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(list["backups"][0]["name"], name.as_str());
     assert!(list["target"].as_str().unwrap().ends_with("backups"));
     let r = a.req(Method::GET, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap();
@@ -997,7 +1075,10 @@ async fn ops_admin_backup_export_and_import_flows() {
     std::fs::write(dl.path().join(&name), &bytes).unwrap();
     let dest = tempfile::tempdir().unwrap();
     backup::restore(&dl.path().join(&name), dest.path(), &RestoreOptions::default()).await.unwrap();
-    assert_eq!(a.req(Method::GET, "/api/admin/backups/..%2Fdata.db", Some(&a.admin)).send().await.unwrap().status(), 400);
+    assert_eq!(
+        a.req(Method::GET, "/api/admin/backups/..%2Fdata.db", Some(&a.admin)).send().await.unwrap().status(),
+        400
+    );
     let r = a.req(Method::DELETE, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let r = a.req(Method::DELETE, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap();
@@ -1015,17 +1096,39 @@ async fn ops_admin_backup_export_and_import_flows() {
     let r = a.req(Method::GET, "/api/admin/export/ops_docs?format=csv", Some(&a.admin)).send().await.unwrap();
     assert_eq!(r.headers()["content-type"], "text/csv; charset=utf-8");
     let csv = r.text().await.unwrap();
-    assert!(csv.starts_with("_id,_creationTime,file,parent,rank,tags,title\r\n") && csv.contains(",\"exported, \"\"quoted\"\"\"\r\n"), "{csv}");
-    let users = a.req(Method::GET, "/api/admin/export/_credentials", Some(&a.admin)).send().await.unwrap().text().await.unwrap();
+    assert!(
+        csv.starts_with("_id,_creationTime,file,parent,rank,tags,title\r\n")
+            && csv.contains(",\"exported, \"\"quoted\"\"\"\r\n"),
+        "{csv}"
+    );
+    let users = a
+        .req(Method::GET, "/api/admin/export/_credentials", Some(&a.admin))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(users.contains("••••") && !users.contains("$argon2"), "{users}");
     assert_eq!(a.req(Method::GET, "/api/admin/export/nope", Some(&a.admin)).send().await.unwrap().status(), 404);
-    assert_eq!(a.req(Method::GET, "/api/admin/export/ops_docs?format=xml", Some(&a.admin)).send().await.unwrap().status(), 400);
+    assert_eq!(
+        a.req(Method::GET, "/api/admin/export/ops_docs?format=xml", Some(&a.admin)).send().await.unwrap().status(),
+        400
+    );
 
     // Import: the exported JSONL goes back in with upsert; a system table is refused; bad input is a 400.
-    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin)).body(jsonl.clone()).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin))
+        .body(jsonl.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let report: Value = r.json().await.unwrap();
-    assert_eq!((report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(
+        (report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()),
+        (Some(1), Some(1))
+    );
     let r = a.req(Method::POST, "/api/admin/import/ops_docs", Some(&a.admin)).body(jsonl.clone()).send().await.unwrap();
     assert_eq!(r.status(), 400, "insert mode: the id exists");
     let new_doc = "{\"title\":\"new\",\"rank\":4,\"file\":null,\"parent\":null,\"tags\":[]}\n";
@@ -1034,17 +1137,43 @@ async fn ops_admin_backup_export_and_import_flows() {
     assert_eq!(a.t.query::<docs>(()).await.unwrap().len(), 2);
     let r = a.req(Method::POST, "/api/admin/import/_users", Some(&a.admin)).body("{}\n").send().await.unwrap();
     assert_eq!(r.status(), 400);
-    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=bogus", Some(&a.admin)).body(new_doc).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/import/ops_docs?mode=bogus", Some(&a.admin))
+        .body(new_doc)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     // CSV: the exported CSV goes back in (upsert keeps the ids); CSV sent as JSONL is refused.
-    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert&format=csv", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/import/ops_docs?mode=upsert&format=csv", Some(&a.admin))
+        .body(csv.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let report: Value = r.json().await.unwrap();
-    assert_eq!((report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()), (Some(1), Some(1)));
-    assert_eq!(a.t.query::<docs>(()).await.unwrap().iter().find(|d| d.rank == 3).unwrap().title, "exported, \"quoted\"");
-    let r = a.req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    assert_eq!(
+        (report["tables"][0]["documents"].as_u64(), report["tables"][0]["replaced"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        a.t.query::<docs>(()).await.unwrap().iter().find(|d| d.rank == 3).unwrap().title,
+        "exported, \"quoted\""
+    );
+    let r = a
+        .req(Method::POST, "/api/admin/import/ops_docs?mode=upsert", Some(&a.admin))
+        .body(csv.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
-    let r = a.req(Method::POST, "/api/admin/import/ops_docs?format=xml", Some(&a.admin)).body(csv.clone()).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/import/ops_docs?format=xml", Some(&a.admin))
+        .body(csv.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     verify(a.t.app()).await;
 }
@@ -1088,7 +1217,10 @@ async fn staged_restore_is_applied_at_the_next_start() {
         // Staged while a "server" holds the data directory: nothing it uses changes.
         let _lock = DirLock::acquire(dest.path()).unwrap();
         let pending = restore::stage(dest.path(), &archive, "the backup", Some("admin-1".into())).await.unwrap();
-        assert!(pending.includes_aux && pending.blobs == 1 && pending.secret_ignored && pending.error.is_none(), "{pending:?}");
+        assert!(
+            pending.includes_aux && pending.blobs == 1 && pending.secret_ignored && pending.error.is_none(),
+            "{pending:?}"
+        );
         assert_eq!(restore::pending(dest.path()).unwrap().as_ref(), Some(&pending));
         assert!(dest.path().join(restore::STAGED_DIR).join("data.db").exists());
         assert!(!dest.path().join(restore::STAGED_DIR).join("auth_secret.key").exists(), "the key is never staged");
@@ -1180,7 +1312,8 @@ async fn staged_restore_over_http() {
     use ferrix::ops::restore::{self, RestartHandle};
     use reqwest::Method;
     let restart = RestartHandle::new(Some(75));
-    let options = AppOptions { ops: OpsOptions { restart: restart.clone(), ..Default::default() }, ..Default::default() };
+    let options =
+        AppOptions { ops: OpsOptions { restart: restart.clone(), ..Default::default() }, ..Default::default() };
     let a = admin_setup_with(options).await;
     a.t.mutation::<add_pair>((1, "from the backup".to_string())).await.unwrap();
     let r = a.req(Method::POST, "/api/admin/backups", Some(&a.admin)).json(&json!({})).send().await.unwrap();
@@ -1199,7 +1332,8 @@ async fn staged_restore_over_http() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["pendingRestore"]["source"], name.as_str());
     assert_eq!(body["restart"], json!({ "available": true, "exitCode": 75 }));
-    let list: Value = a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    let list: Value =
+        a.req(Method::GET, "/api/admin/backups", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(list["pendingRestore"]["source"], name.as_str());
     assert_eq!(a.t.query::<all_pairs>(()).await.unwrap().len(), 4);
     let r = a.req(Method::POST, &format!("/api/admin/backups/{name}/restore"), Some(&a.admin)).send().await.unwrap();
@@ -1209,16 +1343,24 @@ async fn staged_restore_over_http() {
     let r = a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap();
     assert_eq!(r.json::<Value>().await.unwrap(), json!({ "canceled": true }));
     assert_eq!(a.req(Method::DELETE, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().status(), 404);
-    let state: Value = a.req(Method::GET, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
+    let state: Value =
+        a.req(Method::GET, "/api/admin/restore", Some(&a.admin)).send().await.unwrap().json().await.unwrap();
     assert_eq!(state["pendingRestore"], Value::Null);
 
     // Upload: a corrupt archive is refused at once; the real one is staged.
-    let bytes =
-        a.req(Method::GET, &format!("/api/admin/backups/{name}"), Some(&a.admin)).send().await.unwrap().bytes().await.unwrap();
+    let bytes = a
+        .req(Method::GET, &format!("/api/admin/backups/{name}"), Some(&a.admin))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let mut corrupt = bytes.to_vec();
     let mid = corrupt.len() / 2;
     corrupt[mid] ^= 0xff;
-    let r = a.req(Method::POST, "/api/admin/restore?name=mine.tar.zst", Some(&a.admin)).body(corrupt).send().await.unwrap();
+    let r =
+        a.req(Method::POST, "/api/admin/restore?name=mine.tar.zst", Some(&a.admin)).body(corrupt).send().await.unwrap();
     assert_eq!(r.status(), 400);
     assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "invalid_backup");
     let r = a.req(Method::POST, "/api/admin/restore", Some(&a.admin)).body(Vec::<u8>::new()).send().await.unwrap();
@@ -1243,8 +1385,12 @@ async fn staged_restore_over_http() {
     tokio::time::timeout(Duration::from_secs(5), restart.requested()).await.unwrap();
     let args = json!({ "paginationOpts": { "numItems": 20, "cursor": null } });
     let audit = a.t.app().run_query("_system/audit:list", args, &admin_identity(&a.t).await).await;
-    let actions: Vec<String> =
-        audit.result.unwrap()["page"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string()).collect();
+    let actions: Vec<String> = audit.result.unwrap()["page"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap().to_string())
+        .collect();
     for action in ["restore_stage", "restore_cancel", "restore_restart"] {
         assert!(actions.iter().any(|a| a == action), "{action} in {actions:?}");
     }

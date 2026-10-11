@@ -300,7 +300,12 @@ async fn run_or_block(app: &App, name: &str, options: &RunOptions) -> crate::Res
 }
 
 /// Batches until the migration is done, fails, is canceled, or `max_batches` ran.
-async fn drive(app: &App, def: &'static MigrationDef, name: &str, max_batches: Option<u64>) -> crate::Result<MigrationReport> {
+async fn drive(
+    app: &App,
+    def: &'static MigrationDef,
+    name: &str,
+    max_batches: Option<u64>,
+) -> crate::Result<MigrationReport> {
     let mut rep = report(def, name, RunOutcome::Completed);
     tracing::info!(migration = name, table = def.table, "migration started");
     loop {
@@ -324,7 +329,12 @@ async fn drive(app: &App, def: &'static MigrationDef, name: &str, max_batches: O
                 rep.changed += b.changed;
                 if b.done {
                     rep.schema_check = b.schema_check;
-                    tracing::info!(migration = name, processed = rep.processed, changed = rep.changed, "migration done");
+                    tracing::info!(
+                        migration = name,
+                        processed = rep.processed,
+                        changed = rep.changed,
+                        "migration done"
+                    );
                     return Ok(rep);
                 }
             }
@@ -380,7 +390,10 @@ pub(super) async fn run_pending(app: &App, options: &RunOptions) -> crate::Resul
     let mut reports = Vec::new();
     for name in not_done(app).await? {
         let rep = run_or_block(app, &name, options).await?;
-        let stop = matches!(rep.outcome, RunOutcome::Failed | RunOutcome::Canceled | RunOutcome::Stopped | RunOutcome::Blocked);
+        let stop = matches!(
+            rep.outcome,
+            RunOutcome::Failed | RunOutcome::Canceled | RunOutcome::Stopped | RunOutcome::Blocked
+        );
         reports.push(rep);
         if stop && !options.dry_run {
             break;
@@ -390,7 +403,11 @@ pub(super) async fn run_pending(app: &App, options: &RunOptions) -> crate::Resul
 }
 
 /// Start `name` (or every migration that isn't done) and drive it in a background task.
-pub(super) async fn run_in_background(app: &App, name: Option<String>, options: RunOptions) -> crate::Result<RunResult> {
+pub(super) async fn run_in_background(
+    app: &App,
+    name: Option<String>,
+    options: RunOptions,
+) -> crate::Result<RunResult> {
     let mut result = RunResult { started: Vec::new(), reports: Vec::new() };
     match name {
         Some(name) => {

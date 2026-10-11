@@ -44,7 +44,8 @@ async fn setup(config: AuthConfig) -> (TestApp, Http, String, String, Value) {
     let t = TestApp::with_auth(config.rate_limits(None)).await.unwrap();
     let app = t.app().clone();
     let http = Http::new(t.serve().await.unwrap());
-    let admin_id = app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap().to_string();
+    let admin_id =
+        app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap().to_string();
     let admin = token(&http.admin_sign_in("admin@example.com", "admin password").await, "accessToken");
     let user = http.sign_up("user@example.com", "user password").await;
     (t, http, admin, admin_id, user)
@@ -65,7 +66,8 @@ async fn dashboard_writes_are_audited_in_their_transaction() {
         async move { http.call("mutation", &format!("_system/dashboard:{name}"), args, Some(&admin)).await }
     };
 
-    let (_, b) = call("insert_document", json!({ "table": "audited_items", "document": { "title": "a", "rank": 1 } })).await;
+    let (_, b) =
+        call("insert_document", json!({ "table": "audited_items", "document": { "title": "a", "rank": 1 } })).await;
     let id = b["value"].as_str().unwrap().to_string();
     call("patch_document", json!({ "id": id, "patch": { "rank": 2 } })).await;
     call("replace_document", json!({ "id": id, "document": { "title": "b", "rank": 2 } })).await;
@@ -81,10 +83,16 @@ async fn dashboard_writes_are_audited_in_their_transaction() {
     let by = |a: &str| entries.iter().find(|e| e["action"] == a).unwrap().clone();
     assert_eq!((&by("insert")["before"], &by("insert")["after"]["title"]), (&Value::Null, &json!("a")));
     assert_eq!((&by("patch")["before"], &by("patch")["after"]), (&json!({ "rank": 1 }), &json!({ "rank": 2 })));
-    assert_eq!((&by("replace")["before"], &by("replace")["after"]), (&json!({ "title": "a" }), &json!({ "title": "b" })));
+    assert_eq!(
+        (&by("replace")["before"], &by("replace")["after"]),
+        (&json!({ "title": "a" }), &json!({ "title": "b" }))
+    );
     assert_eq!((&by("delete")["before"]["title"], &by("delete")["after"]), (&json!("b"), &Value::Null));
     for e in &entries {
-        assert_eq!((&e["admin"], &e["adminEmail"], &e["targetTable"]), (&json!(admin_id), &json!("admin@example.com"), &json!("audited_items")));
+        assert_eq!(
+            (&e["admin"], &e["adminEmail"], &e["targetTable"]),
+            (&json!(admin_id), &json!("admin@example.com"), &json!("audited_items"))
+        );
         assert!(e["at"].as_f64().unwrap() > 0.0);
     }
     let users = list(&http, &admin, json!({ "table": "_users" })).await;
@@ -99,18 +107,25 @@ async fn dashboard_writes_are_audited_in_their_transaction() {
     assert_eq!(revoked[0]["targetId"], json!(sid));
     assert_eq!(revoked[0]["before"]["refreshTokenHash"], "••••");
     let deleted = list(&http, &admin, json!({ "action": "delete_user", "admin": admin_id })).await;
-    assert_eq!((&deleted[0]["before"]["email"], &deleted[0]["details"]["credentials"]), (&json!("user@example.com"), &json!(1)));
+    assert_eq!(
+        (&deleted[0]["before"]["email"], &deleted[0]["details"]["credentials"]),
+        (&json!("user@example.com"), &json!(1))
+    );
 
     // Filters combine; pagination works; the log is read-only and admin-only.
     assert_eq!(list(&http, &admin, json!({ "action": "patch", "table": "audited_items" })).await.len(), 1);
     assert!(list(&http, &admin, json!({ "admin": "someone-else" })).await.is_empty());
     let all = list(&http, &admin, json!({})).await;
-    let page = http.ok("query", "_system/audit:list", json!({ "paginationOpts": { "numItems": 2, "cursor": null } }), &admin).await;
+    let page = http
+        .ok("query", "_system/audit:list", json!({ "paginationOpts": { "numItems": 2, "cursor": null } }), &admin)
+        .await;
     assert_eq!((page["page"].as_array().unwrap().len(), page["isDone"].as_bool()), (2, Some(false)));
     assert_eq!(page["page"][0]["_id"], all[0]["_id"]);
     let (_, b) = call("delete_documents", json!({ "ids": [all[0]["_id"]] })).await;
     assert_eq!(code_of(&b), "read_only_table");
-    let (s, b) = http.call("query", "_system/audit:list", json!({ "paginationOpts": { "numItems": 1, "cursor": null } }), None).await;
+    let (s, b) = http
+        .call("query", "_system/audit:list", json!({ "paginationOpts": { "numItems": 1, "cursor": null } }), None)
+        .await;
     assert_eq!((s, code_of(&b)), (400, "unauthenticated"));
 
     // Retention: entries older than 90 days are swept.
@@ -143,16 +158,25 @@ async fn run_function_as_a_user_uses_a_real_audited_session() {
     assert_eq!(r["success"], false);
 
     let runs = list(&http, &admin, json!({ "action": "run_function" })).await;
-    let outcomes: Vec<(&str, &str)> =
-        runs.iter().map(|e| (e["details"]["path"].as_str().unwrap(), e["details"]["outcome"].as_str().unwrap())).collect();
+    let outcomes: Vec<(&str, &str)> = runs
+        .iter()
+        .map(|e| (e["details"]["path"].as_str().unwrap(), e["details"]["outcome"].as_str().unwrap()))
+        .collect();
     assert_eq!(
         outcomes,
-        [(app::audit_add::path().as_str(), "error"), (app::audit_add::path().as_str(), "success"), (app::audit_whoami::path().as_str(), "started")]
+        [
+            (app::audit_add::path().as_str(), "error"),
+            (app::audit_add::path().as_str(), "success"),
+            (app::audit_whoami::path().as_str(), "started")
+        ]
     );
     assert_eq!(runs[1]["details"]["asUser"], json!(user_id));
     let impersonations = list(&http, &admin, json!({ "action": "impersonate" })).await;
     assert_eq!(impersonations.len(), 2);
-    assert_eq!((&impersonations[0]["targetId"], &impersonations[0]["details"]["purpose"]), (&json!(user_id), &json!("run_function")));
+    assert_eq!(
+        (&impersonations[0]["targetId"], &impersonations[0]["details"]["purpose"]),
+        (&json!(user_id), &json!("run_function"))
+    );
     drop(t);
 }
 
@@ -176,11 +200,22 @@ async fn impersonation_tokens_are_short_lived_real_sessions() {
     let (s, b) = imp(&http, json!({ "user": "00000000000000000000000000" }), Some(&admin)).await;
     assert_eq!((s, code_of(&b)), (404, "not_found"));
 
-    let (s, minted) = imp(&http, json!({ "user": user_id, "ttlSeconds": 120, "redirectTo": "https://app.example.com/home" }), Some(&admin)).await;
+    let (s, minted) = imp(
+        &http,
+        json!({ "user": user_id, "ttlSeconds": 120, "redirectTo": "https://app.example.com/home" }),
+        Some(&admin),
+    )
+    .await;
     assert_eq!(s, 200, "{minted}");
-    assert_eq!((&minted["userId"], &minted["expiresIn"]), (&json!(user_id), &json!(120)), "the access token ends with the session");
+    assert_eq!(
+        (&minted["userId"], &minted["expiresIn"]),
+        (&json!(user_id), &json!(120)),
+        "the access token ends with the session"
+    );
     let url = minted["url"].as_str().unwrap();
-    assert!(url.starts_with("https://app.example.com/home#ferrix_access_token=") && url.contains("&ferrix_refresh_token="));
+    assert!(
+        url.starts_with("https://app.example.com/home#ferrix_access_token=") && url.contains("&ferrix_refresh_token=")
+    );
     let access = token(&minted, "accessToken");
     let (_, me) = http.call("query", &app::audit_whoami::path(), json!({}), Some(&access)).await;
     assert_eq!(me["value"], json!([user_id, minted["sessionId"], admin_id]));
@@ -196,7 +231,10 @@ async fn impersonation_tokens_are_short_lived_real_sessions() {
 
     // Audited, and revocable like any session (with live revocation of its sockets).
     let entries = list(&http, &admin, json!({ "action": "impersonate" })).await;
-    assert_eq!((&entries[0]["details"]["sessionId"], &entries[0]["details"]["purpose"]), (&minted["sessionId"], &json!("open_app")));
+    assert_eq!(
+        (&entries[0]["details"]["sessionId"], &entries[0]["details"]["purpose"]),
+        (&minted["sessionId"], &json!("open_app"))
+    );
     let mut ws = Ws::connect(t.serve().await.unwrap()).await;
     ws.authenticate(Some(&token(&refreshed, "accessToken"))).await;
     http.ok("mutation", "_system/dashboard:revoke_session", json!({ "session": minted["sessionId"] }), &admin).await;

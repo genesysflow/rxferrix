@@ -299,7 +299,10 @@ mod tests {
         assert_ne!(keys.hash_token("a"), Keys::from_secret(&[2u8; 64]).hash_token("a"));
         assert!(ct_eq("abc", "abc") && !ct_eq("abc", "abd") && !ct_eq("abc", "ab"));
         // BASE64URL(SHA256(verifier)), cross-checked with Python's hashlib.
-        assert_eq!(pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r7wW1gFWFOEjXk"), "bwWFMyPfdG9qreDhH2lmftFx_dFeLDalzcT1gb_j68g");
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r7wW1gFWFOEjXk"),
+            "bwWFMyPfdG9qreDhH2lmftFx_dFeLDalzcT1gb_j68g"
+        );
     }
 
     #[test]

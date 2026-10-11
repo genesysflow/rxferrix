@@ -61,31 +61,31 @@ pub mod __private {
 
 pub use bytes::Bytes;
 pub use cli::Ferrix;
+pub use db::aggregate::{AggregateGroup, AggregateQuery, AggregateValue, Sum as AggregateSum};
+pub use db::dedup::IdempotencyKey;
+pub use db::pagination::{PaginationOpts, PaginationResult};
+pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
+pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
+pub use error::{Error, MutationTimeout, QueryTimeout, Result, UserError};
+pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use ferrix_macros::{
     action, internal_action, internal_mutation, internal_query, migration, mutation, object, query, table, workflow,
 };
-pub use db::aggregate::{AggregateGroup, AggregateQuery, AggregateValue, Sum as AggregateSum};
-pub use db::pagination::{PaginationOpts, PaginationResult};
-pub use db::dedup::IdempotencyKey;
-pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
-pub use error::{Error, MutationTimeout, QueryTimeout, Result, UserError};
-pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
-pub use private::FunctionKind;
 pub use id::Id;
+pub use private::FunctionKind;
 pub use runtime::{
     ActionCtx, App, AppOptions, Auth, FunctionInfo, Identity, Metrics, MutationCtx, QueryCacheOptions, QueryCtx,
     Registry, registry,
 };
-pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
-pub use schema::{
-    Aggregate, AggregateDef, Doc, Field, HnswParams, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table, TableDef, Tokenizer,
-    TokenizerKind, VectorIndex, VectorIndexDef, VectorIndexKind,
-};
-pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
-pub use server::{router, serve, serve_with_shutdown};
-pub use serde_json::json;
 /// For `Ferrix::embed_static`: `#[derive(ferrix::rust_embed::Embed)] #[crate_path = "ferrix::rust_embed"]`.
 pub use rust_embed;
+pub use scheduler::{CronSpec, ScheduledJob, Scheduler, SchedulerOptions};
+pub use schema::{
+    Aggregate, AggregateDef, Doc, Field, HnswParams, Index, IndexDef, Order, SearchIndex, SearchIndexDef, Table,
+    TableDef, Tokenizer, TokenizerKind, VectorIndex, VectorIndexDef, VectorIndexKind,
+};
+pub use serde_json::json;
+pub use server::{router, serve, serve_with_shutdown};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -123,12 +123,13 @@ pub trait SchedulableFunction: FunctionRef {}
 /// Logging is not glob-exported (a glob-imported `log` module or `info!` macro would be ambiguous with the `log`
 /// crate): add `use ferrix::log;` and write `log::info!(...)`. See [`log`](crate::log).
 pub mod prelude {
-    pub use crate::{
-        ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError, action,
-        internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table, workflow,
-    };
-    pub use crate::workflow::WorkflowCtx;
     pub use crate::migrations::DocChange;
+    pub use crate::workflow::WorkflowCtx;
+    pub use crate::{
+        ActionCtx, Bytes, Doc, Error, Ferrix, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, UserError,
+        action, internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table,
+        workflow,
+    };
     pub use crate::{Aggregate, SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};
 }

@@ -161,15 +161,25 @@ async fn execution_log_records_every_execution_with_log_lines() {
     assert_eq!(query.log_lines, vec!["[INFO] querying n=7", "[DEBUG] details"]);
     assert_eq!(
         action.log_lines,
-        vec!["[WARN] action start", "[INFO] adding hi", "[INFO] querying n=7", "[DEBUG] details", "[ERROR] action end code=42"],
+        vec![
+            "[WARN] action start",
+            "[INFO] adding hi",
+            "[INFO] querying n=7",
+            "[DEBUG] details",
+            "[ERROR] action end code=42"
+        ],
         "an action's lines include those of the functions it called, in order"
     );
     assert!(action.duration_us >= query.duration_us && action.duration_us >= add.duration_us);
     assert_eq!(action.identity, None, "anonymous");
-    assert_eq!((fail.error.as_deref(), fail.log_lines.clone()), (Some("failed on purpose"), vec!["[WARN] about to fail".to_string()]));
+    assert_eq!(
+        (fail.error.as_deref(), fail.log_lines.clone()),
+        (Some("failed on purpose"), vec!["[WARN] about to fail".to_string()])
+    );
     assert!(all.iter().all(|e| e.timestamp > 0 && e.id > 0));
 
-    let panicked = logs.query(LogFilter { outcome: Some(LogOutcome::ServerError), ..Default::default() }).await.unwrap();
+    let panicked =
+        logs.query(LogFilter { outcome: Some(LogOutcome::ServerError), ..Default::default() }).await.unwrap();
     assert_eq!(panicked.len(), 1);
     assert_eq!(panicked[0].path, todos::add_then_panic::path());
     assert_eq!(panicked[0].error.as_deref(), Some("function panicked: boom"));
@@ -224,12 +234,8 @@ async fn mutation_timeout_rolls_back_and_frees_the_writer() {
 
     // The execution log has the timeout as a server error with its message.
     t.app().logs().flush().await.unwrap();
-    let failed = t
-        .app()
-        .logs()
-        .query(LogFilter { outcome: Some(LogOutcome::ServerError), ..Default::default() })
-        .await
-        .unwrap();
+    let failed =
+        t.app().logs().query(LogFilter { outcome: Some(LogOutcome::ServerError), ..Default::default() }).await.unwrap();
     assert_eq!(failed.len(), 1);
     assert!(failed[0].error.as_deref().unwrap().contains("timed out"));
     assert!(failed[0].duration_us >= 200_000);
@@ -286,7 +292,12 @@ async fn startup_refuses_documents_that_no_longer_match() {
     };
     assert_eq!(bad_ids.len(), 25);
     let open = |def: TableDef, skip: bool| {
-        Database::open_with(dir.path(), &[def], &OpenOptions { readers: 1, skip_schema_check: skip, ..Default::default() }).map(drop)
+        Database::open_with(
+            dir.path(),
+            &[def],
+            &OpenOptions { readers: 1, skip_schema_check: skip, ..Default::default() },
+        )
+        .map(drop)
     };
 
     let err = open(strict_items(|| "{ changed: true }".into()), false).unwrap_err().to_string();

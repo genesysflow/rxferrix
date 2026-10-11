@@ -210,7 +210,8 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
     super::aggregate::ensure_schema(&tx)?;
     upgrade_key_encoding(&tx)?;
     let existing = Catalog::load(&tx, &defs)?;
-    let mut next_table: u32 = tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
+    let mut next_table: u32 =
+        tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;
     let mut next_index: u32 = tx.query_row("SELECT COALESCE(MAX(index_id), 0) + 1 FROM _indexes", [], |r| r.get(0))?;
 
     for def in &defs {
@@ -225,11 +226,10 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
             }
         };
 
-        let mut desired: Vec<(String, Vec<String>)> = vec![
-            (BY_ID.to_string(), vec![]),
-            (BY_CREATION_TIME.to_string(), vec![CREATION_TIME_FIELD.to_string()]),
-        ];
-        desired.extend(def.indexes.iter().map(|i| (i.name.to_string(), i.fields.iter().map(|f| f.to_string()).collect())));
+        let mut desired: Vec<(String, Vec<String>)> =
+            vec![(BY_ID.to_string(), vec![]), (BY_CREATION_TIME.to_string(), vec![CREATION_TIME_FIELD.to_string()])];
+        desired
+            .extend(def.indexes.iter().map(|i| (i.name.to_string(), i.fields.iter().map(|f| f.to_string()).collect())));
 
         for (name, fields) in &desired {
             let fields_json = serde_json::to_string(fields)?;
@@ -295,7 +295,11 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
     }
     let has_documents: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM documents)", [], |r| r.get(0))?;
     if has_documents {
-        tracing::info!(from = stored, to = keys::KEY_ENCODING_VERSION, "index key encoding changed; rebuilding every index");
+        tracing::info!(
+            from = stored,
+            to = keys::KEY_ENCODING_VERSION,
+            "index key encoding changed; rebuilding every index"
+        );
         conn.execute("DELETE FROM index_entries", [])?;
         let indexes: Vec<(IndexId, u32, String, String)> = conn
             .prepare("SELECT index_id, table_number, name, fields FROM _indexes ORDER BY index_id")?
@@ -303,7 +307,12 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
             .collect::<Result<_, _>>()?;
         for (id, table_number, name, fields) in indexes {
             if name != BY_ID {
-                backfill(conn, table_number, id, &keys::index_key_fields(&serde_json::from_str::<Vec<String>>(&fields)?))?;
+                backfill(
+                    conn,
+                    table_number,
+                    id,
+                    &keys::index_key_fields(&serde_json::from_str::<Vec<String>>(&fields)?),
+                )?;
             }
         }
         // Aggregate keys use the same encoding.

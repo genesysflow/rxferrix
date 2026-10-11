@@ -334,12 +334,8 @@ impl Logs {
         trim(&conn, &retention)?;
 
         let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
-        let shared = Arc::new(Shared {
-            path: path.to_path_buf(),
-            live,
-            dropped: AtomicU64::new(0),
-            reader: Mutex::new(None),
-        });
+        let shared =
+            Arc::new(Shared { path: path.to_path_buf(), live, dropped: AtomicU64::new(0), reader: Mutex::new(None) });
         let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
         let thread_shared = shared.clone();
         std::thread::Builder::new()
@@ -645,7 +641,8 @@ pub fn bucket_count(since: i64, until: i64, bucket_ms: i64) -> i128 {
 }
 
 fn timeseries(conn: &Connection, spec: &TimeseriesSpec) -> anyhow::Result<Vec<TimePoint>> {
-    let mut sql = String::from("SELECT timestamp, outcome, duration_us FROM _logs WHERE timestamp >= ?1 AND timestamp < ?2");
+    let mut sql =
+        String::from("SELECT timestamp, outcome, duration_us FROM _logs WHERE timestamp >= ?1 AND timestamp < ?2");
     let mut args: Vec<rusqlite::types::Value> = vec![spec.since.into(), spec.until.into()];
     match &spec.path {
         Some(path) => {
@@ -810,7 +807,8 @@ mod tests {
         let logs = Logs::open(&dir.path().join("aux.db"), LogRetention::default()).unwrap();
         // Recent, aligned to 5 minutes so the buckets are predictable.
         let base = (crate::db::wall_clock_ms() as i64 / 300_000 - 3) * 300_000;
-        let add = |d: u64, at: i64, outcome: LogOutcome| entry("todos:add", FunctionKind::Mutation, outcome, d, base + at);
+        let add =
+            |d: u64, at: i64, outcome: LogOutcome| entry("todos:add", FunctionKind::Mutation, outcome, d, base + at);
         // Bucket 0: 1..=20 µs (one user error); bucket 2: 100 and 300 µs (a server error); nothing in bucket 1.
         for d in 1..=20 {
             logs.record(add(d, 1000 + d as i64, if d == 7 { LogOutcome::UserError } else { LogOutcome::Success }));
@@ -824,12 +822,22 @@ mod tests {
         logs.record(add(9, 5 * 60_000, LogOutcome::Success));
         logs.flush().await.unwrap();
 
-        let spec = TimeseriesSpec { path: Some("todos:add".into()), since: base, until: base + 5 * 60_000, bucket_ms: 60_000 };
+        let spec =
+            TimeseriesSpec { path: Some("todos:add".into()), since: base, until: base + 5 * 60_000, bucket_ms: 60_000 };
         let points = logs.timeseries(spec.clone()).await.unwrap();
         assert_eq!(points.len(), 2, "{points:?}");
         assert_eq!(
             points[0],
-            TimePoint { t: base, calls: 20, errors: 1, user_errors: 1, server_errors: 0, p50_us: 10, p95_us: 19, max_us: 20 }
+            TimePoint {
+                t: base,
+                calls: 20,
+                errors: 1,
+                user_errors: 1,
+                server_errors: 0,
+                p50_us: 10,
+                p95_us: 19,
+                max_us: 20
+            }
         );
         assert_eq!(
             points[1],

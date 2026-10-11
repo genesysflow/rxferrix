@@ -9,7 +9,6 @@ use anyhow::{Context, bail};
 use object_store::ObjectStore;
 use object_store::signer::Signer;
 
-
 /// Default [`StorageConfig::max_upload_size`]: 100 MiB.
 pub const DEFAULT_MAX_UPLOAD_SIZE: u64 = 100 * 1024 * 1024;
 /// Default [`StorageConfig::upload_url_ttl`]: one hour.

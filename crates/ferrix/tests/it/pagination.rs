@@ -77,7 +77,9 @@ async fn walk(t: &TestApp, group: i64, desc: bool, min: Option<i64>, n: usize) -
     let mut out = Vec::new();
     let mut cursor = None;
     loop {
-        let p = page(t, group, desc, min, PaginationOpts { num_items: n, cursor: cursor.clone(), end_cursor: None }).await.unwrap();
+        let p = page(t, group, desc, min, PaginationOpts { num_items: n, cursor: cursor.clone(), end_cursor: None })
+            .await
+            .unwrap();
         assert!(p.page.len() <= n);
         out.push(scores(&p));
         if p.is_done {
@@ -200,7 +202,8 @@ async fn bad_cursors_are_rejected() {
     assert!(err(page(&t, 1, false, None, PaginationOpts::after("garbage!", 2)).await).contains("malformed cursor"));
     assert!(err(page(&t, 1, false, None, PaginationOpts::after("AAAA", 2)).await).contains("malformed cursor"));
     assert!(
-        err(page(&t, 1, false, None, PaginationOpts::first(2).with_end_cursor("nope")).await).contains("malformed endCursor")
+        err(page(&t, 1, false, None, PaginationOpts::first(2).with_end_cursor("nope")).await)
+            .contains("malformed endCursor")
     );
     // Same index, another range (group 2), another order, another index.
     let foreign = "does not belong to this query";
@@ -221,9 +224,23 @@ async fn bad_cursors_are_rejected() {
     assert!(empty.page.is_empty() && !empty.is_done);
 
     // Over the wire, args are validated too: a missing cursor is null, a wrong type is an args error.
-    let run = t.app().run_query(&pages::by_score::path(), json!({ "group": 1, "desc": false, "paginationOpts": { "numItems": 1 } }), &Identity::default()).await;
+    let run = t
+        .app()
+        .run_query(
+            &pages::by_score::path(),
+            json!({ "group": 1, "desc": false, "paginationOpts": { "numItems": 1 } }),
+            &Identity::default(),
+        )
+        .await;
     assert_eq!(run.result.unwrap()["page"].as_array().unwrap().len(), 1);
-    let run = t.app().run_query(&pages::by_score::path(), json!({ "group": 1, "desc": false, "paginationOpts": { "numItems": "x" } }), &Identity::default()).await;
+    let run = t
+        .app()
+        .run_query(
+            &pages::by_score::path(),
+            json!({ "group": 1, "desc": false, "paginationOpts": { "numItems": "x" } }),
+            &Identity::default(),
+        )
+        .await;
     assert!(run.result.unwrap_err().to_string().starts_with("Invalid args for by_score"));
 }
 
@@ -404,7 +421,7 @@ async fn pinned_page_subscription_is_stable_under_inserts_after_it() {
     let mut ws = ws::Ws::connect(addr).await;
     ws.send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1, "modifications": [
         { "type": "Add", "queryId": 0, "udfPath": path, "args": args(json!({ "numItems": 2, "cursor": null })) }] }))
-    .await;
+        .await;
     let t1 = ws.recv().await;
     let p1 = updates_of(&[t1], 0).remove(0);
     assert_eq!(value_scores(&p1), [10, 20]);

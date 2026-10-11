@@ -193,7 +193,11 @@ pub(crate) fn load(conn: &Connection) -> anyhow::Result<BTreeMap<u32, Vec<Aggreg
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         let definition: String = r.get(3)?;
-        out.entry(r.get(1)?).or_default().push(AggregateInfo { id: r.get(0)?, name: r.get(2)?, spec: serde_json::from_str(&definition)? });
+        out.entry(r.get(1)?).or_default().push(AggregateInfo {
+            id: r.get(0)?,
+            name: r.get(2)?,
+            spec: serde_json::from_str(&definition)?,
+        });
     }
     Ok(out)
 }
@@ -205,7 +209,12 @@ pub(crate) fn validate_def(def: &TableDef) -> anyhow::Result<()> {
         anyhow::ensure!(!a.name.is_empty(), "table `{}`: an aggregate needs a name", def.name);
         anyhow::ensure!(names.insert(a.name), "table `{}`: duplicate aggregate `{}`", def.name, a.name);
         for f in a.group_fields.iter().chain(&a.sum_fields) {
-            anyhow::ensure!(!f.is_empty() && !f.starts_with('_'), "table `{}`: aggregate `{}` can't use the field `{f}`", def.name, a.name);
+            anyhow::ensure!(
+                !f.is_empty() && !f.starts_with('_'),
+                "table `{}`: aggregate `{}` can't use the field `{f}`",
+                def.name,
+                a.name
+            );
         }
     }
     Ok(())
@@ -223,7 +232,10 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
             Some(e) if e.spec == spec => continue,
             Some(e) => {
                 tracing::info!(table = def.name, aggregate = a.name, "aggregate changed; rebuilding it");
-                conn.execute("UPDATE _aggregates SET definition = ?1 WHERE agg_id = ?2", params![serde_json::to_string(&spec)?, e.id])?;
+                conn.execute(
+                    "UPDATE _aggregates SET definition = ?1 WHERE agg_id = ?2",
+                    params![serde_json::to_string(&spec)?, e.id],
+                )?;
                 AggregateInfo { id: e.id, name: e.name.clone(), spec }
             }
             None => {
@@ -290,11 +302,18 @@ pub(crate) fn verify(conn: &Connection, tables: &[std::sync::Arc<TableInfo>]) ->
             let expected = compute(conn, t.number, info)?;
             let stored = stored_groups(conn, info.id)?;
             if expected.len() != stored.len() {
-                problems.push(format!("aggregate `{}.{}`: {} groups, expected {}", t.name, info.name, stored.len(), expected.len()));
+                problems.push(format!(
+                    "aggregate `{}.{}`: {} groups, expected {}",
+                    t.name,
+                    info.name,
+                    stored.len(),
+                    expected.len()
+                ));
                 continue;
             }
             for ((ek, (ec, es)), (sk, (sc, ss))) in expected.iter().zip(&stored) {
-                let close = es.iter().zip(ss).all(|(a, b)| (a.as_f64() - b.as_f64()).abs() <= 1e-6 * a.as_f64().abs().max(1.0));
+                let close =
+                    es.iter().zip(ss).all(|(a, b)| (a.as_f64() - b.as_f64()).abs() <= 1e-6 * a.as_f64().abs().max(1.0));
                 if ek != sk || ec != sc || !close {
                     problems.push(format!("aggregate `{}.{}`: a group differs from the documents", t.name, info.name));
                     break;
@@ -345,7 +364,11 @@ pub(crate) struct Writes {
 }
 
 impl Writes {
-    pub(crate) fn prepare(table: &TableInfo, old: Option<&Map<String, Value>>, new: Option<&Map<String, Value>>) -> Writes {
+    pub(crate) fn prepare(
+        table: &TableInfo,
+        old: Option<&Map<String, Value>>,
+        new: Option<&Map<String, Value>>,
+    ) -> Writes {
         let mut deltas = Vec::new();
         for info in &table.aggregates {
             let old = old.map(|d| contribution(&info.spec, d));
@@ -386,7 +409,8 @@ impl Writes {
                 *a = a.add(*d);
             }
             if c <= 0 {
-                conn.prepare_cached("DELETE FROM aggregate_values WHERE agg_id = ?1 AND key = ?2")?.execute(params![id, key])?;
+                conn.prepare_cached("DELETE FROM aggregate_values WHERE agg_id = ?1 AND key = ?2")?
+                    .execute(params![id, key])?;
             } else {
                 conn.prepare_cached(
                     "INSERT INTO aggregate_values (agg_id, key, count, sums) VALUES (?1, ?2, ?3, ?4)
@@ -423,7 +447,13 @@ impl QueryDb {
         Ok((info, range))
     }
 
-    fn aggregate_rows(&self, info: &AggregateInfo, range: &KeyRange, order: Order, limit: Option<usize>) -> anyhow::Result<Vec<GroupRow>> {
+    fn aggregate_rows(
+        &self,
+        info: &AggregateInfo,
+        range: &KeyRange,
+        order: Order,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<GroupRow>> {
         self.record(info.id, range.clone());
         let dir = if order == Order::Desc { "DESC" } else { "ASC" };
         let limit = limit.map_or(-1, |n| n as i64);

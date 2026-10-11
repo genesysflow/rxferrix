@@ -96,11 +96,12 @@ pub(crate) fn source_hash(repo: &std::path::Path) -> std::io::Result<String> {
         Ok(())
     }
     let dash = repo.join("packages/dashboard");
-    let mut files: Vec<std::path::PathBuf> = ["index.html", "package.json", "vite.config.ts", "tsconfig.json", "svelte.config.js"]
-        .iter()
-        .map(|f| dash.join(f))
-        .filter(|p| p.exists())
-        .collect();
+    let mut files: Vec<std::path::PathBuf> =
+        ["index.html", "package.json", "vite.config.ts", "tsconfig.json", "svelte.config.js"]
+            .iter()
+            .map(|f| dash.join(f))
+            .filter(|p| p.exists())
+            .collect();
     for dir in [dash.join("src"), repo.join("packages/client/src"), repo.join("packages/svelte/src/lib")] {
         walk(&dir, &mut files)?;
     }

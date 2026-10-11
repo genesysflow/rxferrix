@@ -68,7 +68,8 @@ pub mod fns {
     /// typical "check, then write" mutation.
     #[mutation]
     pub async fn bench_scan_insert(ctx: &MutationCtx, group: i64) -> Result<()> {
-        let seen = ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await?;
+        let seen =
+            ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await?;
         ctx.db.insert(Item { group: -3, score: seen.len() as i64, name: String::new() }).await.map(drop)
     }
 
@@ -132,7 +133,8 @@ fn report(name: &str, receipts: &[Vec<(u64, Instant)>], commits: &[(u64, Instant
 }
 
 async fn scenario(name: &str, shared: bool, slow_clients: u64) {
-    let (fast_clients, queries, rate, secs) = (env("BENCH_CLIENTS", 100), env("BENCH_QUERIES", 10), env("BENCH_RATE", 200), env("BENCH_SECS", 5));
+    let (fast_clients, queries, rate, secs) =
+        (env("BENCH_CLIENTS", 100), env("BENCH_QUERIES", 10), env("BENCH_RATE", 200), env("BENCH_SECS", 5));
     let clients = fast_clients + slow_clients;
     let slow_ms = env("BENCH_SLOW_MS", 20);
     let t = TestApp::with_options(ferrix::AppOptions { dev: false, ..Default::default() }).await.unwrap();
@@ -146,7 +148,11 @@ async fn scenario(name: &str, shared: bool, slow_clients: u64) {
     for c in 0..clients {
         let (tx, mut rx) = worker::spawn(app.clone());
         let mods = if c >= fast_clients {
-            vec![QuerySetModification::Add { query_id: 0, udf_path: fns::bench_slow::path(), args: json!({ "ms": slow_ms }) }]
+            vec![QuerySetModification::Add {
+                query_id: 0,
+                udf_path: fns::bench_slow::path(),
+                args: json!({ "ms": slow_ms }),
+            }]
         } else {
             (0..queries)
                 .map(|g| QuerySetModification::Add {
@@ -156,9 +162,13 @@ async fn scenario(name: &str, shared: bool, slow_clients: u64) {
                 })
                 .collect()
         };
-        tx.send(Inbound::Message(ClientMessage::ModifyQuerySet { base_version: 0, new_version: 1, modifications: mods }))
-            .await
-            .unwrap();
+        tx.send(Inbound::Message(ClientMessage::ModifyQuerySet {
+            base_version: 0,
+            new_version: 1,
+            modifications: mods,
+        }))
+        .await
+        .unwrap();
         inputs.push(tx);
         let (receipts, ready_tx) = (receipts.clone(), ready_tx.clone());
         tasks.push(tokio::spawn(async move {
@@ -188,7 +198,10 @@ async fn scenario(name: &str, shared: bool, slow_clients: u64) {
     let total = rate * secs;
     for i in 0..total {
         tick.tick().await;
-        let (_, ts) = app.run_mutation(&fns::bench_insert::path(), json!({ "group": i % queries }), &Identity::default()).await.unwrap();
+        let (_, ts) = app
+            .run_mutation(&fns::bench_insert::path(), json!({ "group": i % queries }), &Identity::default())
+            .await
+            .unwrap();
         commits.push((ts, Instant::now()));
     }
     let elapsed = started.elapsed();
@@ -213,7 +226,11 @@ async fn scenario(name: &str, shared: bool, slow_clients: u64) {
 
     let receipts = receipts.lock().unwrap();
     let (fast, slow) = receipts.split_at(fast_clients as usize);
-    let slow = if slow.is_empty() { String::new() } else { format!("; slow clients ({slow_clients}): {}", report("", slow, &commits)) };
+    let slow = if slow.is_empty() {
+        String::new()
+    } else {
+        format!("; slow clients ({slow_clients}): {}", report("", slow, &commits))
+    };
     println!(
         "[{name}] {fast_clients} clients x {queries} queries, {total} commits in {:.2}s ({:.0}/s): setup {setup_executions} \
          executions; {executions} executions = {:.2} per commit; {}{slow}",
@@ -320,7 +337,8 @@ async fn hammer(app: &ferrix::App, writers: usize, secs: f64, idempotent: bool, 
                 let mut n = 0u64;
                 while Instant::now() < stop {
                     let (path, args) = make(w, n);
-                    let key = idempotent.then(|| ferrix::IdempotencyKey { session_id: format!("bench-{w}"), request_id: n });
+                    let key =
+                        idempotent.then(|| ferrix::IdempotencyKey { session_id: format!("bench-{w}"), request_id: n });
                     let t0 = Instant::now();
                     let run = app.execute_mutation(&path, args, &Identity::default(), key.as_ref()).await;
                     latencies.push(t0.elapsed());
@@ -429,21 +447,30 @@ async fn bench_writes() {
         let t = write_app(Default::default()).await;
         let many: MakeCall = Arc::new(|w, _| call(fns::bench_insert_many::path(), json!({ "group": w % 10, "n": 10 })));
         let run = hammer(t.app(), 16, secs, false, many).await;
-        println!("[writes] 10 inserts per mutation, 16 writers: {} = {:.0} documents/s", run.line(), run.per_sec() * 10.0);
+        println!(
+            "[writes] 10 inserts per mutation, 16 writers: {} = {:.0} documents/s",
+            run.line(),
+            run.per_sec() * 10.0
+        );
     }
     if wanted("scan") {
         // Groups of 100 items to scan.
         let t = write_app(Default::default()).await;
         for i in 0..1000 {
-            t.app().run_mutation(&fns::bench_insert::path(), json!({ "group": 100 + i % 10 }), &Identity::default()).await.unwrap();
+            t.app()
+                .run_mutation(&fns::bench_insert::path(), json!({ "group": 100 + i % 10 }), &Identity::default())
+                .await
+                .unwrap();
         }
-        let scan: MakeCall = Arc::new(|w, _| call(fns::bench_scan_insert::path(), json!({ "group": 100 + w as u64 % 10 })));
+        let scan: MakeCall =
+            Arc::new(|w, _| call(fns::bench_scan_insert::path(), json!({ "group": 100 + w as u64 % 10 })));
         let run = hammer(t.app(), 16, secs, false, scan).await;
         println!("[writes] read 100 documents then insert, 16 writers: {}", run.line());
     }
     if wanted("counter") {
         let t = write_app(Default::default()).await;
-        let (id, _) = t.app().run_mutation(&fns::bench_new_counter::path(), json!({}), &Identity::default()).await.unwrap();
+        let (id, _) =
+            t.app().run_mutation(&fns::bench_new_counter::path(), json!({}), &Identity::default()).await.unwrap();
         let increment: MakeCall = Arc::new({
             let id = id.clone();
             move |_, _| call(fns::bench_increment::path(), json!({ "id": id }))

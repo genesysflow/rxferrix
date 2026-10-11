@@ -22,9 +22,9 @@ use serde_json::Value;
 
 use super::store::{self, NewJob};
 use super::tables::{Cron, JobKind, ScheduledJob};
+use crate::SchedulableFunction;
 use crate::id::Id;
 use crate::runtime::{App, AppOptions};
-use crate::SchedulableFunction;
 
 /// A cron to declare: `CronSpec::cron::<f>("name", "0 */5 * * * *", args)` or `CronSpec::interval::<f>(..)`. Usually
 /// built through `Ferrix::cron` / `Ferrix::cron_tz` / `Ferrix::interval` (or the same methods on `SchedulerOptions`).
@@ -48,7 +48,11 @@ impl CronSpec {
     /// Run `F` with `args` on a cron schedule: 6 fields with seconds (`sec min hour day-of-month month
     /// day-of-week`, an optional 7th is the year), evaluated in UTC unless a [`CronSpec::timezone`] is set. E.g.
     /// `"0 */5 * * * *"` (every 5 minutes), `"0 0 3 * * *"` (03:00 daily), `"0 0 9 * * Mon-Fri"`.
-    pub fn cron<F: SchedulableFunction>(name: impl Into<String>, expr: impl Into<String>, args: impl Into<F::Args>) -> Self {
+    pub fn cron<F: SchedulableFunction>(
+        name: impl Into<String>,
+        expr: impl Into<String>,
+        args: impl Into<F::Args>,
+    ) -> Self {
         CronSpec::new::<F>(name.into(), Every::Expr(expr.into()), args.into())
     }
 
@@ -64,7 +68,11 @@ impl CronSpec {
     }
 
     /// Run `F` with `args` every `every`, the first time `every` after startup.
-    pub fn interval<F: SchedulableFunction>(name: impl Into<String>, every: Duration, args: impl Into<F::Args>) -> Self {
+    pub fn interval<F: SchedulableFunction>(
+        name: impl Into<String>,
+        every: Duration,
+        args: impl Into<F::Args>,
+    ) -> Self {
         CronSpec::new::<F>(name.into(), Every::Interval(every), args.into())
     }
 
@@ -163,7 +171,8 @@ fn next_in_zone(schedule: &cron::Schedule, tz: Tz, now: f64) -> f64 {
     let Some(now_utc) = DateTime::<Utc>::from_timestamp_millis(now as i64) else { return NEVER };
     let offset_at = |t: DateTime<Utc>| tz.offset_from_utc_datetime(&t.naive_utc()).fix();
     let local = now_utc.with_timezone(&tz).naive_local();
-    let stable = offset_at(now_utc - DST_WINDOW) == offset_at(now_utc) && offset_at(now_utc + DST_WINDOW) == offset_at(now_utc);
+    let stable =
+        offset_at(now_utc - DST_WINDOW) == offset_at(now_utc) && offset_at(now_utc + DST_WINDOW) == offset_at(now_utc);
     let start = if stable { local } else { local - DST_WINDOW };
     let every_hour = schedule.hours().is_all();
     let mut best: Option<DateTime<Utc>> = None;
@@ -193,7 +202,9 @@ fn local_instants(tz: Tz, local: NaiveDateTime, both_in_fold: bool) -> [Option<D
         chrono::LocalResult::None => {
             // In a gap: use the offset in effect before it.
             for hours in [1, 2, 3, 6, 12, 24] {
-                if let chrono::LocalResult::Single(before) = tz.from_local_datetime(&(local - chrono::TimeDelta::hours(hours))) {
+                if let chrono::LocalResult::Single(before) =
+                    tz.from_local_datetime(&(local - chrono::TimeDelta::hours(hours)))
+                {
                     let offset = before.offset().fix().local_minus_utc();
                     return [Some((local - chrono::TimeDelta::seconds(offset.into())).and_utc()), None];
                 }
@@ -227,11 +238,14 @@ pub(crate) fn parse_all(specs: &[CronSpec]) -> crate::Result<Vec<ParsedCron>> {
                         "cron `{name}`: `{expr}` has {fields} fields; use 6 (with seconds): `sec min hour day month weekday`, e.g. `0 */5 * * * *`"
                     );
                 }
-                let schedule = cron::Schedule::from_str(expr).with_context(|| format!("cron `{name}`: invalid expression `{expr}`"))?;
+                let schedule = cron::Schedule::from_str(expr)
+                    .with_context(|| format!("cron `{name}`: invalid expression `{expr}`"))?;
                 let tz = match spec.timezone.as_deref().map(str::trim) {
                     None => None,
                     Some(zone) => Some(zone.parse::<Tz>().map_err(|_| {
-                        anyhow::anyhow!("cron `{name}`: unknown time zone `{zone}` (use an IANA name such as `Europe/Bucharest`)")
+                        anyhow::anyhow!(
+                            "cron `{name}`: unknown time zone `{zone}` (use an IANA name such as `Europe/Bucharest`)"
+                        )
                     })?),
                 };
                 // UTC is the default: stored as no zone.
@@ -280,7 +294,10 @@ pub(crate) async fn reconcile(app: &App, crons: &[ParsedCron], now: f64) -> crat
         for c in crons {
             match existing.iter().find(|r| r.name == c.name) {
                 Some(row)
-                    if row.schedule == c.display && row.timezone == c.timezone && row.path == c.path && row.args == c.args =>
+                    if row.schedule == c.display
+                        && row.timezone == c.timezone
+                        && row.path == c.path
+                        && row.args == c.args =>
                 {
                     // Unchanged: keep `nextRun`. If it passed while the server was down, the first tick runs it once.
                 }
@@ -411,7 +428,9 @@ pub(crate) async fn fire_due(app: &App, crons: &[ParsedCron], now: f64) -> crate
 
 /// When the next cron is due, if any.
 pub(crate) async fn next_due(app: &App) -> crate::Result<Option<f64>> {
-    let first = store::read(app, |db| async move { db.query::<Cron>().with_index(Cron::by_next_run, |q| q).first().await }).await?;
+    let first =
+        store::read(app, |db| async move { db.query::<Cron>().with_index(Cron::by_next_run, |q| q).first().await })
+            .await?;
     Ok(first.map(|c| c.next_run).filter(|t| *t < NEVER))
 }
 
@@ -465,7 +484,10 @@ mod tests {
         assert_eq!(weekdays.next_after(ms("2026-10-09T12:00:00Z")), ms("2026-10-12T09:00:00Z"), "Friday → Monday");
         let past = parsed("0 0 0 1 1 * 2020");
         assert_eq!(past.next_after(ms("2026-10-09T12:00:00Z")), NEVER);
-        assert_eq!(parsed_in("0 0 0 1 1 * 2020", Some("Europe/Bucharest")).next_after(ms("2026-10-09T12:00:00Z")), NEVER);
+        assert_eq!(
+            parsed_in("0 0 0 1 1 * 2020", Some("Europe/Bucharest")).next_after(ms("2026-10-09T12:00:00Z")),
+            NEVER
+        );
     }
 
     // Europe/Bucharest in 2026: EET (+2) until Sunday 29 March 03:00 local (01:00Z), which becomes 04:00 EEST (+3);
@@ -477,7 +499,11 @@ mod tests {
         assert_eq!(runs(&nine, "2026-10-09T12:00:00Z", 2), ["2026-10-10T06:00Z", "2026-10-11T06:00Z"], "09:00 EEST");
         assert_eq!(runs(&nine, "2026-12-01T12:00:00Z", 1), ["2026-12-02T07:00Z"], "09:00 EET");
         let weekdays = parsed_in("0 0 9 * * Mon-Fri", Some("America/New_York"));
-        assert_eq!(runs(&weekdays, "2026-10-09T14:00:00Z", 1), ["2026-10-12T13:00Z"], "Friday 10:00 EDT → Monday 09:00");
+        assert_eq!(
+            runs(&weekdays, "2026-10-09T14:00:00Z", 1),
+            ["2026-10-12T13:00Z"],
+            "Friday 10:00 EDT → Monday 09:00"
+        );
     }
 
     #[test]
@@ -527,7 +553,14 @@ mod tests {
         let quarters = runs(&quarter, "2026-10-25T00:40:00Z", 6);
         assert_eq!(
             quarters,
-            ["2026-10-25T00:45Z", "2026-10-25T01:00Z", "2026-10-25T01:15Z", "2026-10-25T01:30Z", "2026-10-25T01:45Z", "2026-10-25T02:00Z"],
+            [
+                "2026-10-25T00:45Z",
+                "2026-10-25T01:00Z",
+                "2026-10-25T01:15Z",
+                "2026-10-25T01:30Z",
+                "2026-10-25T01:45Z",
+                "2026-10-25T02:00Z"
+            ],
             "no gap in an every-15-minutes schedule"
         );
     }

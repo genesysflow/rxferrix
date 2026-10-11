@@ -27,7 +27,13 @@ pub mod fns {
     }
 
     #[internal_mutation]
-    pub async fn add(ctx: &MutationCtx, customer: String, day: String, amount: f64, quantity: Option<i64>) -> Result<Id<Sale>> {
+    pub async fn add(
+        ctx: &MutationCtx,
+        customer: String,
+        day: String,
+        amount: f64,
+        quantity: Option<i64>,
+    ) -> Result<Id<Sale>> {
         ctx.db.insert(Sale { customer, day, amount, quantity, note: String::new() }).await
     }
 
@@ -44,14 +50,24 @@ pub mod fns {
     /// Inserts, then fails: the insert and its aggregate changes roll back together.
     #[internal_mutation]
     pub async fn add_then_fail(ctx: &MutationCtx, customer: String) -> Result<()> {
-        ctx.db.insert(Sale { customer, day: "d".into(), amount: 100.0, quantity: Some(1), note: String::new() }).await?;
+        ctx.db
+            .insert(Sale { customer, day: "d".into(), amount: 100.0, quantity: Some(1), note: String::new() })
+            .await?;
         Err(UserError::new("nope", "failing on purpose").into())
     }
 
     /// A mutation reads its own writes.
     #[internal_mutation]
     pub async fn add_and_count(ctx: &MutationCtx, customer: String) -> Result<u64> {
-        ctx.db.insert(Sale { customer: customer.clone(), day: "d".into(), amount: 1.0, quantity: None, note: String::new() }).await?;
+        ctx.db
+            .insert(Sale {
+                customer: customer.clone(),
+                day: "d".into(),
+                amount: 1.0,
+                quantity: None,
+                note: String::new(),
+            })
+            .await?;
         Ok(ctx.db.aggregate(Sale::by_customer).get(|g| g.eq(Sale::customer, customer)).await?.count)
     }
 
@@ -132,8 +148,16 @@ async fn values_ranges_and_listings() {
     t.mutation::<add>(("ann".to_string(), "2026-10-05".to_string(), 2.0, Some(4))).await.unwrap();
 
     assert_eq!(totals(&t.query::<customer>(("ann".to_string(),)).await.unwrap()), (3, 17.5, Some(7)));
-    assert_eq!(totals(&t.query::<customer>(("bob".to_string(),)).await.unwrap()), (1, 1.0, Some(0)), "a null adds nothing");
-    assert_eq!(totals(&t.query::<customer>(("zed".to_string(),)).await.unwrap()), (0, 0.0, Some(0)), "no documents: zero");
+    assert_eq!(
+        totals(&t.query::<customer>(("bob".to_string(),)).await.unwrap()),
+        (1, 1.0, Some(0)),
+        "a null adds nothing"
+    );
+    assert_eq!(
+        totals(&t.query::<customer>(("zed".to_string(),)).await.unwrap()),
+        (0, 0.0, Some(0)),
+        "no documents: zero"
+    );
     assert_eq!(totals(&t.query::<total>(()).await.unwrap()), (4, 18.5, None));
     let days = |from: &str, to: &str| t.query::<fns::days>(("ann".to_string(), from.to_string(), to.to_string()));
     assert_eq!(totals(&days("2026-10-01", "2026-10-02").await.unwrap()), (2, 15.5, None));
@@ -142,7 +166,13 @@ async fn values_ranges_and_listings() {
     let groups = t.query::<fns::groups>((false, false, 10u32)).await.unwrap();
     assert_eq!(groups, vec![vec![json!("ann"), json!(3), json!(17.5)], vec![json!("bob"), json!(1), json!(1.0)]]);
     let top = t.query::<fns::groups>((true, true, 2u32)).await.unwrap();
-    assert_eq!(top, vec![vec![json!("bob"), json!("2026-10-01"), json!(1), json!(1.0)], vec![json!("ann"), json!("2026-10-05"), json!(1), json!(2.0)]]);
+    assert_eq!(
+        top,
+        vec![
+            vec![json!("bob"), json!("2026-10-01"), json!(1), json!(1.0)],
+            vec![json!("ann"), json!("2026-10-05"), json!(1), json!(2.0)]
+        ]
+    );
 
     // Moving a document to another group, changing a summed field, deleting it.
     t.mutation::<patch>((a, json!({ "customer": "bob" }))).await.unwrap();
@@ -154,10 +184,16 @@ async fn values_ranges_and_listings() {
     assert_eq!(totals(&t.query::<total>(()).await.unwrap()), (3, 8.5, None));
 
     // The dashboard's table summary lists them.
-    let admin = ferrix::Identity::admin(t.app().auth().create_admin(t.app(), "a@example.com", "admin password".into()).await.unwrap(), None);
+    let admin = ferrix::Identity::admin(
+        t.app().auth().create_admin(t.app(), "a@example.com", "admin password".into()).await.unwrap(),
+        None,
+    );
     let tables = t.app().run_query("_system/dashboard:tables", json!({}), &admin).await.result.unwrap();
     let sales = tables.as_array().unwrap().iter().find(|t| t["name"] == "agg_orders").unwrap();
-    assert_eq!(sales["aggregates"][1], json!({ "name": "by_customer_day", "groupFields": ["customer", "day"], "sumFields": ["amount"] }));
+    assert_eq!(
+        sales["aggregates"][1],
+        json!({ "name": "by_customer_day", "groupFields": ["customer", "day"], "sumFields": ["amount"] })
+    );
 
     let e = t.query::<bad_get>(()).await.unwrap_err();
     assert!(e.to_string().contains("get needs an `eq` on every group field"), "{e}");
@@ -222,7 +258,10 @@ async fn the_aggregates_match_the_documents() {
     let daily = t.query::<fns::groups>((true, false, 1000u32)).await.unwrap();
     assert_eq!(daily.len(), by_day.len(), "empty groups are gone");
     for (row, ((c, d), (n, amount))) in daily.iter().zip(&by_day) {
-        assert_eq!((row[0].as_str().unwrap(), row[1].as_str().unwrap(), row[2].as_u64().unwrap()), (c.as_str(), d.as_str(), *n));
+        assert_eq!(
+            (row[0].as_str().unwrap(), row[1].as_str().unwrap(), row[2].as_u64().unwrap()),
+            (c.as_str(), d.as_str(), *n)
+        );
         assert!((row[3].as_f64().unwrap() - amount).abs() < 1e-6);
     }
     let total = t.query::<total>(()).await.unwrap();
@@ -261,7 +300,11 @@ async fn rollbacks_and_reading_your_own_writes() {
     t.mutation::<add>(("ann".to_string(), "d".to_string(), 1.0, Some(1))).await.unwrap();
     let e = t.mutation::<add_then_fail>(("ann".to_string(),)).await.unwrap_err();
     assert!(e.to_string().contains("failing on purpose"));
-    assert_eq!(totals(&t.query::<customer>(("ann".to_string(),)).await.unwrap()), (1, 1.0, Some(1)), "rolled back with the insert");
+    assert_eq!(
+        totals(&t.query::<customer>(("ann".to_string(),)).await.unwrap()),
+        (1, 1.0, Some(1)),
+        "rolled back with the insert"
+    );
     assert_eq!(t.mutation::<add_and_count>(("ann".to_string(),)).await.unwrap(), 2, "the mutation's own insert counts");
     assert!(t.app().db().verify_indexes().await.unwrap().is_empty());
 }
@@ -302,7 +345,10 @@ async fn backfill_redefinition_and_verification() {
     }
     assert!(stored().iter().all(|r| r.1 == "[]"));
     // Tampered with: verification says so.
-    rusqlite::Connection::open(dir.path().join("data.db")).unwrap().execute("UPDATE aggregate_values SET count = count + 1", []).unwrap();
+    rusqlite::Connection::open(dir.path().join("data.db"))
+        .unwrap()
+        .execute("UPDATE aggregate_values SET count = count + 1", [])
+        .unwrap();
     {
         let def = with(vec![AggregateDef { name: "by_group", group_fields: vec!["group"], sum_fields: vec![] }]);
         let db = Database::open(dir.path(), std::slice::from_ref(&def), 2).unwrap();

@@ -45,7 +45,8 @@ mod app {
 const BUDGET: Duration = Duration::from_millis(100);
 
 async fn setup() -> (TestApp, Http, std::net::SocketAddr) {
-    let t = TestApp::with_auth(AuthConfig::password().rate_limits(None).refresh_reuse_grace(Duration::ZERO)).await.unwrap();
+    let t =
+        TestApp::with_auth(AuthConfig::password().rate_limits(None).refresh_reuse_grace(Duration::ZERO)).await.unwrap();
     let addr = t.serve().await.unwrap();
     (t, Http::new(addr), addr)
 }
@@ -177,13 +178,8 @@ async fn dashboard_revoke_and_delete_user_end_sockets_and_admin_sign_out_ends_ad
     // The admin's own socket and SSE log stream end when the admin signs out.
     let mut admin_ws = Ws::connect(addr).await;
     admin_ws.authenticate(Some(&admin_token)).await;
-    let res = http
-        .client
-        .get(format!("{}/api/admin/logs/stream", http.base))
-        .bearer_auth(&admin_token)
-        .send()
-        .await
-        .unwrap();
+    let res =
+        http.client.get(format!("{}/api/admin/logs/stream", http.base)).bearer_auth(&admin_token).send().await.unwrap();
     assert_eq!(res.status(), 200);
     let mut sse = Sse::new(res);
     assert_eq!(sse.next().await.unwrap().0, "ready");

@@ -260,9 +260,13 @@ impl VectorPlan {
                     let mut conds: Vec<(usize, String)> = Vec::new();
                     for (field, value) in branch {
                         let Some(col) = filter_fields.iter().position(|f| f == field) else {
-                            bail!("vector_search: `{field}` is not a filter field of vector index `{name}` (filter fields: {filter_fields:?})");
+                            bail!(
+                                "vector_search: `{field}` is not a filter field of vector index `{name}` (filter fields: {filter_fields:?})"
+                            );
                         };
-                        let value = value.as_ref().map_err(|e| anyhow::anyhow!("vector_search: cannot serialize filter value: {e}"))?;
+                        let value = value
+                            .as_ref()
+                            .map_err(|e| anyhow::anyhow!("vector_search: cannot serialize filter value: {e}"))?;
                         let encoded = encode_filter_value(Some(value));
                         match conds.iter().find(|(c, _)| *c == col) {
                             Some((_, v)) if *v != encoded => continue 'branch, // field == a AND field == b: no match
@@ -306,13 +310,14 @@ impl VectorPlan {
         for conds in &self.branches {
             let where_eqs: String =
                 conds.iter().enumerate().map(|(i, (col, _))| format!(" AND f{col} = ?{}", i + 3)).collect();
-            let sql =
-                format!("SELECT doc_id, distance FROM {storage} WHERE v MATCH ?1 AND k = ?2{where_eqs} ORDER BY distance");
+            let sql = format!(
+                "SELECT doc_id, distance FROM {storage} WHERE v MATCH ?1 AND k = ?2{where_eqs} ORDER BY distance"
+            );
             let mut stmt = conn.prepare_cached(&sql)?;
             let mut values: Vec<rusqlite::types::Value> = vec![blob.clone().into(), (self.limit as i64).into()];
             values.extend(conds.iter().map(|(_, v)| v.clone().into()));
-            let found =
-                stmt.query_map(rusqlite::params_from_iter(values), |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
+            let found = stmt
+                .query_map(rusqlite::params_from_iter(values), |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
             for row in found {
                 let (id, distance) = row?;
                 // A document can match several branches; keep it once.
@@ -325,7 +330,8 @@ impl VectorPlan {
         best.truncate(self.limit);
         best.into_iter()
             .map(|(id, distance)| {
-                let id = DocId::decode(&id).map_err(|_| anyhow::anyhow!("corrupt id in vector index `{}`", self.info.name))?;
+                let id = DocId::decode(&id)
+                    .map_err(|_| anyhow::anyhow!("corrupt id in vector index `{}`", self.info.name))?;
                 Ok((id, (1.0 - distance) as f32))
             })
             .collect()

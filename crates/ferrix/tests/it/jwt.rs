@@ -43,10 +43,16 @@ struct TestKey {
 
 impl TestKey {
     fn rsa(kid: &str) -> TestKey {
-        TestKey { kid: kid.into(), signer: Signer::Rsa(aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap()) }
+        TestKey {
+            kid: kid.into(),
+            signer: Signer::Rsa(aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap()),
+        }
     }
     fn ec(kid: &str) -> TestKey {
-        TestKey { kid: kid.into(), signer: Signer::Ec(EcdsaKeyPair::generate(&signature::ECDSA_P256_SHA256_FIXED_SIGNING).unwrap()) }
+        TestKey {
+            kid: kid.into(),
+            signer: Signer::Ec(EcdsaKeyPair::generate(&signature::ECDSA_P256_SHA256_FIXED_SIGNING).unwrap()),
+        }
     }
     fn ed(kid: &str) -> TestKey {
         TestKey { kid: kid.into(), signer: Signer::Ed(Ed25519KeyPair::generate().unwrap()) }
@@ -73,7 +79,9 @@ impl TestKey {
                 let point = k.public_key().as_ref();
                 json!({ "kty": "EC", "kid": self.kid, "crv": "P-256", "x": b(&point[1..33]), "y": b(&point[33..65]) })
             }
-            Signer::Ed(k) => json!({ "kty": "OKP", "kid": self.kid, "crv": "Ed25519", "x": b(k.public_key().as_ref()) }),
+            Signer::Ed(k) => {
+                json!({ "kty": "OKP", "kid": self.kid, "crv": "Ed25519", "x": b(k.public_key().as_ref()) })
+            }
         }
     }
 
@@ -153,7 +161,9 @@ fn claims(issuer: &str, sub: &str) -> Value {
     json!({ "iss": issuer, "sub": sub, "aud": "my-api", "iat": now(), "exp": now() + 300 })
 }
 
-async fn setup(provider: impl FnOnce(&str) -> JwtProvider) -> (TestApp, Http, SocketAddr, String, Arc<Mutex<IdpState>>) {
+async fn setup(
+    provider: impl FnOnce(&str) -> JwtProvider,
+) -> (TestApp, Http, SocketAddr, String, Arc<Mutex<IdpState>>) {
     let (issuer, idp) = mock_idp().await;
     let t = TestApp::with_auth(AuthConfig::password().rate_limits(None).jwt(provider(&issuer))).await.unwrap();
     let addr = t.serve().await.unwrap();
@@ -223,7 +233,8 @@ async fn rs256_es256_and_eddsa_tokens_map_to_provisioned_users() {
 
 #[tokio::test]
 async fn claims_algorithms_and_signatures_are_checked() {
-    let (_t, http, addr, issuer, idp) = setup(|iss| JwtProvider::new(iss).audience("my-api").leeway(Duration::from_secs(5))).await;
+    let (_t, http, addr, issuer, idp) =
+        setup(|iss| JwtProvider::new(iss).audience("my-api").leeway(Duration::from_secs(5))).await;
     let key = TestKey::ec("k");
     let other = TestKey::ec("k");
     idp.lock().unwrap().jwks = vec![key.jwk()];
@@ -254,14 +265,22 @@ async fn claims_algorithms_and_signatures_are_checked() {
     cases.push(("unknown issuer", key.sign(&c), "unknown token issuer"));
     cases.push(("signed by another key with the same kid", other.sign(&base), "invalid access token signature"));
     // Algorithm confusion: claiming RS256 with an EC key, `none`, and HS256 (which is routed to ferrix's own verifier).
-    cases.push(("alg mismatch", key.sign_with(json!({ "alg": "RS256", "kid": "k" }), &base), "unknown token signing key"));
+    cases.push((
+        "alg mismatch",
+        key.sign_with(json!({ "alg": "RS256", "kid": "k" }), &base),
+        "unknown token signing key",
+    ));
     let none = format!(
         "{}.{}.",
         BASE64URL_NOPAD.encode(br#"{"alg":"none"}"#),
         BASE64URL_NOPAD.encode(base.to_string().as_bytes())
     );
     cases.push(("alg none", none, "malformed access token"));
-    cases.push(("alg HS256", key.sign_with(json!({ "alg": "HS256", "kid": "k" }), &base), "invalid access token signature"));
+    cases.push((
+        "alg HS256",
+        key.sign_with(json!({ "alg": "HS256", "kid": "k" }), &base),
+        "invalid access token signature",
+    ));
     let mut tampered = key.sign(&base);
     let mut c = base.clone();
     c["sub"] = json!("mallory");
@@ -288,7 +307,10 @@ async fn claims_algorithms_and_signatures_are_checked() {
 #[tokio::test]
 async fn key_rotation_refetches_at_most_once_per_interval() {
     let (_t, http, _addr, issuer, idp) = setup(|iss| {
-        JwtProvider::new(iss).jwks_url(format!("{iss}/jwks")).any_audience().jwks_refetch_interval(Duration::from_millis(300))
+        JwtProvider::new(iss)
+            .jwks_url(format!("{iss}/jwks"))
+            .any_audience()
+            .jwks_refetch_interval(Duration::from_millis(300))
     })
     .await;
     let old = TestKey::ed("2024");
@@ -321,7 +343,8 @@ async fn key_rotation_refetches_at_most_once_per_interval() {
 
 #[tokio::test]
 async fn provisioning_never_links_or_steals_an_email() {
-    let (_t, http, _addr, issuer, idp) = setup(|iss| JwtProvider::new(iss).audience("my-api").user_id_claim("uid")).await;
+    let (_t, http, _addr, issuer, idp) =
+        setup(|iss| JwtProvider::new(iss).audience("my-api").user_id_claim("uid")).await;
     let key = TestKey::ed("k");
     idp.lock().unwrap().jwks = vec![key.jwk()];
     let pw = http.sign_up("taken@example.com", "correct horse").await;
@@ -343,11 +366,16 @@ async fn provisioning_never_links_or_steals_an_email() {
     let mut c = claims(&issuer, "x");
     c.as_object_mut().unwrap().remove("uid");
     let (s, b) = whoami(&http, &key.sign(&c)).await;
-    assert_eq!((s, b["errorMessage"].as_str()), (401, Some("invalid access token claims")), "the configured claim is required");
+    assert_eq!(
+        (s, b["errorMessage"].as_str()),
+        (401, Some("invalid access token claims")),
+        "the configured claim is required"
+    );
 }
 
 #[tokio::test]
 async fn misconfigured_providers_fail_at_startup() {
-    let err = TestApp::with_auth(AuthConfig::default().jwt(JwtProvider::new("https://idp.example.com"))).await.err().unwrap();
+    let err =
+        TestApp::with_auth(AuthConfig::default().jwt(JwtProvider::new("https://idp.example.com"))).await.err().unwrap();
     assert!(err.to_string().contains("audience"), "{err}");
 }

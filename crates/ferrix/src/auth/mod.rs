@@ -30,7 +30,6 @@ pub(crate) mod store;
 pub mod tables;
 pub mod tokens;
 
-
 pub use config::{Apple, AuthConfig, Discord, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
 pub use identity::{Auth, FORBIDDEN, Identity, UNAUTHENTICATED};

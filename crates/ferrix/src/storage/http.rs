@@ -14,11 +14,11 @@ use std::ops::Range;
 
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::body::Bytes;
 use data_encoding::HEXLOWER;
 use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
@@ -130,11 +130,9 @@ async fn upload(
     let filename = params.filename.as_deref().and_then(sanitize_filename);
     let file = StoredFile { sha256, size, content_type, created_by: token.b.clone(), filename };
     match service.insert_file(&app, id, &file, Some(&token)).await {
-        Ok(Ok(id)) => (
-            [(header::CACHE_CONTROL, "no-store")],
-            axum::Json(json!({ "storageId": id.as_str() })),
-        )
-            .into_response(),
+        Ok(Ok(id)) => {
+            ([(header::CACHE_CONTROL, "no-store")], axum::Json(json!({ "storageId": id.as_str() }))).into_response()
+        }
         Ok(Err(problem)) => {
             service.delete_blob(&id.encode()).await.ok();
             token_failure(problem)
@@ -438,7 +436,8 @@ fn serve_multipart(
         })
         .collect();
     let closing = Bytes::from(format!("--{boundary}--\r\n"));
-    let length: u64 = parts.iter().map(|(head, r)| head.len() as u64 + (r.end - r.start) + 2).sum::<u64>() + closing.len() as u64;
+    let length: u64 =
+        parts.iter().map(|(head, r)| head.len() as u64 + (r.end - r.start) + 2).sum::<u64>() + closing.len() as u64;
     set(&mut h, header::CONTENT_TYPE, &format!("multipart/byteranges; boundary={boundary}"));
     set(&mut h, header::CONTENT_LENGTH, &length.to_string());
     if method == Method::HEAD {
@@ -497,7 +496,9 @@ async fn serve_thumbnail(
                 service.cache_thumbnail(&id, &variant, bytes.clone()).await;
                 bytes
             }
-            Err(Ok(ThumbError::Unsupported)) => return failure(415, "unsupported_image", ThumbError::Unsupported.to_string()),
+            Err(Ok(ThumbError::Unsupported)) => {
+                return failure(415, "unsupported_image", ThumbError::Unsupported.to_string());
+            }
             Err(Ok(e @ ThumbError::TooLarge { .. })) => return failure(422, "image_too_large", e.to_string()),
             Err(Ok(e @ ThumbError::Invalid(_))) => return failure(422, "invalid_image", e.to_string()),
             Err(Err(e)) => return internal(e),
@@ -520,7 +521,9 @@ async fn generate_thumbnail(
 ) -> Result<Bytes, Result<ThumbError, anyhow::Error>> {
     let _permit = service.thumbnail_permits.acquire().await.map_err(|e| Err(e.into()))?;
     let source = match service.read_blob(id, None).await {
-        Ok(result) => result.bytes().await.map_err(|e| Err(anyhow::Error::from(e).context(format!("reading file {id}"))))?,
+        Ok(result) => {
+            result.bytes().await.map_err(|e| Err(anyhow::Error::from(e).context(format!("reading file {id}"))))?
+        }
         Err(e) => return Err(Err(anyhow::Error::from(e).context(format!("reading file {id}")))),
     };
     let max_pixels = service.config.thumbnail_max_source_pixels;
@@ -573,7 +576,11 @@ mod tests {
         assert!(validate_content_type("png").is_err());
         assert!(validate_content_type("text/\u{e9}").is_err());
         assert!(validate_content_type("a b/c").is_err());
-        assert!(inline_safe(Some("IMAGE/PNG")) && inline_safe(Some("video/mp4")) && inline_safe(Some("text/plain; charset=utf-8")));
+        assert!(
+            inline_safe(Some("IMAGE/PNG"))
+                && inline_safe(Some("video/mp4"))
+                && inline_safe(Some("text/plain; charset=utf-8"))
+        );
         assert!(!inline_safe(Some("text/html")) && !inline_safe(Some("image/svg+xml")) && !inline_safe(None));
         assert!(!inline_safe(Some("application/xhtml+xml")) && !inline_safe(Some("text/javascript")));
         assert_eq!(sanitize_filename("C:\\Users\\me\\photo.png").as_deref(), Some("photo.png"));

@@ -53,7 +53,12 @@ fn outcome(result: &crate::Result<Value>) -> Option<String> {
 }
 
 /// The warning for a query whose rerun at `ts` gave `second` after `first`, or `None` if they agree.
-pub(crate) fn compare(path: &str, ts: u64, first: &crate::Result<Value>, second: &crate::Result<Value>) -> Option<String> {
+pub(crate) fn compare(
+    path: &str,
+    ts: u64,
+    first: &crate::Result<Value>,
+    second: &crate::Result<Value>,
+) -> Option<String> {
     let (a, b) = (outcome(first)?, outcome(second)?);
     if a == b {
         return None;
@@ -101,7 +106,10 @@ mod tests {
     #[test]
     fn different_results_are_reported_with_where_they_differ() {
         let w = compare("items:list", 7, &Ok(json!(["apple", "pear"])), &Ok(json!(["pear", "apple"]))).unwrap();
-        assert!(w.starts_with("query `items:list` gave a different result when run again at the same ts (7), at byte 2"), "{w}");
+        assert!(
+            w.starts_with("query `items:list` gave a different result when run again at the same ts (7), at byte 2"),
+            "{w}"
+        );
         assert!(w.contains(r#"`["apple","pear"]` then `["pear","apple"]`"#), "{w}");
         let w = compare("q", 1, &Ok(json!(1)), &Err(anyhow::anyhow!("boom"))).unwrap();
         assert!(w.contains("`1` then `error: boom`"), "{w}");

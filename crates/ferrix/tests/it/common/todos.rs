@@ -4,29 +4,43 @@ use ferrix::prelude::*;
 
 // ---- #[table(name = "todos")] #[index(by_done = [done, created_by])] #[index(by_text = [text])] ----
 
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize,
-         ::ferrix::__private::ts_rs::TS, ::core::clone::Clone, ::core::fmt::Debug)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
-pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<String> }
+pub struct Todo {
+    pub text: String,
+    pub done: bool,
+    pub created_by: Option<String>,
+}
 
 impl ::ferrix::Table for Todo {
     const NAME: &'static str = "todos";
     fn table_def() -> ::ferrix::TableDef {
-        ::ferrix::TableDef { name: "todos", indexes: vec![
-            ::ferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
-            ::ferrix::IndexDef { name: "by_text", fields: vec!["text"] },
-        ], search_indexes: vec![], vector_indexes: vec![],
-        ts: || ::ferrix::__private::ts_inline::<Todo>(),
-        validate: ::ferrix::__private::validate_doc::<Todo>,
-        shape: || {
-            let mut s = ::ferrix::shape::StructShape::default();
-            s.field("text", ::ferrix::shape::Shape::Text);
-            s.field("done", ::ferrix::shape::Shape::Bool);
-            s.field("createdBy", ::ferrix::shape::Shape::Text.optional());
-            ::ferrix::shape::Shape::Struct(s)
-        },
-        aggregates: vec![] }
+        ::ferrix::TableDef {
+            name: "todos",
+            indexes: vec![
+                ::ferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
+                ::ferrix::IndexDef { name: "by_text", fields: vec!["text"] },
+            ],
+            search_indexes: vec![],
+            vector_indexes: vec![],
+            ts: || ::ferrix::__private::ts_inline::<Todo>(),
+            validate: ::ferrix::__private::validate_doc::<Todo>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field("text", ::ferrix::shape::Shape::Text);
+                s.field("done", ::ferrix::shape::Shape::Bool);
+                s.field("createdBy", ::ferrix::shape::Shape::Text.optional());
+                ::ferrix::shape::Shape::Struct(s)
+            },
+            aggregates: vec![],
+        }
     }
 }
 
@@ -57,13 +71,19 @@ pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Todo>>> 
 }
 
 #[allow(non_camel_case_types)]
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
+#[derive(
+    ::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
-pub struct __ferrix_args_list { pub done: Option<bool> }
+pub struct __ferrix_args_list {
+    pub done: Option<bool>,
+}
 
 impl ::core::convert::From<(Option<bool>,)> for __ferrix_args_list {
-    fn from((done,): (Option<bool>,)) -> Self { Self { done } }
+    fn from((done,): (Option<bool>,)) -> Self {
+        Self { done }
+    }
 }
 
 /// Function reference for [`list`](fn@list).
@@ -73,7 +93,9 @@ pub struct list {}
 impl ::ferrix::FunctionRef for list {
     type Args = __ferrix_args_list;
     type Output = Vec<Doc<Todo>>;
-    fn path() -> String { ::ferrix::__private::function_path(module_path!(), "list") }
+    fn path() -> String {
+        ::ferrix::__private::function_path(module_path!(), "list")
+    }
 }
 impl ::ferrix::QueryFunction for list {}
 
@@ -84,13 +106,14 @@ static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private:
     name: "list",
     visibility: ::ferrix::__private::Visibility::Public,
     dev_only: false,
-    handler: ::ferrix::__private::Handler::Query(|ctx, args| ::std::boxed::Box::pin(async move {
-        let a: __ferrix_args_list = ::ferrix::__private::decode_args("list", args)?;
-        let out = list(&ctx, a.done).await?;
-        ::ferrix::__private::encode_output(out)
-    })),
-    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_list>(),
-            ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
+    handler: ::ferrix::__private::Handler::Query(|ctx, args| {
+        ::std::boxed::Box::pin(async move {
+            let a: __ferrix_args_list = ::ferrix::__private::decode_args("list", args)?;
+            let out = list(&ctx, a.done).await?;
+            ::ferrix::__private::encode_output(out)
+        })
+    }),
+    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_list>(), ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
 };
 
 // ---- #[mutation] add ----
@@ -103,13 +126,19 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
+#[derive(
+    ::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
-pub struct __ferrix_args_add { pub text: String }
+pub struct __ferrix_args_add {
+    pub text: String,
+}
 
 impl ::core::convert::From<(String,)> for __ferrix_args_add {
-    fn from((text,): (String,)) -> Self { Self { text } }
+    fn from((text,): (String,)) -> Self {
+        Self { text }
+    }
 }
 
 #[allow(non_camel_case_types, dead_code)]
@@ -118,7 +147,9 @@ pub struct add {}
 impl ::ferrix::FunctionRef for add {
     type Args = __ferrix_args_add;
     type Output = Id<Todo>;
-    fn path() -> String { ::ferrix::__private::function_path(module_path!(), "add") }
+    fn path() -> String {
+        ::ferrix::__private::function_path(module_path!(), "add")
+    }
 }
 impl ::ferrix::MutationFunction for add {}
 impl ::ferrix::SchedulableFunction for add {}
@@ -130,11 +161,13 @@ static __FERRIX_FN_add: ::ferrix::__private::FunctionDef = ::ferrix::__private::
     name: "add",
     visibility: ::ferrix::__private::Visibility::Public,
     dev_only: false,
-    handler: ::ferrix::__private::Handler::Mutation(|ctx, args| ::std::boxed::Box::pin(async move {
-        let a: __ferrix_args_add = ::ferrix::__private::decode_args("add", args)?;
-        let out = add(&ctx, a.text).await?;
-        ::ferrix::__private::encode_output(out)
-    })),
+    handler: ::ferrix::__private::Handler::Mutation(|ctx, args| {
+        ::std::boxed::Box::pin(async move {
+            let a: __ferrix_args_add = ::ferrix::__private::decode_args("add", args)?;
+            let out = add(&ctx, a.text).await?;
+            ::ferrix::__private::encode_output(out)
+        })
+    }),
     ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add>(), ::ferrix::__private::ts_output::<Id<Todo>>()),
 };
 
@@ -148,13 +181,19 @@ pub async fn add_many(ctx: &ActionCtx, n: u32) -> Result<()> {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
+#[derive(
+    ::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
-pub struct __ferrix_args_add_many { pub n: u32 }
+pub struct __ferrix_args_add_many {
+    pub n: u32,
+}
 
 impl ::core::convert::From<(u32,)> for __ferrix_args_add_many {
-    fn from((n,): (u32,)) -> Self { Self { n } }
+    fn from((n,): (u32,)) -> Self {
+        Self { n }
+    }
 }
 
 #[allow(non_camel_case_types, dead_code)]
@@ -163,7 +202,9 @@ pub struct add_many {}
 impl ::ferrix::FunctionRef for add_many {
     type Args = __ferrix_args_add_many;
     type Output = ();
-    fn path() -> String { ::ferrix::__private::function_path(module_path!(), "add_many") }
+    fn path() -> String {
+        ::ferrix::__private::function_path(module_path!(), "add_many")
+    }
 }
 impl ::ferrix::ActionFunction for add_many {}
 impl ::ferrix::SchedulableFunction for add_many {}
@@ -175,11 +216,13 @@ static __FERRIX_FN_add_many: ::ferrix::__private::FunctionDef = ::ferrix::__priv
     name: "add_many",
     visibility: ::ferrix::__private::Visibility::Public,
     dev_only: false,
-    handler: ::ferrix::__private::Handler::Action(|ctx, args| ::std::boxed::Box::pin(async move {
-        let a: __ferrix_args_add_many = ::ferrix::__private::decode_args("add_many", args)?;
-        let out = add_many(&ctx, a.n).await?;
-        ::ferrix::__private::encode_output(out)
-    })),
+    handler: ::ferrix::__private::Handler::Action(|ctx, args| {
+        ::std::boxed::Box::pin(async move {
+            let a: __ferrix_args_add_many = ::ferrix::__private::decode_args("add_many", args)?;
+            let out = add_many(&ctx, a.n).await?;
+            ::ferrix::__private::encode_output(out)
+        })
+    }),
     ts: || (::ferrix::__private::ts_inline::<__ferrix_args_add_many>(), ::ferrix::__private::ts_output::<()>()),
 };
 

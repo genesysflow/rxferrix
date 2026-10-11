@@ -58,7 +58,8 @@ pub mod fns {
     /// snapshot). Its second read covers the whole table, so every commit invalidates it.
     #[query]
     pub async fn slow_group(ctx: &QueryCtx, group: i64, ms: u32) -> Result<Vec<Doc<Item>>> {
-        let docs = ctx.db.query::<Item>().with_index(Item::by_group_score, |r| r.eq(Item::group, group)).collect().await?;
+        let docs =
+            ctx.db.query::<Item>().with_index(Item::by_group_score, |r| r.eq(Item::group, group)).collect().await?;
         tokio::time::sleep(std::time::Duration::from_millis(ms.into())).await;
         let all = ctx.db.query::<Item>().collect().await?;
         assert!(docs.iter().all(|d| all.contains(d)), "one snapshot across the sleep");
@@ -130,7 +131,10 @@ impl Q {
         fn by_group_score(mut v: Vec<&Doc<Item>>) -> Vec<&Doc<Item>> {
             // Index keys end in `_creationTime, _id`.
             v.sort_by(|a, b| {
-                (a.group, a.score).cmp(&(b.group, b.score)).then(a.creation_time.total_cmp(&b.creation_time)).then(a.id.cmp(&b.id))
+                (a.group, a.score)
+                    .cmp(&(b.group, b.score))
+                    .then(a.creation_time.total_cmp(&b.creation_time))
+                    .then(a.id.cmp(&b.id))
             });
             v
         }
@@ -158,7 +162,8 @@ impl Q {
                 docs.iter().filter(|d| d.group == *g && d.score >= *lo && d.score < *hi).collect(),
             )),
             Q::Filtered(min) => {
-                let mut v: Vec<_> = by_creation(docs.iter().collect()).into_iter().filter(|d| d.score >= *min).collect();
+                let mut v: Vec<_> =
+                    by_creation(docs.iter().collect()).into_iter().filter(|d| d.score >= *min).collect();
                 v.truncate(3);
                 to_json(v)
             }
@@ -341,7 +346,9 @@ impl Client {
                 assert_eq!(start_version, self.version, "client {}: startVersion must equal current version", self.id);
                 assert!(end_version.ts >= start_version.ts, "ts went backwards");
                 assert!(end_version.query_set >= start_version.query_set);
-                assert!(end_version.identity >= start_version.identity && end_version.identity <= self.identity_version);
+                assert!(
+                    end_version.identity >= start_version.identity && end_version.identity <= self.identity_version
+                );
                 for m in modifications {
                     match m {
                         StateModification::QueryUpdated { query_id, value, .. } => {
@@ -358,7 +365,11 @@ impl Client {
                 self.version = end_version;
                 let expected_live = &self.live_at_version[&end_version.query_set];
                 let have: BTreeSet<u64> = self.results.keys().copied().collect();
-                assert_eq!(&have, expected_live, "client {}: result set != live set at querySet {}", self.id, end_version.query_set);
+                assert_eq!(
+                    &have, expected_live,
+                    "client {}: result set != live set at querySet {}",
+                    self.id, end_version.query_set
+                );
                 self.log.states.push((end_version.ts, self.results.clone()));
                 self.uncovered.retain(|m| *m > end_version.ts);
             }
@@ -404,7 +415,14 @@ impl Client {
     }
 }
 
-async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_done: mpsc::Sender<()>, mut quiesce: watch::Receiver<bool>) -> ClientLog {
+async fn run_client(
+    id: usize,
+    app: App,
+    dumps: Arc<Dumps>,
+    seed: u64,
+    steps_done: mpsc::Sender<()>,
+    mut quiesce: watch::Receiver<bool>,
+) -> ClientLog {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut c = Client::new(id, app.clone(), dumps.clone());
     c.send(ClientMessage::Connect {
@@ -416,7 +434,8 @@ async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_don
     })
     .await;
     // Start with two slow queries of different durations (later steps may remove them).
-    let slow = [c.add_mod(Q::Slow(id as i64 % 2, SLOW_MS[3])), c.add_mod(Q::Slow((id as i64 + 1) % 2, SLOW_MS[id % 3]))];
+    let slow =
+        [c.add_mod(Q::Slow(id as i64 % 2, SLOW_MS[3])), c.add_mod(Q::Slow((id as i64 + 1) % 2, SLOW_MS[id % 3]))];
     c.modify(slow.into()).await;
     for _ in 0..CLIENT_STEPS {
         c.step(&mut rng).await;
@@ -446,7 +465,12 @@ async fn run_client(id: usize, app: App, dumps: Arc<Dumps>, seed: u64, steps_don
     c.settle(Duration::from_millis(300)).await;
     let model = dumps.at(final_ts);
     for (qid, result) in &c.results {
-        assert_eq!(result, &c.queries[qid].eval(&model), "client {id}: query {qid} ({:?}) is stale after quiescence", c.queries[qid]);
+        assert_eq!(
+            result,
+            &c.queries[qid].eval(&model),
+            "client {id}: query {qid} ({:?}) is stale after quiescence",
+            c.queries[qid]
+        );
     }
     // A probe ModifyQuerySet is answered at exactly the final ts.
     let probe = c.add_mod(Q::CountAll);
@@ -477,7 +501,14 @@ async fn model_based_reactivity() {
     let (quiesce_tx, quiesce_rx) = watch::channel(false);
     let mut clients = Vec::new();
     for i in 0..CLIENTS {
-        clients.push(tokio::spawn(run_client(i, app.clone(), dumps.clone(), seed.wrapping_add(i as u64), steps_tx.clone(), quiesce_rx.clone())));
+        clients.push(tokio::spawn(run_client(
+            i,
+            app.clone(),
+            dumps.clone(),
+            seed.wrapping_add(i as u64),
+            steps_tx.clone(),
+            quiesce_rx.clone(),
+        )));
     }
     let mut writers = Vec::new();
     for w in 0..WRITERS {

@@ -112,8 +112,11 @@ pub fn forbid_system_write(table: &str, action: &str) -> crate::Result<()> {
         ("_sessions", "delete") => " Use revoke_session.",
         _ => "",
     };
-    Err(UserError::new("read_only_table", format!("System table `{table}` can't be {action}d from the dashboard.{hint}"))
-        .into())
+    Err(UserError::new(
+        "read_only_table",
+        format!("System table `{table}` can't be {action}d from the dashboard.{hint}"),
+    )
+    .into())
 }
 
 #[cfg(test)]

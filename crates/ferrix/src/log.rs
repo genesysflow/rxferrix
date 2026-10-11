@@ -339,7 +339,8 @@ mod tests {
         }
         let out = Buf::default();
         let writer = out.clone();
-        let subscriber = cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Pretty);
+        let subscriber =
+            cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Pretty);
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let ((), lines) = tracing::subscriber::with_default(subscriber, || {
             rt.block_on(capture(async {
@@ -369,7 +370,8 @@ mod tests {
         }
         let out = Buf::default();
         let writer = out.clone();
-        let subscriber = cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Json);
+        let subscriber =
+            cli_subscriber(tracing_subscriber::EnvFilter::new("info"), move || writer.clone(), LogFormat::Json);
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let ((), lines) = tracing::subscriber::with_default(subscriber, || {
             info!(target: "json_test", "outside");
@@ -382,8 +384,10 @@ mod tests {
         });
         assert_eq!(lines, vec!["[WARN] quote \" and\nnewline user=ann count=2", "[DEBUG] capture only"]);
         let printed = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
-        let events: Vec<serde_json::Value> =
-            printed.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))).collect();
+        let events: Vec<serde_json::Value> = printed
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+            .collect();
         assert_eq!(events.len(), 2, "one line per event, newlines escaped: {printed}");
         let first = &events[0];
         assert_eq!((first["level"].as_str(), first["target"].as_str()), (Some("INFO"), Some("json_test")));
@@ -393,7 +397,10 @@ mod tests {
         assert_eq!(second["level"], "WARN");
         assert_eq!(second["fields"]["message"], "quote \" and\nnewline");
         assert_eq!((second["fields"]["user"].as_str(), second["fields"]["count"].as_i64()), (Some("ann"), Some(2)));
-        assert_eq!((second["span"]["name"].as_str(), second["span"]["path"].as_str()), (Some("request"), Some("/api/x")));
+        assert_eq!(
+            (second["span"]["name"].as_str(), second["span"]["path"].as_str()),
+            (Some("request"), Some("/api/x"))
+        );
         assert_eq!(second["spans"][0]["n"], 3);
     }
 

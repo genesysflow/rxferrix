@@ -144,7 +144,10 @@ async fn concurrent_duplicates_run_once() {
             tasks.push(tokio::spawn(async move {
                 let key = IdempotencyKey { session_id: "dup".into(), request_id: i };
                 let args = json!({ "marker": format!("d{i}"), "fail": false });
-                app.execute_mutation(&fns::gc_pair::path(), args, &Identity::default(), Some(&key)).await.result.map(|(v, _)| v)
+                app.execute_mutation(&fns::gc_pair::path(), args, &Identity::default(), Some(&key))
+                    .await
+                    .result
+                    .map(|(v, _)| v)
             }));
         }
     }

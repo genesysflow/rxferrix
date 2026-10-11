@@ -73,11 +73,7 @@ impl Parse for IndexSpec {
         let content;
         let bracket = bracketed!(content in input);
         let fields = Punctuated::<syn::Ident, Token![,]>::parse_terminated(&content)?;
-        Ok(IndexSpec {
-            name,
-            fields: fields.into_iter().collect(),
-            bracket_span: bracket.span.join(),
-        })
+        Ok(IndexSpec { name, fields: fields.into_iter().collect(), bracket_span: bracket.span.join() })
     }
 }
 
@@ -117,10 +113,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             ));
         }
         other => {
-            return Err(syn::Error::new_spanned(
-                other,
-                "#[table] can only be used on a struct with named fields",
-            ));
+            return Err(syn::Error::new_spanned(other, "#[table] can only be used on a struct with named fields"));
         }
     };
     let mut errors = Errors::default();
@@ -138,17 +131,11 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let named = match &strukt.fields {
         syn::Fields::Named(n) => Some(n),
         syn::Fields::Unnamed(u) => {
-            errors.error(
-                u,
-                "#[table] requires a struct with named fields, not a tuple struct",
-            );
+            errors.error(u, "#[table] requires a struct with named fields, not a tuple struct");
             None
         }
         syn::Fields::Unit => {
-            errors.error_at(
-                strukt.ident.span(),
-                "#[table] requires a struct with named fields, not a unit struct",
-            );
+            errors.error_at(strukt.ident.span(), "#[table] requires a struct with named fields, not a unit struct");
             None
         }
     };
@@ -166,11 +153,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 Err(e) => errors.push(e),
             }
         } else if path.is_ident("search_index") || path.is_ident("vector_index") {
-            let kind = if path.is_ident("search_index") {
-                Kind::Search
-            } else {
-                Kind::Vector
-            };
+            let kind = if path.is_ident("search_index") { Kind::Search } else { Kind::Vector };
             match SpecialIndexSpec::parse(kind, &attr) {
                 Ok(mut spec) => {
                     for e in spec.errors.drain(..) {
@@ -196,13 +179,12 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             match attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated) {
                 Ok(paths) => {
                     for p in &paths {
-                        let last = p
-                            .segments
-                            .last()
-                            .map(|s| s.ident.to_string())
-                            .unwrap_or_default();
+                        let last = p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                         if ADDED_DERIVES.contains(&last.as_str()) {
-                            errors.error(p, format_args!("#[table] already derives `{last}`; remove it from this #[derive]"));
+                            errors.error(
+                                p,
+                                format_args!("#[table] already derives `{last}`; remove it from this #[derive]"),
+                            );
                         }
                     }
                 }
@@ -210,11 +192,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             }
             kept_attrs.push(attr);
         } else if path.is_ident("serde") || path.is_ident("ts") {
-            let which = if path.is_ident("serde") {
-                "serde"
-            } else {
-                "ts"
-            };
+            let which = if path.is_ident("serde") { "serde" } else { "ts" };
             let Some(items) = attr_items(&attr) else {
                 kept_attrs.push(attr);
                 continue;
@@ -252,26 +230,27 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     if item.key().is_some_and(|k| k == "rename") {
                         match item.str_value() {
                             Some(v) => json_name = v.value(),
-                            None => errors.error(&item.tokens, "#[table] only supports the `rename = \"...\"` form of #[serde(rename)]"),
+                            None => errors.error(
+                                &item.tokens,
+                                "#[table] only supports the `rename = \"...\"` form of #[serde(rename)]",
+                            ),
                         }
                     }
                 }
             }
             let rust_name = ident.unraw().to_string();
             if RESERVED_ITEMS.contains(&rust_name.as_str()) {
-                errors.error(
-                    ident,
-                    format_args!("`{rust_name}` is reserved for a system field or built-in index"),
-                );
+                errors.error(ident, format_args!("`{rust_name}` is reserved for a system field or built-in index"));
             }
             if json_name.starts_with('_') {
-                errors.error(ident, format_args!("JSON field name `{json_name}` is reserved: names starting with `_` are system fields"));
+                errors.error(
+                    ident,
+                    format_args!(
+                        "JSON field name `{json_name}` is reserved: names starting with `_` are system fields"
+                    ),
+                );
             }
-            fields.push(FieldInfo {
-                ident,
-                ty: &f.ty,
-                json_name,
-            });
+            fields.push(FieldInfo { ident, ty: &f.ty, json_name });
         }
     }
     let mut seen_json = HashMap::new();
@@ -279,19 +258,11 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         if let Some(prev) = seen_json.insert(f.json_name.clone(), f.ident) {
             errors.error(
                 f.ident,
-                format_args!(
-                    "fields `{}` and `{}` both serialize as `{}`",
-                    prev.unraw(),
-                    f.ident.unraw(),
-                    f.json_name
-                ),
+                format_args!("fields `{}` and `{}` both serialize as `{}`", prev.unraw(), f.ident.unraw(), f.json_name),
             );
         }
     }
-    let field_by_name: HashMap<String, &FieldInfo> = fields
-        .iter()
-        .map(|f| (f.ident.unraw().to_string(), f))
-        .collect();
+    let field_by_name: HashMap<String, &FieldInfo> = fields.iter().map(|f| (f.ident.unraw().to_string(), f)).collect();
 
     // --- indexes
     let mut index_defs = Vec::new();
@@ -299,19 +270,13 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     for spec in &index_specs {
         let name = spec.name.unraw().to_string();
         if RESERVED_INDEXES.contains(&name.as_str()) {
-            errors.error(
-                &spec.name,
-                format_args!("index name `{name}` is reserved for a built-in index"),
-            );
+            errors.error(&spec.name, format_args!("index name `{name}` is reserved for a built-in index"));
         } else if !seen_index.insert(name.clone()) {
             errors.error(&spec.name, format_args!("duplicate index name `{name}`"));
         } else if field_by_name.contains_key(&name) {
             errors.error(
                 &spec.name,
-                format_args!(
-                    "index name `{name}` conflicts with the field handle `{}::{name}`",
-                    strukt.ident
-                ),
+                format_args!("index name `{name}` conflicts with the field handle `{}::{name}`", strukt.ident),
             );
         }
         if spec.fields.is_empty() {
@@ -346,19 +311,14 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         if RESERVED_INDEXES.contains(&name.as_str()) || RESERVED_ITEMS.contains(&name.as_str()) {
             errors.error(
                 &spec.name,
-                format_args!(
-                    "index name `{name}` is reserved for a built-in index or system field"
-                ),
+                format_args!("index name `{name}` is reserved for a built-in index or system field"),
             );
         } else if !seen_index.insert(name.clone()) {
             errors.error(&spec.name, format_args!("duplicate index name `{name}`"));
         } else if field_by_name.contains_key(&name) {
             errors.error(
                 &spec.name,
-                format_args!(
-                    "index name `{name}` conflicts with the field handle `{}::{name}`",
-                    strukt.ident
-                ),
+                format_args!("index name `{name}` conflicts with the field handle `{}::{name}`", strukt.ident),
             );
         }
         let lookup = |field: &syn::Ident, errors: &mut Errors, role: &str| -> Option<&FieldInfo> {
@@ -366,14 +326,17 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             match field_by_name.get(&fname) {
                 Some(info) => Some(*info),
                 None if fname == "_id" || fname == "_creation_time" => {
-                    errors.error(
-                        field,
-                        format_args!("system field `{fname}` cannot be used in #[{attr}]"),
-                    );
+                    errors.error(field, format_args!("system field `{fname}` cannot be used in #[{attr}]"));
                     None
                 }
                 None => {
-                    errors.error(field, format_args!("unknown {role} `{fname}` in #[{attr}] `{name}`; struct `{}` has no such field", strukt.ident));
+                    errors.error(
+                        field,
+                        format_args!(
+                            "unknown {role} `{fname}` in #[{attr}] `{name}`; struct `{}` has no such field",
+                            strukt.ident
+                        ),
+                    );
                     None
                 }
             }
@@ -385,10 +348,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let main = match &spec.field {
             Some(f) => lookup(f, &mut errors, role),
             None => {
-                errors.error_at(
-                    spec.name.span(),
-                    format_args!("#[{attr}] `{name}` needs `{field_key} = <field>`"),
-                );
+                errors.error_at(spec.name.span(), format_args!("#[{attr}] `{name}` needs `{field_key} = <field>`"));
                 None
             }
         };
@@ -396,11 +356,17 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             match (spec.kind, type_shape(info.ty)) {
                 (Kind::Search, TypeShape::F32Vec | TypeShape::Other) => errors.error(
                     f,
-                    format_args!("the search field of #[search_index] must be a `String` or `Option<String>`; `{}` is not", f.unraw()),
+                    format_args!(
+                        "the search field of #[search_index] must be a `String` or `Option<String>`; `{}` is not",
+                        f.unraw()
+                    ),
                 ),
                 (Kind::Vector, TypeShape::Text | TypeShape::Other) => errors.error(
                     f,
-                    format_args!("the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `{}` is not", f.unraw()),
+                    format_args!(
+                        "the field of #[vector_index] must be a `Vec<f32>` or `Option<Vec<f32>>`; `{}` is not",
+                        f.unraw()
+                    ),
                 ),
                 _ => {}
             }
@@ -414,29 +380,18 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         if spec.filter.len() > MAX_FILTER_FIELDS
             && let Some(span) = spec.filter_span
         {
-            errors.error_at(
-                span,
-                format_args!("at most {MAX_FILTER_FIELDS} filter fields are supported"),
-            );
+            errors.error_at(span, format_args!("at most {MAX_FILTER_FIELDS} filter fields are supported"));
         }
         let mut filter_json = Vec::new();
         let mut seen_filter = HashSet::new();
         for f in &spec.filter {
             let fname = f.unraw().to_string();
             if !seen_filter.insert(fname.clone()) {
-                errors.error(
-                    f,
-                    format_args!("field `{fname}` appears twice in the filter fields of `{name}`"),
-                );
+                errors.error(f, format_args!("field `{fname}` appears twice in the filter fields of `{name}`"));
                 continue;
             }
             if spec.field.as_ref().is_some_and(|m| m.unraw() == fname) {
-                errors.error(
-                    f,
-                    format_args!(
-                        "`{fname}` is the {role} of `{name}`; it cannot also be a filter field"
-                    ),
-                );
+                errors.error(f, format_args!("`{fname}` is the {role} of `{name}`; it cannot also be a filter field"));
                 continue;
             }
             if let Some(info) = lookup(f, &mut errors, "filter field") {
@@ -453,11 +408,17 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     for spec in &aggregate_specs {
         let name = spec.name.unraw().to_string();
         if RESERVED_INDEXES.contains(&name.as_str()) || RESERVED_ITEMS.contains(&name.as_str()) {
-            errors.error(&spec.name, format_args!("aggregate name `{name}` is reserved for a built-in index or system field"));
+            errors.error(
+                &spec.name,
+                format_args!("aggregate name `{name}` is reserved for a built-in index or system field"),
+            );
         } else if !seen_index.insert(name.clone()) {
             errors.error(&spec.name, format_args!("duplicate index or aggregate name `{name}`"));
         } else if field_by_name.contains_key(&name) {
-            errors.error(&spec.name, format_args!("aggregate name `{name}` conflicts with the field handle `{}::{name}`", strukt.ident));
+            errors.error(
+                &spec.name,
+                format_args!("aggregate name `{name}` conflicts with the field handle `{}::{name}`", strukt.ident),
+            );
         }
         let mut resolve = |fields: &[syn::Ident], role: &str| -> Vec<&FieldInfo> {
             let mut seen = HashSet::new();
@@ -475,7 +436,10 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     }
                     None => errors.error(
                         f,
-                        format_args!("unknown {role} field `{fname}` in #[aggregate] `{name}`; struct `{}` has no such field", strukt.ident),
+                        format_args!(
+                            "unknown {role} field `{fname}` in #[aggregate] `{name}`; struct `{}` has no such field",
+                            strukt.ident
+                        ),
                     ),
                 }
             }
@@ -500,11 +464,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { ::ferrix::IndexDef { name: #name, fields: ::std::vec![#(#json_fields),*] } }
     });
     let field_consts = fields.iter().map(|f| {
-        let FieldInfo {
-            ident: fident,
-            ty,
-            json_name,
-        } = f;
+        let FieldInfo { ident: fident, ty, json_name } = f;
         quote_spanned! {fident.span()=>
             pub const #fident: ::ferrix::Field<#ident, #ty> = ::ferrix::Field::new(#json_name);
         }
@@ -515,22 +475,21 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             pub const #iident: ::ferrix::Index<#ident> = ::ferrix::Index::new(#name);
         }
     });
-    let search_def_exprs = special_defs.iter().filter(|(s, ..)| s.kind == Kind::Search).map(|(spec, name, info, filter)| {
-        let field = &info.json_name;
-        let tokenizer = spec.tokenizer_expr();
-        quote! {
-            ::ferrix::SearchIndexDef {
-                name: #name,
-                search_field: #field,
-                filter_fields: ::std::vec![#(#filter),*],
-                tokenizer: #tokenizer,
+    let search_def_exprs =
+        special_defs.iter().filter(|(s, ..)| s.kind == Kind::Search).map(|(spec, name, info, filter)| {
+            let field = &info.json_name;
+            let tokenizer = spec.tokenizer_expr();
+            quote! {
+                ::ferrix::SearchIndexDef {
+                    name: #name,
+                    search_field: #field,
+                    filter_fields: ::std::vec![#(#filter),*],
+                    tokenizer: #tokenizer,
+                }
             }
-        }
-    });
-    let vector_def_exprs = special_defs
-        .iter()
-        .filter(|(s, ..)| s.kind == Kind::Vector)
-        .map(|(spec, name, info, filter)| {
+        });
+    let vector_def_exprs =
+        special_defs.iter().filter(|(s, ..)| s.kind == Kind::Vector).map(|(spec, name, info, filter)| {
             let field = &info.json_name;
             let dims = spec.dims.map(|(n, _)| n).unwrap_or(1);
             let kind = spec.vector_kind_expr();

@@ -46,9 +46,11 @@ pub(crate) fn kind_of(path: &str) -> crate::Result<JobKind> {
     match def.handler.kind() {
         FunctionKind::Mutation => Ok(JobKind::Mutation),
         FunctionKind::Action => Ok(JobKind::Action),
-        FunctionKind::Query => {
-            Err(UserError::new("not_schedulable", format!("`{path}` is a query; only mutations and actions can be scheduled")).into())
-        }
+        FunctionKind::Query => Err(UserError::new(
+            "not_schedulable",
+            format!("`{path}` is a query; only mutations and actions can be scheduled"),
+        )
+        .into()),
     }
 }
 
@@ -56,7 +58,11 @@ pub(crate) fn kind_of(path: &str) -> crate::Result<JobKind> {
 pub(crate) async fn insert(db: &MutationDb, job: NewJob, now: f64) -> crate::Result<Id<ScheduledJob>> {
     anyhow::ensure!(job.run_at.is_finite(), "the time to run `{}` at is not a finite number", job.path);
     let size = serde_json::to_string(&job.args)?.len();
-    anyhow::ensure!(size <= MAX_ARGS_BYTES, "args for `{}` are too large to schedule ({size} bytes, max {MAX_ARGS_BYTES})", job.path);
+    anyhow::ensure!(
+        size <= MAX_ARGS_BYTES,
+        "args for `{}` are too large to schedule ({size} bytes, max {MAX_ARGS_BYTES})",
+        job.path
+    );
     let mut value = ScheduledJob {
         path: job.path,
         kind: job.kind,
@@ -170,7 +176,12 @@ pub enum CancelOutcome {
 
 /// Cancel a job, in the caller's transaction, recording `reason` in its `error`. `not_found` (a user error) for an
 /// unknown id. Canceling an action in progress also signals it once the transaction commits (`super::cancellation`).
-pub(crate) async fn cancel(db: &MutationDb, id: Id<ScheduledJob>, now: f64, reason: &str) -> crate::Result<CancelOutcome> {
+pub(crate) async fn cancel(
+    db: &MutationDb,
+    id: Id<ScheduledJob>,
+    now: f64,
+    reason: &str,
+) -> crate::Result<CancelOutcome> {
     let Some(job) = db.get(id).await? else {
         return Err(UserError::new("not_found", format!("Scheduled job {id} does not exist")).into());
     };

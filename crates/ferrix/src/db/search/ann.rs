@@ -56,9 +56,9 @@ use crate::db::catalog::{Catalog, IndexId};
 use crate::db::search::hnsw::{Graph, Params, dot, normalized};
 use crate::db::search::vector::from_blob;
 use crate::db::search::{SearchIndexInfo, SpecialIndexKind};
-use crate::schema::HnswParams;
 use crate::db::storage;
 use crate::id::DocId;
+use crate::schema::HnswParams;
 use crate::writelog::WriteLog;
 
 /// Filtered searches whose matching documents number at most this many are computed exactly.
@@ -134,12 +134,13 @@ impl AnnIndexes {
             let weak = Arc::downgrade(&inner);
             let db_path = dir.join("data.db");
             let (tx, rx) = mpsc::channel();
-            let spawned = std::thread::Builder::new()
-                .name("ferrix-ann".into())
-                .spawn(move || background(weak, db_path, rx));
+            let spawned =
+                std::thread::Builder::new().name("ferrix-ann".into()).spawn(move || background(weak, db_path, rx));
             match spawned {
                 Ok(handle) => (stop, thread) = (Some(tx), Some(handle)),
-                Err(e) => tracing::error!("could not start the vector index thread ({e}); vector searches will be exact"),
+                Err(e) => {
+                    tracing::error!("could not start the vector index thread ({e}); vector searches will be exact")
+                }
             }
         }
         AnnIndexes { inner, stop, thread }
@@ -185,7 +186,8 @@ impl AnnIndexes {
             }
             let postings: usize = state.postings.iter().map(|p| p.values().map(HashSet::len).sum::<usize>()).sum();
             if postings != state.by_doc.len() * index.filter_count {
-                problems.push(format!("table `{}` HNSW index `{}`: filter postings out of sync", index.table, index.name));
+                problems
+                    .push(format!("table `{}` HNSW index `{}`: filter postings out of sync", index.table, index.name));
             }
         }
         Ok(problems)
@@ -485,9 +487,9 @@ impl AnnIndex {
 
     fn needs_rebuild(&self) -> bool {
         let state = self.state.read().unwrap_or_else(|e| e.into_inner());
-        state.as_ref().is_some_and(|s| {
-            s.tombstones >= REBUILD_MIN && s.tombstones as f64 >= REBUILD_RATIO * s.graph.len() as f64
-        })
+        state
+            .as_ref()
+            .is_some_and(|s| s.tombstones >= REBUILD_MIN && s.tombstones as f64 >= REBUILD_RATIO * s.graph.len() as f64)
     }
 
     /// Rebuild the graph from its live nodes (dropping tombstones). Searches use the old graph meanwhile.
@@ -510,7 +512,12 @@ impl AnnIndex {
                 .into_iter()
                 .map(|(doc, &n)| {
                     let meta = &state.nodes[n as usize];
-                    Row { doc: *doc, vector: state.graph.vector(n).to_vec(), filters: meta.filters.clone(), hash: meta.hash }
+                    Row {
+                        doc: *doc,
+                        vector: state.graph.vector(n).to_vec(),
+                        filters: meta.filters.clone(),
+                        hash: meta.hash,
+                    }
                 })
                 .collect();
             *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
@@ -805,10 +812,13 @@ impl State {
             match smallest {
                 None => candidates.extend(self.by_doc.values().copied()),
                 Some(None) => {}
-                Some(Some(set)) => candidates.extend(set.iter().copied().filter(|&n| self.matches(n, std::slice::from_ref(branch)))),
+                Some(Some(set)) => {
+                    candidates.extend(set.iter().copied().filter(|&n| self.matches(n, std::slice::from_ref(branch))))
+                }
             }
         }
-        let mut out: Vec<(f32, u32)> = candidates.into_iter().map(|n| (1.0 - dot(&q, self.graph.vector(n)), n)).collect();
+        let mut out: Vec<(f32, u32)> =
+            candidates.into_iter().map(|n| (1.0 - dot(&q, self.graph.vector(n)), n)).collect();
         out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         out
     }

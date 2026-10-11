@@ -112,7 +112,13 @@ unsafe extern "C" fn register(
             return rc;
         }
         let mut fts5: *mut ffi::fts5_api = ptr::null_mut();
-        ffi::sqlite3_bind_pointer(stmt, 1, (&mut fts5 as *mut *mut ffi::fts5_api).cast::<c_void>(), c"fts5_api_ptr".as_ptr(), None);
+        ffi::sqlite3_bind_pointer(
+            stmt,
+            1,
+            (&mut fts5 as *mut *mut ffi::fts5_api).cast::<c_void>(),
+            c"fts5_api_ptr".as_ptr(),
+            None,
+        );
         ffi::sqlite3_step(stmt);
         let rc = ffi::sqlite3_finalize(stmt);
         if rc != ffi::SQLITE_OK {
@@ -205,7 +211,11 @@ mod tests {
         assert_eq!(rows, vec![(2, score(&[3, 1], 5)), (1, score(&[1, 1], 2))]);
         // Usable in WHERE through its alias, e.g. for cursors.
         let n: i64 = conn
-            .query_row("SELECT count(*) FROM (SELECT rowid, ferrix_score(f) AS sc FROM f WHERE f MATCH 'hello' AND sc < ?1)", [score(&[3], 5)], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM (SELECT rowid, ferrix_score(f) AS sc FROM f WHERE f MATCH 'hello' AND sc < ?1)",
+                [score(&[3], 5)],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1);
     }

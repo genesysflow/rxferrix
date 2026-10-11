@@ -258,7 +258,11 @@ async fn objects_embed_documents() {
     // On the wire: one flat camelCase object.
     let run = t
         .app()
-        .run_query(&views::path(), json!({ "board": "b", "mode": "sequential", "paginationOpts": { "numItems": 10, "cursor": null } }), &Identity::default())
+        .run_query(
+            &views::path(),
+            json!({ "board": "b", "mode": "sequential", "paginationOpts": { "numItems": 10, "cursor": null } }),
+            &Identity::default(),
+        )
         .await;
     let json = run.result.unwrap();
     let item = &json["page"][0];
@@ -277,11 +281,7 @@ async fn objects_embed_documents() {
         "{dm}"
     );
     assert!(dm.contains("export type Mode = \"sequential\" | \"tryMap\" | \"concurrent\" | \"failing\";\n"), "{dm}");
-    assert!(
-        files.api_ts.contains("PaginationResult<NoteView>>(\"query\", \"dx/notes:views\")"),
-        "{}",
-        files.api_ts
-    );
+    assert!(files.api_ts.contains("PaginationResult<NoteView>>(\"query\", \"dx/notes:views\")"), "{}", files.api_ts);
 }
 
 #[tokio::test]

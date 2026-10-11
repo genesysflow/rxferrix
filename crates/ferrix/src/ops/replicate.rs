@@ -52,10 +52,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::backup::{self, BackupSpec, BackupTarget, Manifest};
+use crate::UserError;
 use crate::db::journal::{self, JournalEntry};
 use crate::db::storage;
 use crate::runtime::{App, WeakApp};
-use crate::UserError;
 
 /// The directory of generations in a replication target.
 pub const GENERATIONS: &str = "generations";
@@ -226,7 +226,9 @@ fn chain(segments: &[SegmentInfo], from: u64, until: Option<u64>) -> (Vec<Segmen
     let mut out = Vec::new();
     let mut cur = from;
     while until.is_none_or(|u| cur < u) {
-        let Some(next) = segments.iter().filter(|s| s.from <= cur + 1 && s.to > cur).max_by_key(|s| s.to) else { break };
+        let Some(next) = segments.iter().filter(|s| s.from <= cur + 1 && s.to > cur).max_by_key(|s| s.to) else {
+            break;
+        };
         out.push(*next);
         cur = next.to;
     }
@@ -252,7 +254,9 @@ pub async fn list_generations(target: &BackupTarget) -> crate::Result<Vec<Genera
         });
         match kind.as_str() {
             "snapshots" => {
-                let (Some(ts), true) = (backup::ts_from_name(name), backup::validate_name(name).is_ok()) else { continue };
+                let (Some(ts), true) = (backup::ts_from_name(name), backup::validate_name(name).is_ok()) else {
+                    continue;
+                };
                 let created_at = snapshot_time(name).unwrap_or(created_at);
                 entry.snapshots.push(SnapshotInfo { name: name.clone(), ts, created_at, bytes: meta.size });
             }
@@ -278,7 +282,10 @@ fn snapshot_time(name: &str) -> Option<f64> {
 
 async fn put(target: &BackupTarget, rel: &str, bytes: Vec<u8>) -> crate::Result<()> {
     let (store, path) = target.raw(rel);
-    store.put(&path, PutPayload::from(bytes)).await.with_context(|| format!("uploading {rel} to {}", target.location))?;
+    store
+        .put(&path, PutPayload::from(bytes))
+        .await
+        .with_context(|| format!("uploading {rel} to {}", target.location))?;
     Ok(())
 }
 
@@ -372,7 +379,11 @@ pub fn decode_segment(bytes: &[u8], generation: Option<&str>) -> crate::Result<(
             bail!("malformed segment line");
         };
         let entry = JournalEntry { ts: ts.parse()?, time: time.parse()?, changes: changes.to_string() };
-        anyhow::ensure!(entry.ts == header.from + entries.len() as u64, "segment entries are not consecutive at ts {}", entry.ts);
+        anyhow::ensure!(
+            entry.ts == header.from + entries.len() as u64,
+            "segment entries are not consecutive at ts {}",
+            entry.ts
+        );
         entries.push(entry);
     }
     anyhow::ensure!(
@@ -392,7 +403,13 @@ pub async fn read_segment(
 ) -> crate::Result<(SegmentHeader, Vec<JournalEntry>)> {
     let raw = get(target, &segment_rel(generation, from, to)).await?;
     let (header, entries) = decode_segment(&raw, Some(generation))?;
-    anyhow::ensure!((header.from, header.to) == (from, to), "segment {} holds ts {}..{}", segment_name(from, to), header.from, header.to);
+    anyhow::ensure!(
+        (header.from, header.to) == (from, to),
+        "segment {} holds ts {}..{}",
+        segment_name(from, to),
+        header.from,
+        header.to
+    );
     Ok((header, entries))
 }
 
@@ -446,7 +463,11 @@ pub fn plan_retention(generations: &[Generation], now_ms: f64, keep: Duration) -
 }
 
 /// Delete what `plan` lists from `target`.
-pub async fn apply_retention(target: &BackupTarget, generations: &[Generation], plan: &RetentionPlan) -> crate::Result<()> {
+pub async fn apply_retention(
+    target: &BackupTarget,
+    generations: &[Generation],
+    plan: &RetentionPlan,
+) -> crate::Result<()> {
     for id in &plan.generations {
         let Some(g) = generations.iter().find(|g| &g.id == id) else { continue };
         // Snapshots first: a generation without snapshots is ignored by restores even if segments remain.
@@ -639,7 +660,10 @@ fn summarize(g: &Generation) -> GenerationSummary {
 }
 
 fn meta_text(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
-    Ok(conn.query_row("SELECT v FROM _meta WHERE k = ?1", [key], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+    Ok(conn
+        .query_row("SELECT v FROM _meta WHERE k = ?1", [key], |r| r.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten())
 }
 
 fn set_shipped(conn: &Connection, generation: &str, ts: u64, time: f64) -> anyhow::Result<()> {
@@ -814,9 +838,10 @@ impl Replicator {
                 db.journal().set_pending_bytes(pending_bytes);
                 tracing::info!(generation, shipped_ts, pending_bytes, "replication: resuming");
                 let mut st = self.state();
-                st.last_snapshot = generations.iter().find(|g| g.id == generation).and_then(|g| {
-                    g.snapshots.iter().max_by(|a, b| a.created_at.total_cmp(&b.created_at)).cloned()
-                });
+                st.last_snapshot = generations
+                    .iter()
+                    .find(|g| g.id == generation)
+                    .and_then(|g| g.snapshots.iter().max_by(|a, b| a.created_at.total_cmp(&b.created_at)).cloned());
                 st.generation = Some(generation);
                 st.shipped_ts = shipped_ts;
                 st.shipped_time = shipped_time;
@@ -870,7 +895,8 @@ impl Replicator {
     async fn upload_snapshot(&self, app: &App, generation: &str) -> crate::Result<(SnapshotInfo, Manifest)> {
         let target = snapshots_target(&self.target, generation);
         let (info, manifest) = backup::create_with_manifest(app, &BackupSpec::default(), &target, true).await?;
-        let snapshot = SnapshotInfo { name: info.name, ts: manifest.ts, created_at: info.created_at, bytes: info.bytes };
+        let snapshot =
+            SnapshotInfo { name: info.name, ts: manifest.ts, created_at: info.created_at, bytes: info.bytes };
         Ok((snapshot, manifest))
     }
 
@@ -926,14 +952,19 @@ impl Replicator {
                 (st.generation.clone().context("no replication generation")?, st.shipped_ts)
             };
             let snapshot = app.db().snapshot().await?;
-            let (max_entries, max_bytes) = (self.options.segment_max_entries.max(1), self.options.segment_max_bytes.max(1));
+            let (max_entries, max_bytes) =
+                (self.options.segment_max_entries.max(1), self.options.segment_max_bytes.max(1));
             let entries = snapshot.with_conn(|c| journal::read_after(c, shipped, max_entries, max_bytes))?;
             drop(snapshot);
             let (Some(first), Some(last)) = (entries.first(), entries.last()) else { return Ok(()) };
             if first.ts != shipped + 1 {
                 // The journal no longer continues the generation (it can't happen while journaling stays on): start over.
                 self.state().generation = None;
-                bail!("the journal starts at ts {} but ts {} was shipped last; starting a new generation", first.ts, shipped);
+                bail!(
+                    "the journal starts at ts {} but ts {} was shipped last; starting a new generation",
+                    first.ts,
+                    shipped
+                );
             }
             let (from, to, to_time, count) = (first.ts, last.ts, last.time, entries.len() as u64);
             let gen2 = generation.clone();
@@ -952,8 +983,14 @@ impl Replicator {
             st.shipped_ts = to;
             st.shipped_time = to_time;
             st.segments_shipped += 1;
-            st.last_segment =
-                Some(ShippedSegment { name: segment_name(from, to), from, to, entries: count, bytes: size, shipped_at: now });
+            st.last_segment = Some(ShippedSegment {
+                name: segment_name(from, to),
+                from,
+                to,
+                entries: count,
+                bytes: size,
+                shipped_at: now,
+            });
             if let Some(g) = st.generations.iter_mut().find(|g| g.id == generation) {
                 g.segments += 1;
                 g.to_ts = g.to_ts.max(Some(to));
@@ -1005,7 +1042,14 @@ impl Replicator {
                 st.last_segment.clone(),
                 st.last_snapshot.clone(),
                 st.generations.clone(),
-                (st.segments_shipped, st.snapshots_taken, st.last_success_at, st.last_error.clone(), st.last_error_at, st.failures),
+                (
+                    st.segments_shipped,
+                    st.snapshots_taken,
+                    st.last_success_at,
+                    st.last_error.clone(),
+                    st.last_error_at,
+                    st.failures,
+                ),
             )
         };
         let (generation, shipped_ts, shipped_time, last_segment, last_snapshot, generations, counters) = st;
@@ -1013,9 +1057,11 @@ impl Replicator {
             Ok(s) => {
                 let oldest = s
                     .with_conn(|c| {
-                        Ok(c.query_row("SELECT time FROM _journal WHERE ts > ?1 ORDER BY ts LIMIT 1", [shipped_ts as i64], |r| {
-                            r.get::<_, f64>(0)
-                        })
+                        Ok(c.query_row(
+                            "SELECT time FROM _journal WHERE ts > ?1 ORDER BY ts LIMIT 1",
+                            [shipped_ts as i64],
+                            |r| r.get::<_, f64>(0),
+                        )
                         .optional()?)
                     })
                     .ok()
@@ -1045,7 +1091,9 @@ impl Replicator {
             every_ms: self.options.every.as_secs_f64() * 1000.0,
             snapshot_every_ms: self.options.snapshot_every.as_secs_f64() * 1000.0,
             keep_ms: self.options.keep.as_secs_f64() * 1000.0,
-            next_snapshot_at: last_snapshot.as_ref().map(|s| s.created_at + self.options.snapshot_every.as_secs_f64() * 1000.0),
+            next_snapshot_at: last_snapshot
+                .as_ref()
+                .map(|s| s.created_at + self.options.snapshot_every.as_secs_f64() * 1000.0),
             generation,
             current_ts,
             current_time,
@@ -1149,9 +1197,17 @@ pub fn plan_restore(generations: &[Generation], point: &PointInTime) -> crate::R
     }
     let usable: Vec<&Generation> = generations.iter().filter(|g| !g.snapshots.is_empty()).collect();
     let generation = match (&point.generation, point.to_time) {
-        (Some(id), _) => *usable.iter().find(|g| &g.id == id).ok_or_else(|| user_error(format!("no generation {id} in the target")))?,
+        (Some(id), _) => *usable
+            .iter()
+            .find(|g| &g.id == id)
+            .ok_or_else(|| user_error(format!("no generation {id} in the target")))?,
         (None, Some(t)) => *usable.iter().rev().find(|g| g.created_at <= t).ok_or_else(|| match usable.first() {
-            Some(g) => user_error(format!("{} is before the oldest replicated data (generation {} started {})", time_str(t), g.id, time_str(g.created_at))),
+            Some(g) => user_error(format!(
+                "{} is before the oldest replicated data (generation {} started {})",
+                time_str(t),
+                g.id,
+                time_str(g.created_at)
+            )),
             None => user_error("the target holds no replicated data"),
         })?,
         (None, None) => *usable.last().ok_or_else(|| user_error("the target holds no replicated data"))?,
@@ -1166,7 +1222,12 @@ pub fn plan_restore(generations: &[Generation], point: &PointInTime) -> crate::R
             ))
         })?,
         (_, Some(t)) => generation.snapshots.iter().rev().find(|s| s.created_at <= t).ok_or_else(|| {
-            user_error(format!("{} is before the oldest snapshot (taken {}) of generation {}", time_str(t), time_str(generation.snapshots[0].created_at), generation.id))
+            user_error(format!(
+                "{} is before the oldest snapshot (taken {}) of generation {}",
+                time_str(t),
+                time_str(generation.snapshots[0].created_at),
+                generation.id
+            ))
         })?,
         (None, None) => generation.snapshots.last().expect("usable generations have snapshots"),
     };
@@ -1193,7 +1254,8 @@ fn seed_tables(db: &Path, tables: &BTreeMap<u32, String>) -> crate::Result<()> {
             bail!("table `{name}` is number {other} in the snapshot but {number} in the journal");
         }
         tx.execute("INSERT INTO _tables (table_number, name) VALUES (?1, ?2)", params![number, name])?;
-        for (index, fields) in [(crate::schema::BY_ID, "[]"), (crate::schema::BY_CREATION_TIME, "[\"_creationTime\"]")] {
+        for (index, fields) in [(crate::schema::BY_ID, "[]"), (crate::schema::BY_CREATION_TIME, "[\"_creationTime\"]")]
+        {
             tx.execute(
                 "INSERT INTO _indexes (index_id, table_number, name, fields)
                  VALUES ((SELECT COALESCE(MAX(index_id), 0) + 1 FROM _indexes), ?1, ?2, ?3)",
@@ -1219,7 +1281,13 @@ pub async fn prepare_point_in_time(
     let archive = scratch.join(&plan.snapshot.name);
     snapshots_target(target, &plan.generation).download(&plan.snapshot.name, &archive).await?;
     let mut manifest = backup::prepare(&archive, staging, true).await?;
-    anyhow::ensure!(manifest.ts == plan.snapshot.ts, "snapshot {} holds ts {}, not {}", plan.snapshot.name, manifest.ts, plan.snapshot.ts);
+    anyhow::ensure!(
+        manifest.ts == plan.snapshot.ts,
+        "snapshot {} holds ts {}, not {}",
+        plan.snapshot.name,
+        manifest.ts,
+        plan.snapshot.ts
+    );
     let _ = std::fs::remove_file(&archive);
 
     // Download and check the segments, stopping at the first entry beyond the target; note the tables they write.
@@ -1231,7 +1299,13 @@ pub async fn prepare_point_in_time(
     'segments: for seg in &plan.segments {
         let raw = get(target, &segment_rel(&plan.generation, seg.from, seg.to)).await?;
         let (header, entries) = decode_segment(&raw, Some(&plan.generation))?;
-        anyhow::ensure!((header.from, header.to) == (seg.from, seg.to), "segment {} holds ts {}..{}", segment_name(seg.from, seg.to), header.from, header.to);
+        anyhow::ensure!(
+            (header.from, header.to) == (seg.from, seg.to),
+            "segment {} holds ts {}..{}",
+            segment_name(seg.from, seg.to),
+            header.from,
+            header.to
+        );
         let file = scratch.join(segment_name(seg.from, seg.to));
         std::fs::write(&file, &raw)?;
         files.push(file);
@@ -1308,7 +1382,13 @@ pub async fn prepare_point_in_time(
     manifest.ts = final_ts;
     manifest.commit_time = final_time;
     std::fs::write(staging.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
-    tracing::info!(generation = info.generation, snapshot_ts = info.snapshot_ts, ts = final_ts, replayed, "point-in-time restore prepared");
+    tracing::info!(
+        generation = info.generation,
+        snapshot_ts = info.snapshot_ts,
+        ts = final_ts,
+        replayed,
+        "point-in-time restore prepared"
+    );
     Ok((manifest, info))
 }
 
@@ -1342,7 +1422,12 @@ mod tests {
     }
 
     fn generation(id_at: f64, snapshots: Vec<SnapshotInfo>, segments: Vec<SegmentInfo>) -> Generation {
-        Generation { id: format!("{}-0000000a", super::super::file_timestamp(id_at)), created_at: id_at, snapshots, segments }
+        Generation {
+            id: format!("{}-0000000a", super::super::file_timestamp(id_at)),
+            created_at: id_at,
+            snapshots,
+            segments,
+        }
     }
 
     #[test]
@@ -1353,13 +1438,17 @@ mod tests {
         let id = new_generation_id(1_760_011_200_123.0);
         assert_eq!(generation_created_at(&id), Some(1_760_011_200_123.0));
         assert_eq!(generation_created_at("20251009T120000.123Z"), None);
-        assert_eq!(snapshot_time(&backup::archive_name_with_ts(1_760_011_200_123.0, true, 4)), Some(1_760_011_200_123.0));
+        assert_eq!(
+            snapshot_time(&backup::archive_name_with_ts(1_760_011_200_123.0, true, 4)),
+            Some(1_760_011_200_123.0)
+        );
     }
 
     #[test]
     fn segments_round_trip_and_reject_damage() {
-        let entries: Vec<JournalEntry> =
-            (3..=5).map(|ts| JournalEntry { ts, time: 1000.25 + ts as f64, changes: format!("[[\"t\",\"x{ts}\",null]]") }).collect();
+        let entries: Vec<JournalEntry> = (3..=5)
+            .map(|ts| JournalEntry { ts, time: 1000.25 + ts as f64, changes: format!("[[\"t\",\"x{ts}\",null]]") })
+            .collect();
         let raw = encode_segment("g", &entries).unwrap();
         let (header, back) = decode_segment(&raw, Some("g")).unwrap();
         assert_eq!((header.from, header.to, header.entries), (3, 5, 3));
@@ -1393,14 +1482,20 @@ mod tests {
         let gens = [g1.clone(), g2.clone()];
         let p = plan_restore(&gens, &PointInTime::default()).unwrap();
         assert_eq!((p.generation.as_str(), p.snapshot.ts, p.segments.len()), (g2.id.as_str(), 5, 1));
-        let p = plan_restore(&gens, &PointInTime { to_ts: Some(17), generation: Some(g1.id.clone()), ..Default::default() }).unwrap();
+        let p = plan_restore(
+            &gens,
+            &PointInTime { to_ts: Some(17), generation: Some(g1.id.clone()), ..Default::default() },
+        )
+        .unwrap();
         assert_eq!((p.snapshot.ts, p.segments.clone()), (10, vec![seg(11, 15), seg(16, 25)]));
         let p = plan_restore(&gens, &PointInTime { to_time: Some(1.5 * day), ..Default::default() }).unwrap();
         assert_eq!((p.generation.as_str(), p.snapshot.ts), (g1.id.as_str(), 20));
         assert_eq!(p.segments, [seg(16, 25), seg(26, 30)]);
         assert!(plan_restore(&gens, &PointInTime { to_ts: Some(3), ..Default::default() }).is_err());
         assert!(plan_restore(&gens, &PointInTime { to_time: Some(-1.0), ..Default::default() }).is_err());
-        assert!(plan_restore(&gens, &PointInTime { to_ts: Some(3), to_time: Some(1.0), ..Default::default() }).is_err());
+        assert!(
+            plan_restore(&gens, &PointInTime { to_ts: Some(3), to_time: Some(1.0), ..Default::default() }).is_err()
+        );
         assert!(plan_restore(&[], &PointInTime::default()).is_err());
     }
 }

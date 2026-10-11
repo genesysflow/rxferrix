@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use ferrix::auth::AuthConfig;
-use ferrix::testing::TestApp;
 use ferrix::sync::subscriptions::SubscriptionStats;
+use ferrix::testing::TestApp;
 use ferrix::{App, AppOptions, FunctionRef, QueryCacheOptions};
 use serde_json::{Value, json};
 
@@ -77,7 +77,8 @@ impl Http {
     }
 
     async fn call(&self, kind: &str, path: &str, args: Value, token: Option<&str>) -> Value {
-        let mut req = self.client.post(format!("{}/api/{kind}", self.base)).json(&json!({ "path": path, "args": args }));
+        let mut req =
+            self.client.post(format!("{}/api/{kind}", self.base)).json(&json!({ "path": path, "args": args }));
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
@@ -143,7 +144,10 @@ async fn writes_elsewhere_leave_it_cached() {
     t.mutation::<todos::rename>((b, "b2".to_string())).await.unwrap();
     let http = Http::new(&t).await;
     let latest = app.db().write_log().latest();
-    wait_stats(&app, "frontier caught up", |_| app.subscriptions().cache().get(&get, &json!({ "id": a }), &Default::default(), latest).is_some()).await;
+    wait_stats(&app, "frontier caught up", |_| {
+        app.subscriptions().cache().get(&get, &json!({ "id": a }), &Default::default(), latest).is_some()
+    })
+    .await;
     assert_eq!(http.call("query", &get, json!({ "id": a }), None).await["text"], "a");
     assert_eq!(total_executions(&app, &get).await, 1, "still cached after an unrelated write");
 }

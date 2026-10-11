@@ -246,7 +246,8 @@ impl MutationDb {
         let table = self.catalog().table(table)?.clone();
         let validate = raw_validator(&table)?;
         let Value::Object(fields) = fields else { bail!("a document must be a JSON object") };
-        let id = self.txn.with_state(|s| s.insert(&table, fields, |doc| check_raw(&table, validate, doc, "inserted")))?;
+        let id =
+            self.txn.with_state(|s| s.insert(&table, fields, |doc| check_raw(&table, validate, doc, "inserted")))?;
         Ok(id.encode())
     }
 
@@ -366,14 +367,23 @@ impl RangeOps {
                 bail!("{}: `eq({})` must come before range bounds", ctx(), op.field);
             }
             if op.field != expected.as_str() {
-                bail!("{}: range bound must be on `{expected}` (the field after the eq prefix), got `{}({})`", ctx(), op.kind.name(), op.field);
+                bail!(
+                    "{}: range bound must be on `{expected}` (the field after the eq prefix), got `{}({})`",
+                    ctx(),
+                    op.kind.name(),
+                    op.field
+                );
             }
             let v = op.value.as_ref().map_err(|e| anyhow::anyhow!("{}: cannot serialize value: {e}", ctx()))?;
             let mut bound = prefix.clone();
             keys::encode_value(v, &mut bound);
             let slot = if matches!(op.kind, OpKind::Gt | OpKind::Gte) { &mut lower } else { &mut upper };
             if slot.is_some() {
-                bail!("{}: more than one {} bound", ctx(), if matches!(op.kind, OpKind::Gt | OpKind::Gte) { "lower" } else { "upper" });
+                bail!(
+                    "{}: more than one {} bound",
+                    ctx(),
+                    if matches!(op.kind, OpKind::Gt | OpKind::Gte) { "lower" } else { "upper" }
+                );
             }
             *slot = Some((op.kind, bound));
         }

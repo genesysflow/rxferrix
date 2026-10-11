@@ -21,7 +21,7 @@ help: the following other types implement trait `MigrationOutput`
 note: required by a bound in `ferrix_mock::__private::migration_output`
  --> tests/mock/src/lib.rs
   |
-  |     pub fn migration_output<O: crate::migrations::MigrationOutput>(
+  |     pub fn migration_output<O: crate::migrations::MigrationOutput>(out: O) -> Result<crate::migrations::DocChange> {
   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `migration_output`
 
 error[E0277]: the trait bound `NotDeserialize: serde::de::DeserializeOwned` is not satisfied

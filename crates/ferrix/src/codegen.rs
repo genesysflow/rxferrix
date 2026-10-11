@@ -674,14 +674,20 @@ mod tests {
 
     #[test]
     fn dev_only_functions_go_into_dev_api() {
-        let dev = FunctionInfo { dev_only: true, ..f("dev:last_code", FunctionKind::Action, Visibility::Public, "{ email: string, }", "string | null") };
+        let dev = FunctionInfo {
+            dev_only: true,
+            ..f("dev:last_code", FunctionKind::Action, Visibility::Public, "{ email: string, }", "string | null")
+        };
         let api = render(&[q("todos:list"), dev.clone()], &[], &[]).unwrap().api_ts;
         let (public, dev_part) = api.split_once("export const devApi").expect("devApi is exported");
         assert!(public.contains("todos:list") && !public.contains("last_code"), "{api}");
         assert!(dev_part.starts_with(" = {\n  dev: {\n    last_code: makeFunctionReference<\"action\""), "{api}");
         // Only dev-only functions: `api` is empty, `devApi` still imports makeFunctionReference.
         let api = render(&[dev], &[], &[]).unwrap().api_ts;
-        assert!(api.contains("export const api = {} as const;\n") && api.contains("import { makeFunctionReference }"), "{api}");
+        assert!(
+            api.contains("export const api = {} as const;\n") && api.contains("import { makeFunctionReference }"),
+            "{api}"
+        );
         // None: no devApi at all.
         assert!(!render(&[q("a:b")], &[], &[]).unwrap().api_ts.contains("devApi"));
     }
@@ -696,7 +702,10 @@ mod tests {
         );
         // Indented to the level the type starts at; nested undocumented objects and generics are kept as they are.
         let ts = "{ a: { x: number, }, \n/**\n * B.\n */\nb: Record<string, never>, }";
-        assert_eq!(format_ts(ts, 2), "{\n      a: { x: number, },\n      /** B. */\n      b: Record<string, never>,\n    }");
+        assert_eq!(
+            format_ts(ts, 2),
+            "{\n      a: { x: number, },\n      /** B. */\n      b: Record<string, never>,\n    }"
+        );
         // A documented object nested in a documented one.
         let ts = "{ \n/**\n * Outer.\n */\no: { \n/**\n * Inner.\n */\ni: string, }, }";
         assert_eq!(format_ts(ts, 0), "{\n  /** Outer. */\n  o: {\n    /** Inner. */\n    i: string,\n  },\n}");
@@ -705,7 +714,8 @@ mod tests {
             assert_eq!(format_ts(ts, 1), ts);
         }
         // A whole declaration.
-        let decl = render_decl(Some("/**\n * Docs.\n */".into()), "type P = { \n/**\n * N.\n */\nn: number, s: string, };");
+        let decl =
+            render_decl(Some("/**\n * Docs.\n */".into()), "type P = { \n/**\n * N.\n */\nn: number, s: string, };");
         assert_eq!(decl, "/** Docs. */\nexport type P = {\n  /** N. */\n  n: number,\n  s: string,\n};");
         let decl = render_decl(Some("/**\n * One.\n * \n * Two.\n */".into()), "type A = string;");
         assert_eq!(decl, "/**\n * One.\n *\n * Two.\n */\nexport type A = string;");

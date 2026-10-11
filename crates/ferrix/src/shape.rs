@@ -267,10 +267,17 @@ mod tests {
     #[allow(clippy::needless_borrow)] // the double borrow selects the fallback
     fn known_types_and_the_fallback() {
         assert_eq!((&&ShapeProbe::<i64>::new()).probe_shape(), Shape::Int);
-        assert_eq!((&&ShapeProbe::<Option<Vec<String>>>::new()).probe_shape(), Shape::Optional(Box::new(Shape::List(Box::new(Shape::Text)))));
+        assert_eq!(
+            (&&ShapeProbe::<Option<Vec<String>>>::new()).probe_shape(),
+            Shape::Optional(Box::new(Shape::List(Box::new(Shape::Text))))
+        );
         assert_eq!((&&ShapeProbe::<Option<Option<f64>>>::new()).probe_shape(), Shape::Optional(Box::new(Shape::Float)));
         assert_eq!((&&ShapeProbe::<NoShape>::new()).probe_shape(), Shape::Json);
-        assert_eq!((&&ShapeProbe::<Vec<NoShape>>::new()).probe_shape(), Shape::Json, "a list of unknowns is JSON as a whole");
+        assert_eq!(
+            (&&ShapeProbe::<Vec<NoShape>>::new()).probe_shape(),
+            Shape::Json,
+            "a list of unknowns is JSON as a whole"
+        );
         assert_eq!((&&ShapeProbe::<u64>::new()).probe_shape(), Shape::UInt);
         assert_eq!((&&ShapeProbe::<i128>::new()).probe_shape(), Shape::Json, "fits no 64-bit column");
         assert_eq!((&&ShapeProbe::<crate::Id<NoShape>>::new()).probe_shape(), Shape::Text);

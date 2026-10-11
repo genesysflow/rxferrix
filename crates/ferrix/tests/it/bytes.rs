@@ -27,7 +27,12 @@ pub mod blobs {
     /// Names of the blobs whose data is in `[lo, hi)`, in data order.
     #[query]
     pub async fn in_range(ctx: &QueryCtx, lo: Bytes, hi: Bytes) -> Result<Vec<String>> {
-        let docs = ctx.db.query::<Blob>().with_index(Blob::by_data, |q| q.gte(Blob::data, lo).lt(Blob::data, hi)).collect().await?;
+        let docs = ctx
+            .db
+            .query::<Blob>()
+            .with_index(Blob::by_data, |q| q.gte(Blob::data, lo).lt(Blob::data, hi))
+            .collect()
+            .await?;
         Ok(docs.into_iter().map(|d| d.value.name).collect())
     }
 
@@ -87,17 +92,26 @@ async fn bytes_are_stored_tagged_indexed_and_ordered_bytewise() {
     assert_eq!(out[0], json!({ "$bytes": "" }));
     assert_eq!(out[5], json!({ "$bytes": "/w==" }));
     let out = app
-        .run_query(&in_range::path(), json!({ "lo": { "$bytes": "AA==" }, "hi": { "$bytes": "AAE=" } }), &Identity::default())
+        .run_query(
+            &in_range::path(),
+            json!({ "lo": { "$bytes": "AA==" }, "hi": { "$bytes": "AAE=" } }),
+            &Identity::default(),
+        )
         .await
         .result
         .unwrap();
     assert_eq!(out, json!(["b3"]));
-    let err = app.run_query(&in_range::path(), json!({ "lo": "AA==", "hi": { "$bytes": "AAE=" } }), &Identity::default()).await.result.unwrap_err();
+    let err = app
+        .run_query(&in_range::path(), json!({ "lo": "AA==", "hi": { "$bytes": "AAE=" } }), &Identity::default())
+        .await
+        .result
+        .unwrap_err();
     assert!(format!("{err:#}").contains("Invalid args for in_range"), "{err:#}");
 
     // The dashboard's untyped paths show (and accept) the tagged JSON.
     let admin = Identity { admin_id: Some(ferrix::id::DocId::new_random(1).encode()), ..Default::default() };
-    let doc = app.run_query("_system/dashboard:document", json!({ "id": ids[4].to_string() }), &admin).await.result.unwrap();
+    let doc =
+        app.run_query("_system/dashboard:document", json!({ "id": ids[4].to_string() }), &admin).await.result.unwrap();
     assert_eq!(doc["document"]["data"], json!({ "$bytes": "AQID" }));
     assert_eq!(doc["document"]["thumb"], Value::Null);
     app.run_mutation(
@@ -110,7 +124,11 @@ async fn bytes_are_stored_tagged_indexed_and_ordered_bytewise() {
     let doc = t.query::<with_data>((b(&[1, 2, 3]),)).await.unwrap().unwrap();
     assert_eq!(doc.thumb, Some(b(&[0xAA, 0xBB])));
     let err = app
-        .run_mutation("_system/dashboard:patch_document", json!({ "id": ids[4].to_string(), "patch": { "data": "AQID" } }), &admin)
+        .run_mutation(
+            "_system/dashboard:patch_document",
+            json!({ "id": ids[4].to_string(), "patch": { "data": "AQID" } }),
+            &admin,
+        )
         .await
         .unwrap_err();
     assert!(format!("{err:#}").contains("does not match table `blobs`"), "{err:#}");

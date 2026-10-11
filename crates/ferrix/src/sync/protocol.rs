@@ -164,9 +164,20 @@ pub enum StateModification {
     /// `base`: the result the client has for this query, when it accepts diffs (set by the sync worker). The text form
     /// then carries a diff from it instead of the value where that is smaller; [`StateModification::to_json`] always
     /// carries the value.
-    QueryUpdated { query_id: QueryId, value: QueryValue, base: Option<QueryValue>, log_lines: Vec<String> },
-    QueryFailed { query_id: QueryId, error: ClientError, log_lines: Vec<String> },
-    QueryRemoved { query_id: QueryId },
+    QueryUpdated {
+        query_id: QueryId,
+        value: QueryValue,
+        base: Option<QueryValue>,
+        log_lines: Vec<String>,
+    },
+    QueryFailed {
+        query_id: QueryId,
+        error: ClientError,
+        log_lines: Vec<String>,
+    },
+    QueryRemoved {
+        query_id: QueryId,
+    },
 }
 
 impl StateModification {
@@ -219,12 +230,28 @@ impl StateModification {
 /// Server → client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
-    Transition { start_version: StateVersion, end_version: StateVersion, modifications: Vec<StateModification> },
+    Transition {
+        start_version: StateVersion,
+        end_version: StateVersion,
+        modifications: Vec<StateModification>,
+    },
     /// `Ok((result, commit ts))` or the error. `log_lines` only in `--dev`.
-    MutationResponse { request_id: RequestId, result: Result<(Value, u64), ClientError>, log_lines: Vec<String> },
-    ActionResponse { request_id: RequestId, result: Result<Value, ClientError>, log_lines: Vec<String> },
-    FatalError { error: String },
-    AuthError { error: String },
+    MutationResponse {
+        request_id: RequestId,
+        result: Result<(Value, u64), ClientError>,
+        log_lines: Vec<String>,
+    },
+    ActionResponse {
+        request_id: RequestId,
+        result: Result<Value, ClientError>,
+        log_lines: Vec<String>,
+    },
+    FatalError {
+        error: String,
+    },
+    AuthError {
+        error: String,
+    },
     Ping,
 }
 
@@ -323,7 +350,8 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(m, ClientMessage::Connect { .. }));
-        let m: ClientMessage = serde_json::from_str(r#"{ "type": "Authenticate", "baseVersion": 0, "token": null }"#).unwrap();
+        let m: ClientMessage =
+            serde_json::from_str(r#"{ "type": "Authenticate", "baseVersion": 0, "token": null }"#).unwrap();
         assert_eq!(m, ClientMessage::Authenticate { base_version: 0, token: None });
         assert!(serde_json::from_str::<ClientMessage>(r#"{ "type": "Nope" }"#).is_err());
     }
@@ -342,7 +370,12 @@ mod tests {
                     base: None,
                     log_lines: vec!["[INFO] \"hi\"".into()],
                 },
-                StateModification::QueryUpdated { query_id: 8, value: json!(null).into(), base: None, log_lines: vec![] },
+                StateModification::QueryUpdated {
+                    query_id: 8,
+                    value: json!(null).into(),
+                    base: None,
+                    log_lines: vec![],
+                },
                 StateModification::QueryFailed {
                     query_id: 9,
                     error: ClientError {
@@ -371,7 +404,10 @@ mod tests {
     fn server_message_shapes() {
         let v = ServerMessage::MutationResponse { request_id: 1, result: Ok((Value::Null, 5)), log_lines: vec![] }
             .to_json();
-        assert_eq!(v, json!({"type":"MutationResponse","requestId":1,"success":true,"result":null,"ts":5,"logLines":[]}));
+        assert_eq!(
+            v,
+            json!({"type":"MutationResponse","requestId":1,"success":true,"result":null,"ts":5,"logLines":[]})
+        );
         let log_lines = vec!["[INFO] x".to_string()];
         let m = StateModification::QueryUpdated { query_id: 2, value: json!(1).into(), base: None, log_lines };
         assert_eq!(m.to_json()["logLines"], json!(["[INFO] x"]));

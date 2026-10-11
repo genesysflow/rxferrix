@@ -78,7 +78,8 @@ async fn filtered_rows_still_count_as_read() {
         t.mutation::<items::insert>((1, v, format!("n{v}"))).await.unwrap();
     }
     // Nothing passes the filter, so the scan exhausts group 1: the whole group range was read.
-    let spec = ScanSpec { group: Some(1), min_value: Some(100), mode: "take".into(), limit: Some(1), ..Default::default() };
+    let spec =
+        ScanSpec { group: Some(1), min_value: Some(100), mode: "take".into(), limit: Some(1), ..Default::default() };
     let rs = read_set_of::<items::scan>(&t, json!({ "spec": spec })).await;
     let (_, ts) = t.mutation_ts::<items::insert>((1, 50, "x".to_string())).await.unwrap();
     assert!(rs.overlaps(&commit_at(&t, ts)));

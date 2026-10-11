@@ -38,7 +38,8 @@ fn s256(verifier: &str) -> String {
 
 /// The `.p8` PEM of a fresh P-256 key, and its public point.
 fn apple_key() -> (String, Vec<u8>) {
-    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new()).unwrap();
+    let pkcs8 =
+        EcdsaKeyPair::generate_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new()).unwrap();
     let public = EcdsaKeyPair::from_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
         .unwrap()
         .public_key()
@@ -242,7 +243,12 @@ async fn start_flow(http: &Http, provider: &str) -> (HashMap<String, String>, St
 
 fn grant(mock: &Mock, q: &HashMap<String, String>, profile: Value) -> String {
     let code = format!("code-{}", q["state"]);
-    let g = Grant { challenge: q["code_challenge"].clone(), redirect_uri: q["redirect_uri"].clone(), nonce: q.get("nonce").cloned(), profile };
+    let g = Grant {
+        challenge: q["code_challenge"].clone(),
+        redirect_uri: q["redirect_uri"].clone(),
+        nonce: q.get("nonce").cloned(),
+        profile,
+    };
     mock.lock().unwrap().grants.insert(code.clone(), g);
     code
 }
@@ -281,9 +287,10 @@ async fn discord_flow(http: &Http, mock: &Mock, profile: Value) -> HashMap<Strin
 #[tokio::test]
 async fn discord_uses_only_verified_emails() {
     let (base, mock) = start_mock(Vec::new()).await;
-    let auth = AuthConfig::password().rate_limits(None).redirect_url("http://app.test").oauth(
-        Discord::new("discord-client", "discord-secret").base_url(&base),
-    );
+    let auth = AuthConfig::password()
+        .rate_limits(None)
+        .redirect_url("http://app.test")
+        .oauth(Discord::new("discord-client", "discord-secret").base_url(&base));
     let t = TestApp::with_auth(auth).await.unwrap();
     let http = Http::new(t.serve().await.unwrap());
     let (_, providers) = http.get("/api/auth/providers", None).await;
@@ -295,7 +302,10 @@ async fn discord_uses_only_verified_emails() {
     let user = me(&http, &f).await;
     assert_eq!((user["email"].as_str(), user["emailVerified"].as_bool()), (Some("nelly@discord.com"), Some(true)));
     assert_eq!(user["name"], "Nelly");
-    assert_eq!(user["image"], "https://cdn.discordapp.com/avatars/80351110224678912/8342729096ea3675442027381ff50dfe.png");
+    assert_eq!(
+        user["image"],
+        "https://cdn.discordapp.com/avatars/80351110224678912/8342729096ea3675442027381ff50dfe.png"
+    );
     assert_eq!(discord_flow(&http, &mock, profile).await["ferrix_user_id"], f["ferrix_user_id"], "same account");
 
     // An unverified Discord email is not used: a new user without an email, even when the address is taken.
@@ -303,11 +313,20 @@ async fn discord_uses_only_verified_emails() {
     let unverified = json!({ "id": "42", "username": "sam", "global_name": null, "avatar": null, "email": "taken@example.com", "verified": false });
     let f = discord_flow(&http, &mock, unverified).await;
     let user = me(&http, &f).await;
-    assert_eq!((user["email"].clone(), user["emailVerified"].clone(), user["name"].clone()), (Value::Null, json!(false), json!("sam")));
+    assert_eq!(
+        (user["email"].clone(), user["emailVerified"].clone(), user["name"].clone()),
+        (Value::Null, json!(false), json!("sam"))
+    );
     assert_eq!(user["image"], Value::Null);
 
     // Discord redirects with a GET: its callback refuses POSTs.
-    let r = http.client.post(format!("{}/api/auth/oauth/discord/callback", http.base)).form(&[("code", "x"), ("state", "y")]).send().await.unwrap();
+    let r = http
+        .client
+        .post(format!("{}/api/auth/oauth/discord/callback", http.base))
+        .form(&[("code", "x"), ("state", "y")])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 405);
 }
 
@@ -384,15 +403,36 @@ async fn apple_form_post_client_secret_name_once_and_id_token_checks() {
     assert_eq!((status, fragment(&location)["ferrix_error"].as_str()), (303, "state_mismatch"));
     assert_eq!(mock.lock().unwrap().token_requests, before);
     // A forged state never reaches the provider either; an empty or malformed form is a plain 400.
-    let r = http.client.post(format!("{}/api/auth/oauth/apple/callback", http.base)).form(&[("code", "x"), ("state", "forged")]).send().await.unwrap();
+    let r = http
+        .client
+        .post(format!("{}/api/auth/oauth/apple/callback", http.base))
+        .form(&[("code", "x"), ("state", "forged")])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
-    let r = http.client.post(format!("{}/api/auth/oauth/apple/callback", http.base)).body("{}").header("content-type", "application/json").send().await.unwrap();
+    let r = http
+        .client
+        .post(format!("{}/api/auth/oauth/apple/callback", http.base))
+        .body("{}")
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
 
     // ID tokens that fail any check sign nobody in.
-    for mode in [IdToken::WrongNonce, IdToken::WrongAudience, IdToken::WrongIssuer, IdToken::Expired, IdToken::OtherKey] {
+    for mode in [IdToken::WrongNonce, IdToken::WrongAudience, IdToken::WrongIssuer, IdToken::Expired, IdToken::OtherKey]
+    {
         mock.lock().unwrap().id_token = mode;
-        let (status, location) = apple_flow(&http, &mock, json!({ "sub": format!("{mode:?}"), "email": "x@y.z", "email_verified": true }), None, true).await;
+        let (status, location) = apple_flow(
+            &http,
+            &mock,
+            json!({ "sub": format!("{mode:?}"), "email": "x@y.z", "email_verified": true }),
+            None,
+            true,
+        )
+        .await;
         let f = fragment(&location);
         assert_eq!((status, f.get("ferrix_error").map(String::as_str)), (303, Some("oauth_failed")), "{mode:?}");
         assert!(!f.contains_key("ferrix_access_token"), "{mode:?}");
@@ -405,7 +445,11 @@ async fn apple_form_post_client_secret_name_once_and_id_token_checks() {
     let back = http
         .client
         .get(format!("{}/api/auth/oauth/apple/callback", http.base))
-        .query(&[("code", code.as_str()), ("state", q["state"].as_str()), ("user", "{\"name\":{\"firstName\":\"Get\"}}")])
+        .query(&[
+            ("code", code.as_str()),
+            ("state", q["state"].as_str()),
+            ("user", "{\"name\":{\"firstName\":\"Get\"}}"),
+        ])
         .header("cookie", cookie.split(';').next().unwrap())
         .send()
         .await
@@ -444,30 +488,54 @@ async fn discord_and_apple_in_runtime_settings() {
         json!({ "id": "apple", "kind": "apple", "clientId": "com.example.web", "clientSecret": key, "teamId": team,
                 "keyId": "KEYID12345", "enabled": true })
     };
-    let discord = json!({ "id": "discord", "kind": "discord", "clientId": "dc", "clientSecret": "dc-secret", "enabled": true });
+    let discord =
+        json!({ "id": "discord", "kind": "discord", "clientId": "dc", "clientSecret": "dc-secret", "enabled": true });
 
     // Apple needs a team id, a key id and a private key that loads.
-    for bad in [apple(Some(&private_key), None), apple(Some("not a key"), Some("TEAMID1234")), apple(None, Some("TEAMID1234")),
-                apple(Some(&private_key), Some("TEAM ID!"))] {
+    for bad in [
+        apple(Some(&private_key), None),
+        apple(Some("not a key"), Some("TEAMID1234")),
+        apple(None, Some("TEAMID1234")),
+        apple(Some(&private_key), Some("TEAM ID!")),
+    ] {
         let (s, b) = http.call("action", "_system/settings:update", json!({ "oauth": [bad] }), Some(&admin)).await;
         assert_eq!((s, code_of(&b)), (400, "invalid_settings"), "{b}");
     }
     let view = http
-        .ok("action", "_system/settings:update", json!({ "oauth": [apple(Some(&private_key), Some("TEAMID1234")), discord] }), &admin)
+        .ok(
+            "action",
+            "_system/settings:update",
+            json!({ "oauth": [apple(Some(&private_key), Some("TEAMID1234")), discord] }),
+            &admin,
+        )
         .await;
     assert_eq!(view["effective"]["oauthProviders"], json!(["apple", "discord"]));
     let stored = &view["oauth"][0];
-    assert_eq!((stored["kind"].as_str(), stored["teamId"].as_str(), stored["keyId"].as_str()), (Some("apple"), Some("TEAMID1234"), Some("KEYID12345")));
+    assert_eq!(
+        (stored["kind"].as_str(), stored["teamId"].as_str(), stored["keyId"].as_str()),
+        (Some("apple"), Some("TEAMID1234"), Some("KEYID12345"))
+    );
     assert_eq!(stored["clientSecret"], MASK);
     assert!(!view.to_string().contains("PRIVATE KEY"));
     let (_, providers) = http.get("/api/auth/providers", None).await;
     assert_eq!(providers["oauth"], json!(["apple", "discord"]));
     // Starting a flow uses the stored settings (Apple's real endpoint, form_post).
-    let r = http.client.get(format!("{}/api/auth/oauth/apple?redirect_to=http://localhost:5173/", http.base)).send().await.unwrap();
+    let r = http
+        .client
+        .get(format!("{}/api/auth/oauth/apple?redirect_to=http://localhost:5173/", http.base))
+        .send()
+        .await
+        .unwrap();
     let location = r.headers()["location"].to_str().unwrap();
-    assert!(location.starts_with("https://appleid.apple.com/auth/authorize?") && location.contains("response_mode=form_post"), "{location}");
+    assert!(
+        location.starts_with("https://appleid.apple.com/auth/authorize?")
+            && location.contains("response_mode=form_post"),
+        "{location}"
+    );
     // Saving again with the mask keeps the key.
-    let view = http.ok("action", "_system/settings:update", json!({ "oauth": [apple(Some(MASK), Some("TEAMID1234"))] }), &admin).await;
+    let view = http
+        .ok("action", "_system/settings:update", json!({ "oauth": [apple(Some(MASK), Some("TEAMID1234"))] }), &admin)
+        .await;
     assert_eq!(view["effective"]["oauthProviders"], json!(["apple"]));
 
     // The private key is encrypted at rest: not in the database files, nor in the execution log.

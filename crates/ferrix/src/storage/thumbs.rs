@@ -63,7 +63,13 @@ impl ThumbSpec {
         let bad = || format!("`thumb` must be WIDTHxHEIGHT or SIZE, e.g. 200x200 or 480 (got `{thumb}`)");
         let thumb = thumb.trim();
         let (w, h) = thumb.split_once(['x', 'X']).unwrap_or((thumb, thumb));
-        let num = |s: &str| if !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit()) { s.parse::<u32>().ok() } else { None };
+        let num = |s: &str| {
+            if !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit()) {
+                s.parse::<u32>().ok()
+            } else {
+                None
+            }
+        };
         let (width, height) = (num(w).ok_or_else(bad)?, num(h).ok_or_else(bad)?);
         let fit = match fit.map(str::trim) {
             None | Some("") | Some("contain") => Fit::Contain,
@@ -74,7 +80,10 @@ impl ThumbSpec {
             Some(sizes) => {
                 if !sizes.contains(&(width, height)) {
                     let list: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
-                    return Err(format!("Thumbnail size {width}x{height} is not allowed (allowed: {})", list.join(", ")));
+                    return Err(format!(
+                        "Thumbnail size {width}x{height} is not allowed (allowed: {})",
+                        list.join(", ")
+                    ));
                 }
             }
             None => {
@@ -136,7 +145,9 @@ impl fmt::Display for ThumbError {
 /// blocking thread.
 pub(crate) fn render(source: &[u8], spec: ThumbSpec, max_pixels: u64) -> Result<Vec<u8>, ThumbError> {
     let reader = || -> Result<ImageReader<Cursor<&[u8]>>, ThumbError> {
-        let reader = ImageReader::new(Cursor::new(source)).with_guessed_format().map_err(|e| ThumbError::Invalid(e.to_string()))?;
+        let reader = ImageReader::new(Cursor::new(source))
+            .with_guessed_format()
+            .map_err(|e| ThumbError::Invalid(e.to_string()))?;
         match reader.format() {
             Some(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Gif) => Ok(reader),
             _ => Err(ThumbError::Unsupported),
@@ -188,7 +199,9 @@ mod tests {
 
     fn png(width: u32, height: u32, alpha: bool) -> Vec<u8> {
         let image = if alpha {
-            DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| image::Rgba([x as u8, y as u8, 0, 128])))
+            DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([x as u8, y as u8, 0, 128])
+            }))
         } else {
             DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 0])))
         };
@@ -235,6 +248,9 @@ mod tests {
         assert_eq!(content_type_of(&transparent), "image/png", "alpha: PNG");
         assert!(matches!(render(b"\x89PNG\r\n\x1a\n truncated", contain, 1 << 20), Err(ThumbError::Invalid(_))));
         assert!(matches!(render(b"plain text", contain, 1 << 20), Err(ThumbError::Unsupported)));
-        assert!(matches!(render(&source, contain, 400 * 200 - 1), Err(ThumbError::TooLarge { width: 400, height: 200, .. })));
+        assert!(matches!(
+            render(&source, contain, 400 * 200 - 1),
+            Err(ThumbError::TooLarge { width: 400, height: 200, .. })
+        ));
     }
 }

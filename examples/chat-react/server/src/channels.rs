@@ -77,7 +77,8 @@ pub async fn list(ctx: &QueryCtx) -> Result<Vec<ChannelSummary>> {
     let channels = ctx.db.query::<Channel>().with_index(Channel::by_name, |q| q).take(500).await?;
     let mut out = Vec::new();
     for channel in channels.into_iter().filter(|c| !c.private || mine.contains(&c.id)) {
-        let messages = ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel.id)).await?;
+        let messages =
+            ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel.id)).await?;
         out.push(ChannelSummary { is_member: mine.contains(&channel.id), message_count: messages.count, channel });
     }
     Ok(out)
@@ -101,8 +102,10 @@ pub async fn get(ctx: &QueryCtx, channel: Id<Channel>) -> Result<ChannelInfo> {
         members.push(MemberInfo { user: row.user, name, color });
     }
     members.sort_by_key(|m| m.name.to_lowercase());
-    let message_count = ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel)).await?.count;
-    let member_count = ctx.db.aggregate(Member::members_per_channel).get(|g| g.eq(Member::channel, channel)).await?.count;
+    let message_count =
+        ctx.db.aggregate(Message::messages_per_channel).get(|g| g.eq(Message::channel, channel)).await?.count;
+    let member_count =
+        ctx.db.aggregate(Member::members_per_channel).get(|g| g.eq(Member::channel, channel)).await?.count;
     // Every author's count in this channel (one row per author), the five largest.
     let mut posters = ctx
         .db
@@ -112,11 +115,20 @@ pub async fn get(ctx: &QueryCtx, channel: Id<Channel>) -> Result<ChannelInfo> {
     posters.sort_by_key(|a| std::cmp::Reverse(a.value.count));
     let mut top_posters = Vec::new();
     for g in posters.into_iter().take(5) {
-        let Some(author) = g.group.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<Id<User>>().ok()) else { continue };
+        let Some(author) = g.group.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<Id<User>>().ok()) else {
+            continue;
+        };
         let (name, color) = names.get(&ctx.db, author).await?;
         top_posters.push(PosterCount { user: author, name, color, messages: g.value.count });
     }
-    Ok(ChannelInfo { channel: doc, is_member: rows.iter().any(|m| m.user == user), members, message_count, member_count, top_posters })
+    Ok(ChannelInfo {
+        channel: doc,
+        is_member: rows.iter().any(|m| m.user == user),
+        members,
+        message_count,
+        member_count,
+        top_posters,
+    })
 }
 
 /// Creates a channel (the caller joins it). Names are lowercase letters, digits and dashes, and unique.
@@ -127,7 +139,8 @@ pub async fn create(ctx: &MutationCtx, name: String, topic: Option<String>, priv
     if name.is_empty() || name.len() > 32 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(user_error("invalid_name", "Channel names use 1-32 lowercase letters, digits or dashes"));
     }
-    let taken = ctx.db.query::<Channel>().with_index(Channel::by_name, |q| q.eq(Channel::name, name.clone())).first().await?;
+    let taken =
+        ctx.db.query::<Channel>().with_index(Channel::by_name, |q| q.eq(Channel::name, name.clone())).first().await?;
     if taken.is_some() {
         return Err(user_error("name_taken", format!("#{name} already exists")));
     }
@@ -167,7 +180,8 @@ pub async fn invite(ctx: &MutationCtx, channel: Id<Channel>, email: String) -> R
     let user = ctx.auth.require_user()?;
     require_member(&ctx.db, channel, user).await?;
     let email = email.trim().to_lowercase();
-    let Some(invitee) = ctx.db.query::<User>().with_index(User::by_email, |q| q.eq(User::email, Some(email.clone()))).first().await?
+    let Some(invitee) =
+        ctx.db.query::<User>().with_index(User::by_email, |q| q.eq(User::email, Some(email.clone()))).first().await?
     else {
         return Err(user_error("no_such_user", format!("Nobody has signed up as {email} yet")));
     };
@@ -201,7 +215,8 @@ pub async fn mark_read(ctx: &MutationCtx, channel: Id<Channel>) -> Result<()> {
 #[query]
 pub async fn unread(ctx: &QueryCtx) -> Result<Vec<UnreadCount>> {
     let user = ctx.auth.require_user()?;
-    let memberships = ctx.db.query::<Member>().with_index(Member::by_user, |q| q.eq(Member::user, user)).collect().await?;
+    let memberships =
+        ctx.db.query::<Member>().with_index(Member::by_user, |q| q.eq(Member::user, user)).collect().await?;
     let mut out = Vec::new();
     for m in memberships {
         let since_read = |q: ferrix::IndexRange<Message>| {

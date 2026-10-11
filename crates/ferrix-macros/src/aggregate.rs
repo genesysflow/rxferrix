@@ -27,7 +27,9 @@ impl AggregateSpec {
         let parser = |input: ParseStream| -> syn::Result<AggregateSpec> {
             let name: Ident = input.parse()?;
             if input.peek(Token![=]) {
-                return Err(input.error("the aggregate's name comes first: #[aggregate(name, group = [...], sum = [...])]"));
+                return Err(
+                    input.error("the aggregate's name comes first: #[aggregate(name, group = [...], sum = [...])]")
+                );
             }
             let mut spec = AggregateSpec { name, group: Vec::new(), sum: Vec::new(), errors: Vec::new() };
             let (mut seen_group, mut seen_sum) = (false, false);
@@ -40,7 +42,8 @@ impl AggregateSpec {
                 input.parse::<Token![=]>()?;
                 let content;
                 bracketed!(content in input);
-                let fields: Vec<Ident> = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?.into_iter().collect();
+                let fields: Vec<Ident> =
+                    Punctuated::<Ident, Token![,]>::parse_terminated(&content)?.into_iter().collect();
                 match key.to_string().as_str() {
                     "group" if seen_group => spec.errors.push(syn::Error::new(key.span(), "duplicate `group`")),
                     "sum" if seen_sum => spec.errors.push(syn::Error::new(key.span(), "duplicate `sum`")),

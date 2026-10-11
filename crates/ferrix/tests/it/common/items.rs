@@ -5,29 +5,44 @@ use ferrix::prelude::*;
 
 // ---- #[table(name = "items")] #[index(by_group_score = [group, score])] #[index(by_name = [name])] ----
 
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize,
-         ::ferrix::__private::ts_rs::TS, ::core::clone::Clone, ::core::fmt::Debug, PartialEq)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug,
+    PartialEq,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
-pub struct Item { pub group: i64, pub score: i64, pub name: String }
+pub struct Item {
+    pub group: i64,
+    pub score: i64,
+    pub name: String,
+}
 
 impl ::ferrix::Table for Item {
     const NAME: &'static str = "items";
     fn table_def() -> ::ferrix::TableDef {
-        ::ferrix::TableDef { name: "items", indexes: vec![
-            ::ferrix::IndexDef { name: "by_group_score", fields: vec!["group", "score"] },
-            ::ferrix::IndexDef { name: "by_name", fields: vec!["name"] },
-        ], search_indexes: vec![], vector_indexes: vec![],
-        ts: || ::ferrix::__private::ts_inline::<Item>(),
-        validate: ::ferrix::__private::validate_doc::<Item>,
-        shape: || {
-            let mut s = ::ferrix::shape::StructShape::default();
-            s.field("group", ::ferrix::shape::Shape::Int);
-            s.field("score", ::ferrix::shape::Shape::Int);
-            s.field("name", ::ferrix::shape::Shape::Text);
-            ::ferrix::shape::Shape::Struct(s)
-        },
-        aggregates: vec![] }
+        ::ferrix::TableDef {
+            name: "items",
+            indexes: vec![
+                ::ferrix::IndexDef { name: "by_group_score", fields: vec!["group", "score"] },
+                ::ferrix::IndexDef { name: "by_name", fields: vec!["name"] },
+            ],
+            search_indexes: vec![],
+            vector_indexes: vec![],
+            ts: || ::ferrix::__private::ts_inline::<Item>(),
+            validate: ::ferrix::__private::validate_doc::<Item>,
+            shape: || {
+                let mut s = ::ferrix::shape::StructShape::default();
+                s.field("group", ::ferrix::shape::Shape::Int);
+                s.field("score", ::ferrix::shape::Shape::Int);
+                s.field("name", ::ferrix::shape::Shape::Text);
+                ::ferrix::shape::Shape::Struct(s)
+            },
+            aggregates: vec![],
+        }
     }
 }
 
@@ -51,8 +66,14 @@ static __FERRIX_TABLE_Item: fn() -> ::ferrix::TableDef = <Item as ::ferrix::Tabl
 
 /// `group` = eq on the first index field; `lower`/`upper` = (inclusive, bound) on the next field (score if `group`
 /// is set, else group). `mode` is collect | take | first | unique.
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS,
-         Clone, Debug, Default)]
+#[derive(
+    ::ferrix::__private::serde::Serialize,
+    ::ferrix::__private::serde::Deserialize,
+    ::ferrix::__private::ts_rs::TS,
+    Clone,
+    Debug,
+    Default,
+)]
 #[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
 #[ts(crate = "::ferrix::__private::ts_rs")]
 pub struct ScanSpec {
@@ -113,14 +134,21 @@ pub async fn bad_range(ctx: &QueryCtx, kind: u32) -> Result<Vec<Doc<Item>>> {
         3 => q.with_index(::ferrix::Index::new("nope"), |r| r).collect().await,
         4 => q.with_index(::ferrix::Index::new("by_id"), |r| r).collect().await,
         // The key fields are `group, score, _creationTime`: a declared field after them is one too many.
-        5 => q
-            .with_index(Item::by_group_score, |r| {
+        5 => {
+            q.with_index(Item::by_group_score, |r| {
                 r.eq(Item::group, 1).eq(Item::score, 1).eq(Item::_creation_time, 1.0).eq(Item::name, "x".to_string())
             })
             .collect()
-            .await,
+            .await
+        }
         // After the declared fields comes `_creationTime`, not another field.
-        _ => q.with_index(Item::by_group_score, |r| r.eq(Item::group, 1).eq(Item::score, 1).eq(Item::name, "x".to_string())).collect().await,
+        _ => {
+            q.with_index(Item::by_group_score, |r| {
+                r.eq(Item::group, 1).eq(Item::score, 1).eq(Item::name, "x".to_string())
+            })
+            .collect()
+            .await
+        }
     }
 }
 crate::expand_fn!(Query, QueryFunction, Public, bad_range, __ferrix_args_bad_range, __FERRIX_FN_bad_range, (kind: u32) -> Vec<Doc<Item>>);

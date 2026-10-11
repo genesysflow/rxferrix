@@ -70,9 +70,7 @@ impl AttrItem {
     pub fn str_value(&self) -> Option<syn::LitStr> {
         let mut it = self.tokens.clone().into_iter().skip(1);
         match (it.next(), it.next(), it.next()) {
-            (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(l)), None)
-                if p.as_char() == '=' =>
-            {
+            (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(l)), None) if p.as_char() == '=' => {
                 syn::parse2::<syn::LitStr>(TokenTree::Literal(l).into()).ok()
             }
             _ => None,
@@ -92,9 +90,7 @@ pub fn attr_items(attr: &syn::Attribute) -> Option<Vec<AttrItem>> {
         match &tt {
             TokenTree::Punct(p) if p.as_char() == ',' => {
                 if !cur.is_empty() {
-                    items.push(AttrItem {
-                        tokens: std::mem::take(&mut cur),
-                    });
+                    items.push(AttrItem { tokens: std::mem::take(&mut cur) });
                 }
             }
             _ => cur.extend([tt]),
@@ -140,34 +136,25 @@ pub fn check_owned_type(ty: &syn::Type, what: &str, errors: &mut Errors) {
         fn visit_type_reference(&mut self, r: &'ast syn::TypeReference) {
             self.errors.error(
                 r,
-                format_args!("{} types must be owned: references are not allowed (use e.g. `String` instead of `&str`)", self.what),
+                format_args!(
+                    "{} types must be owned: references are not allowed (use e.g. `String` instead of `&str`)",
+                    self.what
+                ),
             );
         }
         fn visit_lifetime(&mut self, l: &'ast syn::Lifetime) {
             if l.ident != "static" {
                 self.errors.error(
                     l,
-                    format_args!(
-                        "{} types must be owned and `'static`: lifetimes are not allowed",
-                        self.what
-                    ),
+                    format_args!("{} types must be owned and `'static`: lifetimes are not allowed", self.what),
                 );
             }
         }
         fn visit_type_impl_trait(&mut self, t: &'ast syn::TypeImplTrait) {
-            self.errors.error(
-                t,
-                format_args!("{} types cannot use `impl Trait`", self.what),
-            );
+            self.errors.error(t, format_args!("{} types cannot use `impl Trait`", self.what));
         }
         fn visit_type_infer(&mut self, t: &'ast syn::TypeInfer) {
-            self.errors.error(
-                t,
-                format_args!(
-                    "{} types must be spelled out; `_` is not allowed",
-                    self.what
-                ),
-            );
+            self.errors.error(t, format_args!("{} types must be spelled out; `_` is not allowed", self.what));
         }
     }
     V { what, errors }.visit_type(ty);

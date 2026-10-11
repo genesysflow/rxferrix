@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ferrix::AppOptions;
-use ferrix::testing::TestApp;
 use ferrix::FunctionRef;
+use ferrix::testing::TestApp;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,7 +90,7 @@ impl Ws {
     async fn subscribe(&mut self, base: u64, query_id: u64, path: &str, args: Value) -> Value {
         self.send(json!({ "type": "ModifyQuerySet", "baseVersion": base, "newVersion": base + 1,
             "modifications": [{ "type": "Add", "queryId": query_id, "udfPath": path, "args": args }] }))
-        .await;
+            .await;
         let t = self.recv_type("Transition").await;
         assert_eq!(t["endVersion"]["querySet"], base + 1);
         t
@@ -99,7 +99,13 @@ impl Ws {
     /// Run a mutation and wait until it is "resolved" the way the client resolves it: its MutationResponse AND a
     /// Transition with ts >= the commit ts, in either order. Returns (response, order) where order is
     /// "response_first" or "transition_first". Other Transitions are collected into `seen`.
-    async fn mutate(&mut self, request_id: u64, path: &str, args: Value, seen: &mut Vec<Value>) -> (Value, &'static str) {
+    async fn mutate(
+        &mut self,
+        request_id: u64,
+        path: &str,
+        args: Value,
+        seen: &mut Vec<Value>,
+    ) -> (Value, &'static str) {
         self.send(json!({ "type": "Mutation", "requestId": request_id, "udfPath": path, "args": args })).await;
         loop {
             let v = self.recv().await;
@@ -182,7 +188,10 @@ async fn subscribe_mutate_and_receive_updates() {
     loop {
         let v = a.recv().await;
         if v["type"] == "ActionResponse" {
-            assert_eq!(v, json!({ "type": "ActionResponse", "requestId": 3, "success": true, "result": null, "logLines": [] }));
+            assert_eq!(
+                v,
+                json!({ "type": "ActionResponse", "requestId": 3, "success": true, "result": null, "logLines": [] })
+            );
             break;
         }
     }
@@ -209,7 +218,7 @@ async fn modify_query_set_versions_and_remove() {
 
     a.send(json!({ "type": "ModifyQuerySet", "baseVersion": 2, "newVersion": 3,
         "modifications": [{ "type": "Remove", "queryId": 42 }] }))
-    .await;
+        .await;
     let removed = a.recv_type("Transition").await;
     assert_eq!(removed["endVersion"]["querySet"], 3);
     assert_eq!(removed["modifications"], json!([{ "type": "QueryRemoved", "queryId": 42 }]));
@@ -239,7 +248,7 @@ async fn modify_query_set_versions_and_remove() {
     d.subscribe(0, 1, &todos::list::path(), json!({})).await;
     d.send(json!({ "type": "ModifyQuerySet", "baseVersion": 1, "newVersion": 2,
         "modifications": [{ "type": "Add", "queryId": 1, "udfPath": todos::list::path(), "args": {} }] }))
-    .await;
+        .await;
     d.recv_type("FatalError").await;
     d.expect_closed().await;
 }
@@ -319,7 +328,8 @@ async fn server_errors_are_hidden_outside_dev() {
 
     let dev = TestApp::new().await.unwrap();
     let addr = dev.serve().await.unwrap();
-    let (status, body) = http(addr, "POST", "/api/query", Some(json!({ "path": todos::server_error::path(), "args": {} }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/query", Some(json!({ "path": todos::server_error::path(), "args": {} }))).await;
     assert_eq!(status, 500);
     assert!(body["errorMessage"].as_str().unwrap().contains("secret internal detail"));
 }
@@ -349,29 +359,34 @@ async fn http_fallback_endpoints() {
 
     assert_eq!(http(addr, "GET", "/api/health", None).await, (200, json!({ "status": "ok" })));
 
-    let (status, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "h" } }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "h" } }))).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], "success");
     // The commit ts (startup may already have committed, e.g. the reconcile of ferrix's system crons).
     assert!(body["ts"].as_u64().is_some_and(|ts| ts >= 1), "{body}");
     assert_eq!(body["logLines"], json!([]));
 
-    let (status, body) = http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await;
     assert_eq!(status, 200);
     assert_eq!(texts(&body["value"]), vec!["h"]);
 
-    let (status, body) = http(addr, "POST", "/api/action", Some(json!({ "path": todos::count_via_action::path(), "args": {} }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/action", Some(json!({ "path": todos::count_via_action::path(), "args": {} }))).await;
     assert_eq!((status, body["value"].clone()), (200, json!(1)));
 
     // User error: 400 with code and data.
-    let (status, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "" } }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "" } }))).await;
     assert_eq!(status, 400);
     assert_eq!(
         body,
         json!({ "status": "error", "errorMessage": "text is empty", "errorData": { "code": "empty", "data": { "min": 1 } }, "logLines": [] })
     );
     // Bad args: 400.
-    let (status, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": {} }))).await;
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": {} }))).await;
     assert_eq!(status, 400);
     assert!(body["errorMessage"].as_str().unwrap().starts_with("Invalid args for add: "));
     // Unknown and internal functions: 404.
@@ -390,7 +405,8 @@ async fn http_fallback_endpoints() {
 async fn duplicate_mutations_are_applied_once() {
     let t = TestApp::new().await.unwrap();
     let addr = t.serve().await.unwrap();
-    let count = || async { http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await.1 };
+    let count =
+        || async { http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await.1 };
 
     // Sequential: the second socket is the "reconnected" client resending request 5.
     let mut a = Ws::connect_session(addr, "same-session").await;
@@ -450,7 +466,11 @@ async fn aggregate_subscriptions_update_per_group() {
     for expected in 1..=2 {
         t.mutation::<fns::add>(("ann".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
         let update = a.recv_type("Transition").await;
-        assert_eq!(update["modifications"], json!([{ "type": "QueryUpdated", "queryId": 0, "value": expected, "logLines": [] }]), "bob's query isn't rerun");
+        assert_eq!(
+            update["modifications"],
+            json!([{ "type": "QueryUpdated", "queryId": 0, "value": expected, "logLines": [] }]),
+            "bob's query isn't rerun"
+        );
     }
     t.mutation::<fns::add>(("bob".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
     let update = a.recv_type("Transition").await;
@@ -487,10 +507,15 @@ async fn log_lines_reach_clients_only_in_dev() {
         let (resp, _) = a.mutate(0, &fns::logged_add::path(), json!({ "text": "x" }), &mut Vec::new()).await;
         assert_eq!(resp["logLines"], expect(json!(["[INFO] adding x"])));
         let (resp, _) = a.mutate(1, &fns::logged_fail::path(), json!({}), &mut Vec::new()).await;
-        assert_eq!((resp["success"].clone(), resp["logLines"].clone()), (json!(false), expect(json!(["[WARN] about to fail"]))));
+        assert_eq!(
+            (resp["success"].clone(), resp["logLines"].clone()),
+            (json!(false), expect(json!(["[WARN] about to fail"])))
+        );
 
-        a.send(json!({ "type": "Action", "requestId": 2, "udfPath": fns::logged_action::path(), "args": { "text": "y" } }))
-            .await;
+        a.send(
+            json!({ "type": "Action", "requestId": 2, "udfPath": fns::logged_action::path(), "args": { "text": "y" } }),
+        )
+        .await;
         let resp = loop {
             let v = a.recv().await;
             if v["type"] == "ActionResponse" {
@@ -500,15 +525,30 @@ async fn log_lines_reach_clients_only_in_dev() {
         assert_eq!(resp["result"], 7);
         assert_eq!(
             resp["logLines"],
-            expect(json!(["[WARN] action start", "[INFO] adding y", "[INFO] querying n=7", "[DEBUG] details", "[ERROR] action end code=42"]))
+            expect(json!([
+                "[WARN] action start",
+                "[INFO] adding y",
+                "[INFO] querying n=7",
+                "[DEBUG] details",
+                "[ERROR] action end code=42"
+            ]))
         );
 
         // HTTP.
-        let (_, body) = http(addr, "POST", "/api/query", Some(json!({ "path": fns::logged_query::path(), "args": { "n": 1 } }))).await;
+        let (_, body) =
+            http(addr, "POST", "/api/query", Some(json!({ "path": fns::logged_query::path(), "args": { "n": 1 } })))
+                .await;
         assert_eq!(body["logLines"], expect(json!(["[INFO] querying n=1", "[DEBUG] details"])));
-        let (_, body) = http(addr, "POST", "/api/mutation", Some(json!({ "path": fns::logged_fail::path(), "args": {} }))).await;
+        let (_, body) =
+            http(addr, "POST", "/api/mutation", Some(json!({ "path": fns::logged_fail::path(), "args": {} }))).await;
         assert_eq!(body["logLines"], expect(json!(["[WARN] about to fail"])));
-        let (_, body) = http(addr, "POST", "/api/action", Some(json!({ "path": fns::logged_action::path(), "args": { "text": "z" } }))).await;
+        let (_, body) = http(
+            addr,
+            "POST",
+            "/api/action",
+            Some(json!({ "path": fns::logged_action::path(), "args": { "text": "z" } })),
+        )
+        .await;
         assert_eq!(body["logLines"].as_array().unwrap().len(), if dev { 5 } else { 0 });
 
         // Whatever the mode, the execution log keeps them.

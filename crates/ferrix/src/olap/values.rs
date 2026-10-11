@@ -69,8 +69,11 @@ pub(super) fn to_json(v: Db, json_typed: bool) -> Value {
             .map_or(Value::Null, |d| json!(d.format("%Y-%m-%d").to_string())),
         Db::Time64(unit, v) => {
             let us = micros(unit, v);
-            chrono::NaiveTime::from_num_seconds_from_midnight_opt((us / 1_000_000) as u32, ((us % 1_000_000) * 1_000) as u32)
-                .map_or(Value::Null, |t| json!(t.format("%H:%M:%S%.f").to_string()))
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                (us / 1_000_000) as u32,
+                ((us % 1_000_000) * 1_000) as u32,
+            )
+            .map_or(Value::Null, |t| json!(t.format("%H:%M:%S%.f").to_string()))
         }
         Db::Interval { months, days, nanos } => json!({ "months": months, "days": days, "nanos": nanos }),
         Db::List(items) | Db::Array(items) => Value::Array(items.into_iter().map(|v| to_json(v, json_typed)).collect()),
@@ -79,7 +82,8 @@ pub(super) fn to_json(v: Db, json_typed: bool) -> Value {
         }
         Db::Map(entries) => {
             // String keys make an object; anything else a list of [key, value] pairs.
-            let pairs: Vec<(Value, Value)> = entries.iter().map(|(k, v)| (to_json(k.clone(), false), to_json(v.clone(), false))).collect();
+            let pairs: Vec<(Value, Value)> =
+                entries.iter().map(|(k, v)| (to_json(k.clone(), false), to_json(v.clone(), false))).collect();
             if pairs.iter().all(|(k, _)| k.is_string()) {
                 Value::Object(pairs.into_iter().map(|(k, v)| (k.as_str().unwrap_or_default().to_string(), v)).collect())
             } else {
@@ -101,7 +105,10 @@ mod tests {
         assert_eq!(to_json(Db::HugeInt(5), false), json!(5));
         assert_eq!(to_json(Db::HugeInt(i128::MAX), false), json!(i128::MAX as f64));
         assert_eq!(to_json(Db::Double(f64::NAN), false), Value::Null);
-        assert_eq!(to_json(Db::Timestamp(TimeUnit::Microsecond, 1_760_000_000_000_000), false), json!("2025-10-09T08:53:20Z"));
+        assert_eq!(
+            to_json(Db::Timestamp(TimeUnit::Microsecond, 1_760_000_000_000_000), false),
+            json!("2025-10-09T08:53:20Z")
+        );
         assert_eq!(to_json(Db::Date32(1), false), json!("1970-01-02"));
         assert_eq!(to_json(Db::Text("{\"a\":1}".into()), true), json!({"a": 1}));
         assert_eq!(to_json(Db::Text("{\"a\":1}".into()), false), json!("{\"a\":1}"));

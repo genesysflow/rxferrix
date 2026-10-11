@@ -155,7 +155,11 @@ impl Default for TokenizerConfig {
 
 impl From<Tokenizer> for TokenizerConfig {
     fn from(t: Tokenizer) -> Self {
-        TokenizerConfig { kind: t.kind, language: t.language.map(str::to_string), remove_diacritics: t.remove_diacritics }
+        TokenizerConfig {
+            kind: t.kind,
+            language: t.language.map(str::to_string),
+            remove_diacritics: t.remove_diacritics,
+        }
     }
 }
 
@@ -163,7 +167,9 @@ impl TokenizerConfig {
     /// The FTS5 `tokenize` option.
     pub fn fts5(&self) -> String {
         match self.kind {
-            TokenizerKind::Unicode61 => format!("unicode61 remove_diacritics {}", if self.remove_diacritics { 2 } else { 0 }),
+            TokenizerKind::Unicode61 => {
+                format!("unicode61 remove_diacritics {}", if self.remove_diacritics { 2 } else { 0 })
+            }
             TokenizerKind::Porter => {
                 format!("porter unicode61 remove_diacritics {}", if self.remove_diacritics { 2 } else { 0 })
             }
@@ -422,7 +428,8 @@ pub(crate) fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
 /// The search and vector indexes stored for every table, by table number.
 pub(crate) fn load(conn: &Connection) -> anyhow::Result<BTreeMap<u32, Vec<SearchIndexInfo>>> {
     let mut out: BTreeMap<u32, Vec<SearchIndexInfo>> = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT index_id, table_number, name, definition FROM _search_indexes ORDER BY index_id")?;
+    let mut stmt =
+        conn.prepare("SELECT index_id, table_number, name, definition FROM _search_indexes ORDER BY index_id")?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         let definition: String = r.get(3)?;
@@ -658,7 +665,8 @@ impl Entry {
                 };
                 let placeholders: String = (0..filters.len()).map(|i| format!(", ?{}", i + 3)).collect();
                 let cols: String = (0..filters.len()).map(|i| format!(", f{i}")).collect();
-                let sql = format!("INSERT INTO {} (rowid, t{cols}) VALUES (?1, ?2{placeholders})", info.storage_table());
+                let sql =
+                    format!("INSERT INTO {} (rowid, t{cols}) VALUES (?1, ?2{placeholders})", info.storage_table());
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let mut values: Vec<rusqlite::types::Value> = vec![rowid.into(), text.clone().into()];
                 values.extend(filters.iter().map(|f| f.clone().into()));
@@ -667,7 +675,8 @@ impl Entry {
             Entry::Vector { vector, filters } => {
                 let placeholders: String = (0..filters.len()).map(|i| format!(", ?{}", i + 3)).collect();
                 let cols: String = (0..filters.len()).map(|i| format!(", f{i}")).collect();
-                let sql = format!("INSERT INTO {} (doc_id, v{cols}) VALUES (?1, ?2{placeholders})", info.storage_table());
+                let sql =
+                    format!("INSERT INTO {} (doc_id, v{cols}) VALUES (?1, ?2{placeholders})", info.storage_table());
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let mut values: Vec<rusqlite::types::Value> = vec![id.encode().into(), vector::to_blob(vector).into()];
                 values.extend(filters.iter().map(|f| f.clone().into()));
@@ -692,7 +701,8 @@ impl Entry {
         if let Some(rowid) = rowid {
             conn.prepare_cached(&format!("DELETE FROM {} WHERE rowid = ?1", info.storage_table()))?.execute([rowid])?;
             if !keep_rowid {
-                conn.prepare_cached(&format!("DELETE FROM {} WHERE rowid = ?1", info.docs_table()))?.execute([rowid])?;
+                conn.prepare_cached(&format!("DELETE FROM {} WHERE rowid = ?1", info.docs_table()))?
+                    .execute([rowid])?;
             }
         }
         Ok(())
@@ -735,7 +745,12 @@ impl<'a> SpecialWrites<'a> {
     /// Update the FTS / vec0 tables and record the synthetic keys of every changed search or vector entry (the old
     /// entry's and the new one's, see "Reactivity"), plus `(index id, doc id)` for every changed HNSW vector entry
     /// (how its graph catches up, [`ann`]).
-    pub(crate) fn apply(self, conn: &Connection, id: DocId, writes: &mut Vec<(IndexId, Vec<u8>)>) -> anyhow::Result<()> {
+    pub(crate) fn apply(
+        self,
+        conn: &Connection,
+        id: DocId,
+        writes: &mut Vec<(IndexId, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
         for (info, old, new) in self.changes {
             if old.is_some() {
                 Entry::delete(info, conn, &id, new.is_some())?;
@@ -794,7 +809,11 @@ pub(crate) fn verify(conn: &Connection, catalog: &Catalog) -> anyhow::Result<Vec
             }
             if !info.is_vector() {
                 let (fts, map): (i64, i64) = conn.query_row(
-                    &format!("SELECT (SELECT COUNT(*) FROM {}), (SELECT COUNT(*) FROM {})", info.storage_table(), info.docs_table()),
+                    &format!(
+                        "SELECT (SELECT COUNT(*) FROM {}), (SELECT COUNT(*) FROM {})",
+                        info.storage_table(),
+                        info.docs_table()
+                    ),
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;

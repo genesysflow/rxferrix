@@ -57,9 +57,15 @@ mod app {
 
     /// Adds a note now and schedules another one after `delay_ms`; with `fail`, then fails (rolling both back).
     #[mutation]
-    pub async fn add_and_schedule(ctx: &MutationCtx, text: String, delay_ms: u64, fail: bool) -> Result<Id<ScheduledJob>> {
+    pub async fn add_and_schedule(
+        ctx: &MutationCtx,
+        text: String,
+        delay_ms: u64,
+        fail: bool,
+    ) -> Result<Id<ScheduledJob>> {
         ctx.db.insert(Note { text: text.clone() }).await?;
-        let job = ctx.scheduler.run_after::<add_note>(Duration::from_millis(delay_ms), (format!("{text} (later)"),)).await?;
+        let job =
+            ctx.scheduler.run_after::<add_note>(Duration::from_millis(delay_ms), (format!("{text} (later)"),)).await?;
         if fail {
             return Err(UserError::new("nope", "failing on purpose").into());
         }
@@ -340,7 +346,10 @@ async fn transactional_scheduling_runs_after_the_delay_exactly_once() {
     // A committed one schedules its job, which runs once it's due.
     let id = t.mutation::<add_and_schedule>(("a".to_string(), 60_000, false)).await.unwrap();
     let pending = job(&t, id).await;
-    assert_eq!((pending.state, pending.attempts, pending.origin.as_deref()), (JobState::Pending, 0, Some(add_and_schedule::path().as_str())));
+    assert_eq!(
+        (pending.state, pending.attempts, pending.origin.as_deref()),
+        (JobState::Pending, 0, Some(add_and_schedule::path().as_str()))
+    );
     assert_eq!(pending.path, add_note::path());
     assert_eq!(pending.args, json!({ "text": "a (later)" }));
     assert!((pending.run_at - pending.scheduled_at - 60_000.0).abs() < 1.0);
@@ -351,7 +360,11 @@ async fn transactional_scheduling_runs_after_the_delay_exactly_once() {
     assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["a", "a (later)"]);
     let done = job(&t, id).await;
     assert_eq!((done.state, done.attempts), (JobState::Success, 1));
-    assert!(done.result.as_deref().unwrap().starts_with('"'), "the result is the new note's id as JSON: {:?}", done.result);
+    assert!(
+        done.result.as_deref().unwrap().starts_with('"'),
+        "the result is the new note's id as JSON: {:?}",
+        done.result
+    );
     assert!(done.started_at.is_some() && done.completed_at.is_some() && done.error.is_none());
 
     // Never again.
@@ -377,9 +390,13 @@ async fn a_failing_scheduled_mutation_rolls_back_and_is_marked_failed() {
 
 #[tokio::test]
 async fn a_crash_mid_mutation_leaves_the_job_pending_and_it_then_runs_once() {
-    let t = TestApp::with_options(AppOptions { dev: true, mutation_timeout: Duration::from_secs(3600), ..Default::default() })
-        .await
-        .unwrap();
+    let t = TestApp::with_options(AppOptions {
+        dev: true,
+        mutation_timeout: Duration::from_secs(3600),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
     let id = t.mutation::<schedule_crashy>(("once".to_string(),)).await.unwrap();
 
     // The job's mutation has written its note and hangs; the "process" dies (the runner's future is dropped).
@@ -392,7 +409,11 @@ async fn a_crash_mid_mutation_leaves_the_job_pending_and_it_then_runs_once() {
     CRASH.store(false, Ordering::SeqCst);
 
     let after_crash = job(&t, id).await;
-    assert_eq!((after_crash.state, after_crash.attempts), (JobState::Pending, 0), "nothing of the attempt was committed");
+    assert_eq!(
+        (after_crash.state, after_crash.attempts),
+        (JobState::Pending, 0),
+        "nothing of the attempt was committed"
+    );
     assert!(t.query::<notes>(()).await.unwrap().is_empty());
 
     // After the "restart" it runs, exactly once.
@@ -511,7 +532,11 @@ async fn actions_can_opt_into_retries_with_backoff() {
 
 #[tokio::test]
 async fn the_concurrency_limit_bounds_running_actions() {
-    let options = AppOptions { dev: true, scheduler: SchedulerOptions { concurrency: 2, ..Default::default() }, ..Default::default() };
+    let options = AppOptions {
+        dev: true,
+        scheduler: SchedulerOptions { concurrency: 2, ..Default::default() },
+        ..Default::default()
+    };
     let t = TestApp::with_options(options).await.unwrap();
     t.mutation::<schedule_slow>((6,)).await.unwrap();
     assert_eq!(t.run_due_jobs().await.unwrap(), 6);
@@ -527,13 +552,19 @@ async fn scheduled_functions_run_without_identity_and_log_as_scheduler() {
     t.run_due_jobs().await.unwrap();
     assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["anonymous"]);
     t.app().logs().flush().await.unwrap();
-    let logs = t.app().logs().query(LogFilter { identity: Some("scheduler".into()), ..Default::default() }).await.unwrap();
+    let logs =
+        t.app().logs().query(LogFilter { identity: Some("scheduler".into()), ..Default::default() }).await.unwrap();
     assert!(logs.iter().any(|e| e.path == whoami::path()), "{logs:?}");
 }
 
 fn crons_options(crons: SchedulerOptions) -> AppOptions {
     // Without the storage sweep's system cron, so the counts of jobs that ran are the app's crons only.
-    AppOptions { dev: true, scheduler: crons, storage: StorageConfig::default().sweep_interval(None), ..Default::default() }
+    AppOptions {
+        dev: true,
+        scheduler: crons,
+        storage: StorageConfig::default().sweep_interval(None),
+        ..Default::default()
+    }
 }
 
 /// The app's `_crons` rows (without ferrix's system crons, e.g. `_storage_sweep`).
@@ -627,7 +658,8 @@ async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
 
     CRON_HANG_RELEASE.notify_one();
     // At least the held run; the real-time cron may have come due again meanwhile (those runs don't block).
-    let ran = tokio::time::timeout(Duration::from_secs(30), first).await.expect("run_due_jobs finished").unwrap().unwrap();
+    let ran =
+        tokio::time::timeout(Duration::from_secs(30), first).await.expect("run_due_jobs finished").unwrap().unwrap();
     assert!(ran >= 1, "{ran}");
     let jobs = t.query::<all_jobs>(()).await.unwrap();
     assert!(jobs.iter().all(|j| j.state == JobState::Success), "{jobs:?}");
@@ -635,7 +667,8 @@ async fn cron_runs_are_skipped_while_the_previous_one_is_still_running() {
 
 #[tokio::test]
 async fn invalid_crons_fail_startup() {
-    let bad = |s: SchedulerOptions| async move { TestApp::with_options(crons_options(s)).await.err().unwrap().to_string() };
+    let bad =
+        |s: SchedulerOptions| async move { TestApp::with_options(crons_options(s)).await.err().unwrap().to_string() };
     let msg = bad(SchedulerOptions::default().cron::<cron_tick>("x", "*/5 * * * *", ("a".to_string(),))).await;
     assert!(msg.contains("has 5 fields"), "{msg}");
     let msg = bad(SchedulerOptions::default().cron::<cron_tick>("x", "0 61 * * * *", ("a".to_string(),))).await;
@@ -689,7 +722,8 @@ impl Http {
     }
 
     async fn call(&self, kind: &str, name: &str, args: Value, token: Option<&str>) -> (u16, Value) {
-        self.post(&format!("/api/{kind}"), token, json!({ "path": format!("_system/scheduler:{name}"), "args": args })).await
+        self.post(&format!("/api/{kind}"), token, json!({ "path": format!("_system/scheduler:{name}"), "args": args }))
+            .await
     }
 
     async fn ok(&self, kind: &str, name: &str, args: Value, token: &str) -> Value {
@@ -720,9 +754,13 @@ async fn dashboard_functions_are_admin_only_and_manage_jobs() {
     let addr: SocketAddr = t.serve().await.unwrap();
     let http = Http { client: reqwest::Client::new(), base: format!("http://{addr}") };
     app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
-    let (_, admin) = http.post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" })).await;
-    let (_, user) = http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
-    let (admin, user) = (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
+    let (_, admin) = http
+        .post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+        .await;
+    let (_, user) =
+        http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (admin, user) =
+        (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
 
     let pending = t.mutation::<add_and_schedule>(("p".to_string(), 3_600_000, false)).await.unwrap();
     let failed = t.mutation::<schedule_failing>(()).await.unwrap();
@@ -762,7 +800,10 @@ async fn dashboard_functions_are_admin_only_and_manage_jobs() {
     let retry: Id<ScheduledJob> = retry.as_str().unwrap().parse().unwrap();
     assert_ne!(retry, failed);
     let retried = job(&t, retry).await;
-    assert_eq!((retried.state, retried.origin.as_deref(), retried.path.as_str()), (JobState::Pending, Some("dashboard"), failing_add::path().as_str()));
+    assert_eq!(
+        (retried.state, retried.origin.as_deref(), retried.path.as_str()),
+        (JobState::Pending, Some("dashboard"), failing_add::path().as_str())
+    );
     // Run a pending job now: same id, due immediately.
     let same = http.ok("mutation", "run_job_now", json!({ "id": pending }), &admin).await;
     assert_eq!(same, json!(pending));
@@ -799,7 +840,8 @@ async fn subscribers_see_the_writes_of_scheduled_mutations() {
         .unwrap();
     let mut next_values = async || -> Value {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("timed out").unwrap().unwrap();
+            let msg =
+                tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("timed out").unwrap().unwrap();
             let Message::Text(text) = msg else { continue };
             let v: Value = serde_json::from_str(text.as_str()).unwrap();
             if v["type"] == "Transition"
@@ -890,7 +932,8 @@ async fn an_uncooperative_action_is_aborted_after_the_grace_period() {
     assert_eq!(job(&t, id).await.state, JobState::Canceled);
     // The execution log has the aborted run.
     t.app().logs().flush().await.unwrap();
-    let logs = t.app().logs().query(LogFilter { path_prefix: Some(stubborn::path()), ..Default::default() }).await.unwrap();
+    let logs =
+        t.app().logs().query(LogFilter { path_prefix: Some(stubborn::path()), ..Default::default() }).await.unwrap();
     let error = logs[0].error.as_deref().unwrap_or_default();
     assert!(error.contains("aborted 300ms after its job was canceled"), "{logs:?}");
     assert_eq!(texts(&t.query::<notes>(()).await.unwrap()), vec!["stubborn: before", "after"]);
@@ -928,7 +971,12 @@ async fn crons_in_a_time_zone() {
     assert_eq!(t.advance_time(Duration::from_secs(24 * 3600)).await.unwrap(), 2);
 
     // Changing only the zone recomputes the next run.
-    let moved = SchedulerOptions::default().cron_tz::<cron_tick>("nine", "0 0 9 * * *", "America/New_York", ("tz".to_string(),));
+    let moved = SchedulerOptions::default().cron_tz::<cron_tick>(
+        "nine",
+        "0 0 9 * * *",
+        "America/New_York",
+        ("tz".to_string(),),
+    );
     let t = t.restart_with(crons_options(moved)).await.unwrap();
     let nine = cron_rows(&t).await.remove(0);
     assert_eq!(nine["timezone"], "America/New_York");
@@ -936,13 +984,19 @@ async fn crons_in_a_time_zone() {
     assert!(hour_utc == 13 || hour_utc == 14, "09:00 EDT/EST: {nine}");
 
     // Startup fails on an unknown zone, a zone on an interval, and app crons named like system crons.
-    let bad = |s: SchedulerOptions| async move { TestApp::with_options(crons_options(s)).await.err().unwrap().to_string() };
-    let msg = bad(SchedulerOptions::default().cron_tz::<cron_tick>("x", "0 0 9 * * *", "Mars/Olympus", ("a".to_string(),))).await;
+    let bad =
+        |s: SchedulerOptions| async move { TestApp::with_options(crons_options(s)).await.err().unwrap().to_string() };
+    let msg =
+        bad(SchedulerOptions::default().cron_tz::<cron_tick>("x", "0 0 9 * * *", "Mars/Olympus", ("a".to_string(),)))
+            .await;
     assert!(msg.contains("unknown time zone `Mars/Olympus`"), "{msg}");
-    let interval = ferrix::CronSpec::interval::<cron_tick>("x", Duration::from_secs(60), ("a".to_string(),)).timezone("Europe/Paris");
+    let interval = ferrix::CronSpec::interval::<cron_tick>("x", Duration::from_secs(60), ("a".to_string(),))
+        .timezone("Europe/Paris");
     let msg = bad(SchedulerOptions { crons: vec![interval], ..Default::default() }).await;
     assert!(msg.contains("an interval has no time zone"), "{msg}");
-    let msg = bad(SchedulerOptions::default().interval::<cron_tick>("_mine", Duration::from_secs(60), ("a".to_string(),))).await;
+    let msg =
+        bad(SchedulerOptions::default().interval::<cron_tick>("_mine", Duration::from_secs(60), ("a".to_string(),)))
+            .await;
     assert!(msg.contains("reserved"), "{msg}");
 }
 
@@ -962,9 +1016,13 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
     let addr: SocketAddr = t.serve().await.unwrap();
     let http = Http { client: reqwest::Client::new(), base: format!("http://{addr}") };
     app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
-    let (_, admin) = http.post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" })).await;
-    let (_, user) = http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
-    let (admin, user) = (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
+    let (_, admin) = http
+        .post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+        .await;
+    let (_, user) =
+        http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (admin, user) =
+        (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
 
     let (s, b) = http.call("mutation", "run_cron_now", json!({ "name": "yearly" }), None).await;
     assert_eq!((s, code_of(&b)), (400, "unauthenticated"));
@@ -975,14 +1033,23 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
 
     // Enqueued now, as the cron's last run; its next run doesn't move.
     let before = http.ok("query", "crons", json!({}), &admin).await;
-    let first: Id<ScheduledJob> = http.ok("mutation", "run_cron_now", json!({ "name": "yearly" }), &admin).await.as_str().unwrap().parse().unwrap();
+    let first: Id<ScheduledJob> = http
+        .ok("mutation", "run_cron_now", json!({ "name": "yearly" }), &admin)
+        .await
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     let queued = job(&t, first).await;
     assert_eq!((queued.state, queued.origin.as_deref()), (JobState::Pending, Some("cron:yearly")));
     let crons = http.ok("query", "crons", json!({}), &admin).await;
     let yearly = crons.as_array().unwrap().iter().find(|c| c["name"] == "yearly").unwrap().clone();
     assert_eq!(yearly["lastJob"], json!(first));
     assert_eq!(yearly["lastJobState"], "pending");
-    assert_eq!(yearly["nextRun"], before.as_array().unwrap().iter().find(|c| c["name"] == "yearly").unwrap()["nextRun"]);
+    assert_eq!(
+        yearly["nextRun"],
+        before.as_array().unwrap().iter().find(|c| c["name"] == "yearly").unwrap()["nextRun"]
+    );
     // No pile-up unless forced.
     let (_, b) = http.call("mutation", "run_cron_now", json!({ "name": "yearly" }), Some(&admin)).await;
     assert_eq!(code_of(&b), "running", "{b}");
@@ -993,10 +1060,21 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
 
     // System crons are listed last, marked, and can be run now too.
     let crons = http.ok("query", "crons", json!({}), &admin).await;
-    let names: Vec<_> = crons.as_array().unwrap().iter().map(|c| (c["name"].as_str().unwrap(), c["system"].as_bool().unwrap())).collect();
+    let names: Vec<_> = crons
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap(), c["system"].as_bool().unwrap()))
+        .collect();
     assert_eq!(names, vec![("hang", false), ("yearly", false), ("_storage_sweep", true)]);
     assert_eq!(crons[2]["schedule"], "every 6h");
-    let sweep: Id<ScheduledJob> = http.ok("mutation", "run_cron_now", json!({ "name": "_storage_sweep" }), &admin).await.as_str().unwrap().parse().unwrap();
+    let sweep: Id<ScheduledJob> = http
+        .ok("mutation", "run_cron_now", json!({ "name": "_storage_sweep" }), &admin)
+        .await
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert_eq!(t.run_due_jobs().await.unwrap(), 1);
     let swept = job(&t, sweep).await;
     assert_eq!(swept.state, JobState::Success, "{swept:?}");
@@ -1004,7 +1082,8 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
     assert_eq!(stats, json!({ "scanned": 0, "deleted": 0, "thumbnails": 0, "kept": 0 }));
 
     // The dashboard cancels a running action: it sees the cancel and stops.
-    let hang: Id<ScheduledJob> = http.ok("mutation", "run_cron_now", json!({ "name": "hang" }), &admin).await.as_str().unwrap().parse().unwrap();
+    let hang: Id<ScheduledJob> =
+        http.ok("mutation", "run_cron_now", json!({ "name": "hang" }), &admin).await.as_str().unwrap().parse().unwrap();
     let runner = run_in_background(&t);
     tokio::time::timeout(Duration::from_secs(5), DASH_STARTED.notified()).await.expect("action started");
     let outcome = http.ok("mutation", "cancel_job", json!({ "id": hang }), &admin).await;
@@ -1013,7 +1092,11 @@ async fn run_cron_now_and_cancel_running_actions_from_the_dashboard() {
     let canceled = job(&t, hang).await;
     assert_eq!(canceled.state, JobState::Canceled);
     let error = canceled.error.clone().unwrap();
-    assert!(error.starts_with("Canceled from the dashboard by admin:") && error.ends_with("(while running); it stopped with an error: gave up"), "{error}");
+    assert!(
+        error.starts_with("Canceled from the dashboard by admin:")
+            && error.ends_with("(while running); it stopped with an error: gave up"),
+        "{error}"
+    );
     let again = http.ok("mutation", "cancel_job", json!({ "id": hang }), &admin).await;
     assert_eq!(again, "alreadyFinished");
 }

@@ -143,7 +143,9 @@ impl OlapValue {
         match v {
             Value::Null => OlapValue::Null,
             Value::Bool(b) => OlapValue::Bool(b),
-            Value::Number(n) => n.as_i64().map_or_else(|| OlapValue::Float(n.as_f64().unwrap_or(f64::NAN)), OlapValue::Int),
+            Value::Number(n) => {
+                n.as_i64().map_or_else(|| OlapValue::Float(n.as_f64().unwrap_or(f64::NAN)), OlapValue::Int)
+            }
             Value::String(s) => OlapValue::Text(s),
             other => OlapValue::Text(other.to_string()),
         }
@@ -222,7 +224,16 @@ macro_rules! olap_tuples {
         })*
     };
 }
-olap_tuples!((A), (A, B), (A, B, C), (A, B, C, D), (A, B, C, D, E), (A, B, C, D, E, F), (A, B, C, D, E, F, G), (A, B, C, D, E, F, G, H));
+olap_tuples!(
+    (A),
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H)
+);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // ctx.olap
@@ -270,7 +281,8 @@ impl Olap {
             .into_iter()
             .map(|row| {
                 serde_json::from_value(Value::Object(row)).map_err(|e| {
-                    UserError::new("olap_query_failed", format!("A row doesn't deserialize as the requested type: {e}")).into()
+                    UserError::new("olap_query_failed", format!("A row doesn't deserialize as the requested type: {e}"))
+                        .into()
                 })
             })
             .collect()
@@ -368,7 +380,13 @@ impl OlapService {
 
     /// Run one SELECT (the same sandbox as [`Olap::query`]) and write its whole result to `path` as CSV or Parquet,
     /// up to [`OlapOptions::max_export_rows`] rows, interrupted after [`OlapOptions::export_timeout`].
-    pub async fn export(&self, sql: &str, params: Vec<OlapValue>, format: OlapExportFormat, path: &std::path::Path) -> Result<OlapExport> {
+    pub async fn export(
+        &self,
+        sql: &str,
+        params: Vec<OlapValue>,
+        format: OlapExportFormat,
+        path: &std::path::Path,
+    ) -> Result<OlapExport> {
         #[cfg(feature = "olap")]
         {
             self.engine.export(sql, params, format, path.to_path_buf()).await

@@ -247,7 +247,9 @@ pub fn field_shapes(ts: &str) -> BTreeMap<String, FieldShape> {
     let Some(body) = ts.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else { return BTreeMap::new() };
     let mut out = BTreeMap::new();
     for entry in split_top(body, ',').into_iter().map(str::trim).filter(|e| !e.is_empty()) {
-        let Some((name, ty)) = split_top(entry, ':').split_first().map(|(n, rest)| (*n, rest.join(":"))) else { continue };
+        let Some((name, ty)) = split_top(entry, ':').split_first().map(|(n, rest)| (*n, rest.join(":"))) else {
+            continue;
+        };
         if ty.is_empty() {
             continue;
         }
@@ -311,12 +313,7 @@ pub struct CsvDocs<R> {
 impl<R: BufRead> CsvDocs<R> {
     /// Read the header. `ts` is the table's TS type and `validate` its document check, when the table is defined in
     /// code (both guide the reading of ambiguous cells).
-    pub fn new(
-        reader: R,
-        ts: Option<String>,
-        validate: Option<Validate>,
-        table_number: u32,
-    ) -> crate::Result<Self> {
+    pub fn new(reader: R, ts: Option<String>, validate: Option<Validate>, table_number: u32) -> crate::Result<Self> {
         let mut reader = CsvReader::new(reader);
         let Some((_, columns)) = reader.next_record()? else { bail!("the CSV file is empty (it needs a header row)") };
         let mut seen = HashSet::new();
@@ -347,8 +344,12 @@ impl<R: BufRead> CsvDocs<R> {
                 }
                 CREATION_TIME_FIELD => {
                     if !cell.is_empty() {
-                        let n: f64 = cell.trim().parse().map_err(|_| anyhow::anyhow!("`_creationTime` `{cell}` is not a number"))?;
-                        let n = serde_json::Number::from_f64(n).ok_or_else(|| anyhow::anyhow!("`_creationTime` must be finite"))?;
+                        let n: f64 = cell
+                            .trim()
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("`_creationTime` `{cell}` is not a number"))?;
+                        let n = serde_json::Number::from_f64(n)
+                            .ok_or_else(|| anyhow::anyhow!("`_creationTime` must be finite"))?;
                         doc.insert(CREATION_TIME_FIELD.into(), Value::Number(n));
                     }
                 }
@@ -422,7 +423,8 @@ mod tests {
 
     #[test]
     fn rfc4180() {
-        let recs = read_all("\u{feff}a,b,c\r\n1,\"x,y\",\"say \"\"hi\"\"\"\r\n\r\n\"two\r\nlines\",,\" pad \"\nlast,\"\",z");
+        let recs =
+            read_all("\u{feff}a,b,c\r\n1,\"x,y\",\"say \"\"hi\"\"\"\r\n\r\n\"two\r\nlines\",,\" pad \"\nlast,\"\",z");
         let fields: Vec<Vec<&str>> = recs.iter().map(|(_, f)| f.iter().map(String::as_str).collect()).collect();
         assert_eq!(
             fields,

@@ -16,7 +16,9 @@ fn leaf(rng: &mut StdRng) -> Value {
         1 => json!(rng.random_bool(0.5)),
         2 => json!(rng.random_range(-50..50)),
         3 => json!(rng.random_range(-50..50) as f64 / 4.0),
-        4 => json!(["", "a", "é ✓", "quote \" and \\", "a longer string value, about forty chars"][rng.random_range(0..5)]),
+        4 => json!(
+            ["", "a", "é ✓", "quote \" and \\", "a longer string value, about forty chars"][rng.random_range(0..5)]
+        ),
         _ => json!(format!("s{}", rng.random_range(0..20))),
     }
 }
@@ -29,7 +31,11 @@ fn value(rng: &mut StdRng, depth: u32) -> Value {
         Value::Array((0..rng.random_range(0..10)).map(|_| value(rng, depth - 1)).collect())
     } else {
         let keys = ["_id", "_creationTime", "a", "b", "title", "page", "isDone"];
-        Value::Object((0..rng.random_range(0..5)).map(|_| (keys[rng.random_range(0..keys.len())].to_string(), value(rng, depth - 1))).collect())
+        Value::Object(
+            (0..rng.random_range(0..5))
+                .map(|_| (keys[rng.random_range(0..keys.len())].to_string(), value(rng, depth - 1)))
+                .collect(),
+        )
     }
 }
 
@@ -95,12 +101,21 @@ fn cases() -> Vec<Value> {
     for new in [added, updated, deleted] {
         pairs.push((Value::Array(list.clone()), Value::Array(new)));
     }
-    pairs.push((json!({ "page": list.clone(), "isDone": false }), json!({ "page": list[1..].to_vec(), "isDone": true })));
+    pairs.push((
+        json!({ "page": list.clone(), "isDone": false }),
+        json!({ "page": list[1..].to_vec(), "isDone": true }),
+    ));
     // Keys that mean something to JavaScript objects (user data can have them, e.g. a map keyed by user input): set,
     // patched and deleted, they must stay plain keys.
     pairs.push((json!({ "a": 1 }), json!({ "a": 1, "__proto__": { "x": 1 }, "toString": 2, "constructor": [3] })));
-    pairs.push((json!({ "__proto__": { "x": 1, "y": [1, 2] }, "toString": 1 }), json!({ "__proto__": { "x": 2, "y": [1, 2] } })));
-    pairs.push((json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 8] } }), json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 9] } })));
+    pairs.push((
+        json!({ "__proto__": { "x": 1, "y": [1, 2] }, "toString": 1 }),
+        json!({ "__proto__": { "x": 2, "y": [1, 2] } }),
+    ));
+    pairs.push((
+        json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 8] } }),
+        json!({ "constructor": { "p": [1, 2, 3, 4, 5, 6, 7, 9] } }),
+    ));
     let mut rng = StdRng::seed_from_u64(7);
     let mut cases = Vec::new();
     let add = |old: Value, new: Value, cases: &mut Vec<Value>| {

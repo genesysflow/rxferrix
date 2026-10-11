@@ -66,7 +66,11 @@ pub(crate) async fn require_admin_watched(
     watch: bool,
 ) -> Result<(Authenticated, Option<SessionWatch>), Box<AuthFailure>> {
     let Some(token) = crate::auth::http::bearer_token(headers) else {
-        return Err(Box::new(AuthFailure::new(401, crate::auth::UNAUTHENTICATED, "An administrator access token is required")));
+        return Err(Box::new(AuthFailure::new(
+            401,
+            crate::auth::UNAUTHENTICATED,
+            "An administrator access token is required",
+        )));
     };
     let failure = |e| Box::new(crate::auth::http::token_failure(e));
     let (auth, session) = if watch {
@@ -160,7 +164,11 @@ async fn logs_stream(
     let ready = futures::stream::once(async { Ok::<_, Infallible>(Event::default().event("ready").data("{}")) });
     let sse = Sse::new(ready.chain(entries)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)));
     // `X-Accel-Buffering: no` keeps nginx-style proxies from buffering the stream.
-    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store"), (header::HeaderName::from_static("x-accel-buffering"), "no")], sse)
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store"), (header::HeaderName::from_static("x-accel-buffering"), "no")],
+        sse,
+    )
         .into_response()
 }
 
@@ -192,7 +200,8 @@ async fn stats(
         let functions = app.logs().stats(since).await?;
         let snapshot = app.db().snapshot().await?;
         let (ts, commit_time) = (snapshot.ts, snapshot.time);
-        let documents: i64 = snapshot.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?))?;
+        let documents: i64 =
+            snapshot.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?))?;
         drop(snapshot);
         let dir = app.dir();
         let files: Vec<_> = ["data.db", "data.db-wal", "aux.db", "aux.db-wal"]

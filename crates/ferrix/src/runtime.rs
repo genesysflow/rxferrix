@@ -18,8 +18,8 @@ use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
 use crate::error::{FunctionNotFound, MutationTimeout, QueryTimeout};
 use crate::exec_log::{LogRetention, Logs};
-use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
 use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, QueryHandler, TABLES, Visibility};
+use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
 use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -27,8 +27,8 @@ use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
 // ---------------------------------------------------------------------------------------------------------------------
 
 // `Identity` (who is calling) and `Auth` (`ctx.auth`) live in the auth module.
-pub use crate::auth::{Auth, Identity};
 use crate::auth::identity::AuthDeps;
+pub use crate::auth::{Auth, Identity};
 
 /// Context of a query: read-only access to one consistent snapshot.
 pub struct QueryCtx {
@@ -431,7 +431,13 @@ impl Metrics {
         self.sockets.fetch_sub(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn set_subscription_counts(&self, connections: u64, shared_queries: u64, subscriptions: u64, ranges: u64) {
+    pub(crate) fn set_subscription_counts(
+        &self,
+        connections: u64,
+        shared_queries: u64,
+        subscriptions: u64,
+        ranges: u64,
+    ) {
         self.connections.store(connections, Ordering::Relaxed);
         self.shared_queries.store(shared_queries, Ordering::Relaxed);
         self.subscriptions.store(subscriptions, Ordering::Relaxed);
@@ -491,15 +497,14 @@ impl App {
         let data_dir = dir.clone();
         let auth = crate::auth::AuthService::new(&dir, options.auth.clone(), options.dev)?;
         let scheduler = crate::scheduler::SchedulerState::new(&options)?;
-        let open_options =
-            crate::db::OpenOptions {
-                readers: options.readers,
-                skip_schema_check: options.skip_schema_check,
-                // Replication and the analytics copy read every commit from the very first one in the journal
-                // (`crate::ops::replicate`, `crate::olap`).
-                journal: options.ops.replication.is_some() || options.olap.enabled,
-                fsync_commits: options.fsync_commits,
-            };
+        let open_options = crate::db::OpenOptions {
+            readers: options.readers,
+            skip_schema_check: options.skip_schema_check,
+            // Replication and the analytics copy read every commit from the very first one in the journal
+            // (`crate::ops::replicate`, `crate::olap`).
+            journal: options.ops.replication.is_some() || options.olap.enabled,
+            fsync_commits: options.fsync_commits,
+        };
         let retention = options.log_retention.clone();
         let (db, logs) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
             let db = Database::open_with_migrations(&dir, &tables, &open_options, &migrations)?;
@@ -707,7 +712,11 @@ impl App {
         self.typed_action::<F>(args.into(), &Identity::default()).await
     }
 
-    pub(crate) async fn typed_query<F: QueryFunction>(&self, args: F::Args, identity: &Identity) -> crate::Result<F::Output> {
+    pub(crate) async fn typed_query<F: QueryFunction>(
+        &self,
+        args: F::Args,
+        identity: &Identity,
+    ) -> crate::Result<F::Output> {
         match self.query_or_cached(&F::path(), serde_json::to_value(args)?, identity, true).await {
             QueryOutcome::Cached(hit) => Ok(serde_json::from_str(hit.value.json())?),
             QueryOutcome::Ran(run) => Ok(serde_json::from_value(run.result?)?),
@@ -743,16 +752,27 @@ impl App {
         args: F::Args,
         identity: &Identity,
     ) -> crate::Result<(F::Output, u64)> {
-        let (out, ts) = self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, true, None).await.result?;
+        let (out, ts) =
+            self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, true, None).await.result?;
         Ok((serde_json::from_value(out)?, ts))
     }
 
-    pub(crate) async fn typed_action<F: ActionFunction>(&self, args: F::Args, identity: &Identity) -> crate::Result<F::Output> {
+    pub(crate) async fn typed_action<F: ActionFunction>(
+        &self,
+        args: F::Args,
+        identity: &Identity,
+    ) -> crate::Result<F::Output> {
         let out = self.call_action(&F::path(), serde_json::to_value(args)?, identity, true).await.result?;
         Ok(serde_json::from_value(out)?)
     }
 
-    pub(crate) async fn call_query(&self, path: &str, args: Value, identity: &Identity, allow_internal: bool) -> QueryRun {
+    pub(crate) async fn call_query(
+        &self,
+        path: &str,
+        args: Value,
+        identity: &Identity,
+        allow_internal: bool,
+    ) -> QueryRun {
         let snapshot = match self.db().snapshot().await {
             Ok(s) => s,
             Err(e) => return QueryRun::not_run(e, 0),
@@ -804,7 +824,13 @@ impl App {
     }
 
     /// Run a query's handler, with the query timeout and panics caught.
-    async fn run_query_handler(&self, handler: QueryHandler, ctx: QueryCtx, args: Value, path: &str) -> crate::Result<Value> {
+    async fn run_query_handler(
+        &self,
+        handler: QueryHandler,
+        ctx: QueryCtx,
+        args: Value,
+        path: &str,
+    ) -> crate::Result<Value> {
         let timeout = self.options().query_timeout;
         match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
             Ok(result) => result,
@@ -870,8 +896,11 @@ impl App {
             txn.rollback();
             return not_run(e);
         }
-        let storage =
-            crate::storage::MutationStorage::new(MutationDb::new(txn.clone()), self.storage().clone(), identity.clone());
+        let storage = crate::storage::MutationStorage::new(
+            MutationDb::new(txn.clone()),
+            self.storage().clone(),
+            identity.clone(),
+        );
         let pools = self.scheduler_state().pools().clone();
         let ctx = MutationCtx {
             db: MutationDb::new(txn.clone()),
@@ -914,7 +943,10 @@ impl App {
                     match idempotency_key {
                         Some(key) => {
                             if let Err(record_err) = txn.rollback_then(|conn| dedup::record_error(conn, key, &e)) {
-                                tracing::warn!(path, "could not record a failed mutation for deduplication: {record_err:#}");
+                                tracing::warn!(
+                                    path,
+                                    "could not record a failed mutation for deduplication: {record_err:#}"
+                                );
                             }
                         }
                         None => txn.rollback(),

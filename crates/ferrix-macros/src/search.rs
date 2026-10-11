@@ -113,9 +113,7 @@ impl SpecialIndexSpec {
     }
 
     fn parse_body(kind: Kind, usage: &str, input: ParseStream) -> syn::Result<SpecialIndexSpec> {
-        let name: syn::Ident = input
-            .parse()
-            .map_err(|e| syn::Error::new(e.span(), usage))?;
+        let name: syn::Ident = input.parse().map_err(|e| syn::Error::new(e.span(), usage))?;
         if input.peek(Token![=]) {
             return Err(input.error(format!("the index name comes first, without `=`; {usage}")));
         }
@@ -151,17 +149,13 @@ impl SpecialIndexSpec {
             if key_name == field_key {
                 let f: syn::Ident = input.parse()?;
                 if spec.field.is_some() {
-                    spec.errors.push(syn::Error::new(
-                        key.span(),
-                        format!("duplicate `{field_key}` argument"),
-                    ));
+                    spec.errors.push(syn::Error::new(key.span(), format!("duplicate `{field_key}` argument")));
                 }
                 spec.field = Some(f);
             } else if key_name == "dims" && kind == Kind::Vector {
                 let lit: syn::LitInt = input.parse()?;
                 if spec.dims.is_some() {
-                    spec.errors
-                        .push(syn::Error::new(key.span(), "duplicate `dims` argument"));
+                    spec.errors.push(syn::Error::new(key.span(), "duplicate `dims` argument"));
                 }
                 match lit.base10_parse::<usize>() {
                     Ok(n) if (1..=MAX_DIMENSIONS).contains(&n) => spec.dims = Some((n, lit.span())),
@@ -195,8 +189,7 @@ impl SpecialIndexSpec {
                 let bracket = bracketed!(content in input);
                 let fields = Punctuated::<syn::Ident, Token![,]>::parse_terminated(&content)?;
                 if seen_filter {
-                    spec.errors
-                        .push(syn::Error::new(key.span(), "duplicate `filter` argument"));
+                    spec.errors.push(syn::Error::new(key.span(), "duplicate `filter` argument"));
                 }
                 seen_filter = true;
                 spec.filter = fields.into_iter().collect();
@@ -211,8 +204,7 @@ impl SpecialIndexSpec {
                 let lit: syn::LitStr = input.parse()?;
                 let value = lit.value();
                 if slot.is_some() {
-                    spec.errors
-                        .push(syn::Error::new(key.span(), format!("duplicate `{key_name}` argument")));
+                    spec.errors.push(syn::Error::new(key.span(), format!("duplicate `{key_name}` argument")));
                 }
                 if !allowed.contains(&value.as_str()) {
                     let list = allowed.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ");
@@ -231,10 +223,7 @@ impl SpecialIndexSpec {
                 };
                 return Err(syn::Error::new(
                     key.span(),
-                    format!(
-                        "unknown #[{}] argument `{key_name}`; expected {expected}",
-                        kind.attr()
-                    ),
+                    format!("unknown #[{}] argument `{key_name}`; expected {expected}", kind.attr()),
                 ));
             }
         }
@@ -266,7 +255,8 @@ impl SpecialIndexSpec {
             (None, _) => {}
         }
         if spec.vector_kind.as_ref().is_none_or(|(k, _)| k != "hnsw") {
-            for (name, arg) in [("m", spec.m), ("ef_construction", spec.ef_construction), ("ef_search", spec.ef_search)] {
+            for (name, arg) in [("m", spec.m), ("ef_construction", spec.ef_construction), ("ef_search", spec.ef_search)]
+            {
                 if let Some((_, span)) = arg {
                     spec.errors.push(syn::Error::new(
                         span,
@@ -308,14 +298,15 @@ impl SpecialIndexSpec {
 
     /// The `::ferrix::HnswParams` expression of a vector index: the defaults with the given parameters.
     pub fn hnsw_params_expr(&self) -> TokenStream {
-        let fields: Vec<TokenStream> = [("m", self.m), ("ef_construction", self.ef_construction), ("ef_search", self.ef_search)]
-            .into_iter()
-            .filter_map(|(name, arg)| {
-                let (n, _) = arg?;
-                let ident = syn::Ident::new(name, Span::call_site());
-                Some(quote!(#ident: #n))
-            })
-            .collect();
+        let fields: Vec<TokenStream> =
+            [("m", self.m), ("ef_construction", self.ef_construction), ("ef_search", self.ef_search)]
+                .into_iter()
+                .filter_map(|(name, arg)| {
+                    let (n, _) = arg?;
+                    let ident = syn::Ident::new(name, Span::call_site());
+                    Some(quote!(#ident: #n))
+                })
+                .collect();
         match fields.len() {
             0 => quote!(::ferrix::HnswParams::DEFAULT),
             3 => quote!(::ferrix::HnswParams { #(#fields,)* }),
@@ -338,8 +329,8 @@ pub enum TypeShape {
 }
 
 const PRIMITIVES: &[&str] = &[
-    "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
-    "usize", "f32", "f64",
+    "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32",
+    "f64",
 ];
 
 fn single_generic(seg: &syn::PathSegment) -> Option<&syn::Type> {
@@ -367,10 +358,7 @@ pub fn type_shape(ty: &syn::Type) -> TypeShape {
 
 fn shape(ty: &syn::Type, allow_option: bool) -> TypeShape {
     match ty {
-        syn::Type::Array(_)
-        | syn::Type::Tuple(_)
-        | syn::Type::Reference(_)
-        | syn::Type::Slice(_) => {
+        syn::Type::Array(_) | syn::Type::Tuple(_) | syn::Type::Reference(_) | syn::Type::Slice(_) => {
             return TypeShape::Other;
         }
         _ => {}
@@ -390,10 +378,7 @@ fn shape(ty: &syn::Type, allow_option: bool) -> TypeShape {
         },
         "Vec" => match single_generic(seg).and_then(last_segment) {
             Some(inner) if inner.ident == "f32" && inner.arguments.is_none() => TypeShape::F32Vec,
-            Some(inner)
-                if PRIMITIVES.contains(&inner.ident.to_string().as_str())
-                    || inner.ident == "String" =>
-            {
+            Some(inner) if PRIMITIVES.contains(&inner.ident.to_string().as_str()) || inner.ident == "String" => {
                 TypeShape::Other
             }
             _ => TypeShape::Unknown,

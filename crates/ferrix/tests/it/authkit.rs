@@ -95,7 +95,8 @@ impl Ws {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
         let mut ws = Ws { stream, next_query: 0, query_set: 0, identity: 0 };
         let session = format!("s-{}", rand::random::<u64>());
-        ws.send(json!({ "type": "Connect", "sessionId": session, "connectionCount": 0, "lastCloseReason": null })).await;
+        ws.send(json!({ "type": "Connect", "sessionId": session, "connectionCount": 0, "lastCloseReason": null }))
+            .await;
         ws
     }
 
@@ -229,7 +230,8 @@ impl Sse {
                 }
                 continue;
             }
-            let chunk = tokio::time::timeout(Duration::from_secs(10), self.res.chunk()).await.expect("sse timeout").unwrap()?;
+            let chunk =
+                tokio::time::timeout(Duration::from_secs(10), self.res.chunk()).await.expect("sse timeout").unwrap()?;
             self.buf.push_str(std::str::from_utf8(&chunk).unwrap());
         }
     }

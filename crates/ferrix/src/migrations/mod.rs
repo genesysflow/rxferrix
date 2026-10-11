@@ -48,8 +48,8 @@
 //! `_system/migrations:run`). Dry runs are never refused: they write nothing, and see the data as it is now (without
 //! the dependencies' changes, if those haven't run).
 
-pub mod tables;
 mod runner;
+pub mod tables;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -470,7 +470,9 @@ impl App {
 pub(crate) async fn startup(app: &App) -> crate::Result<()> {
     let recovered = runner::recover_interrupted(app).await?;
     if recovered > 0 {
-        tracing::warn!("{recovered} migration(s) were interrupted by a restart; they resume where they stopped on the next run");
+        tracing::warn!(
+            "{recovered} migration(s) were interrupted by a restart; they resume where they stopped on the next run"
+        );
     }
     let migrating = app.db().catalog().migrating_tables();
     if !migrating.is_empty() {
@@ -735,7 +737,8 @@ mod tests {
         assert_eq!(build(&[("a", &["d"]), ("b", &["a"]), ("c", &[]), ("d", &[])]).unwrap(), ["c", "d", "a", "b"]);
         // A diamond.
         assert_eq!(
-            build(&[("top", &[]), ("l", &["top"]), ("r", &["top"]), ("z_bottom", &["r", "l"]), ("a", &["z_bottom"])]).unwrap(),
+            build(&[("top", &[]), ("l", &["top"]), ("r", &["top"]), ("z_bottom", &["r", "l"]), ("a", &["z_bottom"])])
+                .unwrap(),
             ["top", "l", "r", "z_bottom", "a"]
         );
     }

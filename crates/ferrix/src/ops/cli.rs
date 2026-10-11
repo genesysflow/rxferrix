@@ -245,7 +245,8 @@ pub struct BackupArgs {
 pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()> {
     let storage = storage_config(args.storage.as_deref(), storage)?;
     let source = SnapshotSource::new(&args.dir, &storage);
-    let spec = BackupSpec { include_aux: args.with_aux, include_files: args.with_files, include_secret: args.include_secret };
+    let spec =
+        BackupSpec { include_aux: args.with_aux, include_files: args.with_files, include_secret: args.include_secret };
     if spec.include_secret {
         eprintln!(
             "warning: the archive includes auth_secret.key: anyone holding it can forge sessions and upload URLs. Keep it safe."
@@ -317,7 +318,8 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
     let storage_dir = args.storage_dir.clone().or_else(|| backup::local_storage_dir(&args.dir, &storage.backend));
     let options = RestoreOptions { storage_dir, skip_verify: args.skip_verify };
     if args.cancel {
-        let _lock = super::DirLock::acquire(&args.dir).context("cancel the staged restore from the dashboard while the server runs")?;
+        let _lock = super::DirLock::acquire(&args.dir)
+            .context("cancel the staged restore from the dashboard while the server runs")?;
         match super::restore::cancel(&args.dir)? {
             true => println!("Canceled the staged restore of {}.", args.dir.display()),
             false => println!("No restore is staged in {}.", args.dir.display()),
@@ -400,7 +402,8 @@ async fn restore_from_replica(args: &RestoreArgs, from: &str, options: &RestoreO
         }
         return Ok(());
     }
-    let point = super::replicate::PointInTime { to_ts: args.to_ts, to_time: args.to_time, generation: args.generation.clone() };
+    let point =
+        super::replicate::PointInTime { to_ts: args.to_ts, to_time: args.to_time, generation: args.generation.clone() };
     let (report, info) = super::replicate::restore_point_in_time(&target, &args.dir, &point, options).await?;
     println!(
         "Restored ts {} (committed {}) of generation {} into {}: snapshot ts {} plus {} replayed commit(s) from {} segment(s).",
@@ -449,7 +452,10 @@ pub struct ExportArgs {
 
 pub fn run_export(args: ExportArgs, storage: StorageConfig) -> crate::Result<()> {
     let storage = storage_config(args.storage.as_deref(), storage)?;
-    let out = args.out.clone().unwrap_or_else(|| PathBuf::from(format!("export-{}", super::file_timestamp(crate::db::wall_clock_ms()))));
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("export-{}", super::file_timestamp(crate::db::wall_clock_ms()))));
     let options = ExportOptions {
         tables: (!args.tables.is_empty()).then(|| args.tables.clone()),
         format: args.format,
@@ -462,7 +468,12 @@ pub fn run_export(args: ExportArgs, storage: StorageConfig) -> crate::Result<()>
             println!("{:<24} {:>8} document(s)  {}", t.name, t.documents, out.join(&t.file).display());
         }
         if manifest.files > 0 || manifest.missing_files > 0 {
-            println!("{} file blob(s) in {} ({} missing)", manifest.files, out.join("files").display(), manifest.missing_files);
+            println!(
+                "{} file blob(s) in {} ({} missing)",
+                manifest.files,
+                out.join("files").display(),
+                manifest.missing_files
+            );
         }
         println!("Exported at ts {} into {}", manifest.ts, out.display());
         Ok(())
@@ -502,8 +513,12 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
     )?;
     runtime()?.block_on(async {
         let app = App::open(&args.dir, options).await?;
-        let import =
-            ImportOptions { mode: args.mode, batch_size: args.batch_size, allow_system_tables: true, format: args.format };
+        let import = ImportOptions {
+            mode: args.mode,
+            batch_size: args.batch_size,
+            allow_system_tables: true,
+            format: args.format,
+        };
         let report = export::import_path(&app, &args.path, args.table.as_deref(), &import).await?;
         for t in &report.tables {
             println!(
@@ -549,8 +564,18 @@ mod tests {
         ops.apply(&mut options);
         assert!(!options.ops.metrics.enabled && options.scheduler.crons.is_empty() && ops.public_url().is_none());
 
-        let ops = parse(&["--metrics", "--metrics-token", "t", "--backup-every", "6h", "--backup-keep", "3", "--backup-to", "s3://b/p"])
-            .unwrap();
+        let ops = parse(&[
+            "--metrics",
+            "--metrics-token",
+            "t",
+            "--backup-every",
+            "6h",
+            "--backup-keep",
+            "3",
+            "--backup-to",
+            "s3://b/p",
+        ])
+        .unwrap();
         let mut options = AppOptions::default();
         ops.apply(&mut options);
         assert!(options.ops.metrics.enabled && options.ops.metrics.token.as_deref() == Some("t"));
@@ -558,7 +583,8 @@ mod tests {
         assert_eq!(options.scheduler.crons.iter().map(|c| c.name()).collect::<Vec<_>>(), [backup::CRON_NAME]);
 
         // --https: ACME on :443, redirect from :80, cache in <dir>/acme, public URL.
-        let ops = parse(&["--https", "Example.com,www.example.com", "--acme-email", "a@b.c", "--acme-staging"]).unwrap();
+        let ops =
+            parse(&["--https", "Example.com,www.example.com", "--acme-email", "a@b.c", "--acme-staging"]).unwrap();
         let Listen::Acme { https, redirect, acme } = ops.listen(http, dir).unwrap() else { panic!("acme") };
         assert_eq!(https, "0.0.0.0:443".parse().unwrap());
         assert_eq!(redirect, Some("0.0.0.0:80".parse().unwrap()));
@@ -571,7 +597,9 @@ mod tests {
 
         // Certificate files: both needed, not with --https; no redirect unless asked.
         let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).unwrap();
-        assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: None, reload_every: Some(d), .. } if d == Duration::from_secs(30)));
+        assert!(
+            matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { redirect: None, reload_every: Some(d), .. } if d == Duration::from_secs(30))
+        );
         let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-reload-every", "0"]).unwrap();
         assert!(matches!(ops.listen(http, dir).unwrap(), Listen::CertFiles { reload_every: None, .. }));
         let ops = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem", "--http-redirect", "127.0.0.1:8080"]).unwrap();
@@ -583,13 +611,31 @@ mod tests {
 
         // Replication: off by default; the flags fill `ops.replication`.
         assert!(options.ops.replication.is_none());
-        let ops = parse(&["--replicate-to", "s3://b/r", "--replicate-every", "10s", "--snapshot-every", "6h", "--replicate-keep", "3d", "--replicate-max-pending", "200MB"]).unwrap();
+        let ops = parse(&[
+            "--replicate-to",
+            "s3://b/r",
+            "--replicate-every",
+            "10s",
+            "--snapshot-every",
+            "6h",
+            "--replicate-keep",
+            "3d",
+            "--replicate-max-pending",
+            "200MB",
+        ])
+        .unwrap();
         let mut options = AppOptions::default();
         ops.apply(&mut options);
         let r = options.ops.replication.unwrap();
-        assert_eq!((r.target.as_str(), r.every, r.snapshot_every, r.keep), ("s3://b/r", Duration::from_secs(10), Duration::from_secs(6 * 3600), Duration::from_secs(3 * 86400)));
+        assert_eq!(
+            (r.target.as_str(), r.every, r.snapshot_every, r.keep),
+            ("s3://b/r", Duration::from_secs(10), Duration::from_secs(6 * 3600), Duration::from_secs(3 * 86400))
+        );
         assert_eq!(r.max_pending_bytes, 200 << 20);
         let defaults = parse(&["--replicate-to", "/r"]).unwrap();
-        assert_eq!((defaults.replicate_every, defaults.snapshot_every, defaults.replicate_keep), (Duration::from_secs(1), Duration::from_secs(86400), Duration::from_secs(7 * 86400)));
+        assert_eq!(
+            (defaults.replicate_every, defaults.snapshot_every, defaults.replicate_keep),
+            (Duration::from_secs(1), Duration::from_secs(86400), Duration::from_secs(7 * 86400))
+        );
     }
 }

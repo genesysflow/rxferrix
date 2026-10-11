@@ -77,7 +77,12 @@ pub mod vq {
 
     /// The names of the nearest items (loads the documents: also reads their `by_id` points).
     #[query]
-    pub async fn nearest_names(ctx: &QueryCtx, vector: Vec<f32>, limit: u32, group: Option<String>) -> Result<Vec<String>> {
+    pub async fn nearest_names(
+        ctx: &QueryCtx,
+        vector: Vec<f32>,
+        limit: u32,
+        group: Option<String>,
+    ) -> Result<Vec<String>> {
         let mut out = Vec::new();
         for (id, _) in ctx.db.vector_search(Item::by_vec, &vector, opts(limit, group.map(|g| vec![g]), None)).await? {
             if let Some(doc) = ctx.db.get(id).await? {
@@ -136,7 +141,13 @@ pub mod vq {
     }
 
     #[mutation]
-    pub async fn add(ctx: &MutationCtx, name: String, group: String, tier: i64, vec: Option<Vec<f32>>) -> Result<Id<Item>> {
+    pub async fn add(
+        ctx: &MutationCtx,
+        name: String,
+        group: String,
+        tier: i64,
+        vec: Option<Vec<f32>>,
+    ) -> Result<Id<Item>> {
         ctx.db.insert(Item { name, group, tier, vec }).await
     }
 
@@ -229,7 +240,9 @@ async fn query_vector_search_is_exact_and_deterministic() {
         // Brute force.
         let mut expected: Vec<(ferrix::Id<vq::Item>, f32)> = items
             .iter()
-            .filter(|(_, g, t, _)| gs.as_ref().is_none_or(|gs| gs.iter().any(|x| x == g)) && tier.is_none_or(|x| x == *t))
+            .filter(|(_, g, t, _)| {
+                gs.as_ref().is_none_or(|gs| gs.iter().any(|x| x == g)) && tier.is_none_or(|x| x == *t)
+            })
             .map(|(id, _, _, v)| (*id, cosine(&q, v)))
             .collect();
         expected.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -344,7 +357,11 @@ async fn filtered_invalidation_never_misses_a_change() {
     let mut ids = Vec::new();
     for i in 0..40 {
         let g = groups[i % 3];
-        ids.push(t.mutation::<vq::add>((format!("n{i}"), s(g), (i % 2) as i64, Some(random_vector(&mut rng)))).await.unwrap());
+        ids.push(
+            t.mutation::<vq::add>((format!("n{i}"), s(g), (i % 2) as i64, Some(random_vector(&mut rng))))
+                .await
+                .unwrap(),
+        );
     }
     let q = random_vector(&mut rng);
     let queries = [
@@ -368,8 +385,15 @@ async fn filtered_invalidation_never_misses_a_change() {
             3 => t.mutation_ts::<vq::rename>((id, format!("r{step}"))).await.unwrap().1,
             _ => {
                 let g = s(groups[rng.random_range(0..3)]);
-                let (new, ts) =
-                    t.mutation_ts::<vq::add>((format!("s{step}"), g, rng.random_range(0..2), Some(random_vector(&mut rng)))).await.unwrap();
+                let (new, ts) = t
+                    .mutation_ts::<vq::add>((
+                        format!("s{step}"),
+                        g,
+                        rng.random_range(0..2),
+                        Some(random_vector(&mut rng)),
+                    ))
+                    .await
+                    .unwrap();
                 ids.push(new);
                 ts
             }
@@ -438,7 +462,7 @@ async fn subscriptions_follow_nearer_vectors() {
     ws.send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1,
         "modifications": [{ "type": "Add", "queryId": 0, "udfPath": vq::nearest_names::path(),
                             "args": { "vector": q, "limit": 2, "group": "live" } }] }))
-    .await;
+        .await;
     let wait = Duration::from_secs(5);
     assert_eq!(names(&ws.next_value(wait).await.unwrap()), vec!["mid", "far"]);
 
@@ -484,7 +508,8 @@ async fn hnsw_parameters_reach_the_graph() {
 
     // The dashboard lists them.
     let admin = t.app().auth().create_admin(t.app(), "admin@example.com", "admin password".into()).await.unwrap();
-    let tables = t.app().run_query("_system/dashboard:tables", json!({}), &Identity::admin(admin, None)).await.result.unwrap();
+    let tables =
+        t.app().run_query("_system/dashboard:tables", json!({}), &Identity::admin(admin, None)).await.result.unwrap();
     let ann = tables.as_array().unwrap().iter().find(|t| t["name"] == "vq_ann").unwrap();
     assert_eq!(ann["searchIndexes"][0]["hnsw"], json!({ "m": 8, "efConstruction": 64, "efSearch": 40 }));
 
@@ -505,7 +530,11 @@ async fn hnsw_parameters_reach_the_graph() {
     let hnsw = ferrix::VectorIndexKind::Hnsw;
     for (params, kind, msg) in [
         (HnswParams { m: 2, ..HnswParams::DEFAULT }, hnsw, "`m` must be between 4 and 64"),
-        (HnswParams { ef_construction: 4096, ..HnswParams::DEFAULT }, hnsw, "`ef_construction` must be between 16 and 2048"),
+        (
+            HnswParams { ef_construction: 4096, ..HnswParams::DEFAULT },
+            hnsw,
+            "`ef_construction` must be between 16 and 2048",
+        ),
         (HnswParams { ef_search: 0, ..HnswParams::DEFAULT }, hnsw, "`ef_search` must be between 1 and 4096"),
         (HnswParams { m: 8, ..HnswParams::DEFAULT }, ferrix::VectorIndexKind::Exact, "only apply to kind = \"hnsw\""),
     ] {
@@ -585,19 +614,27 @@ async fn recall_improves_with_ef() {
     let n = 10_000;
     for chunk in 0..5 {
         let items: Vec<(String, Vec<f32>)> = (0..n / 5)
-            .map(|i| (format!("c{}", (chunk + i) % 2), (0..ann::DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()))
+            .map(|i| {
+                (format!("c{}", (chunk + i) % 2), (0..ann::DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect())
+            })
             .collect();
         t.mutation::<ann::add_many>((items,)).await.unwrap();
     }
     let id = t.app().db().catalog().table("ann_items").unwrap().search_indexes[0].id;
     assert!(t.app().db().ann().index(id).unwrap().wait_ready(Duration::from_secs(60)).await);
-    let queries: Vec<Vec<f32>> = (0..60).map(|_| (0..ann::DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect();
+    let queries: Vec<Vec<f32>> =
+        (0..60).map(|_| (0..ann::DIMS).map(|_| rng.random_range(-1.0f32..1.0)).collect()).collect();
     let mut recall = Vec::new();
     for ef in [10u32, 400] {
         let mut hits = 0;
         for q in &queries {
-            let truth: HashSet<_> =
-                t.action::<ann::nearest>((q.clone(), 10, None, true)).await.unwrap().into_iter().map(|h| h.id).collect();
+            let truth: HashSet<_> = t
+                .action::<ann::nearest>((q.clone(), 10, None, true))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect();
             let got = t.action::<ann::nearest_ef>((q.clone(), 10, ef)).await.unwrap();
             assert_eq!(got.len(), 10);
             hits += got.iter().filter(|h| truth.contains(&h.id)).count();
@@ -619,7 +656,8 @@ async fn dropping_the_database_stops_the_vector_index_thread() {
     let mut rng = StdRng::seed_from_u64(30);
     {
         let app = App::open(dir, AppOptions::default()).await.unwrap();
-        let items: Vec<(String, Vec<f32>)> = (0..50).map(|i| (format!("g{}", i % 2), random_vector(&mut rng))).collect();
+        let items: Vec<(String, Vec<f32>)> =
+            (0..50).map(|i| (format!("g{}", i % 2), random_vector(&mut rng))).collect();
         app.mutation::<vq::add_ann>((items,)).await.unwrap();
     }
     let defs = [vq::AnnItem::table_def()];

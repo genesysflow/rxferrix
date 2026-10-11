@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use ferrix::log;
 use ferrix::prelude::*;
-use ferrix::storage::StoredFile;
 use ferrix::scheduler::ScheduledJob;
+use ferrix::storage::StoredFile;
 
 /// One item on the list, with an optional image (a stored file).
 #[table(name = "todos")]

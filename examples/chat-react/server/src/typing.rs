@@ -87,7 +87,12 @@ pub async fn expire(ctx: &MutationCtx, id: Id<Typing>) -> Result<()> {
 #[internal_mutation]
 pub async fn prune(ctx: &MutationCtx) -> Result<u32> {
     let cutoff = ctx.now() - 60_000.0;
-    let stale = ctx.db.query::<Typing>().with_index(Typing::by_expires, |q| q.lt(Typing::expires_at, cutoff)).take(1000).await?;
+    let stale = ctx
+        .db
+        .query::<Typing>()
+        .with_index(Typing::by_expires, |q| q.lt(Typing::expires_at, cutoff))
+        .take(1000)
+        .await?;
     for row in &stale {
         ctx.db.delete(row.id).await?;
     }

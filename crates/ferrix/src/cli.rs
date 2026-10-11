@@ -11,11 +11,11 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::util::SubscriberInitExt as _;
 
+use crate::SchedulableFunction;
 use crate::auth::{AuthConfig, SmtpConfig};
 use crate::runtime::{App, AppOptions, registry};
-use crate::storage::{StorageBackend, StorageConfig};
 use crate::scheduler::SchedulerOptions;
-use crate::SchedulableFunction;
+use crate::storage::{StorageBackend, StorageConfig};
 
 #[derive(Parser, Debug)]
 #[command(about = "A Ferrix backend", args_conflicts_with_subcommands = true)]
@@ -291,7 +291,12 @@ impl Ferrix {
 
     /// Run `F` with `args` on a cron schedule (6 fields with seconds, UTC): `.cron::<cleanup>("cleanup",
     /// "0 0 3 * * *", ())`. See [`crate::scheduler::CronSpec::cron`].
-    pub fn cron<F: SchedulableFunction>(mut self, name: impl Into<String>, expr: impl Into<String>, args: impl Into<F::Args>) -> Self {
+    pub fn cron<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        expr: impl Into<String>,
+        args: impl Into<F::Args>,
+    ) -> Self {
         self.scheduler = self.scheduler.cron::<F>(name, expr, args);
         self
     }
@@ -310,7 +315,12 @@ impl Ferrix {
     }
 
     /// Run `F` with `args` every `every`: `.interval::<sync>("sync", Duration::from_secs(300), ())`.
-    pub fn interval<F: SchedulableFunction>(mut self, name: impl Into<String>, every: Duration, args: impl Into<F::Args>) -> Self {
+    pub fn interval<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        every: Duration,
+        args: impl Into<F::Args>,
+    ) -> Self {
         self.scheduler = self.scheduler.interval::<F>(name, every, args);
         self
     }
@@ -356,7 +366,14 @@ impl Ferrix {
 
 fn print_functions() -> crate::Result<()> {
     for f in registry()?.list() {
-        println!("{:<8} {:<8} {}  (args: {}) => {}", f.kind.as_str(), f.visibility.as_str(), f.path, f.args_ts, f.output_ts);
+        println!(
+            "{:<8} {:<8} {}  (args: {}) => {}",
+            f.kind.as_str(),
+            f.visibility.as_str(),
+            f.path,
+            f.args_ts,
+            f.output_ts
+        );
     }
     Ok(())
 }
@@ -391,7 +408,12 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
     })
 }
 
-fn migrate(args: MigrateArgs, auth: AuthConfig, storage: StorageConfig, scheduler: SchedulerOptions) -> crate::Result<()> {
+fn migrate(
+    args: MigrateArgs,
+    auth: AuthConfig,
+    storage: StorageConfig,
+    scheduler: SchedulerOptions,
+) -> crate::Result<()> {
     let stdout_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,ferrix::migrations=info".into());
     let format = args.log_format.unwrap_or(crate::log::LogFormat::Pretty);
@@ -479,8 +501,14 @@ async fn print_migration_status(app: &App) -> crate::Result<()> {
         println!("no migrations are declared");
     }
     for m in migrations {
-        let mut line =
-            format!("{:<10} {}  (table `{}`, {}/{} processed", m.state.as_str(), m.name, m.table, m.processed, m.documents);
+        let mut line = format!(
+            "{:<10} {}  (table `{}`, {}/{} processed",
+            m.state.as_str(),
+            m.name,
+            m.table,
+            m.processed,
+            m.documents
+        );
         if !m.after.is_empty() {
             line.push_str(&format!(", after {}", m.after.join(", ")));
         }
@@ -521,14 +549,17 @@ fn read_password() -> crate::Result<String> {
 
 /// The builder's auth config with the command line's options applied on top.
 fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
-    let public_url = args.public_url.clone().or_else(|| auth.public_url.clone()).or_else(|| args.ops.public_url()).unwrap_or_else(|| {
-        let addr = if args.http.ip().is_unspecified() {
-            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), args.http.port())
-        } else {
-            args.http
-        };
-        format!("http://{addr}")
-    });
+    let public_url =
+        args.public_url.clone().or_else(|| auth.public_url.clone()).or_else(|| args.ops.public_url()).unwrap_or_else(
+            || {
+                let addr = if args.http.ip().is_unspecified() {
+                    SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), args.http.port())
+                } else {
+                    args.http
+                };
+                format!("http://{addr}")
+            },
+        );
     auth.public_url = Some(public_url);
     for url in args.auth_redirect_urls.iter().map(|u| u.trim()).filter(|u| !u.is_empty()) {
         if !auth.redirect_urls.iter().any(|u| u == url) {
@@ -561,7 +592,11 @@ fn explicit_public_url(args: &ServeArgs, auth: &AuthConfig) -> bool {
 /// In `--dev`, unless a public URL was set explicitly (`explicit_public_url`, or `StorageConfig::public_url`), file
 /// and upload URLs are root-relative (`/api/storage/<id>`), so an app served by a dev server that proxies `/api`
 /// (Vite) loads and uploads files through the proxy, same-origin, instead of from the backend's own address.
-fn storage_config(args: &ServeArgs, mut storage: StorageConfig, explicit_public_url: bool) -> crate::Result<StorageConfig> {
+fn storage_config(
+    args: &ServeArgs,
+    mut storage: StorageConfig,
+    explicit_public_url: bool,
+) -> crate::Result<StorageConfig> {
     if args.dev && !explicit_public_url && storage.public_url.is_none() {
         storage.public_url = Some(String::new());
     }
@@ -658,7 +693,10 @@ fn serve(
                 .map(|m| m.name)
                 .collect();
             if !pending.is_empty() {
-                tracing::warn!(?pending, "migrations are waiting; run them with `serve --migrate`, `migrate` or the dashboard");
+                tracing::warn!(
+                    ?pending,
+                    "migrations are waiting; run them with `serve --migrate`, `migrate` or the dashboard"
+                );
             }
         }
         let server = crate::ops::tls::start(crate::ops::web::router(app.clone(), &web), &listen).await?;
@@ -723,7 +761,9 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::Create(ref a)))
             if a.email == "a@b.c" && a.password.as_deref() == Some("pw") && a.dir == Path::new("d")));
         let cli = parse(&["admin", "reset-password", "a@b.c"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::ResetPassword(ref a))) if a.password.is_none()));
+        assert!(
+            matches!(cli.command, Some(Command::Admin(AdminCommand::ResetPassword(ref a))) if a.password.is_none())
+        );
 
         let cli = parse(&[
             "serve",
@@ -748,7 +788,9 @@ mod tests {
     #[test]
     fn serve_codegen_out_requires_dev() {
         let cli = parse(&["serve", "--dev", "--codegen-out", "gen"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Serve(ref a)) if a.codegen_out.as_deref() == Some(Path::new("gen"))));
+        assert!(
+            matches!(cli.command, Some(Command::Serve(ref a)) if a.codegen_out.as_deref() == Some(Path::new("gen")))
+        );
         let cli = parse(&["--dev", "--codegen-out", "gen"]).unwrap();
         assert_eq!(cli.serve.codegen_out.as_deref(), Some(Path::new("gen")));
         assert!(parse(&["serve", "--codegen-out", "gen"]).is_err());
@@ -757,10 +799,14 @@ mod tests {
 
     #[test]
     fn storage_flags() {
-        let cli = parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB", "--storage-private"]).unwrap();
+        let cli =
+            parse(&["serve", "--storage", "s3://bucket/some/prefix", "--max-upload-size", "2GB", "--storage-private"])
+                .unwrap();
         let Some(Command::Serve(args)) = cli.command else { panic!("expected serve") };
         let storage = storage_config(&args, StorageConfig::default(), false).unwrap();
-        assert!(matches!(storage.backend, StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "some/prefix"));
+        assert!(
+            matches!(storage.backend, StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "some/prefix")
+        );
         assert_eq!(storage.max_upload_size, 2 << 30);
         assert!(storage.private);
         assert_eq!(storage.public_url, None, "not in --dev: the public URL (default: the --http address) applies");
@@ -804,13 +850,17 @@ mod tests {
     #[test]
     fn migrate_args() {
         let cli = parse(&["migrate"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Migrate(ref a)) if a.command.is_none() && a.name.is_none() && !a.dry_run));
+        assert!(
+            matches!(cli.command, Some(Command::Migrate(ref a)) if a.command.is_none() && a.name.is_none() && !a.dry_run)
+        );
         let cli = parse(&["migrate", "--name", "todos:add", "--dry-run", "--dir", "d"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Migrate(ref a))
             if a.name.as_deref() == Some("todos:add") && a.dry_run && a.dir == Path::new("d")));
         let cli = parse(&["migrate", "status", "--dir", "d"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Migrate(MigrateArgs { command: Some(MigrateCommand::Status { ref dir }), .. }))
-            if dir == Path::new("d")));
+        assert!(
+            matches!(cli.command, Some(Command::Migrate(MigrateArgs { command: Some(MigrateCommand::Status { ref dir }), .. }))
+            if dir == Path::new("d"))
+        );
         assert!(parse(&["migrate", "--restart"]).is_err(), "--restart needs --name");
         let cli = parse(&["serve", "--migrate"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Serve(ref a)) if a.migrate));
@@ -819,10 +869,13 @@ mod tests {
     #[test]
     fn log_format_flag() {
         use crate::log::LogFormat;
-        assert_eq!(parse(&["serve", "--log-format", "json"]).unwrap().command.map(|c| match c {
-            Command::Serve(a) => a.log_format,
-            _ => None,
-        }), Some(Some(LogFormat::Json)));
+        assert_eq!(
+            parse(&["serve", "--log-format", "json"]).unwrap().command.map(|c| match c {
+                Command::Serve(a) => a.log_format,
+                _ => None,
+            }),
+            Some(Some(LogFormat::Json))
+        );
         assert_eq!(parse(&["--log-format", "compact"]).unwrap().serve.log_format, Some(LogFormat::Compact));
         assert_eq!(parse(&["--log-format", "pretty"]).unwrap().serve.log_format, Some(LogFormat::Pretty));
         assert!(parse(&["--log-format", "xml"]).is_err());
@@ -870,7 +923,18 @@ mod tests {
         let Some(Command::Serve(a)) = parse(&["serve"]).unwrap().command else { panic!("serve") };
         a.ops.apply(&mut options);
         assert!(!options.olap.enabled);
-        let args = ["serve", "--olap", "--olap-memory", "2GB", "--olap-threads", "3", "--olap-timeout", "5s", "--olap-max-lag", "64MB"];
+        let args = [
+            "serve",
+            "--olap",
+            "--olap-memory",
+            "2GB",
+            "--olap-threads",
+            "3",
+            "--olap-timeout",
+            "5s",
+            "--olap-max-lag",
+            "64MB",
+        ];
         let Some(Command::Serve(a)) = parse(&args).unwrap().command else { panic!("serve") };
         a.ops.apply(&mut options);
         let o = &options.olap;

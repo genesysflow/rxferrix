@@ -212,12 +212,22 @@ fn first(n: usize) -> PaginationOpts {
     PaginationOpts::first(n)
 }
 
-async fn page(t: &TestApp, text: &str, channel: Option<&str>, opts: PaginationOpts) -> ferrix::Result<PaginationResult<ferrix::Doc<Msg>>> {
+async fn page(
+    t: &TestApp,
+    text: &str,
+    channel: Option<&str>,
+    opts: PaginationOpts,
+) -> ferrix::Result<PaginationResult<ferrix::Doc<Msg>>> {
     t.query::<pages::page>((text.to_string(), channel.map(str::to_string), None, opts)).await
 }
 
 async fn all(t: &TestApp, text: &str, channel: Option<&str>) -> Vec<ferrix::Id<Msg>> {
-    t.query::<pages::all>((text.to_string(), channel.map(str::to_string))).await.unwrap().into_iter().map(|d| d.id).collect()
+    t.query::<pages::all>((text.to_string(), channel.map(str::to_string)))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.id)
+        .collect()
 }
 
 /// Bodies with varied relevance for "apple": 1-3 occurrences in bodies of different lengths, many ties.
@@ -298,8 +308,13 @@ async fn pages_walk_every_match_once_in_relevance_order() {
     // Cursors are checked: other text, other filters, malformed, reversed, an index-pagination cursor.
     let p = page(&t, "apple", None, first(3)).await.unwrap();
     let err = |r: ferrix::Result<PaginationResult<ferrix::Doc<Msg>>>| format!("{:#}", r.unwrap_err());
-    assert!(err(page(&t, "pear", None, PaginationOpts::after(&p.continue_cursor, 3)).await).contains("does not belong"));
-    assert!(err(page(&t, "apple", Some("c"), PaginationOpts::after(&p.continue_cursor, 3)).await).contains("does not belong"));
+    assert!(
+        err(page(&t, "pear", None, PaginationOpts::after(&p.continue_cursor, 3)).await).contains("does not belong")
+    );
+    assert!(
+        err(page(&t, "apple", Some("c"), PaginationOpts::after(&p.continue_cursor, 3)).await)
+            .contains("does not belong")
+    );
     assert!(err(page(&t, "apple", None, PaginationOpts::after("bogus!", 3)).await).contains("malformed"));
     let p2 = page(&t, "apple", None, PaginationOpts::after(&p.continue_cursor, 3)).await.unwrap();
     let reversed = PaginationOpts::after(&p2.continue_cursor, 3).with_end_cursor(&p.continue_cursor);
@@ -402,15 +417,17 @@ async fn paginated_search_subscription_updates_live() {
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     let t = TestApp::new().await.unwrap();
     let addr = t.serve().await.unwrap();
-    t.mutation::<pages::add_many>(("c".to_string(), vec!["apple".into(), "apple pie with cream".into()])).await.unwrap();
+    t.mutation::<pages::add_many>(("c".to_string(), vec!["apple".into(), "apple pie with cream".into()]))
+        .await
+        .unwrap();
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
     let send = |v: Value| WsMessage::text(v.to_string());
     ws.send(send(json!({ "type": "Connect", "sessionId": "pages", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" }))).await.unwrap();
     ws.send(send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1, "modifications": [{
         "type": "Add", "queryId": 0, "udfPath": pages::page::path(),
         "args": { "text": "apple", "channel": "c", "paginationOpts": { "numItems": 2, "cursor": null } } }] })))
-    .await
-    .unwrap();
+        .await
+        .unwrap();
     let mut next = async || loop {
         let msg = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("no update").unwrap().unwrap();
         let WsMessage::Text(text) = msg else { continue };
@@ -421,7 +438,9 @@ async fn paginated_search_subscription_updates_live() {
             return m["value"].clone();
         }
     };
-    let bodies = |v: &Value| v["page"].as_array().unwrap().iter().map(|d| d["body"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let bodies = |v: &Value| {
+        v["page"].as_array().unwrap().iter().map(|d| d["body"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
     let v = next().await;
     assert_eq!(bodies(&v), vec!["apple", "apple pie with cream"]);
     assert_eq!(v["isDone"], true);
@@ -449,8 +468,8 @@ async fn tokenizers_stem_find_substrings_and_keep_diacritics() {
         "Café crème".to_string(),
         "cafe au lait".to_string(),
     ],))
-    .await
-    .unwrap();
+        .await
+        .unwrap();
     // Porter: "run" matches running and runs; "running" matches run (all stem to "run").
     let mut got = find(&t, "stemmed", "run").await;
     got.sort();
@@ -488,11 +507,16 @@ async fn changing_the_tokenizer_rebuilds_the_index() {
         app.mutation::<tok::add>((vec!["running fast".to_string(), "hello".to_string()],)).await.unwrap();
     }
     let original = tok::TokDoc::table_def();
-    let index_id = |db: &Database| db.catalog().table("tok_docs").unwrap().search_indexes.iter().find(|i| i.name == "stemmed").unwrap().id;
+    let index_id = |db: &Database| {
+        db.catalog().table("tok_docs").unwrap().search_indexes.iter().find(|i| i.name == "stemmed").unwrap().id
+    };
     let ddl = |db: &Database| {
         let n = index_id(db) - ferrix::db::search::SPECIAL_INDEX_BASE;
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-        conn.query_row(&format!("SELECT sql FROM sqlite_master WHERE name = '_search_{n}'"), [], |r| r.get::<_, String>(0)).unwrap()
+        conn.query_row(&format!("SELECT sql FROM sqlite_master WHERE name = '_search_{n}'"), [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
     };
     let db = Database::open(dir.path(), std::slice::from_ref(&original), 1).unwrap();
     let id = index_id(&db);
@@ -530,35 +554,69 @@ async fn dashboard_search_documents() {
     let t = TestApp::new().await.unwrap();
     let admin = t.app().auth().create_admin(t.app(), "admin@example.com", "admin password".into()).await.unwrap();
     let admin = Identity::admin(admin, None);
-    t.mutation::<pages::add_many>(("c".to_string(), vec!["apple pie".into(), "apple apple".into(), "pear".into()])).await.unwrap();
+    t.mutation::<pages::add_many>(("c".to_string(), vec!["apple pie".into(), "apple apple".into(), "pear".into()]))
+        .await
+        .unwrap();
     t.mutation::<pages::add_many>(("d".to_string(), vec!["apple tart".into()])).await.unwrap();
     let call = |args: Value, who: Identity| {
         let app = t.app();
         async move { app.run_query("_system/dashboard:search_documents", args, &who).await.result }
     };
-    let args = |text: &str, filters: Value, opts: Value| {
-        json!({ "table": "page_messages", "index": "search_body", "text": text, "filters": filters, "paginationOpts": opts })
+    let args = |text: &str, filters: Value, opts: Value| json!({ "table": "page_messages", "index": "search_body", "text": text, "filters": filters, "paginationOpts": opts });
+    let body = |v: &Value| {
+        v["page"].as_array().unwrap().iter().map(|d| d["body"].as_str().unwrap().to_string()).collect::<Vec<_>>()
     };
-    let body = |v: &Value| v["page"].as_array().unwrap().iter().map(|d| d["body"].as_str().unwrap().to_string()).collect::<Vec<_>>();
 
     let p1 = call(args("apple", Value::Null, json!({ "numItems": 2, "cursor": null })), admin.clone()).await.unwrap();
     assert_eq!(body(&p1), vec!["apple apple", "apple pie"]);
     assert_eq!(p1["isDone"], false);
-    let p2 = call(args("apple", Value::Null, json!({ "numItems": 2, "cursor": p1["continueCursor"] })), admin.clone()).await.unwrap();
+    let p2 = call(args("apple", Value::Null, json!({ "numItems": 2, "cursor": p1["continueCursor"] })), admin.clone())
+        .await
+        .unwrap();
     assert_eq!(body(&p2), vec!["apple tart"]);
     assert_eq!(p2["isDone"], true);
-    let only_d = call(args("apple", json!([{ "field": "channel", "value": "d" }]), json!({ "numItems": 10, "cursor": null })), admin.clone()).await.unwrap();
+    let only_d = call(
+        args("apple", json!([{ "field": "channel", "value": "d" }]), json!({ "numItems": 10, "cursor": null })),
+        admin.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(body(&only_d), vec!["apple tart"]);
     assert!(only_d["page"][0]["_id"].is_string() && only_d["page"][0]["_creationTime"].is_number());
 
     // Errors are user errors with codes.
-    let code = |r: ferrix::Result<Value>| r.unwrap_err().downcast_ref::<ferrix::UserError>().map(|e| e.code.clone()).unwrap();
+    let code =
+        |r: ferrix::Result<Value>| r.unwrap_err().downcast_ref::<ferrix::UserError>().map(|e| e.code.clone()).unwrap();
     let opts = json!({ "numItems": 2, "cursor": null });
-    assert_eq!(code(call(json!({ "table": "nope", "index": "x", "text": "a", "paginationOpts": opts }), admin.clone()).await), "unknown_table");
-    assert_eq!(code(call(json!({ "table": "page_messages", "index": "x", "text": "a", "paginationOpts": opts }), admin.clone()).await), "invalid_query");
-    assert_eq!(code(call(json!({ "table": "ann_items", "index": "by_vec", "text": "a", "paginationOpts": opts }), admin.clone()).await), "invalid_query");
-    assert_eq!(code(call(args("a", json!([{ "field": "note", "value": "x" }]), opts.clone()), admin.clone()).await), "invalid_query");
-    assert_eq!(code(call(args("a", Value::Null, json!({ "numItems": 2, "cursor": "bad" })), admin.clone()).await), "invalid_query");
+    assert_eq!(
+        code(call(json!({ "table": "nope", "index": "x", "text": "a", "paginationOpts": opts }), admin.clone()).await),
+        "unknown_table"
+    );
+    assert_eq!(
+        code(
+            call(json!({ "table": "page_messages", "index": "x", "text": "a", "paginationOpts": opts }), admin.clone())
+                .await
+        ),
+        "invalid_query"
+    );
+    assert_eq!(
+        code(
+            call(
+                json!({ "table": "ann_items", "index": "by_vec", "text": "a", "paginationOpts": opts }),
+                admin.clone()
+            )
+            .await
+        ),
+        "invalid_query"
+    );
+    assert_eq!(
+        code(call(args("a", json!([{ "field": "note", "value": "x" }]), opts.clone()), admin.clone()).await),
+        "invalid_query"
+    );
+    assert_eq!(
+        code(call(args("a", Value::Null, json!({ "numItems": 2, "cursor": "bad" })), admin.clone()).await),
+        "invalid_query"
+    );
     // Admins only.
     assert_eq!(code(call(args("apple", Value::Null, opts.clone()), Identity::anonymous()).await), "unauthenticated");
     let user = Identity { user_id: Some("someone".into()), ..Identity::anonymous() };
@@ -736,13 +794,18 @@ async fn switching_vector_index_kind_keeps_the_vectors() {
     }
     let def = ann::AnnItem::table_def();
     let exact = TableDef {
-        vector_indexes: vec![ferrix::VectorIndexDef { kind: ferrix::VectorIndexKind::Exact, ..def.vector_indexes[0].clone() }],
+        vector_indexes: vec![ferrix::VectorIndexDef {
+            kind: ferrix::VectorIndexKind::Exact,
+            ..def.vector_indexes[0].clone()
+        }],
         ..def.clone()
     };
     let count = || {
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let rowids: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '\\_vector\\_%' ESCAPE '\\'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '\\_vector\\_%' ESCAPE '\\'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         rowids
     };

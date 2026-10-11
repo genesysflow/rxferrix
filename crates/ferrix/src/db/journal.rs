@@ -34,7 +34,8 @@ use serde_json::{Map, Value};
 
 use crate::id::DocId;
 
-pub(crate) const DDL: &str = "CREATE TABLE IF NOT EXISTS _journal (ts INTEGER PRIMARY KEY, time REAL NOT NULL, changes TEXT NOT NULL);";
+pub(crate) const DDL: &str =
+    "CREATE TABLE IF NOT EXISTS _journal (ts INTEGER PRIMARY KEY, time REAL NOT NULL, changes TEXT NOT NULL);";
 
 /// `_meta` key: the replication generation this database ships to (`crate::ops::replicate`).
 pub const META_GENERATION: &str = "replication_generation";
@@ -160,7 +161,9 @@ impl Changes {
 
     /// The `changes` column: `[[table, id, doc | null], ...]`, without documents created and deleted again.
     pub(crate) fn encode(&self) -> String {
-        let mut out = String::with_capacity(64 + self.entries.iter().map(|e| e.3.as_ref().map_or(0, |j| j.len()) + 48).sum::<usize>());
+        let mut out = String::with_capacity(
+            64 + self.entries.iter().map(|e| e.3.as_ref().map_or(0, |j| j.len()) + 48).sum::<usize>(),
+        );
         out.push('[');
         let mut first = true;
         for (table, id, existed, json) in &self.entries {
@@ -208,8 +211,8 @@ type StoredChange = (String, String, Option<Map<String, Value>>);
 
 impl JournalEntry {
     pub fn parse_changes(&self) -> anyhow::Result<Vec<Change>> {
-        let raw: Vec<StoredChange> =
-            serde_json::from_str(&self.changes).with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
+        let raw: Vec<StoredChange> = serde_json::from_str(&self.changes)
+            .with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
         raw.into_iter()
             .map(|(table, id, doc)| {
                 let id = DocId::decode(&id).map_err(|e| anyhow::anyhow!("journal entry ts {}: {e}", self.ts))?;
@@ -231,9 +234,12 @@ pub struct RawChange {
 impl JournalEntry {
     /// [`JournalEntry::parse_changes`], keeping each document's JSON text as it is.
     pub fn parse_raw_changes(&self) -> anyhow::Result<Vec<RawChange>> {
-        let raw: Vec<(String, String, Option<Box<serde_json::value::RawValue>>)> =
-            serde_json::from_str(&self.changes).with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
-        Ok(raw.into_iter().map(|(table, id, doc)| RawChange { table, id, doc: doc.map(|d| d.get().to_string()) }).collect())
+        let raw: Vec<(String, String, Option<Box<serde_json::value::RawValue>>)> = serde_json::from_str(&self.changes)
+            .with_context(|| format!("journal entry ts {}: invalid changes", self.ts))?;
+        Ok(raw
+            .into_iter()
+            .map(|(table, id, doc)| RawChange { table, id, doc: doc.map(|d| d.get().to_string()) })
+            .collect())
     }
 }
 
@@ -245,7 +251,12 @@ pub(crate) fn insert(conn: &Connection, ts: u64, time: f64, changes: &str) -> an
 
 /// Up to `max_entries` rows with ts > `after`, in ts order, stopping once `max_bytes` of changes are read (at least
 /// one row is returned if any exists).
-pub fn read_after(conn: &Connection, after: u64, max_entries: usize, max_bytes: usize) -> anyhow::Result<Vec<JournalEntry>> {
+pub fn read_after(
+    conn: &Connection,
+    after: u64,
+    max_entries: usize,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<JournalEntry>> {
     let mut stmt = conn.prepare_cached("SELECT ts, time, changes FROM _journal WHERE ts > ?1 ORDER BY ts LIMIT ?2")?;
     let mut rows = stmt.query(params![after as i64, max_entries as i64])?;
     let mut out = Vec::new();
@@ -263,11 +274,15 @@ pub fn read_after(conn: &Connection, after: u64, max_entries: usize, max_bytes: 
 
 /// `(oldest ts, newest ts, rows, bytes of changes)` of the journal (`None` when empty).
 pub fn stats(conn: &Connection) -> anyhow::Result<Option<(u64, u64, u64, u64)>> {
-    let (min, max, n, bytes) = conn.query_row(
-        "SELECT MIN(ts), MAX(ts), COUNT(*), SUM(octet_length(changes)) FROM _journal",
-        [],
-        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?)),
-    )?;
+    let (min, max, n, bytes) =
+        conn.query_row("SELECT MIN(ts), MAX(ts), COUNT(*), SUM(octet_length(changes)) FROM _journal", [], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
     Ok(match (min, max) {
         (Some(min), Some(max)) => Some((min as u64, max as u64, n as u64, bytes.unwrap_or(0) as u64)),
         _ => None,
@@ -288,13 +303,19 @@ pub(crate) fn trim(conn: &Connection, ts: u64) -> anyhow::Result<u64> {
 /// replication generation instead of continuing (and contradicting) the one it was copied from, and rebuilds its
 /// analytics copy (its id and position go too).
 pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
-    let has_journal: bool =
-        conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_journal')", [], |r| r.get(0))?;
+    let has_journal: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_journal')",
+        [],
+        |r| r.get(0),
+    )?;
     if has_journal {
         conn.execute("DELETE FROM _journal", [])?;
     }
-    let has_meta: bool =
-        conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta')", [], |r| r.get(0))?;
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta')",
+        [],
+        |r| r.get(0),
+    )?;
     if has_meta {
         conn.execute(
             "DELETE FROM _meta WHERE k IN (?1, ?2, ?3, ?4, ?5)",

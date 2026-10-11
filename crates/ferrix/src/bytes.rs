@@ -202,8 +202,13 @@ mod tests {
 
     #[test]
     fn rejects_other_shapes() {
-        for bad in [json!("aGk="), json!({}), json!({"$bytes": "aGk"}), json!({"$bytes": 1}), json!({"$bytes": "aGk=", "x": 1})]
-        {
+        for bad in [
+            json!("aGk="),
+            json!({}),
+            json!({"$bytes": "aGk"}),
+            json!({"$bytes": 1}),
+            json!({"$bytes": "aGk=", "x": 1}),
+        ] {
             assert!(serde_json::from_value::<Bytes>(bad.clone()).is_err(), "{bad}");
             assert_eq!(Bytes::from_json(&bad), None, "{bad}");
         }

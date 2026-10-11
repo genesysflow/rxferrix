@@ -88,7 +88,13 @@ fn private_storage() -> crate::Error {
     UserError::new("storage_private", "File storage is private: use ctx.storage.get_signed_url(id, ttl)").into()
 }
 
-async fn signed_url(db: &QueryDb, service: &StorageService, id: Id<StoredFile>, ttl: Duration, mode: Expiry) -> Result<Option<String>> {
+async fn signed_url(
+    db: &QueryDb,
+    service: &StorageService,
+    id: Id<StoredFile>,
+    ttl: Duration,
+    mode: Expiry,
+) -> Result<Option<String>> {
     // Reading the time makes a query's result time-dependent: never answered from the query cache.
     let _ = db.time();
     let (expires, _) = expiry(service, ttl, mode)?;
@@ -318,7 +324,9 @@ impl ActionStorage {
     /// Store `bytes` as a new file and return its id. `createdBy` is the action's caller.
     pub async fn store(&self, bytes: impl Into<Bytes>, content_type: Option<&str>) -> Result<Id<StoredFile>> {
         let content_type = match content_type {
-            Some(ct) => Some(super::http::validate_content_type(ct).map_err(|m| UserError::new("invalid_content_type", m))?),
+            Some(ct) => {
+                Some(super::http::validate_content_type(ct).map_err(|m| UserError::new("invalid_content_type", m))?)
+            }
             None => None,
         };
         self.service().store_bytes(&self.app, bytes.into(), content_type, self.identity.log_summary(), None).await

@@ -240,7 +240,13 @@ mod meta_q {
 
 fn urlencode(s: &str) -> String {
     s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
         .collect()
 }
 
@@ -269,7 +275,8 @@ async fn upload_flow_end_to_end() {
     assert!(url.contains("/api/storage/upload?token="), "{url}");
 
     let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-    let (status, body) = s.post(&format!("{url}&filename=photo%20%C3%A9t%C3%A9.png"), bytes.clone(), Some("image/png")).await;
+    let (status, body) =
+        s.post(&format!("{url}&filename=photo%20%C3%A9t%C3%A9.png"), bytes.clone(), Some("image/png")).await;
     assert_eq!(status, 200, "{body}");
     let id: Id<StoredFile> = body["storageId"].as_str().unwrap().parse().unwrap();
 
@@ -299,7 +306,10 @@ async fn upload_flow_end_to_end() {
     assert_eq!(h["x-content-type-options"], "nosniff");
     assert_eq!(h["accept-ranges"], "bytes");
     assert!(h["cache-control"].to_str().unwrap().starts_with("private, max-age="), "{h:?}");
-    assert_eq!(h["content-disposition"], "inline; filename=\"photo _t_.png\"; filename*=UTF-8''photo%20%C3%A9t%C3%A9.png");
+    assert_eq!(
+        h["content-disposition"],
+        "inline; filename=\"photo _t_.png\"; filename*=UTF-8''photo%20%C3%A9t%C3%A9.png"
+    );
     assert_eq!(res.bytes().await.unwrap().as_ref(), bytes.as_slice());
 
     // No content type: stored as none, served as octet-stream (an attachment).
@@ -416,7 +426,9 @@ async fn oversized_uploads_get_413_while_streaming() {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 response.extend_from_slice(&buf[..n]);
-                if response.windows(4).any(|w| w == b"\r\n\r\n") && String::from_utf8_lossy(&response).contains("file_too_large") {
+                if response.windows(4).any(|w| w == b"\r\n\r\n")
+                    && String::from_utf8_lossy(&response).contains("file_too_large")
+                {
                     break;
                 }
             }
@@ -427,7 +439,11 @@ async fn oversized_uploads_get_413_while_streaming() {
     assert!(text.contains("file_too_large"), "{text}");
     writer.abort();
     // Far less than the whole body was consumed (socket buffers allow a few MiB beyond the limit).
-    assert!(produced.load(Ordering::Relaxed) < 32 << 20, "the whole body was read: {}", produced.load(Ordering::Relaxed));
+    assert!(
+        produced.load(Ordering::Relaxed) < 32 << 20,
+        "the whole body was read: {}",
+        produced.load(Ordering::Relaxed)
+    );
 
     // Nothing was stored: no documents and no blobs.
     let blobs: Vec<_> = s.t.app().storage().object_store().list(None).collect().await;
@@ -579,15 +595,20 @@ async fn queries_with_get_url_are_reactive() {
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/api/sync", s.addr)).await.unwrap();
     let send = |v: Value| Message::text(v.to_string());
-    ws.send(send(json!({ "type": "Connect", "sessionId": "s", "connectionCount": 0, "lastCloseReason": null }))).await.unwrap();
+    ws.send(send(json!({ "type": "Connect", "sessionId": "s", "connectionCount": 0, "lastCloseReason": null })))
+        .await
+        .unwrap();
     ws.send(send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1, "modifications": [
         { "type": "Add", "queryId": 0, "udfPath": app::list::path(), "args": {} }
     ] })))
     .await
     .unwrap();
-    async fn next_value(ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin)) -> Value {
+    async fn next_value(
+        ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    ) -> Value {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(10), ws.next()).await.expect("timeout").unwrap().unwrap();
+            let msg =
+                tokio::time::timeout(Duration::from_secs(10), ws.next()).await.expect("timeout").unwrap().unwrap();
             let Message::Text(text) = msg else { continue };
             let v: Value = serde_json::from_str(text.as_str()).unwrap();
             if v["type"] != "Transition" {
@@ -625,8 +646,11 @@ async fn dashboard_file_functions_are_admin_only() {
         (res.status().as_u16(), res.json().await.unwrap_or(Value::Null))
     };
     app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
-    let (_, admin) = post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" })).await;
-    let (_, user) = post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (_, admin) =
+        post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+            .await;
+    let (_, user) =
+        post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
     let admin = admin["accessToken"].as_str().unwrap().to_string();
     let user = user["accessToken"].as_str().unwrap().to_string();
     let call = async |kind: &str, name: &str, args: Value, token: Option<&str>| {
@@ -651,10 +675,17 @@ async fn dashboard_file_functions_are_admin_only() {
     let (s, b) = call("mutation", "generate_upload_url", json!({}), Some(&admin)).await;
     assert_eq!(s, 200, "{b}");
     let url = b["value"].as_str().unwrap();
-    let res = client.post(format!("{base}{url}&filename=notes.txt")).header("content-type", "text/plain").body("admin file").send().await.unwrap();
+    let res = client
+        .post(format!("{base}{url}&filename=notes.txt"))
+        .header("content-type", "text/plain")
+        .body("admin file")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 200);
     let id = res.json::<Value>().await.unwrap()["storageId"].as_str().unwrap().to_string();
-    let (s, b) = call("query", "files", json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), Some(&admin)).await;
+    let (s, b) =
+        call("query", "files", json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), Some(&admin)).await;
     assert_eq!(s, 200, "{b}");
     let f = &b["value"]["page"][0];
     assert_eq!(f["_id"], id.as_str());
@@ -669,12 +700,18 @@ async fn dashboard_file_functions_are_admin_only() {
     assert_eq!(code_of(&b), "invalid_id");
 
     // `_storage` is read-only through the generic dashboard writes.
-    let (_, b) = post("/api/mutation", Some(&admin), json!({ "path": "_system/dashboard:delete_documents", "args": { "ids": [id] } })).await;
+    let (_, b) = post(
+        "/api/mutation",
+        Some(&admin),
+        json!({ "path": "_system/dashboard:delete_documents", "args": { "ids": [id] } }),
+    )
+    .await;
     assert_eq!(code_of(&b), "read_only_table", "{b}");
 
     let (s, b) = call("mutation", "delete_file", json!({ "id": id }), Some(&admin)).await;
     assert_eq!(s, 200, "{b}");
-    let (_, b) = call("query", "files", json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), Some(&admin)).await;
+    let (_, b) =
+        call("query", "files", json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), Some(&admin)).await;
     assert_eq!(b["value"]["page"], json!([]));
     let (_, b) = call("mutation", "delete_file", json!({ "id": id }), Some(&admin)).await;
     assert_eq!(code_of(&b), "not_found");
@@ -770,7 +807,10 @@ async fn public_url_makes_absolute_urls() {
     let url = t.mutation::<app::upload_url>(()).await.unwrap();
     assert!(url.starts_with("https://files.example.com/api/storage/upload?token="), "{url}");
     let id = t.action::<app::store_text>(("x".to_string(),)).await.unwrap();
-    assert_eq!(t.query::<app::url_of>((id,)).await.unwrap(), Some(format!("https://files.example.com/api/storage/{id}")));
+    assert_eq!(
+        t.query::<app::url_of>((id,)).await.unwrap(),
+        Some(format!("https://files.example.com/api/storage/{id}"))
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -800,7 +840,17 @@ async fn signed_urls_expire_and_are_tamper_proof() {
     assert!(exp.abs_diff(now_s(&s.t) + 60) <= 1, "{url}");
     let res = s.get_url(&url, &[]).await;
     assert_eq!(res.status(), 200);
-    let max_age: u64 = res.headers()["cache-control"].to_str().unwrap().split("max-age=").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+    let max_age: u64 = res.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .split("max-age=")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(max_age <= 60, "cached at most until it expires");
     assert_eq!(res.bytes().await.unwrap().as_ref(), data.as_slice());
     let from_mutation = s.t.mutation::<app::signed_url_m>((id, 120)).await.unwrap().unwrap();
@@ -901,7 +951,10 @@ async fn private_mode_serves_signed_urls_only() {
     assert_eq!(res.status(), 403);
     // The dashboard's file list gets signed URLs (an hour, bucketed).
     let app = s.t.app();
-    let admin = Identity::admin(app.auth().create_admin(app, "admin@example.com", "admin password".into()).await.unwrap(), None);
+    let admin = Identity::admin(
+        app.auth().create_admin(app, "admin@example.com", "admin password".into()).await.unwrap(),
+        None,
+    );
     let page = ferrix::PaginationOpts::first(10);
     let files = s.t.query_as::<ferrix::storage::files>(&admin, (page,)).await.unwrap();
     let url = s.abs(&files.page[0].url);
@@ -924,9 +977,13 @@ fn encode(image: image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
 
 fn png_bytes(width: u32, height: u32, alpha: bool) -> Vec<u8> {
     let image = if alpha {
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| image::Rgba([x as u8, y as u8, 7, 100])))
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([x as u8, y as u8, 7, 100])
+        }))
     } else {
-        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 7])))
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([x as u8, y as u8, 7])
+        }))
     };
     encode(image, image::ImageFormat::Png)
 }
@@ -997,7 +1054,10 @@ async fn thumbnails_are_generated_cached_and_invalidated() {
     assert_eq!(dimensions(&res.bytes().await.unwrap()), (80, 60));
     // HEAD: headers only.
     let res = s.client.head(thumb("thumb=100x100")).send().await.unwrap();
-    assert_eq!((res.status().as_u16(), res.headers()["content-length"].to_str().unwrap()), (200, first.len().to_string().as_str()));
+    assert_eq!(
+        (res.status().as_u16(), res.headers()["content-length"].to_str().unwrap()),
+        (200, first.len().to_string().as_str())
+    );
 
     // Transparency → PNG; GIF (first frame) and WebP sources work too.
     let transparent = s.upload(&png_bytes(80, 80, true), "image/png", None).await;
@@ -1005,7 +1065,11 @@ async fn thumbnails_are_generated_cached_and_invalidated() {
     assert_eq!(res.headers()["content-type"], "image/png");
     assert_eq!(dimensions(&res.bytes().await.unwrap()), (40, 40));
     let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(60, 30, |x, _| image::Rgb([x as u8 * 4, 0, 0])));
-    for (format, ct) in [(image::ImageFormat::Gif, "image/gif"), (image::ImageFormat::WebP, "image/webp"), (image::ImageFormat::Jpeg, "image/jpeg")] {
+    for (format, ct) in [
+        (image::ImageFormat::Gif, "image/gif"),
+        (image::ImageFormat::WebP, "image/webp"),
+        (image::ImageFormat::Jpeg, "image/jpeg"),
+    ] {
         let file = s.upload(&encode(rgb.clone(), format), ct, None).await;
         let res = s.get_url(&format!("{}/api/storage/{file}?thumb=30x30", s.base), &[]).await;
         assert_eq!(res.status(), 200, "{ct}");
@@ -1057,7 +1121,10 @@ async fn decompression_bombs_are_refused_before_decoding() {
 
     // The limits are configurable: source pixels, source bytes, and an allowlist of sizes.
     let s = server_with(
-        StorageConfig::default().thumbnail_max_source_pixels(10_000).thumbnail_max_source_bytes(50_000).thumbnail_sizes(&[(64, 64)]),
+        StorageConfig::default()
+            .thumbnail_max_source_pixels(10_000)
+            .thumbnail_max_source_bytes(50_000)
+            .thumbnail_sizes(&[(64, 64)]),
     )
     .await;
     let small = s.upload(&png_bytes(100, 100, false), "image/png", None).await;
@@ -1107,8 +1174,10 @@ async fn raw_request(addr: SocketAddr, method: &str, path: &str, headers: &[(&st
     let head = String::from_utf8(raw[..split].to_vec()).unwrap();
     let mut lines = head.split("\r\n");
     let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
-    let headers =
-        lines.map(|l| l.split_once(':').unwrap()).map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string())).collect();
+    let headers = lines
+        .map(|l| l.split_once(':').unwrap())
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
     RawResponse { status, headers, body: raw[split + 4..].to_vec() }
 }
 
@@ -1121,7 +1190,8 @@ fn multipart_parts(body: &[u8], boundary: &str) -> Vec<Part> {
     let text = body;
     let mut parts = Vec::new();
     let mut at = 0;
-    let find = |from: usize, needle: &[u8]| text[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from);
+    let find =
+        |from: usize, needle: &[u8]| text[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from);
     assert!(text.starts_with(delimiter.as_bytes()), "the body starts with the first boundary");
     loop {
         at += delimiter.len();
@@ -1209,7 +1279,14 @@ mod sweep_q {
 
     #[internal_query]
     pub async fn sweep_jobs(ctx: &QueryCtx) -> Result<Vec<Doc<ScheduledJob>>> {
-        Ok(ctx.db.query::<ScheduledJob>().collect().await?.into_iter().filter(|j| j.origin.as_deref() == Some("cron:_storage_sweep")).collect())
+        Ok(ctx
+            .db
+            .query::<ScheduledJob>()
+            .collect()
+            .await?
+            .into_iter()
+            .filter(|j| j.origin.as_deref() == Some("cron:_storage_sweep"))
+            .collect())
     }
 }
 
@@ -1245,9 +1322,13 @@ async fn the_orphan_sweep_runs_as_a_system_cron() {
     assert_eq!((stats["deleted"].as_u64(), stats["thumbnails"].as_u64()), (Some(1), Some(1)), "{stats}");
 
     // Without a sweep interval there is no system cron.
-    let t = TestApp::with_options(AppOptions { dev: true, storage: StorageConfig::default().sweep_interval(None), ..Default::default() })
-        .await
-        .unwrap();
+    let t = TestApp::with_options(AppOptions {
+        dev: true,
+        storage: StorageConfig::default().sweep_interval(None),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
     assert!(t.query::<sweep_q::cron_rows>(()).await.unwrap().is_empty());
 }
 
@@ -1259,7 +1340,8 @@ async fn the_orphan_sweep_runs_as_a_system_cron() {
 fn deletion_recorded(dir: &std::path::Path, id: Id<StoredFile>) -> bool {
     let id = ferrix::id::DocId::decode(&id.to_string()).unwrap();
     let conn = rusqlite::Connection::open(dir.join("data.db")).unwrap();
-    conn.query_row("SELECT count(*) FROM _storage_deleted WHERE id = ?1", [&id.0[..]], |r| r.get::<_, i64>(0)).unwrap() > 0
+    conn.query_row("SELECT count(*) FROM _storage_deleted WHERE id = ?1", [&id.0[..]], |r| r.get::<_, i64>(0)).unwrap()
+        > 0
 }
 
 #[tokio::test]
@@ -1435,7 +1517,8 @@ mod fake_s3 {
         if get("X-Amz-Credential")? != format!("{KEY_ID}/{scope}") {
             return Err("wrong credential".into());
         }
-        let signed_at = chrono::NaiveDateTime::parse_from_str(&amz_date, "%Y%m%dT%H%M%SZ").map_err(|e| e.to_string())?;
+        let signed_at =
+            chrono::NaiveDateTime::parse_from_str(&amz_date, "%Y%m%dT%H%M%SZ").map_err(|e| e.to_string())?;
         let expires: i64 = get("X-Amz-Expires")?.parse().map_err(|_| "bad X-Amz-Expires")?;
         if expires > 604_800 {
             return Err("X-Amz-Expires must be at most 7 days".into());
@@ -1449,10 +1532,9 @@ mod fake_s3 {
         let query = query.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
         let canonical = format!("GET\n{}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD", url.path());
         let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex(&Sha256::digest(canonical.as_bytes())));
-        let key = ["s3", "aws4_request"].iter().fold(
-            hmac(&hmac(format!("AWS4{SECRET}").as_bytes(), date), REGION),
-            |key, part| hmac(&key, part),
-        );
+        let key = ["s3", "aws4_request"]
+            .iter()
+            .fold(hmac(&hmac(format!("AWS4{SECRET}").as_bytes(), date), REGION), |key, part| hmac(&key, part));
         if hex(&hmac(&key, &to_sign)) != get("X-Amz-Signature")? {
             return Err("SignatureDoesNotMatch".into());
         }

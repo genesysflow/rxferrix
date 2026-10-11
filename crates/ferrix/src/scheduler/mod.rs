@@ -19,8 +19,8 @@
 pub mod cancellation;
 pub mod context;
 pub mod cron;
-pub mod store;
 pub mod runner;
+pub mod store;
 pub mod tables;
 
 use std::time::Duration;
@@ -28,11 +28,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use context::{ScheduleWith, Scheduler};
 pub use cancellation::ActionAborted;
+pub use context::{ScheduleWith, Scheduler};
 pub use cron::{CronSpec, SWEEP_CRON};
-pub use store::{CancelOutcome, WorkResult};
 pub use runner::SchedulerState;
+pub use store::{CancelOutcome, WorkResult};
 pub use tables::{Backoff, Cron, JobKind, JobState, OnComplete, ScheduledJob};
 
 use crate::SchedulableFunction;
@@ -123,7 +123,12 @@ impl Default for SchedulerOptions {
 
 impl SchedulerOptions {
     /// Declare a cron: see [`CronSpec::cron`].
-    pub fn cron<F: SchedulableFunction>(mut self, name: impl Into<String>, expr: impl Into<String>, args: impl Into<F::Args>) -> Self {
+    pub fn cron<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        expr: impl Into<String>,
+        args: impl Into<F::Args>,
+    ) -> Self {
         self.crons.push(CronSpec::cron::<F>(name, expr, args));
         self
     }
@@ -147,7 +152,12 @@ impl SchedulerOptions {
     }
 
     /// Declare an interval cron: see [`CronSpec::interval`].
-    pub fn interval<F: SchedulableFunction>(mut self, name: impl Into<String>, every: Duration, args: impl Into<F::Args>) -> Self {
+    pub fn interval<F: SchedulableFunction>(
+        mut self,
+        name: impl Into<String>,
+        every: Duration,
+        args: impl Into<F::Args>,
+    ) -> Self {
         self.crons.push(CronSpec::interval::<F>(name, every, args));
         self
     }
@@ -218,7 +228,11 @@ pub async fn cancel(ctx: &MutationCtx, id: Id<ScheduledJob>, reason: Option<Stri
 /// Scheduled jobs, live and paginated. With `state`, only jobs in that state, through the `(state, runAt)` index:
 /// pending and in-progress jobs soonest first, finished ones most recent first. Without, every job, newest first.
 #[query]
-pub async fn jobs(ctx: &QueryCtx, state: Option<JobState>, pagination_opts: PaginationOpts) -> Result<PaginationResult<Doc<ScheduledJob>>> {
+pub async fn jobs(
+    ctx: &QueryCtx,
+    state: Option<JobState>,
+    pagination_opts: PaginationOpts,
+) -> Result<PaginationResult<Doc<ScheduledJob>>> {
     ctx.auth.require_admin()?;
     let query = match state {
         Some(state) => {
@@ -344,6 +358,9 @@ pub async fn run_cron_now(ctx: &MutationCtx, name: String, force: Option<bool>) 
     };
     match cron::enqueue_now(&ctx.db, row, ctx.now(), force.unwrap_or(false)).await? {
         Some(job) => Ok(job.to_string()),
-        None => Err(user_error("running", format!("The previous run of `{name}` hasn't finished; pass force to run it anyway"))),
+        None => Err(user_error(
+            "running",
+            format!("The previous run of `{name}` hasn't finished; pass force to run it anyway"),
+        )),
     }
 }

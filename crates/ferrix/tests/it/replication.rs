@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use ferrix::auth::AuthConfig;
 use ferrix::ops::OpsOptions;
 use ferrix::ops::backup::{BackupTarget, RestoreOptions};
-use ferrix::ops::replicate::{self, Generation, PointInTime, ReplicationOptions, Replicator, SegmentInfo, SnapshotInfo, plan_retention};
+use ferrix::ops::replicate::{
+    self, Generation, PointInTime, ReplicationOptions, Replicator, SegmentInfo, SnapshotInfo, plan_retention,
+};
 use ferrix::ops::restore;
 use ferrix::testing::TestApp;
 use ferrix::{App, AppOptions, Id};
@@ -24,8 +26,8 @@ use futures::stream::BoxStream;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions,
-    PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+    PutOptions, PutPayload, PutResult,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -48,12 +50,21 @@ pub mod pitr {
 
     /// `op`: `insert` (returns the new id), `patch` or `delete` (of `id`).
     #[internal_mutation]
-    pub async fn pitr_op(ctx: &MutationCtx, op: String, id: Option<Id<Note>>, owner: i64, body: String, n: i64) -> Result<Option<Id<Note>>> {
+    pub async fn pitr_op(
+        ctx: &MutationCtx,
+        op: String,
+        id: Option<Id<Note>>,
+        owner: i64,
+        body: String,
+        n: i64,
+    ) -> Result<Option<Id<Note>>> {
         let embedding = vec![owner as f32 / 8.0, n as f32 / 8.0, 1.0];
         match (op.as_str(), id) {
             ("insert", _) => Ok(Some(ctx.db.insert(Note { owner, body, embedding, n }).await?)),
             ("patch", Some(id)) => {
-                ctx.db.patch(id, serde_json::json!({ "owner": owner, "body": body, "n": n, "embedding": embedding })).await?;
+                ctx.db
+                    .patch(id, serde_json::json!({ "owner": owner, "body": body, "n": n, "embedding": embedding }))
+                    .await?;
                 Ok(None)
             }
             ("delete", Some(id)) => {
@@ -81,7 +92,8 @@ pub mod pitr {
     /// Inserts and deletes the same document: a commit whose journaled changes cancel out.
     #[internal_mutation]
     pub async fn pitr_transient(ctx: &MutationCtx) -> Result<()> {
-        let id = ctx.db.insert(Note { owner: 0, body: "transient".into(), embedding: vec![0.0, 1.0, 0.0], n: 0 }).await?;
+        let id =
+            ctx.db.insert(Note { owner: 0, body: "transient".into(), embedding: vec![0.0, 1.0, 0.0], n: 0 }).await?;
         ctx.db.delete(id).await
     }
 
@@ -92,7 +104,12 @@ pub mod pitr {
 
     #[internal_query]
     pub async fn pitr_search(ctx: &QueryCtx, text: String) -> Result<Vec<Id<Note>>> {
-        let hits = ctx.db.query::<Note>().with_search_index(Note::search_body, |q| q.search(Note::body, text)).take(1000).await?;
+        let hits = ctx
+            .db
+            .query::<Note>()
+            .with_search_index(Note::search_body, |q| q.search(Note::body, text))
+            .take(1000)
+            .await?;
         Ok(hits.into_iter().map(|d| d.id).collect())
     }
 }
@@ -112,7 +129,8 @@ fn options(target: BackupTarget) -> ReplicationOptions {
 }
 
 async fn replicated(r: ReplicationOptions) -> TestApp {
-    let options = AppOptions { dev: true, ops: OpsOptions { replication: Some(r), ..Default::default() }, ..Default::default() };
+    let options =
+        AppOptions { dev: true, ops: OpsOptions { replication: Some(r), ..Default::default() }, ..Default::default() };
     TestApp::with_options(options).await.unwrap()
 }
 
@@ -126,7 +144,8 @@ fn dir_target(dir: &Path) -> BackupTarget {
 
 /// `(ts, changes)` of every journal row, read directly from `data.db`.
 fn journal_rows(dir: &Path) -> Vec<(u64, String)> {
-    let conn = rusqlite::Connection::open_with_flags(dir.join("data.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let conn =
+        rusqlite::Connection::open_with_flags(dir.join("data.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let mut stmt = conn.prepare("SELECT ts, changes FROM _journal ORDER BY ts").unwrap();
     stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?))).unwrap().map(Result::unwrap).collect()
 }
@@ -175,13 +194,22 @@ impl FlakyStore {
 
 #[async_trait::async_trait]
 impl ObjectStore for FlakyStore {
-    async fn put_opts(&self, location: &ObjectPath, payload: PutPayload, opts: PutOptions) -> object_store::Result<PutResult> {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
         self.check()?;
         let r = self.inner.put_opts(location, payload, opts).await?;
         if self.mode.load(Ordering::SeqCst) == 2 { Err(down()) } else { Ok(r) }
     }
 
-    async fn put_multipart_opts(&self, location: &ObjectPath, opts: PutMultipartOptions) -> object_store::Result<Box<dyn MultipartUpload>> {
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.check()?;
         self.inner.put_multipart_opts(location, opts).await
     }
@@ -191,7 +219,10 @@ impl ObjectStore for FlakyStore {
         self.inner.get_opts(location, options).await
     }
 
-    fn delete_stream(&self, locations: BoxStream<'static, object_store::Result<ObjectPath>>) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
         if self.check().is_err() {
             return Box::pin(futures::stream::once(async { Err(down()) }));
         }
@@ -229,7 +260,8 @@ async fn verify(app: &App) {
 }
 
 fn meta_ts(dir: &Path) -> u64 {
-    let conn = rusqlite::Connection::open_with_flags(dir.join("data.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let conn =
+        rusqlite::Connection::open_with_flags(dir.join("data.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     conn.query_row("SELECT v FROM _meta WHERE k = 'ts'", [], |r| r.get::<_, i64>(0)).unwrap() as u64
 }
 
@@ -444,7 +476,14 @@ async fn shipping_survives_target_errors_lost_answers_and_restarts() {
     // Down for too long: past the bound the journal is dropped; once the target is back a new generation starts.
     let mut small = options(target.clone());
     small.max_pending_bytes = 1;
-    let t = t.restart_with(AppOptions { dev: true, ops: OpsOptions { replication: Some(small), ..Default::default() }, ..Default::default() }).await.unwrap();
+    let t = t
+        .restart_with(AppOptions {
+            dev: true,
+            ops: OpsOptions { replication: Some(small), ..Default::default() },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     rep(&t).sync_now(t.app()).await.unwrap();
     flaky.mode.store(1, Ordering::SeqCst);
     op(&t, "insert", None, 1, "overflow", 1).await;
@@ -477,7 +516,14 @@ async fn a_gap_in_the_journal_starts_a_new_generation() {
     assert_eq!(rep(&t).status(t.app()).await.generation.unwrap(), first);
     let t = t.restart_with(AppOptions { dev: true, ..Default::default() }).await.unwrap();
     op(&t, "insert", None, 2, "unjournaled", 2).await;
-    let t = t.restart_with(AppOptions { dev: true, ops: OpsOptions { replication: Some(options(target.clone())), ..Default::default() }, ..Default::default() }).await.unwrap();
+    let t = t
+        .restart_with(AppOptions {
+            dev: true,
+            ops: OpsOptions { replication: Some(options(target.clone())), ..Default::default() },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     rep(&t).sync_now(t.app()).await.unwrap();
     let second = rep(&t).status(t.app()).await.generation.unwrap();
     assert_ne!(first, second);
@@ -492,7 +538,8 @@ async fn a_gap_in_the_journal_starts_a_new_generation() {
 /// Restore `point` into a fresh directory and return it with what was restored.
 async fn restore_to(target: &BackupTarget, point: PointInTime) -> (tempfile::TempDir, replicate::PointInTimeInfo) {
     let dir = tempfile::tempdir().unwrap();
-    let (_, info) = replicate::restore_point_in_time(target, dir.path(), &point, &RestoreOptions::default()).await.unwrap();
+    let (_, info) =
+        replicate::restore_point_in_time(target, dir.path(), &point, &RestoreOptions::default()).await.unwrap();
     (dir, info)
 }
 
@@ -503,8 +550,10 @@ async fn check_restored(dir: &Path, expected_ts: u64, expected: &Model) {
     let docs = app.query::<pitr_all>(()).await.unwrap();
     assert_eq!(&model_of(&docs), expected, "documents at ts {expected_ts}");
     // The search index answers from the replayed documents.
-    let hits: Vec<String> = app.query::<pitr_search>(("alpha".to_string(),)).await.unwrap().iter().map(|i| i.to_string()).collect();
-    let mut want: Vec<String> = expected.iter().filter(|(_, v)| v.1.contains("alpha")).map(|(k, _)| k.clone()).collect();
+    let hits: Vec<String> =
+        app.query::<pitr_search>(("alpha".to_string(),)).await.unwrap().iter().map(|i| i.to_string()).collect();
+    let mut want: Vec<String> =
+        expected.iter().filter(|(_, v)| v.1.contains("alpha")).map(|(k, _)| k.clone()).collect();
     let mut got = hits;
     want.sort();
     got.sort();
@@ -528,7 +577,8 @@ async fn point_in_time_restores_match_a_model_at_random_points() {
     for i in 0..240i64 {
         let ids: Vec<String> = model.keys().cloned().collect();
         let owner = rng.random_range(0..5i64);
-        let body = format!("{} {} {i}", words[rng.random_range(0..words.len())], words[rng.random_range(0..words.len())]);
+        let body =
+            format!("{} {} {i}", words[rng.random_range(0..words.len())], words[rng.random_range(0..words.len())]);
         let pick = |rng: &mut StdRng| ids[rng.random_range(0..ids.len())].parse::<Id<Note>>().unwrap();
         let roll = rng.random_range(0..10);
         let ts = if ids.is_empty() || roll < 5 {
@@ -595,15 +645,36 @@ async fn point_in_time_restores_match_a_model_at_random_points() {
     check_restored(dir.path(), info.ts, &k_model).await;
 
     // Before the oldest snapshot: refused with the reason.
-    let err = replicate::restore_point_in_time(&target, tempfile::tempdir().unwrap().path(), &PointInTime { to_ts: Some(start_ts - 1), ..Default::default() }, &RestoreOptions::default())
-        .await
-        .unwrap_err();
+    let err = replicate::restore_point_in_time(
+        &target,
+        tempfile::tempdir().unwrap().path(),
+        &PointInTime { to_ts: Some(start_ts - 1), ..Default::default() },
+        &RestoreOptions::default(),
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("before the oldest snapshot"), "{err:#}");
 
     // A restored database starts a new generation when it replicates.
     let restored = tempfile::tempdir().unwrap();
-    replicate::restore_point_in_time(&target, restored.path(), &PointInTime { to_ts: Some(start_ts + 10), ..Default::default() }, &RestoreOptions::default()).await.unwrap();
-    let app = App::open(restored.path(), AppOptions { dev: true, ops: OpsOptions { replication: Some(options(target.clone())), ..Default::default() }, ..Default::default() }).await.unwrap();
+    replicate::restore_point_in_time(
+        &target,
+        restored.path(),
+        &PointInTime { to_ts: Some(start_ts + 10), ..Default::default() },
+        &RestoreOptions::default(),
+    )
+    .await
+    .unwrap();
+    let app = App::open(
+        restored.path(),
+        AppOptions {
+            dev: true,
+            ops: OpsOptions { replication: Some(options(target.clone())), ..Default::default() },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     app.replication().unwrap().sync_now(&app).await.unwrap();
     let st = app.replication().unwrap().status(&app).await;
     assert_ne!(st.generation.as_deref(), Some(gens[0].id.as_str()));
@@ -616,7 +687,12 @@ async fn point_in_time_restores_match_a_model_at_random_points() {
 
 fn snap(ts: u64, at_h: f64) -> SnapshotInfo {
     let at = 1_760_000_000_000.0 + at_h * 3_600_000.0;
-    SnapshotInfo { name: format!("ferrix-auto-{}-ts{ts}.tar.zst", ferrix::ops::file_timestamp(at)), ts, created_at: at, bytes: 1 }
+    SnapshotInfo {
+        name: format!("ferrix-auto-{}-ts{ts}.tar.zst", ferrix::ops::file_timestamp(at)),
+        ts,
+        created_at: at,
+        bytes: 1,
+    }
 }
 
 fn generation(at_h: f64, snapshots: Vec<SnapshotInfo>, segments: &[(u64, u64)]) -> Generation {
@@ -634,7 +710,11 @@ fn retention_keeps_exactly_what_point_in_time_restores_need() {
     let now = 1_760_000_000_000.0 + 100.0 * 3_600_000.0;
     let keep = Duration::from_secs(24 * 3600); // cutoff at hour 76
     let g1 = generation(0.0, vec![snap(1, 0.0), snap(40, 30.0)], &[(2, 20), (21, 45), (46, 60)]);
-    let g2 = generation(50.0, vec![snap(10, 50.0), snap(30, 70.0), snap(50, 80.0), snap(70, 95.0)], &[(11, 25), (26, 30), (31, 55), (56, 72), (73, 90)]);
+    let g2 = generation(
+        50.0,
+        vec![snap(10, 50.0), snap(30, 70.0), snap(50, 80.0), snap(70, 95.0)],
+        &[(11, 25), (26, 30), (31, 55), (56, 72), (73, 90)],
+    );
     let plan = plan_retention(&[g1.clone(), g2.clone()], now, keep);
     // g1 ends before the window's base (g2's snapshot at hour 70, the newest before the cutoff): all of it goes.
     assert_eq!(plan.generations, std::slice::from_ref(&g1.id));
@@ -653,7 +733,11 @@ fn retention_keeps_exactly_what_point_in_time_restores_need() {
     // Only old snapshots: the newest one stays (with what follows it), whatever `keep` says.
     let plan = plan_retention(std::slice::from_ref(&g2), now + 1e9, Duration::ZERO);
     assert_eq!(plan.snapshots.len(), 3);
-    assert_eq!(plan.segments.len(), 3, "segments ending at or before ts 70 go; 56..72 (straddling the base) and 73..90 stay");
+    assert_eq!(
+        plan.segments.len(),
+        3,
+        "segments ending at or before ts 70 go; 56..72 (straddling the base) and 73..90 stay"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -750,7 +834,12 @@ async fn staged_point_in_time_restore_over_http() {
     assert_eq!(listing["replication"], Value::Null);
 
     let target = store_target(Arc::new(InMemory::new()), "http");
-    let a = admin_with(OpsOptions { replication: Some(options(target.clone())), metrics: ferrix::ops::MetricsOptions { enabled: true, token: None }, ..Default::default() }).await;
+    let a = admin_with(OpsOptions {
+        replication: Some(options(target.clone())),
+        metrics: ferrix::ops::MetricsOptions { enabled: true, token: None },
+        ..Default::default()
+    })
+    .await;
     rep(&a.t).sync_now(a.t.app()).await.unwrap();
     let (first, _) = op(&a.t, "insert", None, 1, "alpha kept", 1).await;
     let (_, target_ts) = op(&a.t, "insert", None, 2, "alpha also kept", 2).await;
@@ -763,7 +852,10 @@ async fn staged_point_in_time_restore_over_http() {
     assert_eq!(st["enabled"], true);
     assert!(st["lagCommits"].as_u64().unwrap() >= 4, "{st}");
     let metrics = a.client.get(format!("{}/metrics", a.base)).send().await.unwrap().text().await.unwrap();
-    assert!(metrics.contains("ferrix_replication_lag_commits ") && metrics.contains("ferrix_replication_shipped_ts "), "{metrics}");
+    assert!(
+        metrics.contains("ferrix_replication_lag_commits ") && metrics.contains("ferrix_replication_shipped_ts "),
+        "{metrics}"
+    );
     rep(&a.t).sync_now(a.t.app()).await.unwrap();
     let listing: Value = a.req(Method::GET, "/api/admin/backups").send().await.unwrap().json().await.unwrap();
     assert_eq!(listing["replication"]["lagCommits"], 0);
@@ -773,14 +865,24 @@ async fn staged_point_in_time_restore_over_http() {
     assert!(r.json::<Value>().await.unwrap()["ts"].as_u64().unwrap() > target_ts);
 
     // Bad requests.
-    let r = a.req(Method::POST, "/api/admin/restore/point-in-time").json(&json!({ "toTime": "yesterday" })).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/restore/point-in-time")
+        .json(&json!({ "toTime": "yesterday" }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     let r = a.req(Method::POST, "/api/admin/restore/point-in-time").json(&json!({ "toTs": 1 })).send().await.unwrap();
     assert_eq!(r.status(), 400);
     assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "invalid_point_in_time");
 
     // Stage the point: checked, pending, the server keeps its data.
-    let r = a.req(Method::POST, "/api/admin/restore/point-in-time").json(&json!({ "toTs": target_ts })).send().await.unwrap();
+    let r = a
+        .req(Method::POST, "/api/admin/restore/point-in-time")
+        .json(&json!({ "toTs": target_ts }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
     let p = &body["pendingRestore"];
@@ -803,7 +905,8 @@ async fn staged_point_in_time_restore_over_http() {
     // By time, through the same endpoint (after canceling).
     assert_eq!(a.req(Method::DELETE, "/api/admin/restore").send().await.unwrap().status(), 200);
     let now = chrono::Utc::now().to_rfc3339();
-    let r = a.req(Method::POST, "/api/admin/restore/point-in-time").json(&json!({ "toTime": now })).send().await.unwrap();
+    let r =
+        a.req(Method::POST, "/api/admin/restore/point-in-time").json(&json!({ "toTime": now })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
     assert!(body["pendingRestore"]["pointInTime"]["requestedTime"].as_f64().is_some());
@@ -814,7 +917,8 @@ async fn staged_point_in_time_restore_over_http() {
 // ---------------------------------------------------------------------------------------------------------------------
 
 async fn commits_per_second(replication: Option<ReplicationOptions>, n: u64) -> f64 {
-    let options = AppOptions { dev: false, ops: OpsOptions { replication, ..Default::default() }, ..Default::default() };
+    let options =
+        AppOptions { dev: false, ops: OpsOptions { replication, ..Default::default() }, ..Default::default() };
     let t = TestApp::with_options(options).await.unwrap();
     if let Some(r) = t.app().replication() {
         r.sync_now(t.app()).await.unwrap();
@@ -825,7 +929,9 @@ async fn commits_per_second(replication: Option<ReplicationOptions>, n: u64) -> 
     let start = Instant::now();
     let mut id = None;
     for i in 0..n as i64 {
-        let (new, _) = op(&t, if i % 3 == 2 { "patch" } else { "insert" }, id, i % 7, "a note with some alpha text in it", i).await;
+        let (new, _) =
+            op(&t, if i % 3 == 2 { "patch" } else { "insert" }, id, i % 7, "a note with some alpha text in it", i)
+                .await;
         id = new.or(id);
     }
     n as f64 / start.elapsed().as_secs_f64()
@@ -847,7 +953,9 @@ async fn bench_journal_overhead() {
         shipping.every = Duration::from_secs(1);
         let shipped = commits_per_second(Some(shipping), n).await;
         rows.push((off, journal_only, shipped));
-        println!("round {round}: off {off:.0}/s, journal {journal_only:.0}/s, journal + shipping every 1s {shipped:.0}/s");
+        println!(
+            "round {round}: off {off:.0}/s, journal {journal_only:.0}/s, journal + shipping every 1s {shipped:.0}/s"
+        );
     }
     let med = |f: fn(&(f64, f64, f64)) -> f64| {
         let mut v: Vec<f64> = rows.iter().map(f).collect();

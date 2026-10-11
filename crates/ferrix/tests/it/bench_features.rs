@@ -43,14 +43,20 @@ pub mod fns {
     }
 
     #[internal_mutation]
-    pub async fn insert_aggregated(ctx: &MutationCtx, group: String, amount: f64, quantity: i64) -> Result<Id<Aggregated>> {
+    pub async fn insert_aggregated(
+        ctx: &MutationCtx,
+        group: String,
+        amount: f64,
+        quantity: i64,
+    ) -> Result<Id<Aggregated>> {
         ctx.db.insert(Aggregated { group, amount, quantity }).await
     }
 
     /// Count and sum a group by reading its documents (what an app does without aggregates).
     #[internal_query]
     pub async fn scan_group(ctx: &QueryCtx, group: String) -> Result<(u64, f64)> {
-        let n = ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, group.clone())).count().await?;
+        let n =
+            ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, group.clone())).count().await?;
         let docs = ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, group)).collect().await?;
         Ok((n, docs.iter().map(|d| d.value.amount).sum()))
     }

@@ -109,7 +109,6 @@ pub(crate) fn finish_if_asked(conn: &Connection, signal: &Signal) {
 }
 
 impl Signal {
-
     /// The WAL has grown: checkpoint soon.
     pub(crate) fn nudge(&self) {
         if !self.raised.swap(true, Ordering::AcqRel) {
@@ -129,12 +128,10 @@ impl Checkpointer {
     pub(crate) fn start(path: &Path) -> anyhow::Result<Checkpointer> {
         let conn = super::storage::open_checkpointer(path)?;
         let signal = Arc::new(Signal::default());
-        let thread = std::thread::Builder::new()
-            .name("ferrix-checkpoint".into())
-            .spawn({
-                let signal = signal.clone();
-                move || run(conn, &signal)
-            })?;
+        let thread = std::thread::Builder::new().name("ferrix-checkpoint".into()).spawn({
+            let signal = signal.clone();
+            move || run(conn, &signal)
+        })?;
         Ok(Checkpointer { signal, thread: Some(thread) })
     }
 

@@ -246,7 +246,9 @@ impl Database {
                 let table = self
                     .catalog
                     .table_by_number(change.id.table_number())
-                    .with_context(|| format!("journal entry ts {}: no table number {}", entry.ts, change.id.table_number()))?
+                    .with_context(|| {
+                        format!("journal entry ts {}: no table number {}", entry.ts, change.id.table_number())
+                    })?
                     .clone();
                 anyhow::ensure!(
                     table.name == change.table,
@@ -323,9 +325,8 @@ impl Database {
                     expected.sort();
                     let mut stmt =
                         conn.prepare("SELECT key, doc_id FROM index_entries WHERE index_id = ?1 ORDER BY key")?;
-                    let actual: Vec<(Vec<u8>, Vec<u8>)> = stmt
-                        .query_map([index.id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                        .collect::<Result<_, _>>()?;
+                    let actual: Vec<(Vec<u8>, Vec<u8>)> =
+                        stmt.query_map([index.id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
                     if actual != expected {
                         problems.push(format!(
                             "table `{}` index `{}`: expected {} entries, found {} (or contents differ)",
@@ -780,10 +781,7 @@ impl Clock {
 }
 
 pub fn wall_clock_ms() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
 }
 
 struct ReaderPool {

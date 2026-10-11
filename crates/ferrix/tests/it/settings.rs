@@ -33,7 +33,9 @@ fn github(enabled: bool, secret: Option<&str>) -> Value {
 async fn settings_are_admin_only_validated_and_applied_immediately() {
     let (_t, http, admin) = setup(AuthConfig::password()).await;
     let user = token(&http.sign_up("u@example.com", "correct horse").await, "accessToken");
-    for (name, args) in [("get", json!({})), ("update", json!({ "signups": false })), ("send_test_email", json!({ "to": "a@b.co" }))] {
+    for (name, args) in
+        [("get", json!({})), ("update", json!({ "signups": false })), ("send_test_email", json!({ "to": "a@b.co" }))]
+    {
         let path = format!("_system/settings:{name}");
         assert_eq!(code_of(&http.call("action", &path, args.clone(), None).await.1), "unauthenticated");
         assert_eq!(code_of(&http.call("action", &path, args, Some(&user)).await.1), "forbidden");
@@ -80,7 +82,8 @@ async fn settings_are_admin_only_validated_and_applied_immediately() {
     assert_eq!(view["effective"]["oauthProviders"], json!(["gh"]));
     assert_eq!(view["oauth"][0]["clientSecret"], MASK, "never returned in clear");
     assert!(!view.to_string().contains(SECRET));
-    let (s, b) = http.post("/api/auth/signup", None, json!({ "email": "new@example.com", "password": "correct horse" })).await;
+    let (s, b) =
+        http.post("/api/auth/signup", None, json!({ "email": "new@example.com", "password": "correct horse" })).await;
     assert_eq!((s, code_of(&b)), (403, "signups_disabled"));
     let (_, providers) = http.get("/api/auth/providers", None).await;
     assert_eq!((&providers["signups"], &providers["oauth"]), (&json!(false), &json!(["gh"])));
@@ -93,14 +96,19 @@ async fn settings_are_admin_only_validated_and_applied_immediately() {
         .unwrap();
     assert_eq!(res.status(), 302);
     let location = res.headers()["location"].to_str().unwrap();
-    assert!(location.starts_with("https://github.com/login/oauth/authorize") && location.contains("client_id=gh-client-id"));
+    assert!(
+        location.starts_with("https://github.com/login/oauth/authorize") && location.contains("client_id=gh-client-id")
+    );
 
     // Sending the mask (or nothing) back keeps the secret; disabling keeps it too; clear removes everything.
-    let view = http.ok("action", "_system/settings:update", json!({ "oauth": [github(false, Some(MASK))] }), &admin).await;
+    let view =
+        http.ok("action", "_system/settings:update", json!({ "oauth": [github(false, Some(MASK))] }), &admin).await;
     assert_eq!((&view["oauth"][0]["clientSecret"], &view["effective"]["oauthProviders"]), (&json!(MASK), &json!([])));
     let view = http.ok("action", "_system/settings:update", json!({ "oauth": [github(true, None)] }), &admin).await;
     assert_eq!(view["effective"]["oauthProviders"], json!(["gh"]), "the stored secret was kept");
-    let view = http.ok("action", "_system/settings:update", json!({ "clear": ["oauth", "signups", "accessTokenTtlSecs"] }), &admin).await;
+    let view = http
+        .ok("action", "_system/settings:update", json!({ "clear": ["oauth", "signups", "accessTokenTtlSecs"] }), &admin)
+        .await;
     assert_eq!((&view["oauth"], &view["effective"]["signups"]), (&json!([]), &json!(true)));
     assert_eq!(http.sign_up("new@example.com", "correct horse").await["expiresIn"], 900);
 }
@@ -118,7 +126,10 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
     )
     .await;
     let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
-    assert_eq!(view["smtp"], json!({ "url": "smtps://mailer@mail.example.com:465", "from": "App <app@example.com>", "password": MASK }));
+    assert_eq!(
+        view["smtp"],
+        json!({ "url": "smtps://mailer@mail.example.com:465", "from": "App <app@example.com>", "password": MASK })
+    );
     assert_eq!(view["effective"]["emailConfigured"], true);
 
     // The data browser masks the sealed values; generic writes to `_settings` are refused.
@@ -127,7 +138,9 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
     let rows = rows["page"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r["encrypted"] == MASK), "{rows:?}");
-    let (_, b) = http.call("mutation", "_system/dashboard:delete_documents", json!({ "ids": [rows[0]["_id"]] }), Some(&admin)).await;
+    let (_, b) = http
+        .call("mutation", "_system/dashboard:delete_documents", json!({ "ids": [rows[0]["_id"]] }), Some(&admin))
+        .await;
     assert_eq!(code_of(&b), "read_only_table");
 
     // Not in the database file, not in the execution log (arguments of system functions are redacted).
@@ -143,7 +156,14 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
     assert!(logged.contains(MASK) && !logged.contains(SECRET), "{logged}");
 
     // The audit log has the change, with secrets masked.
-    let entries = http.ok("query", "_system/audit:list", json!({ "action": "settings_update", "paginationOpts": { "numItems": 5, "cursor": null } }), &admin).await;
+    let entries = http
+        .ok(
+            "query",
+            "_system/audit:list",
+            json!({ "action": "settings_update", "paginationOpts": { "numItems": 5, "cursor": null } }),
+            &admin,
+        )
+        .await;
     let entry = &entries["page"][0];
     assert_eq!(entry["after"]["oauth"][0]["clientSecret"], MASK);
     assert_eq!(entry["after"]["smtp"]["password"], MASK);
@@ -154,7 +174,10 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
     let http = Http::new(t.serve().await.unwrap());
     let admin = token(&http.admin_sign_in("admin@example.com", "admin password").await, "accessToken");
     let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
-    assert_eq!((&view["effective"]["oauthProviders"], &view["effective"]["emailConfigured"]), (&json!(["gh"]), &json!(true)));
+    assert_eq!(
+        (&view["effective"]["oauthProviders"], &view["effective"]["emailConfigured"]),
+        (&json!(["gh"]), &json!(true))
+    );
 
     // With another server secret, the stored secrets are unreadable: the provider is off rather than broken.
     let dir = t.dir().to_path_buf();
@@ -191,12 +214,18 @@ async fn configuration_wins_over_settings() {
     let locked: Vec<&str> = view["locked"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
     assert_eq!(locked, ["signups", "accessTokenTtlSecs", "redirectUrls", "smtp", "oauth.github"]);
     let e = &view["effective"];
-    assert_eq!((&e["signups"], &e["accessTokenTtlSecs"], &e["sessionTtlSecs"]), (&json!(true), &json!(120), &json!(3600)));
+    assert_eq!(
+        (&e["signups"], &e["accessTokenTtlSecs"], &e["sessionTtlSecs"]),
+        (&json!(true), &json!(120), &json!(3600))
+    );
     assert_eq!(e["redirectUrls"], json!(["https://configured.example.com/"]));
     assert_eq!(e["oauthProviders"], json!(["github", "google"]), "settings add providers with other ids");
     assert_eq!(view["oauth"][0]["locked"], true);
     let res = http.client.get(format!("{}/api/auth/oauth/github", http.base)).send().await.unwrap();
-    assert!(res.headers()["location"].to_str().unwrap().contains("client_id=cfg-id"), "the configured GitHub app is used");
+    assert!(
+        res.headers()["location"].to_str().unwrap().contains("client_id=cfg-id"),
+        "the configured GitHub app is used"
+    );
 
     // The configured mailer stays in use: a test email goes through it.
     http.ok("action", "_system/settings:send_test_email", json!({ "to": "ops@example.com" }), &admin).await;

@@ -103,7 +103,8 @@ pub(crate) async fn set_password(app: &App, user: Id<User>, password_hash: Strin
                 db.insert(Credential { user, password_hash }).await?;
             }
         }
-        let sessions = db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(user))).collect().await?;
+        let sessions =
+            db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(user))).collect().await?;
         for s in sessions {
             delete_session_in(&db, s.id).await?;
         }
@@ -291,7 +292,8 @@ async fn strip_unverified_account(db: &MutationDb, user: Id<User>) -> crate::Res
     if let Some(c) = credential_of(db, user).await? {
         db.delete(c.id).await?;
     }
-    let sessions = db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(user))).collect().await?;
+    let sessions =
+        db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(user))).collect().await?;
     for s in sessions {
         delete_session_in(db, s.id).await?;
     }
@@ -429,7 +431,12 @@ pub(crate) async fn delete_session_by_refresh(app: &App, keys: &Keys, refresh: &
 }
 
 /// Whether `session` exists, is unexpired and belongs to `principal`.
-pub(crate) async fn session_active(app: &App, session: Id<Session>, principal: Principal, now: f64) -> crate::Result<bool> {
+pub(crate) async fn session_active(
+    app: &App,
+    session: Id<Session>,
+    principal: Principal,
+    now: f64,
+) -> crate::Result<bool> {
     read(app, |db| async move {
         let Some(s) = db.get(session).await? else { return Ok(false) };
         let owner = match principal {
@@ -444,7 +451,12 @@ pub(crate) async fn session_active(app: &App, session: Id<Session>, principal: P
 /// What happened to a refresh token.
 #[derive(Debug)]
 pub(crate) enum RefreshOutcome {
-    Rotated { session: Id<Session>, principal: Principal, refresh: String, expires_at: f64 },
+    Rotated {
+        session: Id<Session>,
+        principal: Principal,
+        refresh: String,
+        expires_at: f64,
+    },
     /// Unknown token.
     Invalid,
     /// The session expired (and was deleted).
@@ -647,7 +659,8 @@ pub(crate) async fn create_admin(
         if only_if_none && db.query::<Admin>().first().await?.is_some() {
             return Ok(Err(UserError::new("setup_done", "An administrator already exists")));
         }
-        let existing = db.query::<Admin>().with_index(Admin::by_email, |q| q.eq(Admin::email, email.clone())).first().await?;
+        let existing =
+            db.query::<Admin>().with_index(Admin::by_email, |q| q.eq(Admin::email, email.clone())).first().await?;
         if existing.is_some() {
             return Ok(Err(UserError::new("email_in_use", "An administrator with this email already exists")));
         }
@@ -659,13 +672,17 @@ pub(crate) async fn create_admin(
 /// Set an admin's password and end their sessions. `false` if there is no such admin.
 pub(crate) async fn set_admin_password(app: &App, email: String, password_hash: String) -> crate::Result<bool> {
     write(app, |db| async move {
-        let Some(admin) = db.query::<Admin>().with_index(Admin::by_email, |q| q.eq(Admin::email, email.clone())).first().await?
+        let Some(admin) =
+            db.query::<Admin>().with_index(Admin::by_email, |q| q.eq(Admin::email, email.clone())).first().await?
         else {
             return Ok(false);
         };
         db.replace(admin.id, Admin { email, password_hash }).await?;
-        let sessions =
-            db.query::<Session>().with_index(Session::by_admin, |q| q.eq(Session::admin, Some(admin.id))).collect().await?;
+        let sessions = db
+            .query::<Session>()
+            .with_index(Session::by_admin, |q| q.eq(Session::admin, Some(admin.id)))
+            .collect()
+            .await?;
         for s in sessions {
             delete_session_in(&db, s.id).await?;
         }

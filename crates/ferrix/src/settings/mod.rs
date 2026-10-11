@@ -176,7 +176,8 @@ pub async fn update(
 ) -> Result<SettingsView> {
     let admin = ctx.auth.require_admin()?;
     let app = ctx.app.clone();
-    let changes = Changes { oauth, smtp, redirect_urls, signups, access_token_ttl_secs, session_ttl_secs, cors_origins, clear };
+    let changes =
+        Changes { oauth, smtp, redirect_urls, signups, access_token_ttl_secs, session_ttl_secs, cors_origins, clear };
     let auth = app.auth();
     let sbox = auth.keys.secret_box();
     let dev = app.options().dev;
@@ -196,12 +197,22 @@ pub async fn update(
                 continue;
             }
             changed.push(key);
-            let existing = db.query::<Setting>().with_index(Setting::by_key, |q| q.eq(Setting::key, key.to_string())).first().await?;
+            let existing = db
+                .query::<Setting>()
+                .with_index(Setting::by_key, |q| q.eq(Setting::key, key.to_string()))
+                .first()
+                .await?;
             match (existing, row) {
                 (Some(doc), None) => db.delete(doc.id).await?,
                 (existing, Some((value, secret))) => {
                     let encrypted = secret.map(|s| sbox.seal(key, &s));
-                    let setting = Setting { key: key.to_string(), value, encrypted, updated_at: now, updated_by: Some(admin.to_string()) };
+                    let setting = Setting {
+                        key: key.to_string(),
+                        value,
+                        encrypted,
+                        updated_at: now,
+                        updated_by: Some(admin.to_string()),
+                    };
                     match existing {
                         Some(doc) => db.replace(doc.id, setting).await?,
                         None => {
@@ -215,8 +226,9 @@ pub async fn update(
         if !changed.is_empty() {
             let (b, a) = (masked_json(&before), masked_json(&after));
             let (b, a) = audit::diff(&b, &a);
-            let rec = Record { before: Some(b), after: Some(a), ..Record::new("settings_update").target("_settings", None) }
-                .details(serde_json::json!({ "keys": changed }));
+            let rec =
+                Record { before: Some(b), after: Some(a), ..Record::new("settings_update").target("_settings", None) }
+                    .details(serde_json::json!({ "keys": changed }));
             audit::record(&db, Some(admin), rec).await?;
         }
         Ok(after)
@@ -299,7 +311,11 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
                 locked: locked.contains(&format!("oauth.{}", p.id)),
             })
             .collect(),
-        smtp: stored.smtp.as_ref().map(|s| SmtpView { url: s.url.clone(), from: s.from.clone(), password: mask_secret(&s.password) }),
+        smtp: stored.smtp.as_ref().map(|s| SmtpView {
+            url: s.url.clone(),
+            from: s.from.clone(),
+            password: mask_secret(&s.password),
+        }),
         redirect_urls: stored.redirect_urls.clone(),
         signups: stored.signups,
         access_token_ttl_secs: stored.access_token_ttl_secs,
@@ -430,8 +446,12 @@ impl Changes {
                     return Err(invalid(format!("OAuth provider `{id}`: a client id is required")));
                 }
                 let issuer = match (p.kind, p.issuer.map(|i| i.trim().to_string()).filter(|i| !i.is_empty())) {
-                    (OAuthKind::Oidc, None) => return Err(invalid(format!("OAuth provider `{id}`: OIDC needs an issuer"))),
-                    (OAuthKind::Oidc, Some(i)) => Some(check_http_url("issuer", &i, dev)?.to_string().trim_end_matches('/').to_string()),
+                    (OAuthKind::Oidc, None) => {
+                        return Err(invalid(format!("OAuth provider `{id}`: OIDC needs an issuer")));
+                    }
+                    (OAuthKind::Oidc, Some(i)) => {
+                        Some(check_http_url("issuer", &i, dev)?.to_string().trim_end_matches('/').to_string())
+                    }
                     (_, _) => None,
                 };
                 let stored_secret = before.oauth.iter().find(|o| o.id == id).and_then(|o| o.client_secret.as_ref());
@@ -453,14 +473,20 @@ impl Changes {
                 };
                 let (team_id, key_id) = if p.kind == OAuthKind::Apple {
                     if let Some(key) = &client_secret {
-                        crate::auth::apple::parse_private_key(key).map_err(|e| invalid(format!("OAuth provider `{id}`: {e}")))?;
+                        crate::auth::apple::parse_private_key(key)
+                            .map_err(|e| invalid(format!("OAuth provider `{id}`: {e}")))?;
                     }
                     (apple_id("team id", p.team_id)?, apple_id("key id", p.key_id)?)
                 } else {
                     (None, None)
                 };
                 let scopes = match p.scopes {
-                    Some(scopes) if scopes.len() > 20 || scopes.iter().any(|s| s.is_empty() || s.len() > 100 || s.contains(char::is_whitespace)) => {
+                    Some(scopes)
+                        if scopes.len() > 20
+                            || scopes
+                                .iter()
+                                .any(|s| s.is_empty() || s.len() > 100 || s.contains(char::is_whitespace)) =>
+                    {
                         return Err(invalid(format!("OAuth provider `{id}`: invalid scopes")));
                     }
                     other => other.filter(|s| !s.is_empty()),
@@ -494,7 +520,11 @@ impl Changes {
             s.signups = Some(v);
         }
         let range = |what: &str, v: u64, (min, max): (u64, u64)| {
-            if (min..=max).contains(&v) { Ok(v) } else { Err(invalid(format!("{what} must be between {min} and {max} seconds"))) }
+            if (min..=max).contains(&v) {
+                Ok(v)
+            } else {
+                Err(invalid(format!("{what} must be between {min} and {max} seconds")))
+            }
         };
         if let Some(v) = self.access_token_ttl_secs {
             s.access_token_ttl_secs = Some(range("accessTokenTtlSecs", v, ACCESS_TTL_RANGE)?);
@@ -508,7 +538,9 @@ impl Changes {
                 if o != "*" {
                     let url = url::Url::parse(&o).map_err(|e| invalid(format!("CORS origin `{o}`: {e}")))?;
                     if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != o {
-                        return Err(invalid(format!("CORS origin `{o}` must be an origin like https://app.example.com")));
+                        return Err(invalid(format!(
+                            "CORS origin `{o}` must be an origin like https://app.example.com"
+                        )));
                     }
                 }
                 out.push(o);
@@ -578,7 +610,6 @@ fn is_secret_key(k: &str) -> bool {
     k.contains("password") || k.contains("secret") || k.contains("token")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,12 +630,14 @@ mod tests {
 
     #[test]
     fn smtp_input_moves_inline_passwords_out() {
-        let input = SmtpInput { url: "smtps://me:p%40ss@mail.test:465".into(), from: "App <a@b.co>".into(), password: None };
+        let input =
+            SmtpInput { url: "smtps://me:p%40ss@mail.test:465".into(), from: "App <a@b.co>".into(), password: None };
         let s = smtp_from_input(input, None).unwrap();
         assert_eq!(s.url, "smtps://me@mail.test:465");
         assert_eq!(s.password.as_deref(), Some("p@ss"));
         assert!(s.config().unwrap().url.contains("me:p%40ss@"));
-        let keep = SmtpInput { url: "smtps://me@mail.test:465".into(), from: "a@b.co".into(), password: Some(MASK.into()) };
+        let keep =
+            SmtpInput { url: "smtps://me@mail.test:465".into(), from: "a@b.co".into(), password: Some(MASK.into()) };
         assert_eq!(smtp_from_input(keep, Some(&s)).unwrap().password.as_deref(), Some("p@ss"));
         let bad = SmtpInput { url: "http://mail.test".into(), from: "a@b.co".into(), password: None };
         assert!(smtp_from_input(bad, None).is_err());

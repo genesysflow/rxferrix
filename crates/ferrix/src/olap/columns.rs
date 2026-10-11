@@ -135,7 +135,8 @@ fn sql_type(shape: &Shape, top: bool) -> String {
         Shape::Optional(inner) => sql_type(inner, top),
         Shape::List(inner) => format!("{}[]", sql_type(inner, false)),
         Shape::Struct(s) if closed(s) => {
-            let fields: Vec<String> = s.fields.iter().map(|(n, f)| format!("{} {}", ident(n), sql_type(f, false))).collect();
+            let fields: Vec<String> =
+                s.fields.iter().map(|(n, f)| format!("{} {}", ident(n), sql_type(f, false))).collect();
             format!("STRUCT({})", fields.join(", "))
         }
         Shape::Struct(_) => "JSON".into(),
@@ -224,7 +225,10 @@ mod tests {
         );
         assert!(!plan.open);
         let get = |n: &str| plan.columns.iter().find(|c| c.name == n).unwrap().expr.clone();
-        assert_eq!(get("place"), r#"json_transform(json_extract(doc, '/place'), '{"lat":"DOUBLE","label":"VARCHAR"}')"#);
+        assert_eq!(
+            get("place"),
+            r#"json_transform(json_extract(doc, '/place'), '{"lat":"DOUBLE","label":"VARCHAR"}')"#
+        );
         assert_eq!(get("raw"), "TRY(from_base64(json_extract_string(doc, '/raw/$bytes')))");
         assert_eq!(get("o'k/~x"), "json_extract_string(doc, '/o''k~1~0x')");
         assert!(plan.create_sql("t").ends_with(", \"o'k/~x\" VARCHAR)"), "{}", plan.create_sql("t"));

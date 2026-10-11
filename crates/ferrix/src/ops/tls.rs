@@ -74,10 +74,14 @@ impl AcmeSettings {
             let ok = !d.is_empty()
                 && d.len() <= 253
                 && d.contains('.')
-                && d.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                && d.split('.').all(|l| {
+                    !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
                 && d.parse::<std::net::IpAddr>().is_err();
             if !ok {
-                bail!("--https: `{d}` is not a domain name (Let's Encrypt issues certificates for public DNS names only)");
+                bail!(
+                    "--https: `{d}` is not a domain name (Let's Encrypt issues certificates for public DNS names only)"
+                );
             }
         }
         std::fs::create_dir_all(&self.cache_dir).with_context(|| format!("creating {}", self.cache_dir.display()))?;
@@ -107,7 +111,13 @@ pub enum Listen {
     Acme { https: SocketAddr, redirect: Option<SocketAddr>, acme: AcmeSettings },
     /// HTTPS with certificate files, plus an optional redirect listener. With `reload_every`, the files are checked
     /// that often and a changed, valid pair replaces the certificate without a restart.
-    CertFiles { https: SocketAddr, redirect: Option<SocketAddr>, cert: PathBuf, key: PathBuf, reload_every: Option<Duration> },
+    CertFiles {
+        https: SocketAddr,
+        redirect: Option<SocketAddr>,
+        cert: PathBuf,
+        key: PathBuf,
+        reload_every: Option<Duration>,
+    },
 }
 
 /// A digest of the certificate and key files' contents.
@@ -143,13 +153,14 @@ fn spawn_cert_reloader(
                 _ = ticks.tick() => {}
             }
             let (c, k) = (cert.clone(), key.clone());
-            let attempt = tokio::task::spawn_blocking(move || -> (Option<[u8; 32]>, crate::Result<Arc<ServerConfig>>) {
-                match files_digest(&c, &k) {
-                    Ok(d) => (Some(d), server_config_from_pem(&c, &k)),
-                    Err(e) => (None, Err(anyhow::Error::from(e).context("reading the certificate files"))),
-                }
-            })
-            .await;
+            let attempt =
+                tokio::task::spawn_blocking(move || -> (Option<[u8; 32]>, crate::Result<Arc<ServerConfig>>) {
+                    match files_digest(&c, &k) {
+                        Ok(d) => (Some(d), server_config_from_pem(&c, &k)),
+                        Err(e) => (None, Err(anyhow::Error::from(e).context("reading the certificate files"))),
+                    }
+                })
+                .await;
             let Ok((digest, config)) = attempt else { continue };
             if digest.is_some() && digest == loaded {
                 failed = None;
@@ -185,7 +196,8 @@ pub fn server_config_from_pem(cert: &Path, key: &Path) -> crate::Result<Arc<Serv
     if certs.is_empty() {
         bail!("{} contains no PEM certificate", cert.display());
     }
-    let key = PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading a private key from {}", key.display()))?;
+    let key =
+        PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading a private key from {}", key.display()))?;
     let config = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
@@ -215,7 +227,11 @@ pub fn redirect_router(https_port: u16, domains: Vec<String>) -> Router {
             let requested = host_of(&headers);
             let host = match (domains.first(), requested) {
                 (Some(first), Some(h)) => {
-                    if domains.iter().any(|d| d.eq_ignore_ascii_case(&h)) { h } else { first.clone() }
+                    if domains.iter().any(|d| d.eq_ignore_ascii_case(&h)) {
+                        h
+                    } else {
+                        first.clone()
+                    }
                 }
                 (Some(first), None) => first.clone(),
                 (None, Some(h)) => h,
@@ -317,7 +333,11 @@ fn std_listener(addr: SocketAddr) -> crate::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
-fn spawn_plain(listener: tokio::net::TcpListener, router: Router, stop: Stop) -> tokio::task::JoinHandle<crate::Result<()>> {
+fn spawn_plain(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    stop: Stop,
+) -> tokio::task::JoinHandle<crate::Result<()>> {
     tokio::spawn(async move {
         axum::serve(crate::server::nodelay(listener), router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { stopped(&stop).await })
@@ -405,7 +425,6 @@ async fn start_tls(
     }));
     Ok(RunningServer { addr, https: true, redirect_addr, stop, tasks })
 }
-
 
 #[cfg(test)]
 mod tests {

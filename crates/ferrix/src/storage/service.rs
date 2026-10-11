@@ -208,8 +208,12 @@ impl StorageService {
         clock: Arc<crate::db::Clock>,
     ) -> crate::Result<StorageService> {
         let (store, prefix, signer) = config.build_store(data_dir)?;
-        let base_url =
-            config.public_url.as_deref().or(public_url).map(|u| u.trim_end_matches('/').to_string()).unwrap_or_default();
+        let base_url = config
+            .public_url
+            .as_deref()
+            .or(public_url)
+            .map(|u| u.trim_end_matches('/').to_string())
+            .unwrap_or_default();
         let file_url_key = blake3::derive_key("ferrix storage v1 signed file url HMAC key", &key);
         let thumbnail_permits = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
         Ok(StorageService {
@@ -480,7 +484,8 @@ impl StorageService {
                         buffered_len += chunk.len();
                         buffered.push(chunk);
                         if buffered_len >= SINGLE_PUT_MAX {
-                            let parts = self.store.put_multipart(&path).await.map_err(|e| WriteError::Store(e.into()))?;
+                            let parts =
+                                self.store.put_multipart(&path).await.map_err(|e| WriteError::Store(e.into()))?;
                             let mut w = WriteMultipart::new_with_chunk_size(parts, PART_SIZE);
                             for b in buffered.drain(..) {
                                 w.put(b);
@@ -513,7 +518,11 @@ impl StorageService {
     }
 
     /// Read a blob, optionally a byte range of it.
-    pub(crate) async fn read_blob(&self, id: &str, range: Option<std::ops::Range<u64>>) -> object_store::Result<GetResult> {
+    pub(crate) async fn read_blob(
+        &self,
+        id: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> object_store::Result<GetResult> {
         let options = GetOptions { range: range.map(GetRange::Bounded), ..Default::default() };
         self.store.get_opts(&self.blob_path(id), options).await
     }
@@ -638,8 +647,11 @@ impl StorageService {
             stats.scanned += 1;
             // Direct children of the prefix named like a storage id, and `_thumbs/<storage id>/<variant>`.
             let location = meta.location.as_ref();
-            let relative =
-                if self.prefix.is_empty() { Some(location) } else { location.strip_prefix(&format!("{}/", self.prefix)) };
+            let relative = if self.prefix.is_empty() {
+                Some(location)
+            } else {
+                location.strip_prefix(&format!("{}/", self.prefix))
+            };
             let Some(relative) = relative else { continue };
             let (name, thumbnail) = match relative.strip_prefix(&thumbs_root) {
                 Some(rest) => match rest.split_once('/') {

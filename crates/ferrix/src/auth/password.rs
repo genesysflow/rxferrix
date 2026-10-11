@@ -63,9 +63,8 @@ pub async fn verify(password: String, stored: Option<String>) -> bool {
 
 /// A real argon2id hash (of a random password) with the default parameters, so verifying against it costs the same
 /// as verifying a real one.
-static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
-    hash_blocking(&super::tokens::random_token()).expect("hashing a random password works")
-});
+static DUMMY_HASH: LazyLock<String> =
+    LazyLock::new(|| hash_blocking(&super::tokens::random_token()).expect("hashing a random password works"));
 
 #[cfg(test)]
 mod tests {

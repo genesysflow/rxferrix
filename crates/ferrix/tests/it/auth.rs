@@ -38,8 +38,12 @@ mod app {
     #[query]
     pub async fn my_notes(ctx: &QueryCtx) -> Result<Vec<String>> {
         let Some(me) = ctx.auth.user_id() else { return Ok(Vec::new()) };
-        let mut notes =
-            ctx.db.query::<PrivateNote>().with_index(PrivateNote::by_owner, |q| q.eq(PrivateNote::owner, me)).collect().await?;
+        let mut notes = ctx
+            .db
+            .query::<PrivateNote>()
+            .with_index(PrivateNote::by_owner, |q| q.eq(PrivateNote::owner, me))
+            .collect()
+            .await?;
         notes.sort_by(|a, b| a.creation_time.total_cmp(&b.creation_time));
         Ok(notes.into_iter().map(|n| n.value.text).collect())
     }
@@ -117,11 +121,7 @@ fn code_of(v: &Value) -> &str {
 }
 
 fn config(mailer: &Arc<MemoryMailer>) -> AuthConfig {
-    AuthConfig::password()
-        .magic_link()
-        .mailer(mailer.clone())
-        .rate_limits(None)
-        .redirect_url("http://app.test")
+    AuthConfig::password().magic_link().mailer(mailer.clone()).rate_limits(None).redirect_url("http://app.test")
 }
 
 async fn wait_for_email(mailer: &MemoryMailer, to: &str, count: usize) -> ferrix::auth::Email {
@@ -280,7 +280,10 @@ async fn password_sign_up_sign_in_and_identity_in_functions() {
 
     // ctx.auth through the HTTP API.
     let whoami = app::whoami::path();
-    assert_eq!(http.call("query", &whoami, json!({}), None).await, (200, json!({ "status": "success", "value": null, "logLines": [] })));
+    assert_eq!(
+        http.call("query", &whoami, json!({}), None).await,
+        (200, json!({ "status": "success", "value": null, "logLines": [] }))
+    );
     let (s, b) = http.call("query", &whoami, json!({}), Some(&access)).await;
     assert_eq!((s, &b["value"]), (200, &json!("ada@example.com")));
     let (s, b) = http.call("mutation", &app::add_note::path(), json!({ "text": "anon" }), None).await;
@@ -288,7 +291,10 @@ async fn password_sign_up_sign_in_and_identity_in_functions() {
     let (s, b) = http.call("query", &whoami, json!({}), Some("not.a.token")).await;
     assert_eq!((s, code_of(&b)), (401, "invalid_token"));
     assert_eq!(http.call("mutation", &app::add_note::path(), json!({ "text": "one" }), Some(&access)).await.0, 200);
-    assert_eq!(http.call("action", &app::add_note_via_action::path(), json!({ "text": "two" }), Some(&access)).await.0, 200);
+    assert_eq!(
+        http.call("action", &app::add_note_via_action::path(), json!({ "text": "two" }), Some(&access)).await.0,
+        200
+    );
     let (_, b) = http.call("query", &app::my_notes::path(), json!({}), Some(&access)).await;
     assert_eq!(b["value"], json!(["one", "two"]));
     let (_, b) = http.call("query", &app::my_notes::path(), json!({}), None).await;
@@ -338,7 +344,10 @@ async fn refresh_rotation_reuse_detection_and_sign_out() {
     assert_eq!(s, 200, "{second}");
     let r2 = token(&second, "refreshToken");
     assert_ne!(r1, r2, "refresh tokens rotate");
-    assert_eq!(http.call("query", &whoami, json!({}), Some(&token(&second, "accessToken"))).await.1["value"], "carol@example.com");
+    assert_eq!(
+        http.call("query", &whoami, json!({}), Some(&token(&second, "accessToken"))).await.1["value"],
+        "carol@example.com"
+    );
 
     // Reusing r1 (already rotated) revokes the whole session: r2 and the access tokens stop working.
     let (s, b) = http.post("/api/auth/refresh", json!({ "refreshToken": r1 })).await;
@@ -437,7 +446,8 @@ async fn websocket_authenticate_reruns_identity_dependent_queries() {
     assert_eq!(Ws::value_of(&t1, 1), None, "unchanged results are not resent");
 
     // Mutations on this socket run as the user; `user()` reads are tracked, so a profile change pushes `me`.
-    ws.send(json!({ "type": "Mutation", "requestId": 0, "udfPath": app::add_note::path(), "args": { "text": "hi" } })).await;
+    ws.send(json!({ "type": "Mutation", "requestId": 0, "udfPath": app::add_note::path(), "args": { "text": "hi" } }))
+        .await;
     assert_eq!(ws.next_value(1).await, json!(["hi"]));
     http.call("mutation", "_system/auth:update_profile", json!({ "name": "Frank" }), Some(&access)).await;
     assert_eq!(ws.next_value(2).await["name"], "Frank");
@@ -497,7 +507,10 @@ async fn mutation_dedup_never_crosses_identities() {
     assert_ne!(theirs["result"], first["result"], "another identity must not get Alice's response");
     let mut anon = Ws::connect_session(addr, "shared").await;
     let anon_resp = anon.mutate(0, &add, json!({ "text": "anon" })).await;
-    assert_eq!((anon_resp["success"].clone(), anon_resp["errorData"]["code"].clone()), (json!(false), json!("unauthenticated")));
+    assert_eq!(
+        (anon_resp["success"].clone(), anon_resp["errorData"]["code"].clone()),
+        (json!(false), json!("unauthenticated"))
+    );
 
     let (_, notes) = http.call("query", &app::my_notes::path(), json!({}), Some(&alice)).await;
     assert_eq!(notes["value"], json!(["alice's secret"]), "Alice's mutation ran exactly once");
@@ -539,7 +552,8 @@ async fn email_verification_password_reset_and_magic_link() {
     // Password reset: same answer for unknown emails, and no email is sent for them.
     let (s, b) = http.post("/api/auth/reset/request", json!({ "email": "nobody@example.com" })).await;
     assert_eq!((s, b), (200, json!({})));
-    let (s, b) = http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "http://app.test/reset" })).await;
+    let (s, b) =
+        http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "http://app.test/reset" })).await;
     assert_eq!((s, b), (200, json!({})));
     let reset = wait_for_email(&mailer, email, 2).await;
     assert_eq!(reset.subject, "Reset your password");
@@ -547,14 +561,18 @@ async fn email_verification_password_reset_and_magic_link() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(mailer.emails().iter().all(|e| e.to != "nobody@example.com"));
     // A redirect outside the allowlist is refused outright.
-    let (s, b) = http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "https://evil.test/" })).await;
+    let (s, b) =
+        http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "https://evil.test/" })).await;
     assert_eq!((s, code_of(&b)), (400, "invalid_redirect"));
 
     // Confirm with the numeric code; earlier sessions end, the new password works, the old one doesn't.
     let code = email_code(&reset.body);
-    let (s, b) = http.post("/api/auth/reset/confirm", json!({ "email": email, "code": code, "password": "short" })).await;
+    let (s, b) =
+        http.post("/api/auth/reset/confirm", json!({ "email": email, "code": code, "password": "short" })).await;
     assert_eq!((s, code_of(&b)), (400, "weak_password"), "policy is checked before the code is used up");
-    let (s, b) = http.post("/api/auth/reset/confirm", json!({ "email": email, "code": code, "password": "new password!" })).await;
+    let (s, b) = http
+        .post("/api/auth/reset/confirm", json!({ "email": email, "code": code, "password": "new password!" }))
+        .await;
     assert_eq!(s, 200, "{b}");
     assert!(b["accessToken"].is_string());
     assert_eq!(http.call("query", &app::whoami::path(), json!({}), Some(&access)).await.0, 401, "old sessions ended");
@@ -567,10 +585,13 @@ async fn email_verification_password_reset_and_magic_link() {
     let good = email_code(&reset2.body);
     let wrong = if good == "000000" { "000001" } else { "000000" };
     for _ in 0..5 {
-        let (s, b) = http.post("/api/auth/reset/confirm", json!({ "email": email, "code": wrong, "password": "x password 2" })).await;
+        let (s, b) = http
+            .post("/api/auth/reset/confirm", json!({ "email": email, "code": wrong, "password": "x password 2" }))
+            .await;
         assert_eq!((s, code_of(&b)), (400, "invalid_code"));
     }
-    let (s, _) = http.post("/api/auth/reset/confirm", json!({ "email": email, "code": good, "password": "x password 2" })).await;
+    let (s, _) =
+        http.post("/api/auth/reset/confirm", json!({ "email": email, "code": good, "password": "x password 2" })).await;
     assert_eq!(s, 400, "the code is burned");
 
     // Magic link: signs in an existing user by link, and creates a new (verified) user by code.
@@ -584,7 +605,9 @@ async fn email_verification_password_reset_and_magic_link() {
     let newbie = "hank@example.com";
     assert_eq!(http.post("/api/auth/magic/request", json!({ "email": newbie })).await.0, 200);
     let magic = wait_for_email(&mailer, newbie, 1).await;
-    let (s, b) = http.post("/api/auth/magic/verify", json!({ "email": "HANK@example.com", "code": email_code(&magic.body) })).await;
+    let (s, b) = http
+        .post("/api/auth/magic/verify", json!({ "email": "HANK@example.com", "code": email_code(&magic.body) }))
+        .await;
     assert_eq!(s, 200, "{b}");
     let (_, me) = http.call("query", "_system/auth:me", json!({}), Some(&token(&b, "accessToken"))).await;
     assert_eq!((me["value"]["email"].clone(), me["value"]["emailVerified"].clone()), (json!(newbie), json!(true)));
@@ -595,12 +618,14 @@ async fn required_email_verification_and_disabled_signups() {
     let mailer = MemoryMailer::new();
     let t = TestApp::with_auth(config(&mailer).require_email_verification(true)).await.unwrap();
     let http = Http::new(t.serve().await.unwrap());
-    let (s, b) = http.post("/api/auth/signup", json!({ "email": "ivy@example.com", "password": "correct horse" })).await;
+    let (s, b) =
+        http.post("/api/auth/signup", json!({ "email": "ivy@example.com", "password": "correct horse" })).await;
     assert_eq!((s, b), (200, json!({ "verificationRequired": true })));
     let (s, b) = http.sign_in("ivy@example.com", "correct horse").await;
     assert_eq!((s, code_of(&b)), (403, "email_not_verified"));
     let mail = wait_for_email(&mailer, "ivy@example.com", 1).await;
-    http.post("/api/auth/verify-email/confirm", json!({ "email": "ivy@example.com", "code": email_code(&mail.body) })).await;
+    http.post("/api/auth/verify-email/confirm", json!({ "email": "ivy@example.com", "code": email_code(&mail.body) }))
+        .await;
     assert_eq!(http.sign_in("ivy@example.com", "correct horse").await.0, 200);
 
     let closed = TestApp::with_auth(config(&mailer).signups(false)).await.unwrap();
@@ -672,7 +697,8 @@ async fn start_mock_oidc() -> (SocketAddr, Mock) {
         .route(
             "/userinfo",
             get(|State(mock): State<Mock>, headers: HeaderMap| async move {
-                let token = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+                let token =
+                    headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
                 let profile = token.and_then(|t| mock.lock().unwrap().tokens.get(t).cloned());
                 match profile {
                     Some(p) => (axum::http::StatusCode::OK, axum::Json(p)),
@@ -759,11 +785,17 @@ async fn oauth_with_mock_oidc_provider() {
     assert!(!fragment(&replayed).contains_key("ferrix_access_token"));
 
     // Redirects outside the allowlist are refused before leaving for the provider.
-    let res = http.client.get(format!("{}/api/auth/oauth/mock?redirect_to=https://evil.test/", http.base)).send().await.unwrap();
+    let res = http
+        .client
+        .get(format!("{}/api/auth/oauth/mock?redirect_to=https://evil.test/", http.base))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 400);
     // Unknown provider; unknown state.
     assert_eq!(http.client.get(format!("{}/api/auth/oauth/nope", http.base)).send().await.unwrap().status(), 404);
-    let res = http.client.get(format!("{}/api/auth/oauth/mock/callback?code=x&state=y", http.base)).send().await.unwrap();
+    let res =
+        http.client.get(format!("{}/api/auth/oauth/mock/callback?code=x&state=y", http.base)).send().await.unwrap();
     assert_eq!(res.status(), 400);
 
     // Linking by verified email takes over an unverified password account (and removes its password).
@@ -798,21 +830,38 @@ async fn admins_setup_token_and_admin_identity() {
     let page = http.client.get(format!("{}/_/setup", http.base)).send().await.unwrap();
     assert_eq!(page.status(), 200);
     assert!(page.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
-    let (s, b) = http.post("/api/auth/admin/setup", json!({ "token": "wrong", "email": "root@example.com", "password": "admin password" })).await;
+    let (s, b) = http
+        .post(
+            "/api/auth/admin/setup",
+            json!({ "token": "wrong", "email": "root@example.com", "password": "admin password" }),
+        )
+        .await;
     assert_eq!((s, code_of(&b)), (401, "invalid_setup_token"));
-    let (s, b) = http.post("/api/auth/admin/setup", json!({ "token": setup, "email": "Root@example.com", "password": "admin password" })).await;
+    let (s, b) = http
+        .post(
+            "/api/auth/admin/setup",
+            json!({ "token": setup, "email": "Root@example.com", "password": "admin password" }),
+        )
+        .await;
     assert_eq!(s, 200, "{b}");
     assert!(b["adminId"].is_string() && b.get("userId").is_none());
-    let (s, _) = http.post("/api/auth/admin/setup", json!({ "token": setup, "email": "x@example.com", "password": "admin password" })).await;
+    let (s, _) = http
+        .post(
+            "/api/auth/admin/setup",
+            json!({ "token": setup, "email": "x@example.com", "password": "admin password" }),
+        )
+        .await;
     assert_eq!(s, 401, "the setup token works once");
     assert!(app.auth().create_setup_token(&app).await.unwrap().is_none());
 
     // Admin sign-in issues tokens with the admin claim; functions see is_admin().
     app.auth().create_admin(&app, "ops@example.com", "ops password".into()).await.unwrap();
     assert!(app.auth().create_admin(&app, "ops@example.com", "ops password".into()).await.is_err());
-    let (s, b) = http.post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "wrong password" })).await;
+    let (s, b) =
+        http.post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "wrong password" })).await;
     assert_eq!((s, code_of(&b)), (401, "invalid_credentials"));
-    let (s, admin) = http.post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "ops password" })).await;
+    let (s, admin) =
+        http.post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "ops password" })).await;
     assert_eq!(s, 200);
     let admin_access = token(&admin, "accessToken");
     let (s, b) = http.call("query", &app::admin_only::path(), json!({}), Some(&admin_access)).await;
@@ -830,13 +879,19 @@ async fn admins_setup_token_and_admin_identity() {
     let (_, b) = http.call("query", &app::admin_only::path(), json!({}), None).await;
     assert_eq!(code_of(&b), "unauthenticated");
     // A user can't use the admin sign-in.
-    let (s, _) = http.post("/api/auth/admin/signin", json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (s, _) =
+        http.post("/api/auth/admin/signin", json!({ "email": "user@example.com", "password": "user password" })).await;
     assert_eq!(s, 401);
 
     // reset-password (the CLI path) ends the admin's sessions.
     app.auth().reset_admin_password(&app, "ops@example.com", "new ops password".into()).await.unwrap();
-    assert_eq!(http.call("query", &app::admin_only::path(), json!({}), Some(&token(&refreshed, "accessToken"))).await.0, 401);
-    let (s, _) = http.post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "new ops password" })).await;
+    assert_eq!(
+        http.call("query", &app::admin_only::path(), json!({}), Some(&token(&refreshed, "accessToken"))).await.0,
+        401
+    );
+    let (s, _) = http
+        .post("/api/auth/admin/signin", json!({ "email": "ops@example.com", "password": "new ops password" }))
+        .await;
     assert_eq!(s, 200);
     assert!(app.auth().reset_admin_password(&app, "nobody@example.com", "whatever pw".into()).await.is_err());
 }

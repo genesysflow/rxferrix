@@ -59,7 +59,11 @@ pub struct SendResult {
 
 /// A channel's messages, newest first (the app shows them bottom-up and loads older pages on scroll).
 #[query]
-pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: PaginationOpts) -> Result<PaginationResult<MessageView>> {
+pub async fn list(
+    ctx: &QueryCtx,
+    channel: Id<Channel>,
+    pagination_opts: PaginationOpts,
+) -> Result<PaginationResult<MessageView>> {
     let user = ctx.auth.require_user()?;
     require_readable(&ctx.db, channel, user).await?;
     let page = ctx
@@ -131,7 +135,12 @@ async fn view(ctx: &QueryCtx, names: &Names, me: Id<User>, message: Doc<Message>
 /// Posts a message (text and/or an uploaded image), or runs a slash command:
 /// `/remind me in <n> <seconds|minutes|hours> [to] <text>`.
 #[mutation]
-pub async fn send(ctx: &MutationCtx, channel: Id<Channel>, body: String, attachment: Option<Id<StoredFile>>) -> Result<SendResult> {
+pub async fn send(
+    ctx: &MutationCtx,
+    channel: Id<Channel>,
+    body: String,
+    attachment: Option<Id<StoredFile>>,
+) -> Result<SendResult> {
     let user = ctx.auth.require_user()?;
     let (_, member) = require_member(&ctx.db, channel, user).await?;
     let body = body.trim().to_string();
@@ -147,7 +156,10 @@ pub async fn send(ctx: &MutationCtx, channel: Id<Channel>, body: String, attachm
     if let Some(file) = attachment {
         check_image(ctx, file).await?;
     }
-    let id = ctx.db.insert(Message { channel, author: user, body, attachment, edited: false, kind: "message".into() }).await?;
+    let id = ctx
+        .db
+        .insert(Message { channel, author: user, body, attachment, edited: false, kind: "message".into() })
+        .await?;
     // Sending ends "typing…" and means the author has read the channel, up to their own message.
     clear_typing(&ctx.db, channel, user).await?;
     let sent_at = ctx.db.get(id).await?.map_or_else(|| ctx.now(), |m| m.creation_time);
@@ -168,7 +180,10 @@ async fn command(ctx: &MutationCtx, channel: Id<Channel>, user: Id<User>, body: 
             log::info!(seconds = delay.as_secs(), "reminder scheduled");
             Ok(SendResult { message: None, notice: Some(format!("Okay, I'll remind you in {when}: {text}")) })
         }
-        Some(other) => Err(user_error("unknown_command", format!("Unknown command {other}. Try /remind me in 5 minutes to stretch"))),
+        Some(other) => Err(user_error(
+            "unknown_command",
+            format!("Unknown command {other}. Try /remind me in 5 minutes to stretch"),
+        )),
         None => Err(user_error("empty_message", "Write something or attach an image")),
     }
 }
@@ -204,7 +219,13 @@ pub fn parse_remind(words: &[&str]) -> Option<(Duration, String)> {
 
 fn describe(d: Duration) -> String {
     let s = d.as_secs();
-    let (n, unit) = if s.is_multiple_of(3600) { (s / 3600, "hour") } else if s.is_multiple_of(60) { (s / 60, "minute") } else { (s, "second") };
+    let (n, unit) = if s.is_multiple_of(3600) {
+        (s / 3600, "hour")
+    } else if s.is_multiple_of(60) {
+        (s / 60, "minute")
+    } else {
+        (s, "second")
+    };
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -215,7 +236,8 @@ pub async fn deliver_reminder(ctx: &MutationCtx, channel: Id<Channel>, user: Id<
         log::info!("reminder dropped: the user left the channel");
         return Ok(());
     }
-    let message = Message { channel, author: user, body: text, attachment: None, edited: false, kind: "reminder".into() };
+    let message =
+        Message { channel, author: user, body: text, attachment: None, edited: false, kind: "reminder".into() };
     ctx.db.insert(message).await?;
     Ok(())
 }
@@ -322,7 +344,9 @@ pub async fn insert_seed(ctx: &MutationCtx, channel: Id<Channel>, start: u32, n:
     require_member(&ctx.db, channel, user).await?;
     for i in start + 1..=start + n {
         let body = format!("Sample message #{i} of {total}");
-        ctx.db.insert(Message { channel, author: user, body, attachment: None, edited: false, kind: "message".into() }).await?;
+        ctx.db
+            .insert(Message { channel, author: user, body, attachment: None, edited: false, kind: "message".into() })
+            .await?;
     }
     Ok(())
 }

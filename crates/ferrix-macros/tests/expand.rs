@@ -88,12 +88,7 @@ pub mod todos {
         Ok(Some(Doc {
             id,
             creation_time: 1.5,
-            value: Todo {
-                text: "t".into(),
-                done: true,
-                created_by: None,
-                priority_level: 2,
-            },
+            value: Todo { text: "t".into(), done: true, created_by: None, priority_level: 2 },
         }))
     }
 
@@ -316,7 +311,8 @@ fn tables_are_registered() {
     // `shaped` has a test of its own (`shapes_follow_serde`).
     let mut defs: Vec<TableDef> = TABLES.iter().map(|f| f()).filter(|d| d.name != "shaped").collect();
     defs.sort_by_key(|d| d.name);
-    let summary: Vec<(&str, Vec<IndexDef>, String)> = defs.iter().map(|d| (d.name, d.indexes.clone(), (d.ts)())).collect();
+    let summary: Vec<(&str, Vec<IndexDef>, String)> =
+        defs.iter().map(|d| (d.name, d.indexes.clone(), (d.ts)())).collect();
     assert_eq!(
         summary,
         vec![
@@ -374,7 +370,11 @@ fn search_and_vector_indexes() {
                 name: "search_b",
                 search_field: "b",
                 filter_fields: vec!["a"],
-                tokenizer: Tokenizer { kind: TokenizerKind::Porter, language: Some("english"), remove_diacritics: false },
+                tokenizer: Tokenizer {
+                    kind: TokenizerKind::Porter,
+                    language: Some("english"),
+                    remove_diacritics: false
+                },
             },
             SearchIndexDef {
                 name: "search_b_sub",
@@ -386,7 +386,11 @@ fn search_and_vector_indexes() {
                 name: "search_b_ro",
                 search_field: "b",
                 filter_fields: vec![],
-                tokenizer: Tokenizer { kind: TokenizerKind::Snowball, language: Some("romanian"), remove_diacritics: true },
+                tokenizer: Tokenizer {
+                    kind: TokenizerKind::Snowball,
+                    language: Some("romanian"),
+                    remove_diacritics: true
+                },
             },
         ]
     );
@@ -431,17 +435,9 @@ fn table_handles() {
 #[test]
 fn table_serde_ts_and_derives() {
     use todos::Todo;
-    let t = Todo {
-        text: "x".into(),
-        done: false,
-        created_by: Some("me".into()),
-        priority_level: 3,
-    };
+    let t = Todo { text: "x".into(), done: false, created_by: Some("me".into()), priority_level: 3 };
     let v = serde_json::to_value(&t).unwrap();
-    assert_eq!(
-        v,
-        json!({"text": "x", "done": false, "createdBy": "me", "prio": 3})
-    );
+    assert_eq!(v, json!({"text": "x", "done": false, "createdBy": "me", "prio": 3}));
     let back: Todo = serde_json::from_value(v).unwrap();
     assert_eq!(back, t.clone()); // PartialEq (user derive) + Clone (added)
     let _ = format!("{t:?}"); // Debug (added)
@@ -450,10 +446,7 @@ fn table_serde_ts_and_derives() {
         "{ \n/**\n * The text.\n */\ntext: string, done: boolean, createdBy: string | null, prio: number, }"
     );
     // Doc comments are kept (ts-rs picks them up).
-    assert_eq!(
-        <Todo as ferrix::__private::ts_rs::TS>::docs().as_deref(),
-        Some("/**\n * A todo item.\n */\n")
-    );
+    assert_eq!(<Todo as ferrix::__private::ts_rs::TS>::docs().as_deref(), Some("/**\n * A todo item.\n */\n"));
 }
 
 #[test]
@@ -504,40 +497,19 @@ fn function_paths() {
     assert_eq!(todos::list::path(), "todos:list");
     assert_eq!(<todos::add_many as FunctionRef>::path(), "todos:add_many");
     assert_eq!(nested::deeper::deep::path(), "nested/deeper:deep");
-    assert_eq!(
-        function_path(def("deep").module_path, "deep"),
-        "nested/deeper:deep"
-    );
+    assert_eq!(function_path(def("deep").module_path, "deep"), "nested/deeper:deep");
 }
 
 #[test]
 fn ts_signatures() {
     let ts = |n| (def(n).ts)();
-    assert_eq!(
-        ts("list"),
-        (
-            "{ done?: boolean | null, limit: number, }".to_owned(),
-            "Array<string>".to_owned()
-        )
-    );
+    assert_eq!(ts("list"), ("{ done?: boolean | null, limit: number, }".to_owned(), "Array<string>".to_owned()));
     // ts-rs renders an empty struct as `Record<symbol, never>`.
-    assert_eq!(
-        ts("count"),
-        ("Record<symbol, never>".to_owned(), "bigint".to_owned())
-    );
+    assert_eq!(ts("count"), ("Record<symbol, never>".to_owned(), "bigint".to_owned()));
     // Param doc comments and `#[ts]` / `#[serde]` param attributes move to the args struct fields.
-    assert_eq!(
-        ts("add_many").0,
-        "{ \n/**\n * How many to add.\n */\nn: number, prefixText?: string | null, }"
-    );
+    assert_eq!(ts("add_many").0, "{ \n/**\n * How many to add.\n */\nn: number, prefixText?: string | null, }");
     assert_eq!(ts("secret").1, "null");
-    assert_eq!(
-        ts("get_doc"),
-        (
-            "{ id: Id<\"todos\">, }".to_owned(),
-            "Doc<\"todos\"> | null".to_owned()
-        )
-    );
+    assert_eq!(ts("get_doc"), ("{ id: Id<\"todos\">, }".to_owned(), "Doc<\"todos\"> | null".to_owned()));
 }
 
 #[test]
@@ -563,44 +535,27 @@ fn objects_serialize_camel_case_and_are_named_in_ts() {
 
 #[test]
 fn handlers_round_trip() {
-    assert_eq!(
-        run("list", json!({"done": true, "limit": 2})).unwrap(),
-        json!(["done=Some(true)", "limit=2"])
-    );
+    assert_eq!(run("list", json!({"done": true, "limit": 2})).unwrap(), json!(["done=Some(true)", "limit=2"]));
     // Missing Option arg = None.
-    assert_eq!(
-        run("list", json!({"limit": 2})).unwrap(),
-        json!(["done=None", "limit=2"])
-    );
+    assert_eq!(run("list", json!({"limit": 2})).unwrap(), json!(["done=None", "limit=2"]));
     assert_eq!(run("count", json!({})).unwrap(), json!(42));
     assert_eq!(run("bump", json!({"x": 41})).unwrap(), json!(42));
     assert_eq!(run("t", json!({"x": 1, "y": 2})).unwrap(), json!(3));
     let err = run("list", json!({"done": true})).unwrap_err();
-    assert!(
-        err.to_string().starts_with("Invalid args for list: "),
-        "{err}"
-    );
+    assert!(err.to_string().starts_with("Invalid args for list: "), "{err}");
     let err = run("add", json!({"text": ""})).unwrap_err();
     assert_eq!(err.downcast_ref::<UserError>().unwrap().code, "empty");
     // camelCase arg names on the wire.
     let out = run("add_many", json!({"n": 2, "prefixText": "p"})).unwrap();
-    assert_eq!(
-        out,
-        json!(["2:p0", "2:p1", "done=Some(true)", "limit=3", "42"])
-    );
+    assert_eq!(out, json!(["2:p0", "2:p1", "done=Some(true)", "limit=3", "42"]));
     let id = "0000000700000000000000000000002a";
     let out = run("get_doc", json!({"id": id})).unwrap();
-    assert_eq!(
-        out,
-        json!({"_id": id, "_creationTime": 1.5, "text": "t", "done": true, "createdBy": null, "prio": 2})
-    );
+    assert_eq!(out, json!({"_id": id, "_creationTime": 1.5, "text": "t", "done": true, "createdBy": null, "prio": 2}));
 }
 
 #[test]
 fn handler_futures_are_send_and_static() {
-    let Handler::Query(h) = def("list").handler else {
-        panic!()
-    };
+    let Handler::Query(h) = def("list").handler else { panic!() };
     let fut = h(ferrix::QueryCtx::mock(), json!({"limit": 1}));
     assert_send(&fut);
     fn is_static<T: 'static>(_: T) {}
@@ -611,10 +566,7 @@ fn handler_futures_are_send_and_static() {
 fn args_structs_and_tuple_conversions() {
     type ListArgs = <todos::list as FunctionRef>::Args;
     let a: ListArgs = (Some(false), 7).into();
-    assert_eq!(
-        serde_json::to_value(&a).unwrap(),
-        json!({"done": false, "limit": 7})
-    );
+    assert_eq!(serde_json::to_value(&a).unwrap(), json!({"done": false, "limit": 7}));
     let a: <todos::add as FunctionRef>::Args = ("hi".to_owned(),).into();
     assert_eq!(a.text, "hi");
     let _: <todos::count as FunctionRef>::Args = ().into();
@@ -670,27 +622,15 @@ fn user_fns_stay_callable_and_shadowing_works() {
     // The user's fn keeps its name, visibility and signature.
     let out = block_on(todos::list(&ferrix::QueryCtx::mock(), Some(true), 3)).unwrap();
     assert_eq!(out, vec!["done=Some(true)", "limit=3"]);
-    assert_eq!(
-        block_on(shadowing::channel(&ferrix::QueryCtx::mock())).unwrap(),
-        1
-    );
-    assert_eq!(
-        block_on(shadowing::post(&ferrix::MutationCtx::mock(), "c".into())).unwrap(),
-        "c!"
-    );
+    assert_eq!(block_on(shadowing::channel(&ferrix::QueryCtx::mock())).unwrap(), 1);
+    assert_eq!(block_on(shadowing::post(&ferrix::MutationCtx::mock(), "c".into())).unwrap(), "c!");
     assert_eq!(shadowing::bindings(), 4);
     // ... and the type-namespace reference sits beside it.
     assert_eq!(<shadowing::post as FunctionRef>::path(), "shadowing:post");
     assert_eq!(run("post", json!({"channel": "x"})).unwrap(), json!("x!"));
     assert_eq!(shadowing::list_path(), "todos:list");
-    assert_eq!(
-        block_on(shadowing::uses_imported_list()).unwrap(),
-        vec!["done=None", "limit=1"]
-    );
-    assert_eq!(
-        block_on(ferrix::ActionCtx::mock().run_query::<shadowing::channel>(())).unwrap(),
-        1
-    );
+    assert_eq!(block_on(shadowing::uses_imported_list()).unwrap(), vec!["done=None", "limit=1"]);
+    assert_eq!(block_on(ferrix::ActionCtx::mock().run_query::<shadowing::channel>(())).unwrap(), 1);
 }
 
 /// Shapes emitted by `#[table]` and `#[object]` (`ferrix::shape`).
@@ -698,7 +638,13 @@ pub mod shapes {
     use ferrix_macros::{object, table};
 
     /// A plain serde type without `HasShape`: JSON.
-    #[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS, Clone, Debug)]
+    #[derive(
+        ::ferrix::__private::serde::Serialize,
+        ::ferrix::__private::serde::Deserialize,
+        ::ferrix::__private::ts_rs::TS,
+        Clone,
+        Debug,
+    )]
     #[serde(crate = "::ferrix::__private::serde")]
     #[ts(crate = "::ferrix::__private::ts_rs")]
     pub struct Opaque {
@@ -766,7 +712,10 @@ fn shapes_follow_serde() {
     assert_eq!(get("tags"), Shape::List(Box::new(Shape::Text)));
     assert_eq!(get("level"), Shape::Text, "a unit-only enum is its variant names");
     assert_eq!(get("opaque"), Shape::Json, "no HasShape: JSON");
-    assert_eq!(get("loud"), Shape::Struct(StructShape { fields: vec![("SOME_FIELD".into(), Shape::Bool)], open: false }));
+    assert_eq!(
+        get("loud"),
+        Shape::Struct(StructShape { fields: vec![("SOME_FIELD".into(), Shape::Bool)], open: false })
+    );
     let Shape::Struct(tree) = get("tree") else { panic!("a struct") };
     assert_eq!(tree.fields[0].1, Shape::List(Box::new(Shape::Json)), "recursion stops");
     assert_eq!(get("raw"), Shape::List(Box::new(Shape::Int)));

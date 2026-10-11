@@ -154,13 +154,21 @@ pub async fn list(
     let (since, until) = (since.unwrap_or(f64::MIN), until.unwrap_or(f64::MAX));
     let q = ctx.db.query::<AuditEntry>();
     let q = if let Some(t) = target.clone() {
-        q.with_index(AuditEntry::by_target, |r| r.eq(AuditEntry::target_id, Some(t)).gte(AuditEntry::at, since).lte(AuditEntry::at, until))
+        q.with_index(AuditEntry::by_target, |r| {
+            r.eq(AuditEntry::target_id, Some(t)).gte(AuditEntry::at, since).lte(AuditEntry::at, until)
+        })
     } else if let Some(a) = admin.clone() {
-        q.with_index(AuditEntry::by_admin, |r| r.eq(AuditEntry::admin, Some(a)).gte(AuditEntry::at, since).lte(AuditEntry::at, until))
+        q.with_index(AuditEntry::by_admin, |r| {
+            r.eq(AuditEntry::admin, Some(a)).gte(AuditEntry::at, since).lte(AuditEntry::at, until)
+        })
     } else if let Some(a) = action.clone() {
-        q.with_index(AuditEntry::by_action, |r| r.eq(AuditEntry::action, a).gte(AuditEntry::at, since).lte(AuditEntry::at, until))
+        q.with_index(AuditEntry::by_action, |r| {
+            r.eq(AuditEntry::action, a).gte(AuditEntry::at, since).lte(AuditEntry::at, until)
+        })
     } else if let Some(t) = table.clone() {
-        q.with_index(AuditEntry::by_table, |r| r.eq(AuditEntry::target_table, Some(t)).gte(AuditEntry::at, since).lte(AuditEntry::at, until))
+        q.with_index(AuditEntry::by_table, |r| {
+            r.eq(AuditEntry::target_table, Some(t)).gte(AuditEntry::at, since).lte(AuditEntry::at, until)
+        })
     } else {
         q.with_index(AuditEntry::by_at, |r| r.gte(AuditEntry::at, since).lte(AuditEntry::at, until))
     };

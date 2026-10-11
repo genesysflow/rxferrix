@@ -23,18 +23,12 @@ fn func(kind: FnKind, internal: bool, item: TokenStream) -> String {
 
 fn table_err(attr: TokenStream, item: TokenStream) -> String {
     let err = expand_table(attr, item).expect_err("expansion fails");
-    err.into_iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
+    err.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
 }
 
 fn func_err(kind: FnKind, attr: TokenStream, item: TokenStream) -> String {
     let err = expand_function(kind, false, attr, item).expect_err("expansion fails");
-    err.into_iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
+    err.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
 }
 
 // ----------------------------------------------------------------------------------------------- #[table]
@@ -385,7 +379,13 @@ fn dev_only_errors() {
         "fn_err_dev_only",
         [quote!(dev_only, dev_only), quote!(dev_only = true), quote!(internal)]
             .into_iter()
-            .map(|attr| func_err(FnKind::Mutation, attr, quote!(async fn f(ctx: &MutationCtx) -> Result<()> {})))
+            .map(|attr| func_err(
+                FnKind::Mutation,
+                attr,
+                quote!(
+                    async fn f(ctx: &MutationCtx) -> Result<()> {}
+                )
+            ))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -442,8 +442,18 @@ fn object_errors() {
     insta::assert_snapshot!(
         "object_err",
         [
-            object_err(quote!(x), quote!(pub struct A {})),
-            object_err(quote!(), quote!(pub fn f() {})),
+            object_err(
+                quote!(x),
+                quote!(
+                    pub struct A {}
+                )
+            ),
+            object_err(
+                quote!(),
+                quote!(
+                    pub fn f() {}
+                )
+            ),
             object_err(
                 quote!(),
                 quote! {
@@ -462,19 +472,11 @@ fn object_errors() {
 fn internal_variants() {
     insta::assert_snapshot!(
         "internal_query",
-        func(
-            FnKind::Query,
-            true,
-            quote! { async fn iq(ctx: &QueryCtx) -> Result<()> { Ok(()) } }
-        )
+        func(FnKind::Query, true, quote! { async fn iq(ctx: &QueryCtx) -> Result<()> { Ok(()) } })
     );
     insta::assert_snapshot!(
         "internal_mutation",
-        func(
-            FnKind::Mutation,
-            true,
-            quote! { async fn im(ctx: &MutationCtx, x: i32) -> Result<i32> { Ok(x) } }
-        )
+        func(FnKind::Mutation, true, quote! { async fn im(ctx: &MutationCtx, x: i32) -> Result<i32> { Ok(x) } })
     );
     insta::assert_snapshot!(
         "internal_action",
@@ -650,10 +652,7 @@ fn migration(attr: TokenStream, item: TokenStream) -> String {
 
 fn migration_err(attr: TokenStream, item: TokenStream) -> String {
     let err = crate::migration::expand_migration(attr, item).expect_err("expansion fails");
-    err.into_iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
+    err.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
 }
 
 #[test]
@@ -756,17 +755,29 @@ fn workflow_expansion() {
 
 #[test]
 fn workflow_errors() {
-    let dev_only = func_err(FnKind::Workflow, quote!(dev_only), quote! {
-        pub async fn w(step: &WorkflowCtx) -> Result<()> { BODY }
-    });
+    let dev_only = func_err(
+        FnKind::Workflow,
+        quote!(dev_only),
+        quote! {
+            pub async fn w(step: &WorkflowCtx) -> Result<()> { BODY }
+        },
+    );
     assert!(dev_only.contains("#[workflow] takes no arguments"), "{dev_only}");
-    let wrong_ctx = func_err(FnKind::Workflow, TokenStream::new(), quote! {
-        pub async fn w(ctx: &MutationCtx) -> Result<()> { BODY }
-    });
+    let wrong_ctx = func_err(
+        FnKind::Workflow,
+        TokenStream::new(),
+        quote! {
+            pub async fn w(ctx: &MutationCtx) -> Result<()> { BODY }
+        },
+    );
     let expected = "#[workflow] functions take `&WorkflowCtx` as their first parameter, found `&MutationCtx`";
     assert!(wrong_ctx.contains(expected), "{wrong_ctx}");
-    let no_ctx = func_err(FnKind::Workflow, TokenStream::new(), quote! {
-        pub async fn w(user: String) -> Result<()> { BODY }
-    });
+    let no_ctx = func_err(
+        FnKind::Workflow,
+        TokenStream::new(),
+        quote! {
+            pub async fn w(user: String) -> Result<()> { BODY }
+        },
+    );
     assert!(no_ctx.contains("`ctx: &WorkflowCtx`"), "{no_ctx}");
 }

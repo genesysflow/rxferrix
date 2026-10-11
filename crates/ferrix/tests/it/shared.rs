@@ -109,7 +109,10 @@ impl Client {
     /// Next message (Pings skipped); Transitions are checked and applied.
     pub async fn recv(&mut self) -> ServerMessage {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(10), self.rx.recv()).await.expect("timed out").expect("worker stopped");
+            let msg = tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
+                .await
+                .expect("timed out")
+                .expect("worker stopped");
             self.diffs += crate::common::check_wire_diffs(&msg, &self.results);
             match &msg {
                 ServerMessage::Ping => continue,
@@ -188,7 +191,11 @@ impl Client {
 /// Executions of `path` recorded in the execution log, by caller identity.
 pub async fn executions(app: &App, path: &str) -> BTreeMap<Option<String>, usize> {
     app.logs().flush().await.unwrap();
-    let entries = app.logs().query(LogFilter { path_prefix: Some(path.into()), limit: Some(10_000), ..Default::default() }).await.unwrap();
+    let entries = app
+        .logs()
+        .query(LogFilter { path_prefix: Some(path.into()), limit: Some(10_000), ..Default::default() })
+        .await
+        .unwrap();
     let mut by = BTreeMap::new();
     for e in entries.into_iter().filter(|e| e.path == path) {
         *by.entry(e.identity).or_default() += 1;
@@ -230,7 +237,9 @@ fn texts(value: &Value) -> Vec<String> {
 // Dedup over real sockets
 // ---------------------------------------------------------------------------------------------------------------------
 
-async fn ws_connect(addr: SocketAddr) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+async fn ws_connect(
+    addr: SocketAddr,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
     let connect = json!({ "type": "Connect", "sessionId": "x", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "t" });
     ws.send(Message::text(connect.to_string())).await.unwrap();
@@ -340,7 +349,11 @@ async fn identity_separation() {
         assert!(c.value(2).as_str().unwrap().ends_with(":1"));
     }
     let diff = |after: BTreeMap<Option<String>, usize>, before: BTreeMap<Option<String>, usize>| {
-        after.into_iter().map(|(k, v)| (k.clone(), v - before.get(&k).copied().unwrap_or(0))).filter(|(_, v)| *v > 0).collect::<BTreeMap<_, _>>()
+        after
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v - before.get(&k).copied().unwrap_or(0)))
+            .filter(|(_, v)| *v > 0)
+            .collect::<BTreeMap<_, _>>()
     };
     let user = |id: &str| Some(format!("user:{id}"));
     assert_eq!(
@@ -353,7 +366,11 @@ async fn identity_separation() {
         BTreeMap::from([(None, 1), (user(&alice), 2), (user(&bob), 1)]),
         "session-dependent: one per session"
     );
-    assert_eq!(diff(executions(&app, &fns::everyone::path()).await, everyone).values().sum::<usize>(), 1, "auth-free: one for all");
+    assert_eq!(
+        diff(executions(&app, &fns::everyone::path()).await, everyone).values().sum::<usize>(),
+        1,
+        "auth-free: one for all"
+    );
 
     // Signing out on the socket moves its subscriptions to the anonymous shared queries (no execution needed).
     let before = total_executions(&app, &fns::my_id::path()).await;
@@ -386,7 +403,8 @@ async fn query_that_starts_reading_auth_is_split() {
     wait_stats(&app, "one shared query", |s| s.shared_queries == 1).await;
 
     t.mutation::<todos::add>(("x".to_string(),)).await.unwrap();
-    let expected = [json!("anon:1"), json!(format!("{alice}:1")), json!(format!("{bob}:1")), json!(format!("{alice}:1"))];
+    let expected =
+        [json!("anon:1"), json!(format!("{alice}:1")), json!(format!("{bob}:1")), json!(format!("{alice}:1"))];
     for (c, want) in clients.iter_mut().zip(&expected) {
         c.until(|c| c.value(7) != json!("few:0")).await;
         assert_eq!(&c.value(7), want);
@@ -498,7 +516,13 @@ async fn churn_and_disconnect_leave_the_manager_empty() {
                 c.modify(mods).await;
                 live.push(qid);
                 if step % 5 == 0 {
-                    app.run_mutation(&todos::add::path(), json!({ "text": format!("c{i}s{step}") }), &Identity::default()).await.unwrap();
+                    app.run_mutation(
+                        &todos::add::path(),
+                        json!({ "text": format!("c{i}s{step}") }),
+                        &Identity::default(),
+                    )
+                    .await
+                    .unwrap();
                 }
             }
             // Half unsubscribe everything first; the other half just disconnect.
@@ -554,8 +578,15 @@ async fn slow_consumer_is_coalesced_and_does_not_stall_others() {
     let final_ts = app.db().write_log().latest();
     slow.until(|c| c.version.ts >= final_ts).await;
     assert_eq!(slow.value(1), json!(COMMITS));
-    assert!(slow.transitions < COMMITS, "updates were coalesced: {} transitions for {COMMITS} commits", slow.transitions);
-    println!("slow consumer: {} transitions for {COMMITS} commits; fast consumer worst latency {worst:?}", slow.transitions);
+    assert!(
+        slow.transitions < COMMITS,
+        "updates were coalesced: {} transitions for {COMMITS} commits",
+        slow.transitions
+    );
+    println!(
+        "slow consumer: {} transitions for {COMMITS} commits; fast consumer worst latency {worst:?}",
+        slow.transitions
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -581,7 +612,10 @@ async fn slow_query_does_not_hold_up_others() {
         assert_eq!(fast.value(1), json!(i));
     }
     let fast_done = started.elapsed();
-    assert!(fast_done < Duration::from_millis(SLOW_MS as u64 / 2), "the fast query waited for the slow one: {fast_done:?}");
+    assert!(
+        fast_done < Duration::from_millis(SLOW_MS as u64 / 2),
+        "the fast query waited for the slow one: {fast_done:?}"
+    );
 
     // The slow subscriber catches up, with a result valid at the ts it is sent at.
     let final_ts = app.db().write_log().latest();
@@ -623,7 +657,13 @@ async fn connection_with_misaligned_slow_queries_still_gets_updates() {
         }
     }
     writer.await.unwrap();
-    assert!(during >= 5, "only {during} transitions while commits went on (from ts {start_ts} to {}; latest {}; {:?})", c.version.ts, app.db().write_log().latest(), app.subscription_stats());
+    assert!(
+        during >= 5,
+        "only {during} transitions while commits went on (from ts {start_ts} to {}; latest {}; {:?})",
+        c.version.ts,
+        app.db().write_log().latest(),
+        app.subscription_stats()
+    );
     let final_ts = app.db().write_log().latest();
     c.until(|c| c.version.ts >= final_ts).await;
     let n = app.run_query(&fns::everyone::path(), json!({}), &Identity::default()).await.result.unwrap();

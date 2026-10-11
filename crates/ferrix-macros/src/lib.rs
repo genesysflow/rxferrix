@@ -83,34 +83,19 @@ pub fn migration(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// runs with `--dev`, and generated into `devApi` instead of `api`.
 #[proc_macro_attribute]
 pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Query,
-        false,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Query, false, attr.into(), item.into()))
 }
 
 /// Declares a public mutation function. See `docs/CONTRACT.md` §3.2. Takes `dev_only` like `#[query]`.
 #[proc_macro_attribute]
 pub fn mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Mutation,
-        false,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Mutation, false, attr.into(), item.into()))
 }
 
 /// Declares a public action function. See `docs/CONTRACT.md` §3.2. Takes `dev_only` like `#[query]`.
 #[proc_macro_attribute]
 pub fn action(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Action,
-        false,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Action, false, attr.into(), item.into()))
 }
 
 /// Declares a durable workflow: an `async fn` taking `step: &WorkflowCtx` whose steps (`step.run_query`,
@@ -133,32 +118,17 @@ pub fn workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Declares a query that cannot be called by clients. See `docs/CONTRACT.md` §3.2.
 #[proc_macro_attribute]
 pub fn internal_query(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Query,
-        true,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Query, true, attr.into(), item.into()))
 }
 
 /// Declares a mutation that cannot be called by clients. See `docs/CONTRACT.md` §3.2.
 #[proc_macro_attribute]
 pub fn internal_mutation(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Mutation,
-        true,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Mutation, true, attr.into(), item.into()))
 }
 
 /// Declares an action that cannot be called by clients. See `docs/CONTRACT.md` §3.2.
 #[proc_macro_attribute]
 pub fn internal_action(attr: TokenStream, item: TokenStream) -> TokenStream {
-    into_tokens(expand_function(
-        FnKind::Action,
-        true,
-        attr.into(),
-        item.into(),
-    ))
+    into_tokens(expand_function(FnKind::Action, true, attr.into(), item.into()))
 }

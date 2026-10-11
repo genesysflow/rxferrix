@@ -102,10 +102,12 @@ async fn setup() -> (TestApp, Http, String, String, String) {
     let app = t.app().clone();
     let http = Http::new(t.serve().await.unwrap());
     app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
-    let (s, admin) =
-        http.post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" })).await;
+    let (s, admin) = http
+        .post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+        .await;
     assert_eq!(s, 200, "{admin}");
-    let (s, user) = http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (s, user) =
+        http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
     assert_eq!(s, 200, "{user}");
     let admin_token = admin["accessToken"].as_str().unwrap().to_string();
     let user_token = user["accessToken"].as_str().unwrap().to_string();
@@ -172,13 +174,15 @@ async fn system_functions_and_admin_endpoints_are_admin_only() {
 async fn untyped_crud_validates_against_the_schema() {
     let (t, http, admin, _, _) = setup().await;
     let insert = path("insert_document");
-    let ins = |doc: Value| http.call("mutation", &insert, json!({ "table": "dash_items", "document": doc }), Some(&admin));
+    let ins =
+        |doc: Value| http.call("mutation", &insert, json!({ "table": "dash_items", "document": doc }), Some(&admin));
 
     let (s, b) = ins(json!({ "title": "one", "category": "a", "rank": 1 })).await;
     assert_eq!(s, 200, "{b}");
     let id = b["value"].as_str().unwrap().to_string();
     // System fields from an editor are ignored on insert.
-    let (s, b) = ins(json!({ "_id": "x", "_creationTime": 1, "title": "two", "category": "a", "rank": 2, "note": "n" })).await;
+    let (s, b) =
+        ins(json!({ "_id": "x", "_creationTime": 1, "title": "two", "category": "a", "rank": 2, "note": "n" })).await;
     assert_eq!(s, 200, "{b}");
     let id2 = b["value"].as_str().unwrap().to_string();
 
@@ -188,7 +192,8 @@ async fn untyped_crud_validates_against_the_schema() {
     assert!(b["errorMessage"].as_str().unwrap().contains("does not match table `dash_items`"), "{b}");
     let (_, b) = ins(json!({ "title": "x", "category": "a" })).await;
     assert!(b["errorMessage"].as_str().unwrap().contains("missing field `rank`"), "{b}");
-    let (_, b) = http.call("mutation", &path("insert_document"), json!({ "table": "nope", "document": {} }), Some(&admin)).await;
+    let (_, b) =
+        http.call("mutation", &path("insert_document"), json!({ "table": "nope", "document": {} }), Some(&admin)).await;
     assert_eq!(code_of(&b), "invalid_document", "{b}");
     let (_, b) = ins(json!([1])).await;
     assert_eq!(code_of(&b), "invalid_document");
@@ -200,11 +205,16 @@ async fn untyped_crud_validates_against_the_schema() {
     assert_eq!(doc["document"]["_id"], id.as_str());
 
     // Patch: merged, validated.
-    http.ok("mutation", &path("patch_document"), json!({ "id": id, "patch": { "rank": 10, "note": "hi" } }), &admin).await;
-    let (_, b) = http.call("mutation", &path("patch_document"), json!({ "id": id, "patch": { "rank": "ten" } }), Some(&admin)).await;
+    http.ok("mutation", &path("patch_document"), json!({ "id": id, "patch": { "rank": 10, "note": "hi" } }), &admin)
+        .await;
+    let (_, b) = http
+        .call("mutation", &path("patch_document"), json!({ "id": id, "patch": { "rank": "ten" } }), Some(&admin))
+        .await;
     assert_eq!(code_of(&b), "invalid_document");
     assert!(b["errorMessage"].as_str().unwrap().contains("patched document"), "{b}");
-    let (_, b) = http.call("mutation", &path("patch_document"), json!({ "id": id, "patch": { "title": null } }), Some(&admin)).await;
+    let (_, b) = http
+        .call("mutation", &path("patch_document"), json!({ "id": id, "patch": { "title": null } }), Some(&admin))
+        .await;
     assert_eq!(code_of(&b), "invalid_document", "nulling a required field: {b}");
 
     // Replace: the editor's whole document, system fields included; `_id` must match.
@@ -213,12 +223,16 @@ async fn untyped_crud_validates_against_the_schema() {
     edited["category"] = json!("b");
     http.ok("mutation", &path("replace_document"), json!({ "id": id, "document": edited.clone() }), &admin).await;
     edited["_id"] = json!(id2);
-    let (_, b) = http.call("mutation", &path("replace_document"), json!({ "id": id, "document": edited }), Some(&admin)).await;
+    let (_, b) =
+        http.call("mutation", &path("replace_document"), json!({ "id": id, "document": edited }), Some(&admin)).await;
     assert_eq!(code_of(&b), "invalid_document");
 
     let items = http.ok("query", &app::all_items::path(), json!({}), &admin).await;
     let one = items.as_array().unwrap().iter().find(|d| d["_id"] == id.as_str()).unwrap();
-    assert_eq!((&one["title"], &one["category"], &one["rank"], &one["note"]), (&json!("one (edited)"), &json!("b"), &json!(10), &json!("hi")));
+    assert_eq!(
+        (&one["title"], &one["category"], &one["rank"], &one["note"]),
+        (&json!("one (edited)"), &json!("b"), &json!(10), &json!("hi"))
+    );
 
     // Index filters and order in `documents`.
     let res = http
@@ -272,7 +286,11 @@ impl Ws {
 
     async fn recv(&mut self) -> Value {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(10), self.stream.next()).await.expect("timeout").unwrap().unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(10), self.stream.next())
+                .await
+                .expect("timeout")
+                .unwrap()
+                .unwrap();
             let Message::Text(text) = msg else { continue };
             let v: Value = serde_json::from_str(text.as_str()).unwrap();
             if v["type"] != "Ping" {
@@ -324,7 +342,9 @@ async fn documents_subscription_is_live() {
     assert_eq!(first["page"], json!([]));
 
     // A typed mutation (from an anonymous client) shows up in the admin's untyped page.
-    let (s, b) = http.call("mutation", &app::add_item::path(), json!({ "title": "x", "category": "live", "rank": 1 }), None).await;
+    let (s, b) = http
+        .call("mutation", &app::add_item::path(), json!({ "title": "x", "category": "live", "rank": 1 }), None)
+        .await;
     assert_eq!(s, 200, "{b}");
     let v = ws.next_value().await;
     assert_eq!(v["page"][0]["title"], "x");
@@ -350,7 +370,8 @@ async fn documents_subscription_is_live() {
 async fn secrets_are_masked_and_system_tables_protected() {
     let (_t, http, admin, user, user_id) = setup().await;
     // A refresh creates a `_used_refresh_tokens` row.
-    let (s, signin) = http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (s, signin) =
+        http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
     assert_eq!(s, 200);
     let (s, _) = http.post("/api/auth/refresh", None, json!({ "refreshToken": signin["refreshToken"] })).await;
     assert_eq!(s, 200);
@@ -374,10 +395,19 @@ async fn secrets_are_masked_and_system_tables_protected() {
         .iter()
         .map(|c| (c["name"].as_str().unwrap().into(), c["sqlType"].as_str().unwrap().into()))
         .collect();
-    assert_eq!(&columns[..3], &[("_id".into(), "VARCHAR".into()), ("_creationTime".into(), "DOUBLE".into()), ("_ts".into(), "BIGINT".into())]);
+    assert_eq!(
+        &columns[..3],
+        &[("_id".into(), "VARCHAR".into()), ("_creationTime".into(), "DOUBLE".into()), ("_ts".into(), "BIGINT".into())]
+    );
     assert!(columns.contains(&("rank".into(), "BIGINT".into())), "{columns:?}");
-    assert_eq!((find("dash_items")["analytics"].clone(), find("_users")["analytics"].clone()), (json!(true), json!(true)));
-    assert_eq!((find("_credentials")["analytics"].clone(), find("_credentials")["columns"].clone()), (json!(false), json!([])));
+    assert_eq!(
+        (find("dash_items")["analytics"].clone(), find("_users")["analytics"].clone()),
+        (json!(true), json!(true))
+    );
+    assert_eq!(
+        (find("_credentials")["analytics"].clone(), find("_credentials")["columns"].clone()),
+        (json!(false), json!([]))
+    );
 
     for (table, fields) in [
         ("_credentials", vec!["passwordHash"]),
@@ -410,7 +440,11 @@ async fn secrets_are_masked_and_system_tables_protected() {
     // System tables are read-only, except the profile fields of `_users`.
     let cred = http.ok("query", &path("documents"), page("_credentials"), &admin).await["page"][0]["_id"].clone();
     for (kind, name, args) in [
-        ("insert_document", "insert", json!({ "table": "_credentials", "document": { "user": user_id, "passwordHash": "x" } })),
+        (
+            "insert_document",
+            "insert",
+            json!({ "table": "_credentials", "document": { "user": user_id, "passwordHash": "x" } }),
+        ),
         ("patch_document", "update", json!({ "id": cred, "patch": { "passwordHash": "x" } })),
         ("replace_document", "replace", json!({ "id": cred, "document": { "user": user_id, "passwordHash": "x" } })),
         ("delete_documents", "delete", json!({ "ids": [cred] })),
@@ -420,20 +454,44 @@ async fn secrets_are_masked_and_system_tables_protected() {
         let (_, b) = http.call("mutation", &path(kind), args, Some(&admin)).await;
         assert_eq!(code_of(&b), "read_only_table", "{kind} {name}: {b}");
     }
-    http.ok("mutation", &path("patch_document"), json!({ "id": user_id, "patch": { "name": "Ada", "emailVerified": true } }), &admin).await;
-    let (_, b) = http.call("mutation", &path("patch_document"), json!({ "id": user_id, "patch": { "email": "evil@example.com" } }), Some(&admin)).await;
+    http.ok(
+        "mutation",
+        &path("patch_document"),
+        json!({ "id": user_id, "patch": { "name": "Ada", "emailVerified": true } }),
+        &admin,
+    )
+    .await;
+    let (_, b) = http
+        .call(
+            "mutation",
+            &path("patch_document"),
+            json!({ "id": user_id, "patch": { "email": "evil@example.com" } }),
+            Some(&admin),
+        )
+        .await;
     assert_eq!(code_of(&b), "read_only_field", "{b}");
     // A full-document save from the editor works when only editable fields changed.
     let mut doc = http.ok("query", &path("document"), json!({ "id": user_id }), &admin).await["document"].clone();
     doc["name"] = json!("Ada L.");
     http.ok("mutation", &path("replace_document"), json!({ "id": user_id, "document": doc.clone() }), &admin).await;
     doc["email"] = json!("other@example.com");
-    let (_, b) = http.call("mutation", &path("replace_document"), json!({ "id": user_id, "document": doc }), Some(&admin)).await;
+    let (_, b) =
+        http.call("mutation", &path("replace_document"), json!({ "id": user_id, "document": doc }), Some(&admin)).await;
     assert_eq!(code_of(&b), "read_only_field");
-    let (_, b) = http.call("mutation", &path("patch_document"), json!({ "id": user_id, "patch": { "image": "javascript:alert(1)" } }), Some(&admin)).await;
+    let (_, b) = http
+        .call(
+            "mutation",
+            &path("patch_document"),
+            json!({ "id": user_id, "patch": { "image": "javascript:alert(1)" } }),
+            Some(&admin),
+        )
+        .await;
     assert_eq!(code_of(&b), "invalid_image");
     let me = http.ok("query", "_system/auth:me", json!({}), &user).await;
-    assert_eq!((&me["name"], &me["email"], &me["emailVerified"]), (&json!("Ada L."), &json!("user@example.com"), &json!(true)));
+    assert_eq!(
+        (&me["name"], &me["email"], &me["emailVerified"]),
+        (&json!("Ada L."), &json!("user@example.com"), &json!(true))
+    );
 }
 
 #[tokio::test]
@@ -449,7 +507,8 @@ async fn run_function_as_admin_or_as_a_user() {
     assert!(r["identity"].as_str().unwrap().starts_with("admin:"));
 
     // An internal function as a user: identity, log lines and result.
-    let r = run(json!({ "path": app::whoami_logged::path(), "args": { "greeting": "hello" }, "asUser": user_id })).await;
+    let r =
+        run(json!({ "path": app::whoami_logged::path(), "args": { "greeting": "hello" }, "asUser": user_id })).await;
     assert_eq!(r["success"], true, "{r}");
     assert_eq!(r["value"], user_id.as_str());
     assert_eq!(r["identity"], format!("user:{user_id}"));
@@ -467,17 +526,32 @@ async fn run_function_as_admin_or_as_a_user() {
     // Bad requests are errors.
     let (_, b) = http.call("action", &path("run_function"), json!({ "path": "nope:nothing" }), Some(&admin)).await;
     assert_eq!(code_of(&b), "not_found");
-    let (_, b) = http.call("action", &path("run_function"), json!({ "path": app::all_items::path(), "asUser": "garbage" }), Some(&admin)).await;
+    let (_, b) = http
+        .call(
+            "action",
+            &path("run_function"),
+            json!({ "path": app::all_items::path(), "asUser": "garbage" }),
+            Some(&admin),
+        )
+        .await;
     assert_eq!(code_of(&b), "invalid_id");
     let (_, b) = http
-        .call("action", &path("run_function"), json!({ "path": app::all_items::path(), "asUser": "00000000000000000000000000" }), Some(&admin))
+        .call(
+            "action",
+            &path("run_function"),
+            json!({ "path": app::all_items::path(), "asUser": "00000000000000000000000000" }),
+            Some(&admin),
+        )
         .await;
     assert_eq!(code_of(&b), "not_found", "{b}");
 
     // The internal function's execution is in the log, attributed to the user.
     t.app().logs().flush().await.unwrap();
     let (s, logs) = http
-        .get(&format!("/api/admin/logs?pathPrefix={}&identity=user:{user_id}", app::whoami_logged::path()), Some(&admin))
+        .get(
+            &format!("/api/admin/logs?pathPrefix={}&identity=user:{user_id}", app::whoami_logged::path()),
+            Some(&admin),
+        )
         .await;
     assert_eq!(s, 200, "{logs}");
     assert_eq!(logs["entries"].as_array().unwrap().len(), 1, "{logs}");
@@ -487,7 +561,13 @@ async fn run_function_as_admin_or_as_a_user() {
 async fn logs_history_and_live_tail() {
     let (t, http, admin, _, _) = setup().await;
     for i in 0..3 {
-        http.call("mutation", &app::add_item::path(), json!({ "title": format!("l{i}"), "category": "logs", "rank": i }), None).await;
+        http.call(
+            "mutation",
+            &app::add_item::path(),
+            json!({ "title": format!("l{i}"), "category": "logs", "rank": i }),
+            None,
+        )
+        .await;
     }
     http.call("mutation", &app::add_item::path(), json!({ "title": 1 }), None).await;
     t.app().logs().flush().await.unwrap();
@@ -535,14 +615,19 @@ async fn logs_history_and_live_tail() {
                 }
                 continue;
             }
-            let chunk = tokio::time::timeout(Duration::from_secs(10), body.chunk()).await.expect("sse timeout").unwrap().unwrap();
+            let chunk = tokio::time::timeout(Duration::from_secs(10), body.chunk())
+                .await
+                .expect("sse timeout")
+                .unwrap()
+                .unwrap();
             buf.push_str(std::str::from_utf8(&chunk).unwrap());
         }
     };
     assert_eq!(next_event().await.0, "ready");
     // Not matching the filter: skipped. Matching: delivered with its id.
     http.call("query", &app::all_items::path(), json!({}), None).await;
-    http.call("mutation", &app::add_item::path(), json!({ "title": "tail", "category": "logs", "rank": 9 }), None).await;
+    http.call("mutation", &app::add_item::path(), json!({ "title": "tail", "category": "logs", "rank": 9 }), None)
+        .await;
     let (event, data) = next_event().await;
     assert_eq!(event, "log");
     let entry: Value = serde_json::from_str(&data).unwrap();
@@ -554,15 +639,34 @@ async fn logs_history_and_live_tail() {
 #[tokio::test]
 async fn users_sessions_revoke_and_delete() {
     let (t, http, admin, user_token, user_id) = setup().await;
-    let (_, second) = http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (_, second) =
+        http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
 
-    let users = http.ok("query", &path("users"), json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
+    let users =
+        http.ok("query", &path("users"), json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
     let u = &users["page"][0];
-    assert_eq!((&u["_id"], &u["email"], &u["hasPassword"], &u["sessions"]), (&json!(user_id), &json!("user@example.com"), &json!(true), &json!(2)));
+    assert_eq!(
+        (&u["_id"], &u["email"], &u["hasPassword"], &u["sessions"]),
+        (&json!(user_id), &json!("user@example.com"), &json!(true), &json!(2))
+    );
     assert_eq!(u["providers"], json!([]));
-    let found = http.ok("query", &path("users"), json!({ "search": "USER@", "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
+    let found = http
+        .ok(
+            "query",
+            &path("users"),
+            json!({ "search": "USER@", "paginationOpts": { "numItems": 10, "cursor": null } }),
+            &admin,
+        )
+        .await;
     assert_eq!(found["page"].as_array().unwrap().len(), 1);
-    let none = http.ok("query", &path("users"), json!({ "search": "zzz", "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
+    let none = http
+        .ok(
+            "query",
+            &path("users"),
+            json!({ "search": "zzz", "paginationOpts": { "numItems": 10, "cursor": null } }),
+            &admin,
+        )
+        .await;
     assert_eq!(none["page"], json!([]));
 
     let sessions = http.ok("query", &path("user_sessions"), json!({ "user": user_id }), &admin).await;
@@ -582,14 +686,20 @@ async fn users_sessions_revoke_and_delete() {
         http.call("query", "_system/auth:me", json!({}), Some(&user_token)).await.0,
         http.call("query", "_system/auth:me", json!({}), Some(second["accessToken"].as_str().unwrap())).await.0,
     ];
-    assert_eq!(statuses.iter().filter(|s| **s == 401).count(), 1, "exactly the revoked session is refused: {statuses:?}");
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 401).count(),
+        1,
+        "exactly the revoked session is refused: {statuses:?}"
+    );
 
     // Delete the user with everything that belongs to them.
     let deleted = http.ok("mutation", &path("delete_user"), json!({ "user": user_id }), &admin).await;
     assert_eq!((&deleted["sessions"], &deleted["credentials"]), (&json!(1), &json!(1)), "{deleted}");
-    let (s, _) = http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (s, _) =
+        http.post("/api/auth/signin", None, json!({ "email": "user@example.com", "password": "user password" })).await;
     assert_eq!(s, 401);
-    let users = http.ok("query", &path("users"), json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
+    let users =
+        http.ok("query", &path("users"), json!({ "paginationOpts": { "numItems": 10, "cursor": null } }), &admin).await;
     assert_eq!(users["page"], json!([]));
     for table in ["_credentials", "_used_refresh_tokens"] {
         assert_eq!(http.ok("query", &path("documents"), page(table), &admin).await["page"], json!([]), "{table}");
@@ -603,7 +713,13 @@ async fn users_sessions_revoke_and_delete() {
 async fn stats_timeseries_and_overview_counters() {
     let (t, http, admin, user, _) = setup().await;
     for i in 0..4 {
-        http.call("mutation", &app::add_item::path(), json!({ "title": format!("ts{i}"), "category": "ts", "rank": i }), None).await;
+        http.call(
+            "mutation",
+            &app::add_item::path(),
+            json!({ "title": format!("ts{i}"), "category": "ts", "rank": i }),
+            None,
+        )
+        .await;
     }
     http.call("mutation", &app::add_item::path(), json!({ "title": 1 }), None).await; // a user error
     t.app().logs().flush().await.unwrap();

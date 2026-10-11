@@ -41,13 +41,13 @@ use std::collections::BTreeMap;
 use super::store::{self, WorkResult};
 use super::tables::{JobKind, JobState, ScheduledJob};
 use super::{IN_JOB, SchedulerOptions, Workpool};
+use crate::Table;
 use crate::db::Clock;
 use crate::db::query::MutationDb;
 use crate::id::Id;
 use crate::private::FunctionKind;
 use crate::runtime::{App, Identity, MutationHook};
 use crate::schema::Doc;
-use crate::Table;
 
 /// Due jobs read per round.
 const BATCH: usize = 128;
@@ -397,18 +397,23 @@ async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: Option<OwnedSemaphor
             }
             let app = app.clone();
             let signal = registration.signal.clone();
-            tokio::spawn(IN_JOB.scope((), cancel::scope(signal, async move {
-                run_action_job(&app, job, &registration).await;
-                drop(registration);
-                drop(permit);
-                // A slot is free: its pool's next due action can start.
-                app.scheduler_state().notify();
-            })));
+            tokio::spawn(IN_JOB.scope(
+                (),
+                cancel::scope(signal, async move {
+                    run_action_job(&app, job, &registration).await;
+                    drop(registration);
+                    drop(permit);
+                    // A slot is free: its pool's next due action can start.
+                    app.scheduler_state().notify();
+                }),
+            ));
             Ok(true)
         }
         other => {
             let msg = match other {
-                Some(FunctionKind::Query) => format!("`{}` is a query; only mutations and actions can be scheduled", job.path),
+                Some(FunctionKind::Query) => {
+                    format!("`{}` is a query; only mutations and actions can be scheduled", job.path)
+                }
                 _ => format!("No mutation or action is registered at `{}` any more", job.path),
             };
             fail_pending(app, job.id, &msg).await

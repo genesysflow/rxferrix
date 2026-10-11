@@ -538,9 +538,9 @@ pub async fn revenue_by_day(ctx: &ActionCtx, since: f64) -> Result<Vec<DayRevenu
   restore rebuilds it. Its state, lag (commits and seconds), size, rows applied and rebuilds are in
   `GET /api/admin/olap` (`POST /api/admin/olap/rebuild` starts over), `/metrics` (`ferrix_olap_*`), the stats endpoint
   and the dashboard Overview. `TestApp::olap_sync()` brings the copy up to date, so tests are deterministic.
-- **Later**: a dashboard SQL console on the same sandbox (admin only, audited); `COPY … TO 'x.parquet'` exports
-  through an admin endpoint; live in-app aggregates maintained in the write transaction, which are a separate,
-  reactive feature.
+- **Built since**: the dashboard's Analytics page (SQL on the same sandbox, admin only, audited) with CSV and Parquet
+  downloads written from Arrow batches (the sandbox has no file access, so not `COPY … TO`); live in-app aggregates
+  are a separate, reactive feature (§7.7).
 
 ### 7.7 Live aggregates (built in Phase 12)
 

@@ -62,6 +62,68 @@ pub mod m {
         Ok(Some(json!({ "priority": if urgent { 10 } else { 1 } })))
     }
 
+    // ---- notes: an on-read migration (old documents have one `tag`, the new type a list of `tags`).
+
+    #[table(name = "mig_notes")]
+    pub struct Note {
+        pub title: String,
+        pub tags: Vec<String>,
+    }
+
+    #[mutation]
+    pub async fn add_note(ctx: &MutationCtx, title: String, tags: Vec<String>) -> Result<Id<Note>> {
+        ctx.db.insert(Note { title, tags }).await
+    }
+
+    /// Typed read: works on old documents too, through the on-read migration.
+    #[query]
+    pub async fn notes(ctx: &QueryCtx) -> Result<Vec<(String, Vec<String>)>> {
+        Ok(ctx.db.query::<Note>().collect().await?.into_iter().map(|d| (d.value.title, d.value.tags)).collect())
+    }
+
+    /// Get, change, write back: on an old document, writes the new shape.
+    #[mutation]
+    pub async fn tag_note(ctx: &MutationCtx, id: Id<Note>, tag: String) -> Result<()> {
+        let mut note = ctx.db.get(id).await?.ok_or_else(|| anyhow::anyhow!("no such note"))?.value;
+        note.tags.push(tag);
+        ctx.db.replace(id, note).await
+    }
+
+    /// Stored shapes, untyped: `tags` (or `tag`) of each note.
+    #[query]
+    pub async fn stored_notes(ctx: &QueryCtx) -> Result<Vec<Value>> {
+        let docs = ctx.db.query_table("mig_notes").collect().await?;
+        Ok(docs.into_iter().map(|d| d.get("tags").cloned().unwrap_or_else(|| json!({ "tag": d["tag"] }))).collect())
+    }
+
+    #[migration(table = Note, name = "tags/0001_note_tags", on_read)]
+    pub fn note_tags(doc: &Value) -> Result<Option<Value>> {
+        match doc.get("tag") {
+            Some(tag) if doc.get("tags").is_none() => Ok(Some(json!({ "tags": [tag] }))),
+            _ => Ok(None),
+        }
+    }
+
+    // ---- broken: the table's last migration leaves documents that still don't match.
+
+    #[table(name = "mig_broken")]
+    pub struct Broken {
+        pub n: i64,
+        pub label: String,
+    }
+
+    #[mutation]
+    pub async fn add_broken(ctx: &MutationCtx, n: i64) -> Result<Id<Broken>> {
+        ctx.db.insert(Broken { n, label: format!("#{n}") }).await
+    }
+
+    /// Fixes only even documents.
+    #[migration(table = Broken, name = "tags/0002_broken_labels", batch = 2)]
+    pub async fn broken_labels(_ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
+        let n = doc["n"].as_i64().unwrap_or_default();
+        Ok((n % 2 == 0 && doc.get("label").is_none()).then(|| json!({ "label": format!("#{n}") })))
+    }
+
     // ---- counted: resume after a crash; every document exactly once per run.
 
     #[table(name = "mig_counted")]
@@ -223,7 +285,7 @@ async fn summary(app: &App, name: &str) -> ferrix::migrations::MigrationSummary 
 
 /// Make the stored documents of `table` look written by an older version: apply `f` to each document's JSON and
 /// forget the table's schema fingerprint (so the next start validates it).
-fn rewrite_documents(dir: &std::path::Path, table: &str, f: impl Fn(&mut serde_json::Map<String, Value>)) {
+pub(crate) fn rewrite_documents(dir: &std::path::Path, table: &str, f: impl Fn(&mut serde_json::Map<String, Value>)) {
     let conn = rusqlite::Connection::open(dir.join("data.db")).unwrap();
     let number: u32 =
         conn.query_row("SELECT table_number FROM _tables WHERE name = ?1", [table], |r| r.get(0)).unwrap();
@@ -593,4 +655,68 @@ async fn dependencies_order_runs_and_refuse_early_runs() {
         ]
     );
     assert!(reports[2].error.as_deref().unwrap().contains("`dep/z_first` (running)"), "{:?}", reports[2].error);
+}
+
+/// An `#[migration(on_read)]`: while the table is migrating, typed reads (queries, subscriptions, a mutation's `get`)
+/// see old documents in the new shape; the migration then rewrites them, checking each one, so finishing it needs no
+/// scan of the table.
+#[tokio::test]
+async fn on_read_migrations_keep_typed_reads_working_while_documents_migrate() {
+    let t = TestApp::new().await.unwrap();
+    let mut ids = Vec::new();
+    for (title, tag) in [("groceries", "home"), ("standup", "work"), ("taxes", "home")] {
+        ids.push(t.mutation::<add_note>((title.to_string(), vec![tag.to_string()])).await.unwrap());
+    }
+    // Written before `tags` existed: one `tag` each.
+    rewrite_documents(t.dir(), "mig_notes", |doc| {
+        let tag = doc["tags"][0].clone();
+        doc.remove("tags");
+        doc.insert("tag".into(), tag);
+    });
+    let t = t.restart().await.unwrap();
+    let app = t.app().clone();
+    assert!(app.db().catalog().is_migrating("mig_notes"));
+
+    // Typed reads work before the migration ran, and so does a subscription.
+    let expected = json!([["groceries", ["home"]], ["standup", ["work"]], ["taxes", ["home"]]]);
+    assert_eq!(serde_json::to_value(t.query::<notes>(()).await.unwrap()).unwrap(), expected);
+    let mut client = Client::new(&app).await;
+    assert_eq!(client.subscribe(1, &notes::path(), json!({})).await.unwrap(), expected);
+    // A mutation reading an old document and writing it back stores the new shape.
+    t.mutation::<tag_note>((ids[1], "urgent".to_string())).await.unwrap();
+    client.until(|c| c.value(1)[1] == json!(["standup", ["work", "urgent"]])).await;
+    let stored = t.query::<stored_notes>(()).await.unwrap();
+    assert_eq!(stored, vec![json!({ "tag": "home" }), json!(["work", "urgent"]), json!({ "tag": "home" })]);
+
+    // The migration rewrites the rest; each document is checked as it goes, so it finishes without a table scan.
+    let r = app.run_migration::<note_tags>(RunOptions::default()).await.unwrap();
+    assert_eq!((r.outcome, r.processed, r.changed), (RunOutcome::Completed, 3, 2));
+    assert_eq!(r.schema_check.as_deref(), Some("passed"));
+    assert!(!app.db().catalog().is_migrating("mig_notes"));
+    let stored = t.query::<stored_notes>(()).await.unwrap();
+    assert_eq!(stored, vec![json!(["home"]), json!(["work", "urgent"]), json!(["home"])]);
+    assert_eq!(client.value(1)[0], json!(["groceries", ["home"]]), "subscribers saw no change");
+}
+
+/// The table's last migration checks every document it processes: one it leaves invalid fails the run right there
+/// (named), not in a scan of the whole table at the end.
+#[tokio::test]
+async fn a_last_migration_that_leaves_an_invalid_document_fails_on_it() {
+    let t = TestApp::new().await.unwrap();
+    for n in 0..4 {
+        t.mutation::<add_broken>((n,)).await.unwrap();
+    }
+    rewrite_documents(t.dir(), "mig_broken", |doc| {
+        doc.remove("label");
+    });
+    let t = t.restart().await.unwrap();
+    let app = t.app().clone();
+    let r = app.run_migration::<broken_labels>(RunOptions::default()).await.unwrap();
+    assert_eq!(r.outcome, RunOutcome::Failed);
+    let msg = r.error.unwrap_or_default();
+    assert!(msg.contains("still doesn't match the table's type") && msg.contains("label"), "{msg}");
+    let s = summary(&app, "tags/0002_broken_labels").await;
+    assert_eq!(s.state, MigrationState::Failed);
+    assert!(s.failed_document.is_some());
+    assert!(app.db().catalog().is_migrating("mig_broken"), "still lenient: the table doesn't match yet");
 }

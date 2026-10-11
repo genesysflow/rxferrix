@@ -1,4 +1,4 @@
-//! `#[migration(table = T, batch = N, name = "...", after = ["...", ...])]` (CONTRACT.md §3.3).
+//! `#[migration(table = T, batch = N, name = "...", after = ["...", ...], on_read)]` (CONTRACT.md §3.3).
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
@@ -28,6 +28,8 @@ struct Args {
     name: Option<syn::LitStr>,
     /// `after = ["0001_x", ...]`: names of migrations that must be done first.
     after: Vec<syn::LitStr>,
+    /// `on_read`: a plain `fn(doc: &serde_json::Value)`, also applied in memory to documents read before it ran.
+    on_read: bool,
 }
 
 /// The same rule as the runtime's (`migrations::check_name`): 1..=128 characters of `A-Z a-z 0-9 _ - . : /`.
@@ -42,21 +44,53 @@ fn check_name(name: &str) -> Result<(), String> {
 }
 
 fn parse_args(attr: TokenStream, errors: &mut Errors) -> Args {
-    let mut args = Args { table: None, table_seen: false, batch: DEFAULT_BATCH, name: None, after: Vec::new() };
-    let parser = Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
+    let mut args =
+        Args { table: None, table_seen: false, batch: DEFAULT_BATCH, name: None, after: Vec::new(), on_read: false };
+    let parser = Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
     let items = match syn::parse::Parser::parse2(parser, attr) {
         Ok(items) => items,
         Err(e) => {
             errors.push(syn::Error::new(
                 e.span(),
-                "expected `#[migration(table = TableType, batch = 100, name = \"...\", after = [\"...\"])]` (`batch`, `name` and `after` are optional)",
+                "expected `#[migration(table = TableType, batch = 100, name = \"...\", after = [\"...\"], on_read)]` (all but `table` are optional)",
             ));
             args.table_seen = true;
             return args;
         }
     };
     let mut seen = std::collections::HashSet::new();
-    for item in items {
+    for meta in items {
+        let item = match meta {
+            syn::Meta::Path(path) if path.is_ident("on_read") => {
+                if !seen.insert("on_read".to_string()) {
+                    errors.error(&path, "duplicate argument `on_read`");
+                }
+                args.on_read = true;
+                continue;
+            }
+            syn::Meta::NameValue(item) => item,
+            syn::Meta::Path(path)
+                if path
+                    .get_ident()
+                    .is_some_and(|i| ["table", "batch", "name", "after"].contains(&i.to_string().as_str())) =>
+            {
+                let key = path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+                args.table_seen |= key == "table";
+                let example = match key.as_str() {
+                    "table" => "table = TableType",
+                    "batch" => "batch = 100",
+                    "name" => "name = \"0002_add_priority\"",
+                    _ => "after = [\"0001_add_priority\"]",
+                };
+                errors.error(&path, format_args!("`{key}` needs a value: `{example}`"));
+                continue;
+            }
+            other => {
+                errors
+                    .error(&other, "expected `key = value` (`table`, `batch`, `name`, `after`) or the flag `on_read`");
+                continue;
+            }
+        };
         let key = item.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
         if !seen.insert(key.clone()) {
             errors.error(&item.path, format_args!("duplicate argument `{key}`"));
@@ -117,7 +151,7 @@ fn parse_args(attr: TokenStream, errors: &mut Errors) -> Args {
             },
             _ => errors.error(
                 &item.path,
-                format_args!("unknown argument `{key}` (expected `table`, `batch`, `name` or `after`)"),
+                format_args!("unknown argument `{key}` (expected `table`, `batch`, `name`, `after` or `on_read`)"),
             ),
         }
     }
@@ -145,7 +179,14 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
     }
     let sig = &func.sig;
     let name = sig.ident.clone();
-    if sig.asyncness.is_none() {
+    if args.on_read {
+        if let Some(a) = &sig.asyncness {
+            errors.error(
+                a,
+                "an `on_read` migration is a plain `fn(doc: &serde_json::Value)`: it also runs on reads, without the database",
+            );
+        }
+    } else if sig.asyncness.is_none() {
         errors.error_at(sig.fn_token.span, "#[migration] functions must be `async fn`");
     }
     if let Some(c) = &sig.constness {
@@ -194,6 +235,23 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
     }
     let mut doc_ty = None;
     match typed.as_slice() {
+        [doc] if args.on_read => {
+            match &*doc.pat {
+                syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => {}
+                syn::Pat::Wild(_) => {}
+                other => errors.error(other, "parameter patterns must be plain identifiers"),
+            }
+            match &*doc.ty {
+                syn::Type::Reference(r) if r.mutability.is_none() => {}
+                other => errors
+                    .error(other, "an `on_read` migration takes the document by reference: `doc: &serde_json::Value`"),
+            }
+            doc_ty = Some((*doc.ty).clone());
+        }
+        _ if args.on_read => errors.error_at(
+            sig.paren_token.span.join(),
+            "an `on_read` migration takes only the document: `fn f(doc: &serde_json::Value) -> Result<…>`",
+        ),
         [ctx, doc] => {
             for pt in [ctx, doc] {
                 match &*pt.pat {
@@ -238,8 +296,36 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
     let out_var = syn::Ident::new("__ferrix_out", Span::mixed_site());
     let handler_ident = syn::Ident::new("__ferrix_migrate", Span::mixed_site());
     // Spanned so that a type error points at the document parameter or the return type.
-    let decode = quote_spanned!(doc_ty.span()=> ::ferrix::__private::decode_migration_doc::<#doc_ty>(#doc_var)?);
     let convert = quote_spanned!(output.span()=> ::ferrix::__private::migration_output(#out_var));
+    let (handler_body, on_read) = if args.on_read {
+        let on_read_ident = syn::Ident::new("__ferrix_on_read", Span::mixed_site());
+        (
+            quote! {
+                let _ = #ctx_var;
+                let #out_var: #output = #name(&#doc_var)?;
+                #convert
+            },
+            quote! {{
+                fn #on_read_ident(
+                    #doc_var: &::ferrix::__private::serde_json::Value,
+                ) -> ::ferrix::Result<::ferrix::migrations::DocChange> {
+                    let #out_var: #output = #name(#doc_var)?;
+                    #convert
+                }
+                ::core::option::Option::Some(#on_read_ident)
+            }},
+        )
+    } else {
+        let decode = quote_spanned!(doc_ty.span()=> ::ferrix::__private::decode_migration_doc::<#doc_ty>(#doc_var)?);
+        (
+            quote! {
+                let #doc_var: #doc_ty = #decode;
+                let #out_var: #output = #name(#ctx_var, #doc_var).await?;
+                #convert
+            },
+            quote!(::core::option::Option::None),
+        )
+    };
 
     Ok(quote! {
         #func
@@ -275,14 +361,11 @@ pub fn expand_migration(attr: TokenStream, item: TokenStream) -> syn::Result<Tok
                     #ctx_var: &'a ::ferrix::MutationCtx,
                     #doc_var: ::ferrix::__private::serde_json::Value,
                 ) -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
-                    ::std::boxed::Box::pin(async move {
-                        let #doc_var: #doc_ty = #decode;
-                        let #out_var: #output = #name(#ctx_var, #doc_var).await?;
-                        #convert
-                    })
+                    ::std::boxed::Box::pin(async move { #handler_body })
                 }
                 #handler_ident
             },
+            on_read: #on_read,
         };
     })
 }

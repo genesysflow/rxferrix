@@ -24,7 +24,7 @@ error: a migration name may only contain letters, digits and `_ - . : /`, not ` 
 12 | #[migration(table = "todos", batch = 20000, name = "not ok!")]
    |                                                    ^^^^^^^^^
 
-error: unknown argument `every` (expected `table`, `batch`, `name` or `after`)
+error: unknown argument `every` (expected `table`, `batch`, `name`, `after` or `on_read`)
   --> tests/ui/migration_args.rs:15:30
    |
 15 | #[migration(table = "todos", every = 5)]

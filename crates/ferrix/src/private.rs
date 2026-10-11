@@ -89,6 +89,10 @@ pub static MIGRATIONS: [MigrationDef];
 pub type MigrationHandler =
     for<'a> fn(&'a MutationCtx, serde_json::Value) -> BoxFuture<'a, crate::Result<crate::migrations::DocChange>>;
 
+/// An `#[migration(on_read)]`'s function: the change for one stored document, computed without the database, so it
+/// can also be applied in memory when a not-yet-migrated document is read.
+pub type OnReadFn = fn(&serde_json::Value) -> crate::Result<crate::migrations::DocChange>;
+
 /// A `#[migration]` (docs/CONTRACT.md §3.3).
 pub struct MigrationDef {
     /// `module_path!()` at the definition site.
@@ -104,6 +108,9 @@ pub struct MigrationDef {
     /// `#[migration(after = ["0001_x", ...])]`: the names of the migrations that must be done before this one runs.
     pub after: &'static [&'static str],
     pub handler: MigrationHandler,
+    /// `#[migration(on_read)]`: the same change as `handler`, applied to documents read before the migration has
+    /// rewritten them (`crate::migrations::transform_on_read`).
+    pub on_read: Option<OnReadFn>,
 }
 
 impl MigrationDef {

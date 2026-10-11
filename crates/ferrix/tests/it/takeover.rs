@@ -253,3 +253,32 @@ async fn check_opens_a_copy_like_a_takeover_while_the_server_runs() {
     let err = takeover::take_over(other.path()).await.err().unwrap();
     assert!(format!("{err:#}").contains("no running server to take over"), "{err:#}");
 }
+
+/// A takeover onto data with a pending `#[migration(on_read)]`: the table stays migrating (the schema check isn't
+/// repeated), typed reads work at once, and the migration runs on the new server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_takeover_keeps_a_pending_migration_pending_and_reads_working() {
+    use crate::migrations::m::{add_note, note_tags, notes};
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let app = App::open(dir.path(), AppOptions { dev: true, ..Default::default() }).await.unwrap();
+        for (title, tag) in [("a", "x"), ("b", "y")] {
+            app.mutation::<add_note>((title.to_string(), vec![tag.to_string()])).await.unwrap();
+        }
+    }
+    crate::migrations::rewrite_documents(dir.path(), "mig_notes", |doc| {
+        let tag = doc["tags"][0].clone();
+        doc.remove("tags");
+        doc.insert("tag".into(), tag);
+    });
+    let old = start_old(dir.path()).await;
+    assert!(old.app.db().catalog().is_migrating("mig_notes"));
+    let new = take_over(dir.path(), old.addr, ferrix::runtime::registered_tables()).await.unwrap();
+    old.stopped.await.unwrap();
+    assert!(new.app.db().catalog().is_migrating("mig_notes"));
+    let expected = vec![("a".to_string(), vec!["x".to_string()]), ("b".to_string(), vec!["y".to_string()])];
+    assert_eq!(new.app.query::<notes>(()).await.unwrap(), expected);
+    let r = new.app.run_migration::<note_tags>(Default::default()).await.unwrap();
+    assert_eq!(r.schema_check.as_deref(), Some("passed"));
+    assert!(!new.app.db().catalog().is_migrating("mig_notes"));
+}

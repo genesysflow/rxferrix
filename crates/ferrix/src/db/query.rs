@@ -159,7 +159,19 @@ impl QueryDb {
 }
 
 pub(super) fn parse_doc<T: Table>(json: &str) -> anyhow::Result<Doc<T>> {
-    serde_json::from_str(json).with_context(|| format!("document does not match table `{}`", T::NAME))
+    match serde_json::from_str(json) {
+        Ok(doc) => Ok(doc),
+        Err(e) => {
+            // Not migrated yet: an `#[migration(on_read)]` of the table brings it to the new shape in memory.
+            if let Some(transformed) = crate::migrations::transform_on_read(T::NAME, json) {
+                let value = transformed.with_context(|| format!("document does not match table `{}`", T::NAME))?;
+                return serde_json::from_value(value).with_context(|| {
+                    format!("document does not match table `{}`, even after its on-read migrations", T::NAME)
+                });
+            }
+            Err(e).with_context(|| format!("document does not match table `{}`", T::NAME))
+        }
+    }
 }
 
 /// Row decoder of the untyped API: the stored JSON as is.

@@ -252,7 +252,7 @@ fn generates_from_the_real_registry() {
     assert!(api.contains("import { makeFunctionReference } from \"@ferrix/client\";\n"));
     assert!(
         api.contains(
-            "import type { AttachmentView, DevFlags, Doc, Hit, Id, Label, Mode, NoteView, PageHit, PaginationOpts, PaginationResult, Priority, ScanSpec, Stats, TaskSummary, VqHit } from \"./dataModel\";\n"
+            "import type { AttachmentView, DevFlags, Doc, Hit, Id, JsonValue, Label, Mode, NoteView, PageHit, PaginationOpts, PaginationResult, Priority, ScanSpec, Stats, TaskSummary, VqHit } from \"./dataModel\";\n"
         ),
         "{api}"
     );

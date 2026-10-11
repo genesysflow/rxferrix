@@ -76,6 +76,13 @@ pub(super) async fn batch(
         Some(row) => row.cursor.clone(),
         None => cursor,
     };
+    // While this is the table's last pending migration, each document it processes must come out matching the
+    // table's type: a run that did so from its first batch needs no scan of the table when it finishes.
+    let validated = match row.as_ref().and_then(|r| r.validated) {
+        Some(v) => v,
+        None => ctx.db.catalog().is_migrating(def.table) && others_done(ctx, def.table, name).await?,
+    };
+    let table_def = if validated { ctx.db.catalog().table(def.table)?.def.clone() } else { None };
     let page = ctx
         .db
         .query_table(def.table)
@@ -87,7 +94,14 @@ pub(super) async fn batch(
         let id = doc[ID_FIELD].as_str().context("stored document without an _id")?.to_string();
         let applied = async {
             let change = (def.handler)(ctx, doc.clone()).await?;
-            apply(&ctx.db, &id, doc, change).await
+            let applied = apply(&ctx.db, &id, doc, change).await?;
+            if let Some(table_def) = &table_def
+                && let Some((_, after)) = ctx.db.get_raw(&id).await?
+                && let Err(e) = (table_def.validate)(&after)
+            {
+                anyhow::bail!("after the migration the document still doesn't match the table's type: {e}");
+            }
+            Ok::<_, crate::Error>(applied)
         }
         .await
         .map_err(|error| DocFailure { document: id.clone(), error })?;
@@ -114,13 +128,14 @@ pub(super) async fn batch(
     if let Some(row) = row {
         let id = row.id;
         let mut value = row.value;
+        value.validated = Some(validated);
         value.cursor = Some(page.continue_cursor);
         value.processed += processed;
         value.changed += changed;
         if done {
             value.state = MigrationState::Done;
             value.finished_at = Some(ctx.now());
-            value.schema_check = recheck(ctx, def.table, name).await?;
+            value.schema_check = recheck(ctx, def.table, name, validated).await?;
             outcome.schema_check = value.schema_check.clone();
         }
         outcome.state = Some(value.state);
@@ -168,22 +183,38 @@ fn user_fields(doc: &Value, mut fields: Map<String, Value>) -> crate::Result<Map
     Ok(fields)
 }
 
-/// When the last pending migration of a migrating table finishes: validate every document of the table (in this
-/// transaction, so it sees the batch's writes and nothing can slip in between). Passing records the fingerprint and
-/// ends lenient mode; failing is recorded and logged (the next start refuses to open).
-async fn recheck(ctx: &MutationCtx, table: &str, name: &str) -> crate::Result<Option<String>> {
+/// Whether every other migration of `table` is done.
+async fn others_done(ctx: &MutationCtx, table: &str, name: &str) -> crate::Result<bool> {
+    for (other, _) in registry()?.for_table(table) {
+        if other != name && find_row(&ctx.db, other).await?.map(|r| r.state) != Some(MigrationState::Done) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// When the last pending migration of a migrating table finishes, the table must match its type again. A run that
+/// checked every document it processed (`validated`) needs nothing more: documents written meanwhile were checked
+/// when they were written (inserts always; updates of migrated documents, which matched). Otherwise every document
+/// of the table is validated, in this transaction (holding the writer for the scan). Passing records the fingerprint
+/// and ends lenient mode; failing is recorded and logged (the next start refuses to open).
+async fn recheck(ctx: &MutationCtx, table: &str, name: &str, validated: bool) -> crate::Result<Option<String>> {
     let catalog = ctx.db.catalog().clone();
     if !catalog.is_migrating(table) {
         return Ok(None);
     }
-    for (other, _) in registry()?.for_table(table) {
-        if other != name && find_row(&ctx.db, other).await?.map(|r| r.state) != Some(MigrationState::Done) {
-            tracing::info!(table, migration = other, "the table's schema check waits for its other pending migrations");
-            return Ok(None);
-        }
+    if !others_done(ctx, table, name).await? {
+        tracing::info!(table, "the table's schema check waits for its other pending migrations");
+        return Ok(None);
     }
     let info = catalog.table(table)?.clone();
     let def = info.def.clone().with_context(|| format!("table `{table}` is not defined in code"))?;
+    if validated {
+        ctx.db.txn().with_state(|s| schema_check::record_fingerprint(s.conn(), &def))?;
+        catalog.set_migrating(table, false);
+        tracing::info!(table, "migrations done; every document was checked as it was migrated");
+        return Ok(Some("passed".to_string()));
+    }
     let bad = ctx.db.txn().with_state(|s| {
         let bad = schema_check::check_table(s.conn(), info.number, &def)?;
         if bad.is_none() {

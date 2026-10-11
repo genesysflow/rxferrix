@@ -1,0 +1,41 @@
+error: an `on_read` migration is a plain `fn(doc: &serde_json::Value)`: it also runs on reads, without the database
+ --> tests/ui/migration_on_read.rs:7:1
+  |
+7 | async fn async_on_read(doc: &Value) -> Result<()> { Ok(()) }
+  | ^^^^^
+
+error: an `on_read` migration takes only the document: `fn f(doc: &serde_json::Value) -> Result<…>`
+  --> tests/ui/migration_on_read.rs:10:12
+   |
+10 | fn with_ctx(ctx: &MutationCtx, doc: &Value) -> Result<()> { Ok(()) }
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an `on_read` migration takes the document by reference: `doc: &serde_json::Value`
+  --> tests/ui/migration_on_read.rs:13:18
+   |
+13 | fn by_value(doc: Value) -> Result<()> { Ok(()) }
+   |                  ^^^^^
+
+error: duplicate argument `on_read`
+  --> tests/ui/migration_on_read.rs:15:39
+   |
+15 | #[migration(table = "todos", on_read, on_read)]
+   |                                       ^^^^^^^
+
+error: `table` needs a value: `table = TableType`
+  --> tests/ui/migration_on_read.rs:18:13
+   |
+18 | #[migration(table)]
+   |             ^^^^^
+
+error: #[migration] functions must be `async fn`
+  --> tests/ui/migration_on_read.rs:19:1
+   |
+19 | fn bare_table(doc: &Value) -> Result<()> { Ok(()) }
+   | ^^
+
+error: #[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`
+  --> tests/ui/migration_on_read.rs:19:14
+   |
+19 | fn bare_table(doc: &Value) -> Result<()> { Ok(()) }
+   |              ^^^^^^^^^^^^^

@@ -258,6 +258,57 @@ pub fn registry() -> crate::Result<&'static Migrations> {
     REGISTRY.get_or_init(|| Migrations::build(&MIGRATIONS)).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// A stored document of `table` that doesn't deserialize as the table's type, brought to the new shape in memory by
+/// the table's `#[migration(on_read)]` migrations, in run order (each one applied to the result of the previous).
+/// `None` when the table has none. Typed reads use it (`QueryDb`) so that, while a migration runs, queries see every
+/// document in the new shape; the stored documents are rewritten by the migration itself.
+pub(crate) fn transform_on_read(table: &str, json: &str) -> Option<crate::Result<Value>> {
+    static BY_TABLE: OnceLock<BTreeMap<&'static str, Vec<(String, crate::private::OnReadFn)>>> = OnceLock::new();
+    let by_table = BY_TABLE.get_or_init(|| {
+        let mut out: BTreeMap<&'static str, Vec<_>> = BTreeMap::new();
+        if let Ok(registry) = registry() {
+            for (name, def) in registry.iter() {
+                if let Some(f) = def.on_read {
+                    out.entry(def.table).or_default().push((name.to_string(), f));
+                }
+            }
+        }
+        out
+    });
+    let fns = by_table.get(table)?;
+    Some((|| {
+        let mut doc: Value = serde_json::from_str(json)?;
+        for (name, f) in fns {
+            match f(&doc).with_context(|| format!("migration `{name}` on read"))? {
+                DocChange::Keep => {}
+                DocChange::Patch(Value::Object(patch)) => {
+                    let fields = doc.as_object_mut().context("a stored document that isn't an object")?;
+                    for (k, v) in patch {
+                        if k != crate::schema::ID_FIELD && k != crate::schema::CREATION_TIME_FIELD {
+                            fields.insert(k, v);
+                        }
+                    }
+                }
+                DocChange::Replace(Value::Object(mut fields)) => {
+                    for sys in [crate::schema::ID_FIELD, crate::schema::CREATION_TIME_FIELD] {
+                        if let Some(v) = doc.get(sys) {
+                            fields.insert(sys.to_string(), v.clone());
+                        }
+                    }
+                    doc = Value::Object(fields);
+                }
+                DocChange::Delete => {
+                    anyhow::bail!("migration `{name}` deletes this document; it can't be read until the migration ran")
+                }
+                DocChange::Patch(other) | DocChange::Replace(other) => {
+                    anyhow::bail!("migration `{name}`: a patch or replacement must be a JSON object, got {other}")
+                }
+            }
+        }
+        Ok(doc)
+    })())
+}
+
 /// The declared migrations as `(name, table)`, checked against the tables defined in code. `App::open` passes them
 /// to the database for the startup schema check.
 pub(crate) fn declared(tables: &[TableDef]) -> crate::Result<Vec<(String, String)>> {
@@ -383,6 +434,11 @@ pub struct MigrationSummary {
     pub schema_check: Option<String>,
     /// The table is migrating: it opened with documents that don't match its type (lenient writes).
     pub table_migrating: bool,
+    /// `#[migration(on_read)]`: while it is pending, typed reads see old documents in the new shape.
+    pub on_read: bool,
+    /// This run checks every document it processes against the table's type (it is the table's last pending
+    /// migration), so finishing needs no scan of the table. Null before its first batch.
+    pub validated: Option<bool>,
 }
 
 async fn find_row(db: &crate::QueryDb, name: &str) -> crate::Result<Option<Doc<MigrationRecord>>> {
@@ -420,6 +476,8 @@ async fn summaries(db: &crate::QueryDb) -> crate::Result<Vec<MigrationSummary>> 
             failed_document: row.as_ref().and_then(|r| r.failed_document.clone()),
             schema_check: row.as_ref().and_then(|r| r.schema_check.clone()),
             table_migrating: catalog.is_migrating(table),
+            on_read: def.is_some_and(|d| d.on_read.is_some()),
+            validated: row.as_ref().and_then(|r| r.validated),
         })
     };
     for (name, def) in registry()?.iter() {
@@ -565,6 +623,7 @@ pub async fn start(ctx: &MutationCtx, name: String, restart: bool, force: Option
                 error: None,
                 failed_document: None,
                 schema_check: None,
+                validated: None,
             })
             .await?;
         return Ok(StartOutcome::Started);
@@ -583,6 +642,7 @@ pub async fn start(ctx: &MutationCtx, name: String, restart: bool, force: Option
         value.started_at = Some(now);
         value.finished_at = None;
         value.schema_check = None;
+        value.validated = None;
     }
     value.table = def.table.to_string();
     value.state = MigrationState::Running;
@@ -724,6 +784,7 @@ mod tests {
                 batch_size: 10,
                 after,
                 handler: noop,
+                on_read: None,
             })
             .collect();
         let m = Migrations::build(Vec::leak(defs))?;

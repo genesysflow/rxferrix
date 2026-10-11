@@ -52,4 +52,5 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
         }
         __ferrix_migrate
     },
+    on_read: ::core::option::Option::None,
 };

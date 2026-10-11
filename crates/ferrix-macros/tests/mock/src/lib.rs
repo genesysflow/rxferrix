@@ -498,7 +498,9 @@ pub mod __private {
         pub batch_size: usize,
         pub after: &'static [&'static str],
         pub handler: MigrationHandler,
+        pub on_read: Option<OnReadFn>,
     }
+    pub type OnReadFn = fn(&serde_json::Value) -> Result<crate::migrations::DocChange>;
     impl MigrationDef {
         pub fn name(&self) -> String {
             match self.name {

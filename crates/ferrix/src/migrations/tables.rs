@@ -69,6 +69,9 @@ pub struct MigrationRecord {
     // The schema check of the table after its last pending migration finished: "passed", or the failure report.
     // Null when the table didn't need one (its documents already matched when the server started).
     pub schema_check: Option<String>,
+    // This run checked every document it processed against the table's type (it started as the table's last pending
+    // migration), so finishing it needs no scan of the table. Null until the run's first batch.
+    pub validated: Option<bool>,
 }
 
 // Unit enums: their variant names (the analytics copy's column is text).

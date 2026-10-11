@@ -1384,6 +1384,13 @@ async fn add_priority(ctx: &MutationCtx, doc: Value) -> Result<Option<Value>> {
     Ok(doc.get("priority").is_none().then(|| json!({ "priority": 0 })))   // Some(patch) or None (keep)
 }
 
+/// On read: a plain fn of the stored document (no context, no database), so it can also be applied in memory: while
+/// it is pending, typed reads see old documents in the new shape (see "On read" below).
+#[migration(table = Todo, name = "0003_tags", on_read)]
+fn tags_from_tag(doc: &Value) -> Result<Option<Value>> {
+    Ok(doc.get("tag").filter(|_| doc.get("tags").is_none()).map(|tag| json!({ "tags": [tag] })))
+}
+
 /// Typed, when the old shape still deserializes; a stable name set explicitly.
 #[migration(table = "todos", name = "0002_split_owner", after = ["todos:add_priority"])]   // runs after that one
 async fn split_owner(ctx: &MutationCtx, doc: Doc<OldTodo>) -> Result<DocChange> {
@@ -1462,13 +1469,26 @@ pub struct MigrationReport {   // camelCase JSON
   match the type **only if it didn't match before the write either** (so migrations can rewrite documents step by
   step, and app writes to not-yet-migrated documents still work); inserts, and writes to documents that match, are
   validated strictly. So the number of invalid documents can only go down. Typed reads of not-yet-migrated documents
-  still fail (`document does not match table`), so run the migrations promptly (`serve --migrate` runs them right
-  after startup) or keep the type backward compatible. In the transaction where the table's **last** pending
-  migration finishes, every document of the table is validated: if all match, the fingerprint is recorded and the
-  table leaves the migrating state (`schemaCheck: "passed"`); otherwise the report is stored in `schemaCheck` and
-  logged as an error, the table stays migrating until the process stops, and the next start refuses to open (unless
-  a new migration for the table is pending). Invalid documents never survive a restart unnoticed. With
-  `--skip-schema-check` nothing is migrating, and migration writes are validated strictly.
+  fail (`document does not match table`) unless the table has `on_read` migrations, so run the migrations promptly
+  (`serve --migrate` runs them right after startup) or keep the type backward compatible. While the table's **last**
+  pending migration runs, every document it processes must come out matching the type (else the run fails on that
+  document, `failedDocument`); a run that did so from its first batch (`validated` in `list`) finishes without
+  scanning the table: documents written meanwhile were validated when written (inserts always; updates of migrated
+  documents, which matched). Otherwise, in the transaction where the last migration finishes, every document of the
+  table is validated. Either way, if all match, the fingerprint is recorded and the table leaves the migrating state
+  (`schemaCheck: "passed"`); otherwise the report is stored in `schemaCheck` and logged as an error, the table stays
+  migrating until the process stops, and the next start refuses to open (unless a new migration for the table is
+  pending). Invalid documents never survive a restart unnoticed. With `--skip-schema-check` nothing is migrating, and
+  migration writes are validated strictly.
+- **On read.** `#[migration(on_read)]` takes `fn(doc: &serde_json::Value) -> Result<O>` (not async, no context). The
+  background run calls it like any migration. In addition, a typed read (`get`, queries, pagination, search, a
+  filtered `count`) of a document that doesn't deserialize as `Doc<T>` applies the table's `on_read` migrations to it
+  in memory, in run order (`Patch` merges, `Replace` keeps the system fields, `Keep` passes it on; `Delete` fails the
+  read), and deserializes the result. Documents that already match are never touched, so an `on_read` migration that
+  stays in code after it ran costs nothing. Untyped reads (`query_table`, the dashboard) see the stored document.
+  Index ranges, search filters and aggregates use the stored values until the migration rewrote a document; a query
+  that reads the transformed result depends on the document, so it reruns (with the same result) when the migration
+  rewrites it.
 - **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--force --name NAME] [--dir DIR]`
   runs every migration that isn't done (or one) and prints a report per migration (exit code 1 if one failed or was
   blocked); `ferrix migrate status` lists them in run order with their state, progress and dependencies. Run the CLI while the server is stopped (it is a separate process: a
@@ -1991,6 +2011,7 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
     table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
     batch_size: 100usize,
     after: &[],                                              // `after = ["a", "b"]` → &["a", "b"]
+    on_read: ::core::option::Option::None,                  // `on_read`: Some(fn) calling the (sync) fn, see below
     handler: {
         fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
             -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
@@ -2011,6 +2032,10 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
 - The fn takes exactly `(ctx: &MutationCtx, doc: T)` with `T: DeserializeOwned` (`serde_json::Value`, `Doc<Old>`,
   ...) and returns `Result<O>` (any `...::Result`) with `O: MigrationOutput`; an unsupported `O` is reported by
   `#[diagnostic::on_unimplemented]`.
+- With the flag `on_read`, the fn is a plain (not async) `fn(doc: &serde_json::Value) -> Result<O>`: the handler
+  ignores the context and calls it with `&doc`, and `on_read` is `Some(__ferrix_on_read)`, a
+  `fn(&Value) -> Result<DocChange>` doing the same. Compile errors for an async fn, a context parameter, or a document
+  taken by value.
 - Compile errors (with spans) for: a missing `table`, unknown or duplicate arguments, values of the wrong kind, `batch`
   out of range, an invalid `name`, a non-async fn, `const`/`unsafe`/ABI/generics/variadics, a wrong context
   (`&QueryCtx`, by value, ...), a parameter count other than two, non-identifier patterns, parameter attributes, a

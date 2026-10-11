@@ -115,7 +115,8 @@
       <div class="migrating" role="status" data-testid="migrating-banner">
         <strong>Migrating: {migratingTables.join(", ")}.</strong>
         These tables opened with documents that don't match their type. Writes are lenient (a document that didn't match
-        may stay invalid) and typed reads of old documents fail until their migrations finish; run them soon.
+        may stay invalid) until their migrations finish. Typed reads of old documents go through the table's
+        <code>on_read</code> migrations if it has some; otherwise they fail until the migrations ran, so run them soon.
       </div>
     {/if}
     {#if list.error}
@@ -139,6 +140,7 @@
               <td>
                 <span class="mono name">{m.name}</span>
                 {#if !m.declared}<span class="badge" title="Recorded in _migrations but no longer declared in code">not in code</span>{/if}
+                {#if m.onRead}<span class="badge onread" title="#[migration(on_read)]: while it is pending, typed reads see old documents in the new shape" data-testid="on-read">on read</span>{/if}
                 {#if m.batchSize}<div class="faint tiny">batches of {m.batchSize}</div>{/if}
                 {#if m.after.length > 0}
                   <div class="tiny deps" data-testid="migration-after">
@@ -165,8 +167,10 @@
               </td>
               <td>{m.changed}</td>
               <td>
-                {#if m.schemaCheck === null}<span class="faint">—</span>
-                {:else if m.schemaCheck === "passed"}<span class="badge success">passed</span>
+                {#if m.schemaCheck === null}
+                  {#if m.validated && m.state === "running"}<span class="badge" title="The table's last pending migration: each document is checked against the table's type as it is migrated, so no scan is needed at the end">checking each document</span>
+                  {:else}<span class="faint">—</span>{/if}
+                {:else if m.schemaCheck === "passed"}<span class="badge success" title={m.validated ? "Each document was checked as it was migrated" : "Every document of the table was checked at the end"}>passed</span>
                 {:else}<span class="badge serverError" title={m.schemaCheck}>failed</span>{/if}
               </td>
               <td title={m.finishedAt ? formatTime(m.finishedAt) : m.startedAt ? `started ${formatTime(m.startedAt)}` : ""}>
@@ -335,6 +339,10 @@
     color: var(--err);
     background: var(--err-soft);
     border-color: transparent;
+  }
+  .badge.onread {
+    margin-left: 6px;
+    color: var(--link);
   }
   .badge.mig {
     margin-left: 6px;

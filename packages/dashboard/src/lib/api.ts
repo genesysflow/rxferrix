@@ -342,6 +342,10 @@ export interface MigrationSummary {
   schemaCheck: string | null;
   /** The table opened with documents that don't match its type: lenient writes until its migrations finish. */
   tableMigrating: boolean;
+  /** `#[migration(on_read)]`: while it is pending, typed reads see old documents in the new shape. */
+  onRead: boolean;
+  /** This run checks each document it processes (the table's last pending migration): no table scan at the end. */
+  validated: boolean | null;
 }
 
 export type RunOutcome =

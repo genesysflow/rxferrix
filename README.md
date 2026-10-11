@@ -504,9 +504,27 @@ todo-server serve --migrate            # or: start, then run them in the backgro
 ```
 
 While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
-table is *migrating*, writes may leave a document invalid only if it already was, and reads of not-yet-migrated
-documents fail. When its last migration finishes, the table is validated again in the same transaction; if anything
-is still invalid, the next start refuses. `after = [..]` dependencies are checked at startup (unknown names and cycles
+table is *migrating*, writes may leave a document invalid only if it already was, and typed reads of not-yet-migrated
+documents fail, unless the migration is an **on-read** one: a plain function of the stored document, which typed
+reads also apply in memory while it is pending, so queries see every document in the new shape from the first moment:
+
+```rust
+#[table(name = "notes")]
+pub struct Note { pub title: String, pub tags: Vec<String> }    // was `tag: String`
+
+#[migration(table = Note, name = "0004_tags", on_read)]            // no ctx, not async
+fn tags_from_tag(doc: &serde_json::Value) -> Result<Option<serde_json::Value>> {
+    Ok(doc.get("tag").filter(|_| doc.get("tags").is_none()).map(|tag| json!({ "tags": [tag] })))
+}
+```
+
+**A schema change with no downtime**, then: change the type, write the migration (`on_read` if it doesn't need the
+database), check it (`todo-server check` and `migrate --dry-run` on a copy, or in CI), deploy with `serve --takeover
+--migrate` (the old version keeps serving until the new one is ready, see "Deploying"), and the migration runs in the
+background while reads already see the new shape. Index ranges and search filters on a migrated field see the old
+stored values until the migration has reached those documents. The last migration of a table checks every document
+it processes, so finishing it needs no scan of the table and holds up no writes; one it leaves invalid fails the run,
+naming the document, and a table that still doesn't match refuses the next start. `after = [..]` dependencies are checked at startup (unknown names and cycles
 are errors); running one migration before its dependencies are done is refused unless forced (`migrate --name x
 --force`). The dashboard's Migrations page shows their dependencies and live progress and runs, cancels,
 restarts and dry-runs them (`_system/migrations:{list, status, run, cancel}`). Details:

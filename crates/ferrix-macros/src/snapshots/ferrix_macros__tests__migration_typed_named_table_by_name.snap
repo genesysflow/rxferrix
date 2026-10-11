@@ -51,4 +51,5 @@ static __FERRIX_MIGRATION_split: ::ferrix::__private::MigrationDef = ::ferrix::_
         }
         __ferrix_migrate
     },
+    on_read: ::core::option::Option::None,
 };

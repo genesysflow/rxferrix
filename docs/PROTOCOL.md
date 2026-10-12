@@ -196,10 +196,13 @@ Nothing here changes the messages or the guarantees above; it describes how the 
 So that no client can grow the server's memory without bound:
 
 - At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`.
-- At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server stops reading the socket
-  until one finishes (they queue in the client and TCP rather than in the server).
+- At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server holds the next one and
+  stops reading the socket until one finishes (later messages queue in the client and TCP rather than in the server,
+  and keep their order). Meanwhile it goes on sending Transitions and Pings and ending the socket on token expiry or
+  revocation.
 - A socket the client has sent nothing on for 45 seconds is closed with `FatalError` at the next ping tick
-  (`SILENCE_LIMIT`; the server pings every 15 s and a client answers every `Ping` with `Pong`). A frame that takes over 30 s to send (a client that
+  (`SILENCE_LIMIT`; the server pings every 15 s and a client answers every `Ping` with `Pong`). Time spent with a
+  mutation or action held (above) doesn't count: the client's answers are waiting unread behind it. A frame that takes over 30 s to send (a client that
   stopped reading) closes the socket too.
 - A query running longer than the server's `query_timeout` (default 30 s) fails.
 

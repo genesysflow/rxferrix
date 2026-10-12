@@ -32,7 +32,9 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 pub const SILENCE_LIMIT: Duration = Duration::from_secs(45);
 /// The most query subscriptions one connection may have.
 pub const MAX_QUERIES: usize = 1024;
-/// The most mutations and actions one connection may have running; past it, the worker stops reading until one ends.
+/// The most mutations and actions one connection may have running. Past it, the worker parks the next one and reads
+/// nothing more from the client until a slot frees up (so its messages wait, in order, in the socket), while it goes
+/// on sending query updates and pings and enforcing token expiry and revocation.
 pub const MAX_IN_FLIGHT: usize = 64;
 
 /// Input to the worker from the socket reader.
@@ -97,6 +99,9 @@ pub struct SyncWorker {
     last_heard: Instant,
     /// One permit per running mutation or action ([`MAX_IN_FLIGHT`]).
     in_flight: Arc<tokio::sync::Semaphore>,
+    /// A mutation or action that arrived while every slot was taken: it starts when one frees up, and nothing more is
+    /// read from the client until then.
+    parked: Option<ClientMessage>,
 }
 
 /// Spawn a worker and return its input and output channels (used by the WebSocket handler and by tests).
@@ -137,6 +142,7 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         session_watch: None,
         last_heard: Instant::now(),
         in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
+        parked: None,
     };
     worker.run(inbound, doorbell).await
 }
@@ -151,7 +157,7 @@ impl SyncWorker {
                 let auth_expiry = self.auth_expires_at;
                 let session_ended = self.session_watch.as_ref().map(|w| w.ended());
                 tokio::select! {
-                    msg = inbound.recv() => match msg {
+                    msg = inbound.recv(), if self.parked.is_none() => match msg {
                         None => return Ok(()),
                         Some(Inbound::Malformed(e)) => return Err(Fatal(format!("malformed message: {e}"))),
                         Some(Inbound::Message(m)) => {
@@ -160,9 +166,16 @@ impl SyncWorker {
                         }
                     },
                     Some(done) = self.completions_rx.recv() => self.handle_completion(done).await?,
+                    permit = self.in_flight.clone().acquire_owned(), if self.parked.is_some() => {
+                        let permit = permit.map_err(|_| Fatal("connection closing".into()))?;
+                        if let Some(msg) = self.parked.take() {
+                            self.start(msg, permit);
+                        }
+                    }
                     Some(()) = doorbell.recv() => self.deliver().await?,
                     _ = ping.tick() => {
-                        if self.last_heard.elapsed() >= SILENCE_LIMIT {
+                        // While a message is parked the client's answers wait unread behind it: not silence.
+                        if self.parked.is_none() && self.last_heard.elapsed() >= SILENCE_LIMIT {
                             return Err(Fatal("connection closed: the client has been silent too long".into()));
                         }
                         self.send(ServerMessage::Ping).await?
@@ -295,13 +308,26 @@ impl SyncWorker {
                 self.identity_version = base_version + 1;
                 self.conn.authenticate(self.identity_version, identity).await?;
             }
+            msg @ (ClientMessage::Mutation { .. } | ClientMessage::Action { .. }) => {
+                match self.in_flight.clone().try_acquire_owned() {
+                    Ok(permit) => self.start(msg, permit),
+                    Err(_) => self.parked = Some(msg),
+                }
+            }
+            ClientMessage::Pong => {}
+        }
+        Ok(())
+    }
+
+    /// Run a mutation or action off the worker task (so a slow one doesn't hold up query updates for this socket),
+    /// holding `permit` (one of [`MAX_IN_FLIGHT`]) until it ends.
+    fn start(&self, msg: ClientMessage, permit: tokio::sync::OwnedSemaphorePermit) {
+        let (app, identity, tx) = (self.app.clone(), self.identity.clone(), self.completions_tx.clone());
+        match msg {
             ClientMessage::Mutation { request_id, udf_path, args } => {
-                // Run off the worker task so a slow mutation doesn't block query updates for this socket.
-                let (app, identity, tx) = (self.app.clone(), self.identity.clone(), self.completions_tx.clone());
                 // A client resending after a reconnect reuses (sessionId, requestId): the runtime then replays the
                 // recorded response instead of running the mutation twice.
                 let key = self.session_id.clone().map(|session_id| IdempotencyKey { session_id, request_id });
-                let permit = self.in_flight_permit().await?;
                 tokio::spawn(async move {
                     let _permit = permit;
                     let run = app.execute_mutation(&udf_path, args, &identity, key.as_ref()).await;
@@ -311,8 +337,6 @@ impl SyncWorker {
                 });
             }
             ClientMessage::Action { request_id, udf_path, args } => {
-                let (app, identity, tx) = (self.app.clone(), self.identity.clone(), self.completions_tx.clone());
-                let permit = self.in_flight_permit().await?;
                 tokio::spawn(async move {
                     let _permit = permit;
                     let run = app.execute_action(&udf_path, args, &identity).await;
@@ -321,15 +345,8 @@ impl SyncWorker {
                     let _ = tx.send(Completion::Action { request_id, result, log_lines });
                 });
             }
-            ClientMessage::Pong => {}
+            _ => unreachable!("only mutations and actions are started"),
         }
-        Ok(())
-    }
-
-    /// A slot for one more running mutation or action ([`MAX_IN_FLIGHT`]): waits (so this connection's messages wait
-    /// in its socket) while all are taken.
-    async fn in_flight_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, Fatal> {
-        self.in_flight.clone().acquire_owned().await.map_err(|_| Fatal("connection closing".into()))
     }
 
     async fn handle_completion(&mut self, done: Completion) -> Result<(), Fatal> {

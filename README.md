@@ -1,4 +1,4 @@
-# Ferrix
+# RxFerrix
 
 A reactive backend in Rust that ships as a single binary.
 
@@ -13,7 +13,7 @@ directory.
 - **Safe to change.** Deploys and schema changes happen without downtime; a version that can't read the existing
   data refuses to take over, and the old one keeps serving.
 
-**Documentation: https://genesysflow.github.io/ferrix/**
+**Documentation: https://genesysflow.github.io/rxferrix/**
 
 How it works inside, and why: [Design](docs/DESIGN.md).
 
@@ -23,19 +23,19 @@ You need Rust (via [mise](https://mise.jdx.dev), see `mise.toml`) and [bun](http
 
 ```sh
 bun install && bun run build               # build the TypeScript packages
-cargo install --path crates/ferrix-cli     # the `ferrix` command
-ferrix new my-app                          # --web react (default), svelte or none
+cargo install --path crates/rxferrix-cli     # the `rxferrix` command
+rxferrix new my-app                          # --web react (default), svelte or none
 cd my-app && cargo run -- serve --dev      # backend on http://127.0.0.1:8090
 cd my-app/web && bun install && bun run dev   # web app, in a second terminal
 ```
 
 The new app is a Rust crate with a sample `tasks` table and functions in `src/tasks.rs`, and a web app in `web/`.
-`serve --dev` writes the TypeScript API to `web/src/ferrix` each time it starts, so restart it after you change the
+`serve --dev` writes the TypeScript API to `web/src/rxferrix` each time it starts, so restart it after you change the
 functions. The admin dashboard is at http://127.0.0.1:8090/_/: open the setup link the server prints on first start to create an
 administrator.
 
-A `ferrix` command installed from this checkout makes apps that use the checkout's crate and @ferrix packages;
-`--published` uses crates.io and npm instead, and `--ferrix-path DIR` another checkout.
+A `rxferrix` command installed from this checkout makes apps that use the checkout's crate and @rxferrix packages;
+`--published` uses crates.io and npm instead, and `--rxferrix-path DIR` another checkout.
 
 ## What the code looks like
 
@@ -43,7 +43,7 @@ The backend: a table and the functions that use it.
 
 ```rust
 // src/todos.rs
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 #[table(name = "todos")]
 #[index(by_done = [done])]
@@ -61,14 +61,14 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
 
 // src/main.rs
 mod todos;
-fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
+fn main() -> rxferrix::Result<()> { rxferrix::RxFerrix::new().run() }
 ```
 
 The frontend (React; Svelte works the same way):
 
 ```tsx
-import { useMutation, useQuery } from "@ferrix/react";
-import { api } from "./ferrix";                     // generated from the functions above
+import { useMutation, useQuery } from "@rxferrix/react";
+import { api } from "./rxferrix";                     // generated from the functions above
 
 function Todos() {
   const todos = useQuery(api.todos.list);          // undefined while loading, then always up to date
@@ -92,7 +92,7 @@ When anyone adds a todo, every open `list` updates. There are three kinds of fun
 
 ## Features
 
-Each one is explained, with examples, in the [guide](https://genesysflow.github.io/ferrix/guide/functions).
+Each one is explained, with examples, in the [guide](https://genesysflow.github.io/rxferrix/guide/functions).
 
 | Feature | In short |
 |---|---|
@@ -113,15 +113,15 @@ makes a query rerun.
 
 ## Deploying
 
-A Ferrix app is one binary and one data directory (`--dir`, default `fx_data`). The details are in
-[the operations docs](https://genesysflow.github.io/ferrix/operations/deploying).
+A RxFerrix app is one binary and one data directory (`--dir`, default `fx_data`). The details are in
+[the operations docs](https://genesysflow.github.io/rxferrix/operations/deploying).
 
 ```sh
 scripts/release.sh                                  # a static Linux binary of the todo example in dist/ (~25 MB)
 dist/todo-server serve --dir /var/lib/my-app        # listens on 127.0.0.1:8090 (--http to change)
 ```
 
-- **Where to run it:** directly ([`deploy/ferrix.service`](deploy/ferrix.service) for systemd), in Docker
+- **Where to run it:** directly ([`deploy/rxferrix.service`](deploy/rxferrix.service) for systemd), in Docker
   ([`Dockerfile`](Dockerfile), [`deploy/docker`](deploy/docker)) or on Kubernetes ([`deploy/k8s`](deploy/k8s), written
   for k3s). Put it behind a reverse proxy, or let it get Let's Encrypt certificates itself with `--https`.
 - **Deploys without downtime:** `serve --takeover` starts the new version next to the running one. It prepares a copy
@@ -144,7 +144,7 @@ Run the todo example:
 
 ```sh
 bun install && bun run build
-cargo run -p todo-server -- serve --dev --codegen-out examples/todo/web/src/lib/ferrix    # backend on :8090
+cargo run -p todo-server -- serve --dev --codegen-out examples/todo/web/src/lib/rxferrix    # backend on :8090
 cd examples/todo/web && bun run dev                                                       # app on :5173
 ```
 
@@ -156,11 +156,11 @@ command (backups, restores, migrations, export and import, …).
 
 | Path | What |
 |---|---|
-| `crates/ferrix` | The runtime: storage, query engine, reactivity, server, CLI, codegen, test helpers. |
-| `crates/ferrix-macros` | The `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[migration]`, … macros. |
-| `crates/ferrix-cli` | The `ferrix` command (`ferrix new`). |
-| `packages/client` | `@ferrix/client`: the TypeScript client (sync, optimistic updates, reconnects). |
-| `packages/react`, `packages/svelte` | `@ferrix/react` and `@ferrix/svelte` bindings. |
+| `crates/rxferrix` | The runtime: storage, query engine, reactivity, server, CLI, codegen, test helpers. |
+| `crates/rxferrix-macros` | The `#[table]`, `#[query]`, `#[mutation]`, `#[action]`, `#[migration]`, … macros. |
+| `crates/rxferrix-cli` | The `rxferrix` command (`rxferrix new`). |
+| `packages/client` | `@rxferrix/client`: the TypeScript client (sync, optimistic updates, reconnects). |
+| `packages/react`, `packages/svelte` | `@rxferrix/react` and `@rxferrix/svelte` bindings. |
 | `packages/dashboard` | The admin dashboard (Svelte), embedded in the binary at `/_/`. |
 | `examples/` | The todo and chat apps. |
 | `deploy/` | systemd, Docker Compose and Kubernetes files. |
@@ -178,10 +178,10 @@ More test suites ([`.github/workflows/release.yml`](.github/workflows/release.ym
 longer fuzzing and the three rollout scripts):
 
 ```sh
-cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # the generated TS type-checks
-cargo test -p ferrix-cli --test new -- --ignored                          # `ferrix new` apps build
-cargo test -p ferrix --features olap --lib --test it                      # with analytics (builds DuckDB: minutes)
-FUZZ_SCALE=20 cargo test --release -p ferrix --test it fuzz               # longer protocol fuzzing
+cargo test -p rxferrix --test it codegen_typechecks_with_tsc -- --ignored   # the generated TS type-checks
+cargo test -p rxferrix-cli --test new -- --ignored                          # `rxferrix new` apps build
+cargo test -p rxferrix --features olap --lib --test it                      # with analytics (builds DuckDB: minutes)
+FUZZ_SCALE=20 cargo test --release -p rxferrix --test it fuzz               # longer protocol fuzzing
 bun run check:dashboard                       # the committed dashboard build matches its sources
 (cd packages/dashboard && bun e2e/dashboard.ts)   # dashboard e2e, after `cargo build -p todo-server`
 cd examples/todo/web && bun e2e/two-tabs.ts       # needs the backend and Vite running
@@ -191,10 +191,10 @@ bun scripts/docker-rollout-e2e.ts             # the same with Docker Compose and
 bun scripts/k3s-rollout-e2e.ts                # the same on k3s in Docker (needs Docker and the image)
 ```
 
-Benchmarks: `cargo test --release -p ferrix --test it bench_ -- --ignored --nocapture`.
+Benchmarks: `cargo test --release -p rxferrix --test it bench_ -- --ignored --nocapture`.
 
 The dashboard's built files are committed, so `cargo build` needs no JavaScript toolchain. After changing
-`packages/dashboard` or the client packages, run `bun run build:dashboard` and commit `crates/ferrix/dashboard-dist`
+`packages/dashboard` or the client packages, run `bun run build:dashboard` and commit `crates/rxferrix/dashboard-dist`
 (`cargo test` fails while it is out of date). `cd packages/dashboard && bun run dev` serves it on :5174 for UI work.
 
 The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves it with live reload, and

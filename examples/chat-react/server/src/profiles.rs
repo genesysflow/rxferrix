@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use ferrix::QueryDb;
-use ferrix::auth::User;
-use ferrix::prelude::*;
+use rxferrix::QueryDb;
+use rxferrix::auth::User;
+use rxferrix::prelude::*;
 
 use crate::model::{Channel, Member, Profile, user_error};
 

@@ -9,8 +9,8 @@
     "e2e": "bun e2e/chat.ts"
   },
   "dependencies": {
-    "@ferrix/client": "workspace:*",
-    "@ferrix/react": "workspace:*",
+    "@rxferrix/client": "workspace:*",
+    "@rxferrix/react": "workspace:*",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

@@ -1,0 +1,5 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(),\nquote!(async fn f(ctx: &MutationCtx) -> Result<()> {}))"
+---
+#[query] functions take `&QueryCtx` as their first parameter, found `&MutationCtx`

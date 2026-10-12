@@ -1,0 +1,11 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration_err(quote!(batch = 0, name = \"has space\", tables = X, name = \"x\",\nafter = \"0001\", after = [\"a\"]),\nquote!(async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}))"
+---
+`batch` must be between 1 and 10000
+a migration name may only contain letters, digits and `_ - . : /`, not ` `
+unknown argument `tables` (expected `table`, `batch`, `name`, `after` or `on_read`)
+duplicate argument `name`
+`after` must be a list of migration names, e.g. `after = ["0001_add_priority", "todos:split"]`
+duplicate argument `after`
+#[migration] needs the table it migrates: `#[migration(table = TableType)]`

@@ -8,9 +8,9 @@ export default defineConfig({
   resolve: {
     conditions: ["browser"],
     alias: [
-      { find: /^@ferrix\/client$/, replacement: src("../client/src/index.ts") },
-      { find: /^@ferrix\/client\/testing$/, replacement: src("../client/src/testing.ts") },
-      { find: /^@ferrix\/svelte$/, replacement: src("../svelte/src/lib/index.ts") },
+      { find: /^@rxferrix\/client$/, replacement: src("../client/src/index.ts") },
+      { find: /^@rxferrix\/client\/testing$/, replacement: src("../client/src/testing.ts") },
+      { find: /^@rxferrix\/svelte$/, replacement: src("../svelte/src/lib/index.ts") },
     ],
   },
   test: {

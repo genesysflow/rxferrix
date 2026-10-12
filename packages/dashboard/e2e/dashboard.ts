@@ -70,7 +70,7 @@ async function startServer(dir: string, extraArgs: (base: string) => string[] = 
 }
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "ferrix-dashboard-e2e-"));
+  const dir = mkdtempSync(join(tmpdir(), "rxferrix-dashboard-e2e-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -726,7 +726,7 @@ try {
       headers: { "content-type": "application/json", authorization: `Bearer ${admin}` },
       body: JSON.stringify({ user: userId, ttlSeconds: 300, redirectTo: `${base}/` }),
     }).then((r) => r.json() as Promise<{ url: string; expiresAt: number; userId: string }>);
-    if (!imp.url?.startsWith(`${base}/#ferrix_access_token=`) || Math.abs(imp.expiresAt - (Date.now() + 300_000)) > 30_000) {
+    if (!imp.url?.startsWith(`${base}/#rxferrix_access_token=`) || Math.abs(imp.expiresAt - (Date.now() + 300_000)) > 30_000) {
       throw new Error(`impersonate: ${JSON.stringify({ ...imp, url: imp.url?.slice(0, 40) })}`);
     }
     await nav(page, "Users").click();
@@ -740,7 +740,7 @@ try {
       page.context().waitForEvent("page"),
       dialog.getByRole("button", { name: "Open app as user" }).click(),
     ]);
-    const opened = () => tab.url().startsWith(`${base}/api/health#ferrix_access_token=`) && tab.url().includes(`ferrix_user_id=${userId}`);
+    const opened = () => tab.url().startsWith(`${base}/api/health#rxferrix_access_token=`) && tab.url().includes(`rxferrix_user_id=${userId}`);
     for (let i = 0; i < 100 && !opened(); i++) await Bun.sleep(50);
     if (!opened()) throw new Error(`the new tab is at ${tab.url().slice(0, 60)}`);
     await tab.close();

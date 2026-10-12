@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useMutation, usePaginatedQuery, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useMutation, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { workflows, type StepState, type Workflow, type WorkflowState, type WorkflowStep } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatRelative, formatSpan, formatTime, pretty } from "../lib/format.js";
@@ -45,7 +45,7 @@
       const outcome = await cancelWorkflow({ id: wf._id });
       ctx.toast(outcome === "canceled" ? "Workflow canceled" : "The workflow had already finished", outcome === "canceled" ? "info" : "error");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 

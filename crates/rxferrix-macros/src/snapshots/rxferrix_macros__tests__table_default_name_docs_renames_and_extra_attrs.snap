@@ -1,0 +1,131 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table(quote!(), quote!\n{\n    #[doc = r\" A todo item.\"] #[doc = r\"\"] #[doc = r\" Second paragraph.\"]\n    #[index(by_owner = [owner_id])] #[derive(PartialEq)]\n    #[index(by_owner_and_due = [owner_id, due_at], by_label = [r#type])]\n    #[serde(deny_unknown_fields)] pub(crate) struct TodoItem\n    {\n        #[doc = r\" The owner.\"] #[serde(rename = \"owner\")] pub owner_id:\n        String, pub due_at: Option<f64>, pub r#type: String, #[serde(default)]\n        pub tags: Vec<String>,\n    }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+/// A todo item.
+///
+/// Second paragraph.
+#[derive(PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TodoItem {
+    /// The owner.
+    #[serde(rename = "owner")]
+    pub owner_id: String,
+    pub due_at: Option<f64>,
+    pub r#type: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+impl ::rxferrix::Table for TodoItem {
+    const NAME: &'static str = "todo_item";
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef {
+            name: "todo_item",
+            indexes: ::std::vec![
+                ::rxferrix::IndexDef { name : "by_owner", fields : ::std::vec!["owner"]
+                }, ::rxferrix::IndexDef { name : "by_owner_and_due", fields :
+                ::std::vec!["owner", "dueAt"] }, ::rxferrix::IndexDef { name :
+                "by_label", fields : ::std::vec!["type"] }
+            ],
+            search_indexes: ::std::vec![],
+            vector_indexes: ::std::vec![],
+            ts: || ::rxferrix::__private::ts_inline::<TodoItem>(),
+            validate: ::rxferrix::__private::validate_doc::<TodoItem>,
+            shape: || {
+                let mut s = ::rxferrix::shape::StructShape::default();
+                s.field(
+                    "owner",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "dueAt",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<f64>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "type",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "tags",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Vec<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                ::rxferrix::shape::Shape::Struct(s)
+            },
+            aggregates: ::std::vec![],
+        }
+    }
+}
+#[allow(non_upper_case_globals)]
+impl TodoItem {
+    pub const owner_id: ::rxferrix::Field<TodoItem, String> = ::rxferrix::Field::new(
+        "owner",
+    );
+    pub const due_at: ::rxferrix::Field<TodoItem, Option<f64>> = ::rxferrix::Field::new(
+        "dueAt",
+    );
+    pub const r#type: ::rxferrix::Field<TodoItem, String> = ::rxferrix::Field::new(
+        "type",
+    );
+    pub const tags: ::rxferrix::Field<TodoItem, Vec<String>> = ::rxferrix::Field::new(
+        "tags",
+    );
+    pub const _id: ::rxferrix::Field<TodoItem, ::rxferrix::Id<TodoItem>> = ::rxferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::rxferrix::Field<TodoItem, ::core::primitive::f64> = ::rxferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_owner: ::rxferrix::Index<TodoItem> = ::rxferrix::Index::new("by_owner");
+    pub const by_owner_and_due: ::rxferrix::Index<TodoItem> = ::rxferrix::Index::new(
+        "by_owner_and_due",
+    );
+    pub const by_label: ::rxferrix::Index<TodoItem> = ::rxferrix::Index::new("by_label");
+    pub const by_creation_time: ::rxferrix::Index<TodoItem> = ::rxferrix::Index::new(
+        "by_creation_time",
+    );
+}
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_TABLE_TodoItem: fn() -> ::rxferrix::TableDef = <TodoItem as ::rxferrix::Table>::table_def;

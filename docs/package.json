@@ -1,5 +1,5 @@
 {
-  "name": "@ferrix/docs",
+  "name": "@rxferrix/docs",
   "private": true,
   "type": "module",
   "scripts": {

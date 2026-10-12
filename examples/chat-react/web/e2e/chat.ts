@@ -56,7 +56,7 @@ async function startServers() {
   await waitFor(`${BACKEND}/api/health`, "backend");
   const vite = Bun.spawn(["bun", "x", "vite", "--port", String(VITE_PORT), "--strictPort"], {
     cwd: webDir,
-    env: { ...process.env, FERRIX_URL: BACKEND },
+    env: { ...process.env, RXFERRIX_URL: BACKEND },
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -175,7 +175,7 @@ async function makePng(page: Page): Promise<Buffer> {
     g.fillRect(0, 0, 480, 320);
     g.fillStyle = "white";
     g.font = "bold 48px sans-serif";
-    g.fillText("ferrix ⚡", 120, 175);
+    g.fillText("rxferrix ⚡", 120, 175);
     return c.toDataURL("image/png");
   });
   return Buffer.from(dataUrl.split(",")[1]!, "base64");

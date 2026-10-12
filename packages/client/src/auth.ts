@@ -1,9 +1,9 @@
 /**
- * Auth for a {@link FerrixClient}: sign-up / sign-in against the server's `/api/auth/*` endpoints, token storage,
+ * Auth for a {@link RxFerrixClient}: sign-up / sign-in against the server's `/api/auth/*` endpoints, token storage,
  * automatic refresh (wired into `client.setAuth`), OAuth redirects and cross-tab sync.
  *
  * ```ts
- * const client = new FerrixClient("http://localhost:8090");
+ * const client = new RxFerrixClient("http://localhost:8090");
  * const auth = getAuth(client);                      // restores a stored session, if any
  * await auth.signIn({ email, password });
  * auth.subscribe(() => console.log(auth.state()));   // { isLoading, isAuthenticated, userId, isAdmin }
@@ -15,8 +15,8 @@
  * tabs with the Web Locks API when available, and tabs pick up each other's tokens through `storage` events.
  */
 import { makeFunctionReference, type Id } from "./api.js";
-import type { FerrixClient } from "./client.js";
-import { FerrixError } from "./errors.js";
+import type { RxFerrixClient } from "./client.js";
+import { RxFerrixError } from "./errors.js";
 import type { ErrorData } from "./protocol.js";
 
 /** Where tokens are persisted. `localStorage` satisfies it; async implementations (e.g. secure storage) work too. */
@@ -40,7 +40,7 @@ export class MemoryAuthStorage implements AuthStorage {
   }
 }
 
-export interface FerrixAuthOptions {
+export interface RxFerrixAuthOptions {
   /** Token storage. Defaults to `localStorage` when available, else memory. */
   storage?: AuthStorage;
   /** Storage key. Defaults to `"ferrix.auth:" + client.url`. */
@@ -51,7 +51,7 @@ export interface FerrixAuthOptions {
   syncTabs?: boolean;
 }
 
-/** The auth state, as shown by `useFerrixAuth()` / `useAuth()`. */
+/** The auth state, as shown by `useRxFerrixAuth()` / `useAuth()`. */
 export interface AuthState {
   /** True until the stored session has been checked, and after a sign-in until the server confirmed the token. */
   readonly isLoading: boolean;
@@ -76,13 +76,13 @@ export interface AuthTokens {
 /** Proof of email ownership: the token from an email link, or the email address plus the code from the email. */
 export type CodeProof = { token: string } | { email: string; code: string };
 
-/** What {@link FerrixAuth.handleRedirectCallback} found in the URL. */
+/** What {@link RxFerrixAuth.handleRedirectCallback} found in the URL. */
 export type RedirectResult =
   | { type: "signedIn" }
   | { type: "emailVerified" }
   /** A password reset link: ask for a new password, then call `resetPassword({ token }, password)`. */
   | { type: "passwordReset"; token: string }
-  | { type: "error"; error: FerrixError };
+  | { type: "error"; error: RxFerrixError };
 
 /** Sign-in methods enabled on the server (`GET /api/auth/providers`). */
 export interface AuthProviders {
@@ -104,7 +104,7 @@ export interface User {
 }
 
 /**
- * Hand-written references to ferrix's built-in functions (codegen leaves system functions out of `api`).
+ * Hand-written references to rxferrix's built-in functions (codegen leaves system functions out of `api`).
  *
  * - `systemApi.auth.me`: the signed-in user (reactive), or `null`.
  * - `systemApi.auth.updateProfile`: set `name` / `image`; omitted fields are unchanged, `""` clears.
@@ -182,16 +182,16 @@ const SIGNED_OUT_STATE: AuthState = Object.freeze({
   isAdmin: false,
 });
 
-/** An error from an auth endpoint (`FerrixError` with the server's `code`, e.g. `"invalid_credentials"`). */
-function errorFrom(status: number, body: unknown): FerrixError {
+/** An error from an auth endpoint (`RxFerrixError` with the server's `code`, e.g. `"invalid_credentials"`). */
+function errorFrom(status: number, body: unknown): RxFerrixError {
   const b = (body ?? {}) as { errorMessage?: string; errorData?: ErrorData | null };
-  if (typeof b.errorMessage === "string") return FerrixError.fromServer(b.errorMessage, b.errorData ?? null);
-  return new FerrixError(`Auth request failed with HTTP ${status}`, { code: "http_error", data: { status } });
+  if (typeof b.errorMessage === "string") return RxFerrixError.fromServer(b.errorMessage, b.errorData ?? null);
+  return new RxFerrixError(`Auth request failed with HTTP ${status}`, { code: "http_error", data: { status } });
 }
 
-/** Auth bound to one {@link FerrixClient}. Create it with {@link getAuth}. */
-export class FerrixAuth {
-  readonly client: FerrixClient;
+/** Auth bound to one {@link RxFerrixClient}. Create it with {@link getAuth}. */
+export class RxFerrixAuth {
+  readonly client: RxFerrixClient;
   private readonly storage: AuthStorage;
   private readonly storageKey: string;
   private readonly fetchImpl: typeof fetch;
@@ -203,12 +203,12 @@ export class FerrixAuth {
   private refreshing: Promise<string | null> | null = null;
   private removeStorageListener: () => void = () => {};
 
-  constructor(client: FerrixClient, options: FerrixAuthOptions = {}) {
+  constructor(client: RxFerrixClient, options: RxFerrixAuthOptions = {}) {
     this.client = client;
     this.storage = options.storage ?? defaultStorage();
     this.storageKey = options.storageKey ?? `ferrix.auth:${client.url}`;
     const f = options.fetch ?? (globalThis as { fetch?: typeof fetch }).fetch;
-    if (!f) throw new Error("FerrixAuth: no global fetch available; pass the `fetch` option");
+    if (!f) throw new Error("RxFerrixAuth: no global fetch available; pass the `fetch` option");
     // Called as a plain function: browsers throw "Illegal invocation" when `window.fetch` is called as a method of
     // another object (e.g. `this.fetchImpl(...)`).
     this.fetchImpl = (input, init) => f(input, init);
@@ -250,7 +250,7 @@ export class FerrixAuth {
       try {
         l();
       } catch (e) {
-        console.error("[ferrix] auth listener threw", e);
+        console.error("[rxferrix] auth listener threw", e);
       }
     }
   }
@@ -296,7 +296,7 @@ export class FerrixAuth {
       if (t) await this.storage.setItem(this.storageKey, JSON.stringify(t));
       else await this.storage.removeItem(this.storageKey);
     } catch (e) {
-      console.warn("[ferrix] could not persist auth tokens", e);
+      console.warn("[rxferrix] could not persist auth tokens", e);
     }
   }
 
@@ -339,7 +339,7 @@ export class FerrixAuth {
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
     const locks = (globalThis as { navigator?: { locks?: { request(name: string, cb: () => Promise<T>): Promise<T> } } })
       .navigator?.locks;
-    if (locks && typeof locks.request === "function") return locks.request(`ferrix-auth-refresh:${this.storageKey}`, fn);
+    if (locks && typeof locks.request === "function") return locks.request(`rxferrix-auth-refresh:${this.storageKey}`, fn);
     return fn();
   }
 
@@ -369,7 +369,7 @@ export class FerrixAuth {
       });
     } catch (e) {
       // Offline: keep the session; the next reconnect or AuthError tries again.
-      throw new FerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: e });
+      throw new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: e });
     }
     const body = (await res.json().catch(() => null)) as unknown;
     if (res.ok) {
@@ -437,7 +437,7 @@ export class FerrixAuth {
     try {
       res = await this.fetchImpl(`${this.baseUrl}/api/auth/${path}`, { method: "POST", headers, body: JSON.stringify(body) });
     } catch (e) {
-      throw new FerrixError("Could not reach the server", { code: "network_error", cause: e });
+      throw new RxFerrixError("Could not reach the server", { code: "network_error", cause: e });
     }
     const json = (await res.json().catch(() => null)) as unknown;
     if (!res.ok) throw errorFrom(res.status, json);
@@ -562,9 +562,9 @@ export class FerrixAuth {
   }
 
   /**
-   * Handle the `#ferrix_…` fragment that OAuth redirects and email links put on the URL: stores tokens (OAuth),
+   * Handle the `#rxferrix_…` fragment that OAuth redirects and email links put on the URL: stores tokens (OAuth),
    * signs in (magic link), confirms the email (verification link) or returns the reset token (password reset). The
-   * `ferrix_` parameters are removed from the address bar first, so a reload can't replay them. Returns null when
+   * `rxferrix_` parameters are removed from the address bar first, so a reload can't replay them. Returns null when
    * the URL has none.
    */
   async handleRedirectCallback(url?: string): Promise<RedirectResult | null> {
@@ -577,7 +577,7 @@ export class FerrixAuth {
     const parsed = new URL(href);
     const params = new URLSearchParams(parsed.hash.replace(/^#/, ""));
     const ours = new Map<string, string>();
-    for (const [k, v] of params) if (k.startsWith("ferrix_")) ours.set(k, v);
+    for (const [k, v] of params) if (k.startsWith("rxferrix_")) ours.set(k, v);
     if (ours.size === 0) return null;
     for (const k of ours.keys()) params.delete(k);
     const rest = params.toString();
@@ -587,49 +587,49 @@ export class FerrixAuth {
     }
 
     try {
-      const error = ours.get("ferrix_error");
+      const error = ours.get("rxferrix_error");
       if (error) {
-        const message = ours.get("ferrix_error_description") ?? "Sign-in failed";
-        return { type: "error", error: new FerrixError(message, { code: error }) };
+        const message = ours.get("rxferrix_error_description") ?? "Sign-in failed";
+        return { type: "error", error: new RxFerrixError(message, { code: error }) };
       }
-      const access = ours.get("ferrix_access_token");
-      const refresh = ours.get("ferrix_refresh_token");
+      const access = ours.get("rxferrix_access_token");
+      const refresh = ours.get("rxferrix_refresh_token");
       if (access && refresh) {
-        const expiresIn = Number(ours.get("ferrix_expires_in") ?? "900");
-        const userId = ours.get("ferrix_user_id");
+        const expiresIn = Number(ours.get("rxferrix_expires_in") ?? "900");
+        const userId = ours.get("rxferrix_user_id");
         await this.signedIn({ accessToken: access, refreshToken: refresh, expiresIn, ...(userId ? { userId } : {}) });
         return { type: "signedIn" };
       }
-      const magic = ours.get("ferrix_magic_token");
+      const magic = ours.get("rxferrix_magic_token");
       if (magic) {
         await this.verifyMagicLink(magic);
         return { type: "signedIn" };
       }
-      const verify = ours.get("ferrix_verify_token");
+      const verify = ours.get("rxferrix_verify_token");
       if (verify) {
         await this.verifyEmail({ token: verify });
         return { type: "emailVerified" };
       }
-      const reset = ours.get("ferrix_reset_token");
+      const reset = ours.get("rxferrix_reset_token");
       if (reset) return { type: "passwordReset", token: reset };
     } catch (e) {
-      return { type: "error", error: e instanceof FerrixError ? e : new FerrixError(String(e), { cause: e }) };
+      return { type: "error", error: e instanceof RxFerrixError ? e : new RxFerrixError(String(e), { cause: e }) };
     }
     return null;
   }
 }
 
-const instances = new WeakMap<FerrixClient, FerrixAuth>();
+const instances = new WeakMap<RxFerrixClient, RxFerrixAuth>();
 
 /**
- * The {@link FerrixAuth} of `client`, created on first use (with `options`). Later calls return the same instance
- * (and ignore `options`), so hooks like `useFerrixAuth()` share it. Call it once early (e.g. next to
- * `new FerrixClient`) to pass options such as a custom `storage`.
+ * The {@link RxFerrixAuth} of `client`, created on first use (with `options`). Later calls return the same instance
+ * (and ignore `options`), so hooks like `useRxFerrixAuth()` share it. Call it once early (e.g. next to
+ * `new RxFerrixClient`) to pass options such as a custom `storage`.
  */
-export function getAuth(client: FerrixClient, options?: FerrixAuthOptions): FerrixAuth {
+export function getAuth(client: RxFerrixClient, options?: RxFerrixAuthOptions): RxFerrixAuth {
   let auth = instances.get(client);
   if (!auth) {
-    auth = new FerrixAuth(client, options);
+    auth = new RxFerrixAuth(client, options);
     instances.set(client, auth);
   }
   return auth;

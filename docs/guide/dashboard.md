@@ -53,6 +53,6 @@ sidebar order.
 It talks to the server over the same WebSocket protocol as apps (admin-only `_system/*` functions), so every
 view is live, plus `/api/admin/*` for logs, stats, backups, replication, analytics, export/import and impersonation (docs/CONTRACT.md §4). The built assets are committed, so
 `cargo build` needs no JS toolchain; after changing `packages/dashboard` (or the client packages it bundles), run
-`bun run build:dashboard` and commit `crates/ferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
+`bun run build:dashboard` and commit `crates/rxferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
 work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` proxied to :8090. Build without it with
-`default-features = false` on the `ferrix` dependency.
+`default-features = false` on the `rxferrix` dependency.

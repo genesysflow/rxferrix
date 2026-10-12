@@ -6,7 +6,7 @@
 
 <div class="wrap">
   <div class="card box">
-    <div class="brand"><span class="logo">F</span> ferrix</div>
+    <div class="brand"><span class="logo">F</span> rxferrix</div>
     <h1>{title}</h1>
     {#if subtitle}<p class="muted sub">{subtitle}</p>{/if}
     {@render children()}

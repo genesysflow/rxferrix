@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(x),\nquote!(async fn f(ctx: &QueryCtx) -> Result<()> {}))"
----
-unknown #[query] argument; the only one is `dev_only` (refused unless the server runs with --dev)

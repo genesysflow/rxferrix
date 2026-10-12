@@ -1,0 +1,26 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "object(quote!(), quote!\n{ pub enum Status { Open, InProgress, Done { at: f64 } } })"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::rxferrix::__private::serde")]
+#[ts(crate = "::rxferrix::__private::ts_rs")]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum Status {
+    Open,
+    InProgress,
+    Done { at: f64 },
+}
+impl ::rxferrix::shape::HasShape for Status {
+    fn shape() -> ::rxferrix::shape::Shape {
+        ::rxferrix::shape::guard(
+            ::core::any::type_name::<Self>(),
+            || ::rxferrix::shape::Shape::Json,
+        )
+    }
+}

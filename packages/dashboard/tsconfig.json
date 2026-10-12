@@ -6,9 +6,9 @@
     "declarationMap": false,
     "types": ["svelte", "vite/client"],
     "paths": {
-      "@ferrix/client": ["../client/src/index.ts"],
-      "@ferrix/client/testing": ["../client/src/testing.ts"],
-      "@ferrix/svelte": ["../svelte/src/lib/index.ts"]
+      "@rxferrix/client": ["../client/src/index.ts"],
+      "@rxferrix/client/testing": ["../client/src/testing.ts"],
+      "@rxferrix/svelte": ["../svelte/src/lib/index.ts"]
     }
   },
   "include": ["src", "test", "vitest.config.ts", "svelte.config.js"]

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixClient, getAuth } from "@ferrix/client";
-  import { setupFerrix, useAuth, useConnectionState, useQuery } from "@ferrix/svelte";
+  import { RxFerrixClient, getAuth } from "@rxferrix/client";
+  import { setupRxFerrix, useAuth, useConnectionState, useQuery } from "@rxferrix/svelte";
   import { dashboard, type TableSummary } from "./lib/api.js";
   import { setDashboard } from "./lib/context.js";
   import { href, link, router, type Page } from "./lib/router.svelte.js";
@@ -24,11 +24,11 @@
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
 
-  // Same origin: the dashboard is served by the ferrix server at /_/.
-  const client = new FerrixClient(location.origin, { unsavedChangesWarning: false });
-  setupFerrix(client);
+  // Same origin: the dashboard is served by the rxferrix server at /_/.
+  const client = new RxFerrixClient(location.origin, { unsavedChangesWarning: false });
+  setupRxFerrix(client);
   // Its own storage key, so an app served from the same origin keeps its user session separate.
-  const ferrixAuth = getAuth(client, { storageKey: `ferrix.dashboard.auth:${location.origin}` });
+  const rxferrixAuth = getAuth(client, { storageKey: `rxferrix.dashboard.auth:${location.origin}` });
   const auth = useAuth();
   const connection = useConnectionState();
   const isAdmin = $derived(auth.isAuthenticated && auth.isAdmin);
@@ -39,7 +39,7 @@
   let nextToast = 0;
 
   setDashboard({
-    auth: ferrixAuth,
+    auth: rxferrixAuth,
     get tables() {
       return tables.data;
     },
@@ -151,7 +151,7 @@
   }
 
   async function signOut() {
-    await ferrixAuth.signOut();
+    await rxferrixAuth.signOut();
     router.navigate(href("overview"));
   }
 </script>
@@ -180,7 +180,7 @@
     </header>
     <button class="scrim" aria-label="Close menu" tabindex="-1" onclick={() => (menu = false)}></button>
     <nav class="sidebar" aria-label="Dashboard">
-      <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> ferrix</a>
+      <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> rxferrix</a>
       <button class="palette-button" onclick={() => (palette = true)} title="Command palette">
         <span>Go to…</span><kbd>Ctrl K</kbd>
       </button>

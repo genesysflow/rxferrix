@@ -1,12 +1,12 @@
-# @ferrix/svelte
+# @rxferrix/svelte
 
-Svelte 5 (runes) bindings for Ferrix.
+Svelte 5 (runes) bindings for RxFerrix.
 
 ```svelte
 <!-- +layout.svelte -->
 <script lang="ts">
-  import { setupFerrix } from "@ferrix/svelte";
-  setupFerrix(import.meta.env.VITE_FERRIX_URL); // or setupFerrix(existingClient)
+  import { setupRxFerrix } from "@rxferrix/svelte";
+  setupRxFerrix(import.meta.env.VITE_RXFERRIX_URL); // or setupRxFerrix(existingClient)
   let { children } = $props();
 </script>
 {@render children()}
@@ -14,8 +14,8 @@ Svelte 5 (runes) bindings for Ferrix.
 
 ```svelte
 <script lang="ts">
-  import { useQuery, useMutation } from "@ferrix/svelte";
-  import { api } from "$lib/ferrix/api";
+  import { useQuery, useMutation } from "@rxferrix/svelte";
+  import { api } from "$lib/rxferrix/api";
   let { channel } = $props();
 
   const messages = useQuery(api.messages.list, () => ({ channel })); // or () => "skip"
@@ -23,7 +23,7 @@ Svelte 5 (runes) bindings for Ferrix.
 </script>
 ```
 
-API: `setupFerrix(url | client, options?)`, `getFerrixClient()`, `useQuery(ref, argsThunk?, { client? })` →
+API: `setupRxFerrix(url | client, options?)`, `getRxFerrixClient()`, `useQuery(ref, argsThunk?, { client? })` →
 `{ data, error, isLoading }`, `useMutation(ref)` (callable, `.withOptimisticUpdate(fn)`), `useAction(ref)`,
 `useConnectionState()` → `{ current }`. Hooks read the client from context, so call them during component
 initialization, or pass `{ client }` explicitly.
@@ -40,4 +40,4 @@ which is the only place it makes sense.
 ## Tests
 
 `bun run test` (vitest + jsdom + `@sveltejs/vite-plugin-svelte`, resolving Svelte's `browser` build). The tests mount
-components with `mount`/`flushSync` and drive a fake sync server from `@ferrix/client/testing`.
+components with `mount`/`flushSync` and drive a fake sync server from `@rxferrix/client/testing`.

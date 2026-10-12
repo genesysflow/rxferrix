@@ -1,0 +1,12 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!\n{\n    #[derive(Serialize, serde::Deserialize, Clone, PartialEq)]\n    #[serde(rename_all = \"snake_case\")] #[serde(crate = \"serde\")] struct T\n    {\n        _id: String, #[serde(rename = \"_x\")] a: u32, #[serde(rename = \"b\")] c:\n        u32, b: u32\n    }\n})"
+---
+#[table] already derives `Serialize`; remove it from this #[derive]
+#[table] already derives `Deserialize`; remove it from this #[derive]
+#[table] already derives `Clone`; remove it from this #[derive]
+#[table] sets `#[serde(rename_all = "camelCase")]`; other `rename_all` rules are not supported (use per-field `#[serde(rename = "...")]`)
+#[table] sets `#[serde(crate = ...)]` itself; remove this
+`_id` is reserved for a system field or built-in index
+JSON field name `_x` is reserved: names starting with `_` are system fields
+fields `c` and `b` both serialize as `b`

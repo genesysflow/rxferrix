@@ -1,5 +1,5 @@
 /**
- * Wire types for the Ferrix sync protocol (v1). See `docs/PROTOCOL.md` in the repository; that document is normative.
+ * Wire types for the RxFerrix sync protocol (v1). See `docs/PROTOCOL.md` in the repository; that document is normative.
  */
 
 export type QueryId = number;

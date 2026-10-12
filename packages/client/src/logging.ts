@@ -9,7 +9,7 @@ export interface Logger {
   logLines(kind: string, udfPath: string, lines: string[] | undefined): void;
 }
 
-const PREFIX = "[ferrix]";
+const PREFIX = "[rxferrix]";
 
 export function createLogger(options: { verbose: boolean; reportDebugInfoToConsole: boolean }): Logger {
   const noop = () => {};

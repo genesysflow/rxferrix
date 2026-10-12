@@ -1,6 +1,6 @@
 import { createSubscriber } from "svelte/reactivity";
-import { getAuth, systemApi, type AuthState, type FerrixAuth, type FerrixClient, type User } from "@ferrix/client";
-import { getFerrixClient } from "./context.js";
+import { getAuth, systemApi, type AuthState, type RxFerrixAuth, type RxFerrixClient, type User } from "@rxferrix/client";
+import { getRxFerrixClient } from "./context.js";
 import { useQuery } from "./use_query.svelte.js";
 
 /**
@@ -17,29 +17,29 @@ import { useQuery } from "./use_query.svelte.js";
  * Uses `getAuth(client)`: call `getAuth(client, { storage })` before to customize it.
  */
 export interface UseAuthResult extends AuthState {
-  /** The underlying {@link FerrixAuth} (all actions, `getAccessToken`, `providers`, ...). */
-  readonly auth: FerrixAuth;
-  signUp: FerrixAuth["signUp"];
-  signIn: FerrixAuth["signIn"];
-  signInAsAdmin: FerrixAuth["signInAsAdmin"];
-  setupAdmin: FerrixAuth["setupAdmin"];
-  signOut: FerrixAuth["signOut"];
-  signInWithOAuth: FerrixAuth["signInWithOAuth"];
-  handleRedirectCallback: FerrixAuth["handleRedirectCallback"];
-  requestPasswordReset: FerrixAuth["requestPasswordReset"];
-  resetPassword: FerrixAuth["resetPassword"];
-  requestMagicLink: FerrixAuth["requestMagicLink"];
-  verifyCode: FerrixAuth["verifyCode"];
-  verifyMagicLink: FerrixAuth["verifyMagicLink"];
-  requestEmailVerification: FerrixAuth["requestEmailVerification"];
-  verifyEmail: FerrixAuth["verifyEmail"];
+  /** The underlying {@link RxFerrixAuth} (all actions, `getAccessToken`, `providers`, ...). */
+  readonly auth: RxFerrixAuth;
+  signUp: RxFerrixAuth["signUp"];
+  signIn: RxFerrixAuth["signIn"];
+  signInAsAdmin: RxFerrixAuth["signInAsAdmin"];
+  setupAdmin: RxFerrixAuth["setupAdmin"];
+  signOut: RxFerrixAuth["signOut"];
+  signInWithOAuth: RxFerrixAuth["signInWithOAuth"];
+  handleRedirectCallback: RxFerrixAuth["handleRedirectCallback"];
+  requestPasswordReset: RxFerrixAuth["requestPasswordReset"];
+  resetPassword: RxFerrixAuth["resetPassword"];
+  requestMagicLink: RxFerrixAuth["requestMagicLink"];
+  verifyCode: RxFerrixAuth["verifyCode"];
+  verifyMagicLink: RxFerrixAuth["verifyMagicLink"];
+  requestEmailVerification: RxFerrixAuth["requestEmailVerification"];
+  verifyEmail: RxFerrixAuth["verifyEmail"];
   /** The sign-in methods the server offers (`GET /api/auth/providers`), e.g. to show an OAuth button. */
-  providers: FerrixAuth["providers"];
-  getAccessToken: FerrixAuth["getAccessToken"];
+  providers: RxFerrixAuth["providers"];
+  getAccessToken: RxFerrixAuth["getAccessToken"];
 }
 
-export function useAuth(options: { client?: FerrixClient } = {}): UseAuthResult {
-  const auth = getAuth(options.client ?? getFerrixClient());
+export function useAuth(options: { client?: RxFerrixClient } = {}): UseAuthResult {
+  const auth = getAuth(options.client ?? getRxFerrixClient());
   const subscribe = createSubscriber((update) => auth.subscribe(update));
   const state = () => {
     subscribe();
@@ -81,11 +81,11 @@ export function useAuth(options: { client?: FerrixClient } = {}): UseAuthResult 
 /**
  * The signed-in user (live), as `{ data, isLoading }`: `data` is `null` when signed out. Call during component init.
  */
-export function useCurrentUser(options: { client?: FerrixClient } = {}): {
+export function useCurrentUser(options: { client?: RxFerrixClient } = {}): {
   readonly data: User | null | undefined;
   readonly isLoading: boolean;
 } {
-  const client = options.client ?? getFerrixClient();
+  const client = options.client ?? getRxFerrixClient();
   const auth = useAuth({ client });
   const me = useQuery(systemApi.auth.me, () => (auth.isAuthenticated ? {} : "skip"), { client });
   return {

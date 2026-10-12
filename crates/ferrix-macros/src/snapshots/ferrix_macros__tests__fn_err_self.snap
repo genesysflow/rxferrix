@@ -1,6 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(), quote!(async fn f(&self, x: u32) -> Result<()> {}))"
----
-#[query] functions cannot take `self`
-#[query] functions take the context as their first parameter: `ctx: &QueryCtx`

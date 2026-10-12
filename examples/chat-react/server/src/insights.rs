@@ -4,8 +4,8 @@
 //! Actions, not queries: the copy is a few hundred milliseconds behind and not reactive, so the client polls while
 //! the view is open. Without `--olap` the action fails with `olap_unavailable`, which the client explains.
 
-use ferrix::olap::OlapValue;
-use ferrix::prelude::*;
+use rxferrix::olap::OlapValue;
+use rxferrix::prelude::*;
 
 use crate::channels;
 use crate::model::{Channel, user_error};

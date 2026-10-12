@@ -1,0 +1,5 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration_err(quote!(table),\nquote!(async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}))"
+---
+`table` needs a value: `table = TableType`

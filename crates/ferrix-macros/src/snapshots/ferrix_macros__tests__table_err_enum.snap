@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "table_err(quote!(), quote!(enum E { A, }))"
----
-#[table] can only be used on a struct with named fields, not an enum

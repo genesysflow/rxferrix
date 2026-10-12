@@ -15,17 +15,17 @@ export {
   type Id,
 } from "./api.js";
 export {
-  FerrixClient,
-  type FerrixClientOptions,
+  RxFerrixClient,
+  type RxFerrixClientOptions,
   type MutationOptions,
   type AuthTokenFetcher,
   type ConnectionState,
   type QueryWatch,
 } from "./client.js";
-export { FerrixError, CONNECTION_LOST, CLIENT_CLOSED } from "./errors.js";
+export { RxFerrixError, CONNECTION_LOST, CLIENT_CLOSED } from "./errors.js";
 export { applyDiff, DiffMismatch } from "./diff.js";
 export {
-  FerrixAuth,
+  RxFerrixAuth,
   getAuth,
   systemApi,
   MemoryAuthStorage,
@@ -34,7 +34,7 @@ export {
   type AuthTokens,
   type AuthProviders,
   type CodeProof,
-  type FerrixAuthOptions,
+  type RxFerrixAuthOptions,
   type RedirectResult,
   type User,
 } from "./auth.js";

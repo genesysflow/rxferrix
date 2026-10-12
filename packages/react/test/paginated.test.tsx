@@ -2,15 +2,15 @@ import { Component, StrictMode, type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
-  FerrixClient,
+  RxFerrixClient,
   makeFunctionReference,
   type Id,
   type PaginationOpts,
   type PaginationResult,
-} from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+} from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import {
-  FerrixProvider,
+  RxFerrixProvider,
   usePaginatedQuery,
   usePaginatedQueryWithStatus,
   type UsePaginatedQueryResult,
@@ -36,11 +36,11 @@ const page = (ids: string[], continueCursor: string, isDone = false): Pagination
 const update = (queryId: number, value: unknown) => ({ type: "QueryUpdated" as const, queryId, value, logLines: [] });
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 
 beforeEach(async () => {
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", {
+  client = new RxFerrixClient("http://localhost:3210", {
     webSocketConstructor: server.WebSocket,
     unsavedChangesWarning: false,
   });
@@ -88,9 +88,9 @@ function Messages({ channel }: { channel: string | null }) {
 
 function renderMessages(channel: string | null, strict = false) {
   const tree = (c: string | null) => (
-    <FerrixProvider client={client}>
+    <RxFerrixProvider client={client}>
       <Messages channel={c} />
-    </FerrixProvider>
+    </RxFerrixProvider>
   );
   const r = render(strict ? <StrictMode>{tree(channel)}</StrictMode> : tree(channel));
   return { rerender: (c: string | null) => r.rerender(strict ? <StrictMode>{tree(c)}</StrictMode> : tree(c)) };
@@ -179,11 +179,11 @@ describe("usePaginatedQuery", () => {
     }
     vi.spyOn(console, "error").mockImplementation(() => {});
     render(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <Boundary>
           <Messages channel="a" />
         </Boundary>
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     act(() =>
@@ -211,9 +211,9 @@ describe("usePaginatedQuery", () => {
       );
     }
     render(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <Status />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     expect(screen.getByTestId("status").textContent).toBe("LoadingFirstPage true ok []");

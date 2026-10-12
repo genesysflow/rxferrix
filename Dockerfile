@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# A Ferrix app as a `FROM scratch` image: one static binary (built by scripts/release.sh for x86_64 musl, with the
+# A RxFerrix app as a `FROM scratch` image: one static binary (built by scripts/release.sh for x86_64 musl, with the
 # web app embedded), CA certificates for outgoing TLS (S3, OAuth, SMTP, Let's Encrypt), and a data volume.
 #
 #   docker build -t todo-server .
@@ -44,8 +44,8 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 # Zero-downtime rollouts (deploy/docker, deploy/k8s): a container started on a volume another container is serving
 # takes over from it (and starts normally on its own); the one taken over stays up, serving nothing, until it is
 # stopped, so a restart policy doesn't bring it back while it is being replaced.
-ENV FERRIX_TAKEOVER=auto
-ENV FERRIX_AFTER_HANDOVER=wait
+ENV RXFERRIX_TAKEOVER=auto
+ENV RXFERRIX_AFTER_HANDOVER=wait
 USER 65532:65532
 VOLUME /data
 EXPOSE 8090

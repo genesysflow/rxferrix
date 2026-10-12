@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError, uploadFile } from "@ferrix/client";
-  import { useMutation, usePaginatedQuery, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError, uploadFile } from "@rxferrix/client";
+  import { useMutation, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { storage, type FileSummary } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatTime, hasThumbnail, previewKind, sameOriginPath, thumbUrl } from "../lib/format.js";
@@ -38,7 +38,7 @@
       ctx.toast(`Deleted ${label(f)}`);
       if (selectedId === f._id) select(null);
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 

@@ -1,15 +1,15 @@
-# A Ferrix app behind Traefik with Docker Compose, deployable with no downtime (deploy/docker/deploy.sh).
+# A RxFerrix app behind Traefik with Docker Compose, deployable with no downtime (deploy/docker/deploy.sh).
 #
 #   docker build -t todo-server .                 # from the repository root (or your app's image)
 #   docker compose -f deploy/docker/compose.yaml up -d
 #   deploy/docker/deploy.sh                       # after building a new image: roll it out
 #
 # How a rollout works: deploy.sh starts a second `app` container on the same volume. The image runs with
-# FERRIX_TAKEOVER=auto, so it takes over from the running container: it copies the database, opens the copy with the
+# RXFERRIX_TAKEOVER=auto, so it takes over from the running container: it copies the database, opens the copy with the
 # new code (index builds, schema check), catches up, then the old one stops serving and the new one swaps the copy in
 # and starts listening. Traefik connects to whichever container accepts (see the proxy's labels), so clients see no
 # errors. If the new version can't serve the data, its container exits and the old one carries on.
-# The old container (FERRIX_AFTER_HANDOVER=wait) stays up, serving nothing, until deploy.sh removes it.
+# The old container (RXFERRIX_AFTER_HANDOVER=wait) stays up, serving nothing, until deploy.sh removes it.
 #
 # Both containers must share the volume on the same host (a local volume): SQLite needs a local disk, and the
 # takeover talks over a Unix socket in the data directory.
@@ -21,7 +21,7 @@ services:
     volumes:
       - data:/data
     restart: unless-stopped
-    # Secrets and settings (FERRIX_SMTP_URL, AWS_* for S3, ...):
+    # Secrets and settings (RXFERRIX_SMTP_URL, AWS_* for S3, ...):
     env_file:
       - path: ./app.env
         required: false

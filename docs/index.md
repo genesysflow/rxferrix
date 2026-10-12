@@ -2,12 +2,12 @@
 layout: home
 
 hero:
-  name: Ferrix
+  name: RxFerrix
   text: A reactive backend in Rust
   tagline: Write typed Rust functions. Clients get live results. Ship it all as one binary.
   image:
     src: /logo.svg
-    alt: Ferrix
+    alt: RxFerrix
   actions:
     - theme: brand
       text: Get started
@@ -17,7 +17,7 @@ hero:
       link: /guide/functions
     - theme: alt
       text: GitHub
-      link: https://github.com/genesysflow/ferrix
+      link: https://github.com/genesysflow/rxferrix
 
 features:
   - icon: ⚡
@@ -46,7 +46,7 @@ A table and two functions on the server:
 
 ```rust
 // src/todos.rs
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 #[table(name = "todos")]
 pub struct Todo { pub text: String, pub done: bool }
@@ -63,14 +63,14 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
 
 // src/main.rs
 mod todos;
-fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
+fn main() -> rxferrix::Result<()> { rxferrix::RxFerrix::new().run() }
 ```
 
 And a React component that uses them. When anyone adds a todo, every open list updates:
 
 ```tsx
-import { useMutation, useQuery } from "@ferrix/react";
-import { api } from "./ferrix"; // generated from the functions above
+import { useMutation, useQuery } from "@rxferrix/react";
+import { api } from "./rxferrix"; // generated from the functions above
 
 function Todos() {
   const todos = useQuery(api.todos.list);

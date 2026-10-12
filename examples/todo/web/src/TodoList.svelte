@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { uploadFile, useAction, useConnectionState, useMutation, useQuery } from "@ferrix/svelte";
-  import { api, type Doc, type Id } from "./lib/ferrix";
+  import { uploadFile, useAction, useConnectionState, useMutation, useQuery } from "@rxferrix/svelte";
+  import { api, type Doc, type Id } from "./lib/rxferrix";
   import TodoImage from "./TodoImage.svelte";
 
   type Filter = "all" | "open" | "done";

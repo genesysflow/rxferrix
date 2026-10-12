@@ -1,0 +1,10 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "[object_err(quote!(x), quote!(pub struct A {})),\nobject_err(quote!(), quote!(pub fn f() {})),\nobject_err(quote!(), quote!\n{\n    #[derive(Debug, serde::Serialize, TS)] #[serde(crate = \"serde\")]\n    #[ts(crate = \"ts_rs\", export)] pub struct A { pub a: u32 }\n}),].join(\"\\n\")"
+---
+#[object] does not take arguments
+#[object] can only be used on a struct or an enum
+#[object] already derives `Serialize`; remove it from this #[derive]
+#[object] already derives `TS`; remove it from this #[derive]
+#[object] sets `#[serde(crate = ...)]` itself; remove this
+#[object] sets `#[ts(crate = ...)]` itself; remove this

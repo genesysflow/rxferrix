@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Action, quote!(), quote!(async fn f(n: u32) -> Result<()> {}))"
----
-#[action] functions take the context as their first parameter: `ctx: &ActionCtx`

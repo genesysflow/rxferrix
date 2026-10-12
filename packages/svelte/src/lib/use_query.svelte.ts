@@ -2,20 +2,20 @@ import { createSubscriber } from "svelte/reactivity";
 import {
   canonicalJSON,
   type ArgsOf,
-  type FerrixClient,
-  type FerrixError,
+  type RxFerrixClient,
+  type RxFerrixError,
   type FunctionReference,
   type OutputOf,
   type QueryState,
-} from "@ferrix/client";
-import { getFerrixClient } from "./context.js";
+} from "@rxferrix/client";
+import { getRxFerrixClient } from "./context.js";
 
 /** The reactive result of {@link useQuery}. Read its fields in templates, `$derived` or `$effect`. */
 export interface UseQueryResult<T> {
   /** The latest value; `undefined` while loading, after an error, or when skipped. */
   readonly data: T | undefined;
   /** The query's error, if its latest result is an error. */
-  readonly error: FerrixError | undefined;
+  readonly error: RxFerrixError | undefined;
   /** True until the first result arrives (false when skipped). */
   readonly isLoading: boolean;
 }
@@ -27,7 +27,7 @@ const SKIPPED = Object.freeze({ status: "skipped" as const });
 
 export interface UseQueryOptions {
   /** Use this client instead of the one from context (allows calling `useQuery` outside component init). */
-  client?: FerrixClient;
+  client?: RxFerrixClient;
 }
 
 /**
@@ -51,7 +51,7 @@ export function useQuery<Q extends FunctionReference<"query">>(
   args: ArgsThunk<Q> = () => ({}) as ArgsOf<Q>,
   options: UseQueryOptions = {},
 ): UseQueryResult<OutputOf<Q>> {
-  const client = options.client ?? getFerrixClient();
+  const client = options.client ?? getRxFerrixClient();
 
   // A string, so that equal args (even as fresh objects) do not invalidate anything downstream.
   const argsKey = $derived.by(() => {

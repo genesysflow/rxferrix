@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FerrixAuth, FerrixClient, FerrixError, MemoryAuthStorage, getAuth, systemApi } from "../src/index.js";
+import { RxFerrixAuth, RxFerrixClient, RxFerrixError, MemoryAuthStorage, getAuth, systemApi } from "../src/index.js";
 import { FakeServer } from "../src/testing.js";
 
 const URL_BASE = "http://localhost:3210";
@@ -53,13 +53,13 @@ async function settle(): Promise<void> {
 }
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 let storage: MemoryAuthStorage;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   server = new FakeServer();
-  client = new FerrixClient(URL_BASE, { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+  client = new RxFerrixClient(URL_BASE, { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
   storage = new MemoryAuthStorage();
 });
 
@@ -76,11 +76,11 @@ async function openAndDrain() {
   return server.drain();
 }
 
-describe("FerrixAuth", () => {
+describe("RxFerrixAuth", () => {
   it("restores a stored session and authenticates the socket before subscribing", async () => {
     storage.setItem(KEY, stored("a", Date.now() + 600_000));
     const { fetch, calls } = mockFetch({});
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     expect(auth.state()).toMatchObject({ isLoading: true, isAuthenticated: false });
     client.watchQuery(systemApi.auth.me).onUpdate(() => {});
     const sent = await openAndDrain();
@@ -95,7 +95,7 @@ describe("FerrixAuth", () => {
   it("signs in, stores the tokens and sends Authenticate", async () => {
     const t = tokens("b");
     const { fetch, calls } = mockFetch({ "/api/auth/signin": () => ({ status: 200, body: t }) });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     const listener = vi.fn();
     auth.subscribe(listener);
     await openAndDrain();
@@ -119,7 +119,7 @@ describe("FerrixAuth", () => {
       seen.push(this);
       return Promise.resolve(new Response(JSON.stringify(t), { status: 200 }));
     } as unknown as typeof globalThis.fetch;
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     await auth.signIn({ email: "a@b.co", password: "pw" });
     expect(seen).toEqual([undefined]);
@@ -130,7 +130,7 @@ describe("FerrixAuth", () => {
     const { fetch, calls } = mockFetch({
       "/api/auth/admin/setup": (b) => (b.token === "good" ? { status: 200, body: t } : authError(401, "invalid_setup_token")),
     });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     const err = await auth.setupAdmin({ token: "bad", email: "a@b.co", password: "pw" }).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "invalid_setup_token" });
@@ -144,10 +144,10 @@ describe("FerrixAuth", () => {
 
   it("rejects with the server's error code", async () => {
     const { fetch } = mockFetch({ "/api/auth/signin": () => authError(401, "invalid_credentials", "Invalid email or password") });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     const err = await auth.signIn({ email: "a@b.co", password: "nope" }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(FerrixError);
+    expect(err).toBeInstanceOf(RxFerrixError);
     expect(err).toMatchObject({ code: "invalid_credentials", message: "Invalid email or password" });
     expect(storage.getItem(KEY)).toBeNull();
     expect(auth.state().isAuthenticated).toBe(false);
@@ -157,7 +157,7 @@ describe("FerrixAuth", () => {
     storage.setItem(KEY, stored("old", Date.now() - 1000));
     const fresh = tokens("new");
     const { fetch, calls } = mockFetch({ "/api/auth/refresh": () => ({ status: 200, body: fresh }) });
-    new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     const sent = await openAndDrain();
     expect(calls).toEqual([{ path: "/api/auth/refresh", body: { refreshToken: "refresh-old" } }]);
     expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: fresh.accessToken });
@@ -168,7 +168,7 @@ describe("FerrixAuth", () => {
     storage.setItem(KEY, stored("a", Date.now() + 600_000));
     const fresh = tokens("b");
     const { fetch, calls } = mockFetch({ "/api/auth/refresh": () => ({ status: 200, body: fresh }) });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     server.push({ type: "AuthError", error: "access token expired" });
     await settle();
@@ -183,7 +183,7 @@ describe("FerrixAuth", () => {
   it("signs out locally when the refresh token is rejected", async () => {
     storage.setItem(KEY, stored("a", Date.now() - 1000));
     const { fetch } = mockFetch({ "/api/auth/refresh": () => authError(401, "refresh_token_reused") });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     const sent = await openAndDrain();
     expect(sent.map((m) => m.type)).toEqual(["Connect"]);
     expect(storage.getItem(KEY)).toBeNull();
@@ -193,7 +193,7 @@ describe("FerrixAuth", () => {
   it("drops to signed out when the server revokes the session of a live socket", async () => {
     storage.setItem(KEY, stored("a", Date.now() + 600_000));
     const { fetch, calls } = mockFetch({ "/api/auth/refresh": () => authError(401, "invalid_refresh_token") });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     server.transition({ identity: 1, ts: 1 });
     expect(auth.state().isAuthenticated).toBe(true);
@@ -217,7 +217,7 @@ describe("FerrixAuth", () => {
         return authError(401, "stale_refresh_token");
       },
     });
-    new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     const sent = await openAndDrain();
     expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: JSON.parse(other).accessToken });
   });
@@ -225,7 +225,7 @@ describe("FerrixAuth", () => {
   it("signs out: forgets the tokens, clears the socket identity and ends the session", async () => {
     storage.setItem(KEY, stored("a", Date.now() + 600_000));
     const { fetch, calls } = mockFetch({ "/api/auth/signout": () => ({ status: 200, body: {} }) });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     server.transition({ identity: 1, ts: 1 });
     await auth.signOut();
@@ -246,7 +246,7 @@ describe("FerrixAuth", () => {
       "/api/auth/magic/verify": () => ({ status: 200, body: t }),
       "/api/auth/verify-email/confirm": ok,
     });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
     expect(await auth.signUp({ email: "a@b.co", password: "long enough" })).toEqual({ verificationRequired: true });
     expect(storage.getItem(KEY)).toBeNull();
@@ -273,25 +273,25 @@ describe("FerrixAuth", () => {
     const location = { href: "", assign: vi.fn() };
     vi.stubGlobal("location", location);
     vi.stubGlobal("history", { state: null, replaceState });
-    const auth = new FerrixAuth(client, { storage, fetch, syncTabs: false });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
 
-    location.href = `http://app.test/cb?x=1#tab=2&ferrix_access_token=${t.accessToken}&ferrix_refresh_token=r1&ferrix_expires_in=900&ferrix_user_id=u9`;
+    location.href = `http://app.test/cb?x=1#tab=2&rxferrix_access_token=${t.accessToken}&rxferrix_refresh_token=r1&rxferrix_expires_in=900&rxferrix_user_id=u9`;
     expect(await auth.handleRedirectCallback()).toEqual({ type: "signedIn" });
     expect(replaceState).toHaveBeenLastCalledWith(null, "", "http://app.test/cb?x=1#tab=2");
     expect(JSON.parse(storage.getItem(KEY)!)).toMatchObject({ accessToken: t.accessToken, refreshToken: "r1", userId: "u9" });
     await settle();
     expect(server.drain()).toEqual([{ type: "Authenticate", baseVersion: 0, token: t.accessToken }]);
 
-    location.href = "http://app.test/cb#ferrix_error=access_denied&ferrix_error_description=No%20thanks";
+    location.href = "http://app.test/cb#rxferrix_error=access_denied&rxferrix_error_description=No%20thanks";
     const failed = await auth.handleRedirectCallback();
     expect(failed).toMatchObject({ type: "error", error: { code: "access_denied", message: "No thanks" } });
     expect(replaceState).toHaveBeenLastCalledWith(null, "", "http://app.test/cb");
 
-    location.href = "http://app.test/reset#ferrix_reset_token=rt";
+    location.href = "http://app.test/reset#rxferrix_reset_token=rt";
     expect(await auth.handleRedirectCallback()).toEqual({ type: "passwordReset", token: "rt" });
 
-    location.href = "http://app.test/#ferrix_magic_token=mt";
+    location.href = "http://app.test/#rxferrix_magic_token=mt";
     expect(await auth.handleRedirectCallback()).toEqual({ type: "signedIn" });
     expect(calls).toEqual([{ path: "/api/auth/magic/verify", body: { token: "mt" } }]);
 
@@ -313,7 +313,7 @@ describe("FerrixAuth", () => {
     });
     vi.stubGlobal("removeEventListener", () => {});
     const { fetch } = mockFetch({});
-    const auth = new FerrixAuth(client, { storage, fetch });
+    const auth = new RxFerrixAuth(client, { storage, fetch });
     await openAndDrain();
     expect(handler).toBeDefined();
 

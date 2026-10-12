@@ -1,8 +1,0 @@
-# Build flags for the SQLite that Ferrix compiles in (the `libsqlite3-sys` crate reads LIBSQLITE3_FLAGS).
-#
-# Its default build defines SQLITE_ENABLE_MEMORY_MANAGEMENT, which makes every database connection share one page cache
-# behind one global mutex: queries then run no faster in parallel than one at a time. Ferrix doesn't need it. Cargo
-# reads this file only when it builds from this directory, so keep it next to Cargo.toml (Ferrix logs a warning at
-# startup when the flag is missing). Changing it rebuilds SQLite.
-[env]
-LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0"

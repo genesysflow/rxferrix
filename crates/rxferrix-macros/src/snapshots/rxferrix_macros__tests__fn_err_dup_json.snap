@@ -1,0 +1,5 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(),\nquote!(async fn f(ctx: &QueryCtx, foo_bar: u32, fooBar: u32) -> Result<()>\n{}))"
+---
+parameters `foo_bar` and `fooBar` both serialize as `fooBar`

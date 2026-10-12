@@ -1,15 +1,15 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   canonicalJSON,
-  type FerrixError,
+  type RxFerrixError,
   type PaginatedQuery,
   type PaginatedQueryArgs,
   type PaginatedQueryItem,
   type PaginatedQueryReference,
   type PaginatedQueryResult,
   type PaginationStatus,
-} from "@ferrix/client";
-import { useFerrix } from "./context.js";
+} from "@rxferrix/client";
+import { useRxFerrix } from "./context.js";
 
 export interface UsePaginatedQueryResult<Item> {
   /** The items of every loaded page, in order. */
@@ -24,7 +24,7 @@ export interface UsePaginatedQueryResult<Item> {
 /** The result of {@link usePaginatedQueryWithStatus}: {@link UsePaginatedQueryResult} plus the error. */
 export interface UsePaginatedQueryWithStatusResult<Item> extends UsePaginatedQueryResult<Item> {
   /** The error of the first failed page, if any (then `isLoading` is false). */
-  error: FerrixError | undefined;
+  error: RxFerrixError | undefined;
 }
 
 export interface UsePaginatedQueryOptions {
@@ -45,7 +45,7 @@ const noopUnsubscribe = () => {};
 /**
  * Subscribes to a paginated query: a query that takes `paginationOpts` and returns a `PaginationResult` (in Rust,
  * `.paginate(pagination_opts)`). Pass the args without `paginationOpts`, or `"skip"`. Changing the args (or
- * `initialNumItems`) starts over from the first page. Throws the {@link FerrixError} of a failed page, so an
+ * `initialNumItems`) starts over from the first page. Throws the {@link RxFerrixError} of a failed page, so an
  * ErrorBoundary can render it.
  *
  * ```tsx
@@ -79,7 +79,7 @@ export function usePaginatedQueryWithStatus<Q extends PaginatedQueryReference>(
   args: PaginatedQueryArgs<Q> | "skip",
   options: UsePaginatedQueryOptions,
 ): UsePaginatedQueryWithStatusResult<PaginatedQueryItem<Q>> {
-  const client = useFerrix();
+  const client = useRxFerrix();
   const argsKey = args === "skip" ? null : canonicalJSON(args ?? {});
   const path = ref._path;
   const initialNumItems = options.initialNumItems;

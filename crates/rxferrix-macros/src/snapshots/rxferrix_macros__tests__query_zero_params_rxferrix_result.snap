@@ -1,0 +1,57 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func(FnKind::Query, false, quote!\n{ async fn count(_ctx: &rxferrix::QueryCtx) -> rxferrix::Result<u64> { Ok(0) } })"
+---
+async fn count(_ctx: &rxferrix::QueryCtx) -> rxferrix::Result<u64> {
+    Ok(0)
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::rxferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __rxferrix_args_count {}
+impl ::core::convert::From<()> for __rxferrix_args_count {
+    fn from(_: ()) -> Self {
+        Self {}
+    }
+}
+/// Function reference for [`count`](fn@count).
+#[allow(non_camel_case_types, dead_code)]
+struct count {}
+impl ::rxferrix::FunctionRef for count {
+    type Args = __rxferrix_args_count;
+    type Output = u64;
+    fn path() -> ::std::string::String {
+        ::rxferrix::__private::function_path(::core::module_path!(), "count")
+    }
+}
+impl ::rxferrix::QueryFunction for count {}
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_FN_count: ::rxferrix::__private::FunctionDef = ::rxferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "count",
+    visibility: ::rxferrix::__private::Visibility::Public,
+    dev_only: false,
+    handler: ::rxferrix::__private::Handler::Query(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
+        let __rxferrix_decoded: __rxferrix_args_count = ::rxferrix::__private::decode_args(
+            "count",
+            __rxferrix_args,
+        )?;
+        let __rxferrix_out = count(&__rxferrix_ctx).await?;
+        ::rxferrix::__private::encode_output(__rxferrix_out)
+    })),
+    ts: || (
+        ::rxferrix::__private::ts_inline::<__rxferrix_args_count>(),
+        ::rxferrix::__private::ts_output::<u64>(),
+    ),
+};

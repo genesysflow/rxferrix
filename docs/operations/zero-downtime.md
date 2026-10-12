@@ -1,7 +1,7 @@
 # Deploys with no downtime
 
 The usual way to deploy a new version is to stop the old server and start the new one. For a few seconds, requests
-fail. With Ferrix, the new version starts **next to** the running one and takes over from it. No request fails, no
+fail. With RxFerrix, the new version starts **next to** the running one and takes over from it. No request fails, no
 write is lost, and the switch pauses requests for well under a second.
 
 ## How it works
@@ -27,13 +27,13 @@ and is handy in CI.
 
 ## On a server with systemd
 
-[`deploy/ferrix.service`](https://github.com/genesysflow/ferrix/blob/master/deploy/ferrix.service) is set up for it.
+[`deploy/rxferrix.service`](https://github.com/genesysflow/rxferrix/blob/master/deploy/rxferrix.service) is set up for it.
 Install the new binary over the old one, then reload:
 
 ```sh
 sudo install -m 0755 dist/my-app /usr/local/bin/my-app
-sudo systemctl reload ferrix          # runs `my-app serve … --takeover` next to the running server
-journalctl -u ferrix -f               # if the new version refused, this says why
+sudo systemctl reload rxferrix          # runs `my-app serve … --takeover` next to the running server
+journalctl -u rxferrix -f               # if the new version refused, this says why
 ```
 
 Without systemd, start the new binary yourself with the same arguments as the running one plus `--takeover`. The
@@ -44,7 +44,7 @@ new process takes over the listening socket, so the address doesn't change.
 A container can't hand its process over, so the new version runs in a second container on the same volume. The
 Docker image is set up for that.
 
-1. Start the app with [`deploy/docker/compose.yaml`](https://github.com/genesysflow/ferrix/blob/master/deploy/docker/compose.yaml)
+1. Start the app with [`deploy/docker/compose.yaml`](https://github.com/genesysflow/rxferrix/blob/master/deploy/docker/compose.yaml)
    (the app behind Traefik):
 
    ```sh
@@ -53,7 +53,7 @@ Docker image is set up for that.
    ```
 
 2. To deploy, build the new image and run
-   [`deploy/docker/deploy.sh`](https://github.com/genesysflow/ferrix/blob/master/deploy/docker/deploy.sh):
+   [`deploy/docker/deploy.sh`](https://github.com/genesysflow/rxferrix/blob/master/deploy/docker/deploy.sh):
 
    ```sh
    docker build -t my-app .
@@ -65,18 +65,18 @@ Docker image is set up for that.
 
 ## On Kubernetes
 
-[`deploy/k8s/ferrix.yaml`](https://github.com/genesysflow/ferrix/blob/master/deploy/k8s/ferrix.yaml) is written for
+[`deploy/k8s/rxferrix.yaml`](https://github.com/genesysflow/rxferrix/blob/master/deploy/k8s/rxferrix.yaml) is written for
 k3s (local-path volume, Traefik ingress). Set your image, host name and public URL in it, then:
 
 ```sh
-kubectl apply -f deploy/k8s/ferrix.yaml
-kubectl set image deployment/ferrix app=ghcr.io/you/my-app:v2    # deploy a new version
-kubectl rollout status deployment/ferrix
+kubectl apply -f deploy/k8s/rxferrix.yaml
+kubectl set image deployment/rxferrix app=ghcr.io/you/my-app:v2    # deploy a new version
+kubectl rollout status deployment/rxferrix
 ```
 
 Kubernetes starts the new pod before stopping the old one, the new pod takes over, and then the old pod is stopped.
 If the new version can't read the data, its pod keeps failing (CrashLoopBackOff) while the old pod serves; undo with
-`kubectl rollout undo deployment/ferrix`.
+`kubectl rollout undo deployment/rxferrix`.
 
 ## Using your own setup
 
@@ -84,7 +84,7 @@ The files above get these details right. If you write your own, keep to them:
 
 - **Same host, local disk.** Both containers (or pods) must run on the same machine and share the data directory on
   a local volume. SQLite needs a local disk, and the two versions talk over a socket file in the data directory.
-- **Keep the old container alive.** Set `FERRIX_AFTER_HANDOVER=wait` (the image does). After handing over, the old
+- **Keep the old container alive.** Set `RXFERRIX_AFTER_HANDOVER=wait` (the image does). After handing over, the old
   container idles until it is stopped. If it exited, a restart policy would start it again, and it would take the
   data back.
 - **Route to whoever accepts.** The old container stops listening at the switch. Your proxy must send each new
@@ -103,8 +103,8 @@ The files above get these details right. If you write your own, keep to them:
 
 | Flag | Environment variable | Values |
 |---|---|---|
-| `--takeover` | `FERRIX_TAKEOVER` | `require` (the default for a bare `--takeover`): take over, fail if no server runs. `auto`: take over if a server runs, else start normally. The Docker image sets `auto`. |
-| `--after-handover` | `FERRIX_AFTER_HANDOVER` | `exit` (default): exit after handing over. `wait`: stay alive, serving nothing, until stopped. The Docker image sets `wait`. |
+| `--takeover` | `RXFERRIX_TAKEOVER` | `require` (the default for a bare `--takeover`): take over, fail if no server runs. `auto`: take over if a server runs, else start normally. The Docker image sets `auto`. |
+| `--after-handover` | `RXFERRIX_AFTER_HANDOVER` | `exit` (default): exit after handing over. `wait`: stay alive, serving nothing, until stopped. The Docker image sets `wait`. |
 
 `my-app health [url]` exits with 0 if the server's `/api/health` answers, and 1 otherwise. The image's
 `HEALTHCHECK` uses it, since the image has no curl.

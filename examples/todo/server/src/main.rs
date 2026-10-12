@@ -1,4 +1,4 @@
-//! The Ferrix todo example backend.
+//! The RxFerrix todo example backend.
 //!
 //! ```sh
 //! cargo run -p todo-server -- serve --dev            # http://127.0.0.1:8090
@@ -14,14 +14,14 @@ mod migrations;
 mod todos;
 
 /// The built web app (empty when `web/dist` doesn't exist).
-#[derive(ferrix::rust_embed::Embed)]
+#[derive(rxferrix::rust_embed::Embed)]
 #[folder = "../web/dist/"]
-#[crate_path = "ferrix::rust_embed"]
+#[crate_path = "rxferrix::rust_embed"]
 #[allow_missing = true]
 struct Web;
 
-fn main() -> ferrix::Result<()> {
-    let mut app = ferrix::Ferrix::new()
+fn main() -> rxferrix::Result<()> {
+    let mut app = rxferrix::RxFerrix::new()
         // Every hour, on the hour (UTC): delete todos completed more than a day ago.
         .cron::<todos::purge_completed>("purge-completed", "0 0 * * * *", ());
     if Web::get("index.html").is_some() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a static release binary of a Ferrix app: x86_64-unknown-linux-musl, everything linked in (SQLite, FTS5,
+# Build a static release binary of a RxFerrix app: x86_64-unknown-linux-musl, everything linked in (SQLite, FTS5,
 # sqlite-vec, aws-lc for TLS, zstd), the web app embedded, no runtime dependencies. Copy it to any x86-64 Linux box
 # (or a `FROM scratch` image) and run it.
 #
@@ -35,7 +35,7 @@ ZIGBUILD_VERSION=0.23.4
 if [[ -n "$WEB" ]]; then
   echo "==> building the web app in $WEB"
   bun install --frozen-lockfile
-  bun run build                       # the @ferrix/* client packages
+  bun run build                       # the @rxferrix/* client packages
   (cd "$WEB" && bun run build)
   # rust-embed reads dist/ when the crate compiles: recompile the app crate (only) so it embeds the fresh files.
   cargo clean --quiet -p "$PACKAGE" --profile "$PROFILE" --target "$TARGET" || true

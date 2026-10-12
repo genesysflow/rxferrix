@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { insertAtTop, uploadFile, useAction, useMutation } from "@ferrix/react";
-import { api, type Id } from "../ferrix";
+import { insertAtTop, uploadFile, useAction, useMutation } from "@rxferrix/react";
+import { api, type Id } from "../rxferrix";
 import { errorMessage, type ChannelInfo, type Profile } from "../lib";
 
 /** An image being uploaded (or uploaded) for the next message. */

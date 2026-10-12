@@ -1,17 +1,17 @@
 import { defineConfig } from "vitepress";
 
-const repo = "https://github.com/genesysflow/ferrix";
+const repo = "https://github.com/genesysflow/rxferrix";
 
 export default defineConfig({
-  title: "Ferrix",
+  title: "RxFerrix",
   description: "A reactive backend in Rust that ships as a single binary.",
-  // Served from https://genesysflow.github.io/ferrix/ (DOCS_BASE overrides it, e.g. "/" for a custom domain).
-  base: process.env.DOCS_BASE ?? "/ferrix/",
+  // Served from https://genesysflow.github.io/rxferrix/ (DOCS_BASE overrides it, e.g. "/" for a custom domain).
+  base: process.env.DOCS_BASE ?? "/rxferrix/",
   cleanUrls: true,
   // Links to a local dev server (http://localhost:5173) are instructions, not pages.
   ignoreDeadLinks: "localhostLinks",
   lastUpdated: true,
-  head: [["link", { rel: "icon", type: "image/svg+xml", href: `${process.env.DOCS_BASE ?? "/ferrix/"}logo.svg` }]],
+  head: [["link", { rel: "icon", type: "image/svg+xml", href: `${process.env.DOCS_BASE ?? "/rxferrix/"}logo.svg` }]],
   themeConfig: {
     logo: "/logo.svg",
     nav: [
@@ -28,7 +28,7 @@ export default defineConfig({
       {
         text: "Introduction",
         items: [
-          { text: "What is Ferrix?", link: "/" },
+          { text: "What is RxFerrix?", link: "/" },
           { text: "Get started", link: "/getting-started" },
         ],
       },

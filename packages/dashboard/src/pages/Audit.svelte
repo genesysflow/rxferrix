@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { usePaginatedQuery, useQuery } from "@ferrix/svelte";
+  import { usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { AUDIT_ACTIONS, audit, dashboard, type AuditEntry, type Json } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { diffFields, summarize } from "../lib/diff.js";

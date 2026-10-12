@@ -3,11 +3,11 @@
 
 use std::time::Duration;
 
-use ferrix::auth::User;
-use ferrix::log;
-use ferrix::prelude::*;
-use ferrix::storage::StoredFile;
-use ferrix::{MutationDb, QueryDb};
+use rxferrix::auth::User;
+use rxferrix::log;
+use rxferrix::prelude::*;
+use rxferrix::storage::StoredFile;
+use rxferrix::{MutationDb, QueryDb};
 
 use crate::model::{Channel, Message, Reaction, Typing, require_member, require_readable, user_error};
 use crate::profiles::Names;

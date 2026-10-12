@@ -1,6 +1,6 @@
 # Deploying
 
-A Ferrix app is one binary plus one data directory. Deploying it takes three steps:
+A RxFerrix app is one binary plus one data directory. Deploying it takes three steps:
 
 1. **Build** a release binary with `scripts/release.sh`, or a Docker image with the `Dockerfile` (below).
 2. **Run** it on a server: `my-app serve --dir /var/lib/my-app`. It listens on `127.0.0.1:8090` (`--http` changes
@@ -23,10 +23,10 @@ The data directory (`--dir`, default `fx_data`) holds everything the server keep
 
 ## Build with the right SQLite flags
 
-Build your app with these SQLite flags. Apps created with `ferrix new` have them in `.cargo/config.toml` (so does
+Build your app with these SQLite flags. Apps created with `rxferrix new` have them in `.cargo/config.toml` (so does
 this repository); for an app created otherwise, put this in its `.cargo/config.toml`. Without it, rusqlite's bundled
 SQLite shares one page cache behind a global mutex, so concurrent queries don't run in parallel (measured: 8 parallel
-readers ran no faster than one; with the flags they scale to ~4x the single-reader throughput and beyond). Ferrix logs
+readers ran no faster than one; with the flags they scale to ~4x the single-reader throughput and beyond). RxFerrix logs
 a warning at startup when the flag is missing. It has to be the app's own config: Cargo gives a dependency no way to
 set another crate's build flags, and `libsqlite3-sys` reads them only from this variable. (Memory statistics, the
 second flag, are also turned off at runtime; the page cache can only be changed at build time.)
@@ -42,12 +42,12 @@ LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS
 `.embed_static::<Assets>()` embeds it at compile time, so the whole app ships as one file:
 
 ```rust
-#[derive(ferrix::rust_embed::Embed)]
+#[derive(rxferrix::rust_embed::Embed)]
 #[folder = "../web/dist/"]                        // relative to the crate
-#[crate_path = "ferrix::rust_embed"]
+#[crate_path = "rxferrix::rust_embed"]
 struct Assets;
 
-ferrix::Ferrix::new()
+rxferrix::RxFerrix::new()
     .embed_static::<Assets>()
     .routes(axum::Router::new().route("/webhooks/stripe", post(stripe)))   // your own routes, if any
     .run()
@@ -68,13 +68,13 @@ cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not in
 
 ## systemd
 
-[`deploy/ferrix.service`](https://github.com/genesysflow/ferrix/blob/master/deploy/ferrix.service) runs the binary as a dynamic unprivileged user with
-its data in `/var/lib/ferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM, and restarts
-on the dashboard's "Restart now" (exit code 75, `FERRIX_RESTART_EXIT_CODE`).
+[`deploy/rxferrix.service`](https://github.com/genesysflow/rxferrix/blob/master/deploy/rxferrix.service) runs the binary as a dynamic unprivileged user with
+its data in `/var/lib/rxferrix`, behind a reverse proxy or with `--https`; it stops gracefully on SIGTERM, and restarts
+on the dashboard's "Restart now" (exit code 75, `RXFERRIX_RESTART_EXIT_CODE`).
 
 ## Docker
 
-The [`Dockerfile`](https://github.com/genesysflow/ferrix/blob/master/Dockerfile) runs `scripts/release.sh` and copies the binary into a `FROM scratch`
+The [`Dockerfile`](https://github.com/genesysflow/rxferrix/blob/master/Dockerfile) runs `scripts/release.sh` and copies the binary into a `FROM scratch`
 image with CA certificates, running as an unprivileged user with the data in the `/data` volume. To build the image
 locally you need a Docker daemon you can use (on Linux: membership in the `docker` group, or rootless Docker/Podman;
 `podman build` works with the same file) and network access for the base images, Zig and the crates; the first build
@@ -84,7 +84,7 @@ sets the bundled SQLite's flags: don't pass `LIBSQLITE3_FLAGS` to the build.
 ```sh
 docker build -t todo-server .                     # --build-arg PACKAGE=my-server --build-arg WEB=web for yours
 docker run -p 8090:8090 -v todo-data:/data todo-server
-docker run -p 8090:8090 -v todo-data:/data -e FERRIX_RESTART_EXIT_CODE=75 --restart unless-stopped todo-server
+docker run -p 8090:8090 -v todo-data:/data -e RXFERRIX_RESTART_EXIT_CODE=75 --restart unless-stopped todo-server
                                                   # lets "Restart now" apply a restore staged in the dashboard
 docker run --rm todo-server functions             # any CLI command
 ```
@@ -109,7 +109,7 @@ SSD (btrfs, encrypted), one-insert mutations: 8.9k/s with 1 writer, 16.2k/s with
 
 ## CI
 
-[`.github/workflows/release.yml`](https://github.com/genesysflow/ferrix/blob/master/.github/workflows/release.yml) runs every gate of [Tests](https://github.com/genesysflow/ferrix/blob/master/README.md#development) (end-to-end
+[`.github/workflows/release.yml`](https://github.com/genesysflow/rxferrix/blob/master/.github/workflows/release.yml) runs every gate of [Tests](https://github.com/genesysflow/rxferrix/blob/master/README.md#development) (end-to-end
 tests included, in Chromium) and, in a job of its own, the tests with the `olap` feature; builds the static musl
 binary with `scripts/release.sh` (an artifact; attached to the GitHub release for `v*` tags) and, for tags and manual
 runs, `todo-server-olap` too; and builds the Docker image alongside, smoke-tests it (`functions`, `/api/health` with a

@@ -3,7 +3,7 @@
 //   docker build -t todo-server . && bun scripts/docker-rollout-e2e.ts
 //
 // Needs a Docker daemon you can use (and the traefik image, pulled on first use). Runs its own Compose
-// project (`ferrix-e2e`, Traefik on port 18080) and removes it, volume included, at the end. `COMPOSE_EXTRA=file.yaml`
+// project (`rxferrix-e2e`, Traefik on port 18080) and removes it, volume included, at the end. `COMPOSE_EXTRA=file.yaml`
 // adds a Compose file (e.g. Traefik with `--log.level=DEBUG`); on failure the logs go to /tmp/docker-rollout-e2e.log.
 //
 // 1. `deploy.sh` with the same image: a second container takes over, the first is removed. Zero failed requests
@@ -14,7 +14,7 @@
 import { join } from "node:path";
 
 const DIR = join(import.meta.dir, "../deploy/docker");
-const env = { ...process.env, COMPOSE_PROJECT_NAME: "ferrix-e2e", HTTP_PORT: "18080" };
+const env = { ...process.env, COMPOSE_PROJECT_NAME: "rxferrix-e2e", HTTP_PORT: "18080" };
 const BASE = "http://127.0.0.1:18080";
 const failures: string[] = [];
 
@@ -114,7 +114,7 @@ try {
 
   // 2. A version that fails to start.
   const broken = Bun.spawn(["docker", "build", "-t", "todo-server:e2e-broken", "-"], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
-  broken.stdin.write("FROM todo-server:latest\nENV FERRIX_LOG_FORMAT=nonsense\n");
+  broken.stdin.write("FROM todo-server:latest\nENV RXFERRIX_LOG_FORMAT=nonsense\n");
   broken.stdin.end();
   if ((await broken.exited) !== 0) throw new Error(`building the broken image failed: ${await new Response(broken.stderr).text()}`);
   l = load();

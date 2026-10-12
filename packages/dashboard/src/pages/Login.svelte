@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
+  import { RxFerrixError } from "@rxferrix/client";
   import { dashboardContext } from "../lib/context.js";
   import AuthCard from "./AuthCard.svelte";
 
@@ -16,14 +16,14 @@
     try {
       await auth.signInAsAdmin({ email, password });
     } catch (err) {
-      error = err instanceof FerrixError ? err.message : String(err);
+      error = err instanceof RxFerrixError ? err.message : String(err);
     } finally {
       busy = false;
     }
   }
 </script>
 
-<AuthCard title="Sign in" subtitle="Administrator access to this Ferrix server.">
+<AuthCard title="Sign in" subtitle="Administrator access to this RxFerrix server.">
   <form onsubmit={submit}>
     <label>Email <input type="email" bind:value={email} required autocomplete="username" /></label>
     <label>Password <input type="password" bind:value={password} required autocomplete="current-password" /></label>

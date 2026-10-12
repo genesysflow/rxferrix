@@ -17,7 +17,7 @@ import {
   type SmtpInput,
 } from "./api.js";
 
-/** Bounds enforced by the server (crates/ferrix/src/auth/effective.rs). */
+/** Bounds enforced by the server (crates/rxferrix/src/auth/effective.rs). */
 export const ACCESS_TTL_RANGE = [30, 24 * 3600] as const;
 export const SESSION_TTL_RANGE = [60, 400 * 24 * 3600] as const;
 export const MAX_PROVIDERS = 20;

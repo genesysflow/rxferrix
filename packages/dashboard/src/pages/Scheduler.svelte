@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useMutation, usePaginatedQuery, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useMutation, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { scheduler, type CronSummary, type JobState, type ScheduledJob } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatRelative, formatTime, pretty, prettyArgs } from "../lib/format.js";
@@ -59,7 +59,7 @@
       if (outcome === "canceled") ctx.toast(job.state === "inProgress" ? "Canceling the running action" : "Job canceled");
       else ctx.toast("The job had already finished", "error");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 
@@ -70,13 +70,13 @@
       try {
         await runCronNow({ name: c.name });
       } catch (e) {
-        if (!(e instanceof FerrixError && e.code === "running")) throw e;
+        if (!(e instanceof RxFerrixError && e.code === "running")) throw e;
         if (!confirm(`The previous run of “${c.name}” hasn't finished yet. Start another run anyway?`)) return;
         await runCronNow({ name: c.name, force: true });
       }
       ctx.toast(`Started ${c.name}`);
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     } finally {
       startingCron = null;
     }
@@ -87,7 +87,7 @@
       const id = await runJobNow({ id: job._id });
       ctx.toast(id === job._id ? "The job will run now" : "Scheduled a new run of the job");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 
@@ -127,7 +127,7 @@
       {#if crons.error}
         <div class="alert" role="alert">{crons.error.message}</div>
       {:else if crons.data && crons.data.length === 0}
-        <p class="muted pad">No crons are declared. Add one with <code class="mono">Ferrix::new().cron::&lt;f&gt;("name", "0 */5 * * * *", args)</code>.</p>
+        <p class="muted pad">No crons are declared. Add one with <code class="mono">RxFerrix::new().cron::&lt;f&gt;("name", "0 */5 * * * *", args)</code>.</p>
       {:else if crons.data}
         <table class="grid" data-testid="crons">
           <thead>
@@ -138,7 +138,7 @@
               {@render cronRow(c)}
             {/each}
             {#if systemCrons.length > 0}
-              <tr class="group"><td colspan="8">System crons <span class="faint">· run by ferrix itself</span></td></tr>
+              <tr class="group"><td colspan="8">System crons <span class="faint">· run by rxferrix itself</span></td></tr>
               {#each systemCrons as c (c._id)}
                 {@render cronRow(c)}
               {/each}

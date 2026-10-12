@@ -759,7 +759,7 @@ dependencies = [
 name = "chat-server"
 version = "0.1.0"
 dependencies = [
- "ferrix",
+ "rxferrix",
  "tokio",
 ]
 
@@ -1245,98 +1245,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "ferrix"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "aws-lc-rs",
- "axum",
- "axum-server",
- "blake3",
- "chacha20poly1305",
- "chrono",
- "chrono-tz",
- "clap",
- "cron",
- "data-encoding",
- "duckdb",
- "ferrix-macros",
- "futures",
- "hmac",
- "image",
- "lettre",
- "linkme",
- "mime_guess",
- "nix",
- "object_store",
- "parquet",
- "proptest",
- "rand 0.10.3",
- "rcgen 0.14.10",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "rust-stemmers",
- "rustls",
- "rustls-acme",
- "serde",
- "serde_json",
- "sha2",
- "sqlite-vec",
- "subtle",
- "tar",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tower-http 0.7.1",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
- "url",
- "zstd 0.14.1",
-]
-
-[[package]]
-name = "ferrix-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "ferrix-macros"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ferrix-mock",
- "futures",
- "heck",
- "insta",
- "prettyplease",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.119",
- "trybuild",
-]
-
-[[package]]
-name = "ferrix-mock"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
- "linkme",
- "serde",
- "serde_json",
- "ts-rs",
 ]
 
 [[package]]
@@ -3421,6 +3329,98 @@ dependencies = [
 ]
 
 [[package]]
+name = "rxferrix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "aws-lc-rs",
+ "axum",
+ "axum-server",
+ "blake3",
+ "chacha20poly1305",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "cron",
+ "data-encoding",
+ "duckdb",
+ "futures",
+ "hmac",
+ "image",
+ "lettre",
+ "linkme",
+ "mime_guess",
+ "nix",
+ "object_store",
+ "parquet",
+ "proptest",
+ "rand 0.10.3",
+ "rcgen 0.14.10",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "rust-stemmers",
+ "rustls",
+ "rustls-acme",
+ "rxferrix-macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlite-vec",
+ "subtle",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+ "url",
+ "zstd 0.14.1",
+]
+
+[[package]]
+name = "rxferrix-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rxferrix-macros"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "heck",
+ "insta",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "rxferrix-mock",
+ "serde_json",
+ "syn 2.0.119",
+ "trybuild",
+]
+
+[[package]]
+name = "rxferrix-mock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "linkme",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3951,7 +3951,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 name = "todo-server"
 version = "0.1.0"
 dependencies = [
- "ferrix",
+ "rxferrix",
 ]
 
 [[package]]

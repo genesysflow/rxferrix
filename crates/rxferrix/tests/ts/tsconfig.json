@@ -1,0 +1,11 @@
+{
+  "//": "Copied by the `codegen_typechecks_with_tsc` test into a temp dir inside packages/client (next to `generated/`).",
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": [],
+    "noUnusedLocals": true,
+    "paths": { "@rxferrix/client": ["../src/index.ts"] }
+  },
+  "include": ["usage.ts", "generated"]
+}

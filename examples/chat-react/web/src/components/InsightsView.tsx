@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { useAction } from "@ferrix/react";
-import { api, type Id, type Insights } from "../ferrix";
+import { useAction } from "@rxferrix/react";
+import { api, type Id, type Insights } from "../rxferrix";
 import { errorCode, errorMessage, initials, type ChannelSummary } from "../lib";
 
 /** How often the view asks again: the analytics copy isn't reactive (it trails the data by a few hundred ms). */

@@ -1,0 +1,8 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration_err(quote!(table = Todo),\nquote!(fn m<T>(ctx: &QueryCtx, doc: &Value, extra: u32) {}))"
+---
+#[migration] functions must be `async fn`
+#[migration] functions cannot be generic (no type, const or lifetime parameters)
+#[migration] functions return `Result<Option<serde_json::Value>>` (a patch or None), `Result<DocChange>` or `Result<()>`
+#[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`

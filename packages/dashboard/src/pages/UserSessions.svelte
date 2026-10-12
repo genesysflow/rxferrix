@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useMutation, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useMutation, useQuery } from "@rxferrix/svelte";
   import { dashboard } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatAgo, formatTime } from "../lib/format.js";
@@ -19,7 +19,7 @@
       await revokeSession({ session: id });
       ctx.toast("Session revoked: its connections were signed out");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     } finally {
       const next = new Set(revoking);
       next.delete(id);

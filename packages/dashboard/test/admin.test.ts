@@ -1,4 +1,4 @@
-import type { FerrixAuth } from "@ferrix/client";
+import type { RxFerrixAuth } from "@rxferrix/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelRestore,
@@ -25,7 +25,7 @@ function fakeAuth() {
   let n = 0;
   return {
     getAccessToken: vi.fn(async ({ forceRefresh = false } = {}) => `t${forceRefresh ? ++n : n}`),
-  } as unknown as FerrixAuth;
+  } as unknown as RxFerrixAuth;
 }
 
 function mockFetch(...responses: Response[]) {
@@ -227,12 +227,12 @@ describe("other admin endpoints", () => {
           userId: "u1",
           sessionId: "s1",
           expiresAt: 123,
-          url: "http://app/#ferrix_access_token=secret-access",
+          url: "http://app/#rxferrix_access_token=secret-access",
         }),
       ),
     );
     const r = await impersonate(fakeAuth(), { user: "u1", ttlSeconds: 300, redirectTo: "http://app/" });
-    expect(r).toEqual({ userId: "u1", sessionId: "s1", expiresAt: 123, url: "http://app/#ferrix_access_token=secret-access" });
+    expect(r).toEqual({ userId: "u1", sessionId: "s1", expiresAt: 123, url: "http://app/#rxferrix_access_token=secret-access" });
     expect(Object.keys(r)).not.toContain("accessToken");
     expect(Object.keys(r)).not.toContain("refreshToken");
   });

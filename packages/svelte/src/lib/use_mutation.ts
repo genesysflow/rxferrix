@@ -1,12 +1,12 @@
 import type {
   ArgsOf,
-  FerrixClient,
+  RxFerrixClient,
   FunctionReference,
   OptimisticUpdate,
   OptionalArgs,
   OutputOf,
-} from "@ferrix/client";
-import { getFerrixClient } from "./context.js";
+} from "@rxferrix/client";
+import { getRxFerrixClient } from "./context.js";
 
 /** A mutation bound to the client: call it with the mutation's args. */
 export interface Mutation<M extends FunctionReference<"mutation">> {
@@ -19,7 +19,7 @@ export interface Mutation<M extends FunctionReference<"mutation">> {
 export type Action<A extends FunctionReference<"action">> = (...args: OptionalArgs<A>) => Promise<OutputOf<A>>;
 
 function createMutation<M extends FunctionReference<"mutation">>(
-  client: FerrixClient,
+  client: RxFerrixClient,
   ref: M,
   optimisticUpdate?: OptimisticUpdate<ArgsOf<M>>,
 ): Mutation<M> {
@@ -35,16 +35,16 @@ function createMutation<M extends FunctionReference<"mutation">>(
 /** Returns a function that runs the mutation. Call during component init (or pass `client`). */
 export function useMutation<M extends FunctionReference<"mutation">>(
   ref: M,
-  options: { client?: FerrixClient } = {},
+  options: { client?: RxFerrixClient } = {},
 ): Mutation<M> {
-  return createMutation(options.client ?? getFerrixClient(), ref);
+  return createMutation(options.client ?? getRxFerrixClient(), ref);
 }
 
 /** Returns a function that runs the action. Call during component init (or pass `client`). */
 export function useAction<A extends FunctionReference<"action">>(
   ref: A,
-  options: { client?: FerrixClient } = {},
+  options: { client?: RxFerrixClient } = {},
 ): Action<A> {
-  const client = options.client ?? getFerrixClient();
+  const client = options.client ?? getRxFerrixClient();
   return ((...args: OptionalArgs<A>) => client.action(ref, ...args)) as Action<A>;
 }

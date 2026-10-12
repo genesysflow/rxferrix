@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
+  import { RxFerrixError } from "@rxferrix/client";
   import { onMount } from "svelte";
   import { dashboardContext } from "../lib/context.js";
   import { href, link, router } from "../lib/router.svelte.js";
@@ -37,7 +37,7 @@
       await auth.setupAdmin({ token, email, password });
       router.navigate(href("overview"), { replace: true });
     } catch (err) {
-      error = err instanceof FerrixError ? err.message : String(err);
+      error = err instanceof RxFerrixError ? err.message : String(err);
     } finally {
       busy = false;
     }

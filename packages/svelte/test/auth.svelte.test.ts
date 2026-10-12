@@ -1,13 +1,13 @@
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FerrixClient, MemoryAuthStorage, getAuth } from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { RxFerrixClient, MemoryAuthStorage, getAuth } from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { useAuth, type AuthProviders } from "../src/lib/index.js";
 import AuthView from "./AuthView.svelte";
 import Root from "./Root.svelte";
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 let target: HTMLElement;
 let mounted: ReturnType<typeof mount> | null = null;
 
@@ -15,7 +15,7 @@ const tokens = { accessToken: "a.b.c", refreshToken: "r1", expiresIn: 900, userI
 
 beforeEach(() => {
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+  client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
   const fetch = vi.fn(async () => new Response(JSON.stringify(tokens), { status: 200 }));
   getAuth(client, { storage: new MemoryAuthStorage(), fetch: fetch as unknown as typeof globalThis.fetch, syncTabs: false });
   target = document.createElement("div");
@@ -69,7 +69,7 @@ describe("useAuth / useCurrentUser", () => {
 
   it("lists the server's sign-in methods", async () => {
     const providers: AuthProviders = { password: true, magicLink: false, signups: true, oauth: ["github"] };
-    const other = new FerrixClient("http://localhost:3211", {
+    const other = new RxFerrixClient("http://localhost:3211", {
       webSocketConstructor: server.WebSocket,
       unsavedChangesWarning: false,
     });

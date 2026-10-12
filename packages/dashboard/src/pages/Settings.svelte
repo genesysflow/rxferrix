@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useAction } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction } from "@rxferrix/svelte";
   import { onMount } from "svelte";
   import { settings, type OAuthKind, type SettingsKey, type SettingsView } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
@@ -78,7 +78,7 @@
       ctx.toast(`Saved ${changed.join(", ")}; in effect now`);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (e instanceof FerrixError && e.code === "invalid_settings") serverError = { section: sectionOfError(message), message };
+      if (e instanceof RxFerrixError && e.code === "invalid_settings") serverError = { section: sectionOfError(message), message };
       else serverError = { section: "general", message };
     } finally {
       saving = false;

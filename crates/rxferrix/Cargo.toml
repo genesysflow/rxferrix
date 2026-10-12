@@ -1,0 +1,89 @@
+[package]
+name = "rxferrix"
+description = "A single-binary reactive backend: typed Rust queries, mutations and actions, live over WebSockets, with auth, file storage, scheduling, search and an admin dashboard"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rxferrix-macros = { path = "../rxferrix-macros", version = "0.1.0" }
+anyhow = "1.0.104"
+argon2 = "0.6.0"
+axum = { version = "0.8.9", features = ["ws"] }
+blake3 = "1.8.7"
+# Encryption at rest of secrets in `_settings` (XChaCha20-Poly1305).
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+# Signature verification of external JWTs (RS256, ES256, EdDSA); already in the tree through rustls.
+aws-lc-rs = "1.18.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+data-encoding = "2.11.1"
+futures = "0.3.34"
+hmac = "0.13.0"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "pool", "hostname", "tokio1-rustls", "aws-lc-rs", "rustls-platform-verifier"] }
+linkme = "0.3.37"
+# File storage backends (local filesystem; S3-compatible with the `s3` feature).
+object_store = { version = "0.14.2", default-features = false, features = ["fs"] }
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form", "query"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Embedded assets: the dashboard SPA, and apps' own frontends (`RxFerrix::embed_static`; re-exported as
+# `rxferrix::rust_embed`).
+rust-embed = { version = "8.13.0", features = ["debug-embed"] }
+serde = { version = "1.0.229", features = ["derive"] }
+# Vector search (`vec0` virtual tables), compiled in and linked against the bundled SQLite.
+sqlite-vec = "0.1.9"
+# Snowball stemmers for `#[search_index(.., tokenizer = "snowball", language = "..")]` (a custom FTS5 tokenizer).
+rust-stemmers = "1.2.0"
+# float_roundtrip: index keys are built from f64 values (e.g. `_creationTime`) that must survive the JSON round trip
+# through storage bit-exactly; the default fast float parser can be off by one ULP.
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "raw_value"] }
+sha2 = "0.11.0"
+subtle = "2.6.1"
+tokio = { version = "1.53.2", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["cors"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+tempfile = "3.27.0"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+url = "2.5.8"
+cron = "0.17.0"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Per-cron time zones (IANA database compiled in).
+chrono-tz = "0.10.4"
+# Image thumbnails (`GET /api/storage/{id}?thumb=WxH`): decoders and encoders for the formats it accepts only.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+# Operations (`ops`): backup archives (.tar.zst), static frontend serving, TLS (certificate files and Let's Encrypt).
+tar = "0.4.46"
+zstd = { version = "0.14.1", default-features = false }
+mime_guess = "2.0.5"
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "webpki-roots", "axum"] }
+
+# DuckDB, compiled from its bundled C++ sources (feature `olap`).
+duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = true }
+# Parquet exports of analytics queries, written from DuckDB's Arrow batches (same Arrow major version as duckdb's).
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
+
+[features]
+default = ["dashboard", "s3"]
+# S3-compatible file storage (AWS, R2, MinIO): `--storage s3://bucket/prefix`.
+s3 = ["object_store/aws"]
+# The admin dashboard SPA, embedded from `dashboard-dist/` and served at `/_/`. Its admin-only system functions and
+# `/api/admin/*` endpoints exist either way.
+dashboard = []
+# Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions (`--olap`).
+olap = ["dep:duckdb", "dep:parquet"]
+
+# Zero-downtime takeover (`serve --takeover`): the listening sockets are passed to the new process over a Unix socket.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["socket", "uio"] }
+
+[dev-dependencies]
+# Paused time in tests (`#[tokio::test(start_paused = true)]`).
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
+# A failing `ObjectStore` wrapper in the replication tests (the trait is an `async_trait`).
+async-trait = "0.1.92"
+proptest = "1.11.0"
+tokio-tungstenite = "0.30.0"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "crypto"] }

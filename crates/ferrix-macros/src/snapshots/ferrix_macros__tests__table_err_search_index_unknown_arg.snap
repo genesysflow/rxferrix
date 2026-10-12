@@ -1,7 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "table_err(quote!(), quote!\n{\n    #[search_index(s, search = text, dims = 3)]\n    #[vector_index(v, field = emb, dims = 3, search = text)] #[search_index]\n    struct T { text: String, emb: Vec<f32> }\n})"
----
-unknown #[search_index] argument `dims`; expected `search`, `filter`, `tokenizer`, `language` or `diacritics`
-unknown #[vector_index] argument `search`; expected `field`, `dims`, `filter`, `kind`, `m`, `ef_construction` or `ef_search`
-expected `#[search_index(name, search = field, filter = [field, ...], tokenizer = "...")]`

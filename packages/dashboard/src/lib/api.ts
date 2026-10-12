@@ -1,10 +1,10 @@
 /**
  * Hand-written references to the admin-only system functions and the types they return (codegen leaves system
- * functions out of app APIs): `_system/dashboard:*` (crates/ferrix/src/dashboard/mod.rs), `_system/storage:*`,
+ * functions out of app APIs): `_system/dashboard:*` (crates/rxferrix/src/dashboard/mod.rs), `_system/storage:*`,
  * `_system/scheduler:*`, `_system/workflow:*`, `_system/migrations:*`, `_system/settings:*`, `_system/env:*` and `_system/audit:list`, plus the types of
  * the `/api/admin/*` endpoints (lib/admin.ts). See docs/CONTRACT.md §4.
  */
-import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@ferrix/client";
+import { makeFunctionReference, type PaginationOpts, type PaginationResult } from "@rxferrix/client";
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
@@ -160,7 +160,7 @@ export const dashboard = {
   me: q<Record<string, never>, { _id: string; email: string } | null>("me"),
 } as const;
 
-/** A stored file (`FileSummary` in crates/ferrix/src/storage/mod.rs). */
+/** A stored file (`FileSummary` in crates/rxferrix/src/storage/mod.rs). */
 export interface FileSummary {
   _id: string;
   _creationTime: number;
@@ -178,7 +178,7 @@ export interface FileSummary {
   downloadUrl: string;
 }
 
-/** The Files page's admin-only system functions (`_system/storage:*`, crates/ferrix/src/storage/mod.rs). */
+/** The Files page's admin-only system functions (`_system/storage:*`, crates/rxferrix/src/storage/mod.rs). */
 export const storage = {
   files: makeFunctionReference<"query", { paginationOpts: PaginationOpts }, PaginationResult<FileSummary>>(
     "query",
@@ -192,7 +192,7 @@ export const storage = {
   ),
 };
 
-/** Scheduled job states (`JobState` in crates/ferrix/src/scheduler/tables.rs). */
+/** Scheduled job states (`JobState` in crates/rxferrix/src/scheduler/tables.rs). */
 export type JobState = "pending" | "inProgress" | "success" | "failed" | "canceled";
 
 /** A `_scheduled_jobs` document. */
@@ -228,7 +228,7 @@ export interface CronSummary {
   schedule: string;
   /** The IANA time zone of the expression; null for UTC. */
   timezone: string | null;
-  /** A ferrix system cron (name starting with `_`, e.g. `_storage_sweep`). */
+  /** A rxferrix system cron (name starting with `_`, e.g. `_storage_sweep`). */
   system: boolean;
   path: string;
   args: Json;
@@ -245,7 +245,7 @@ const sq = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out
 const sm = <Args, Out>(name: string) =>
   makeFunctionReference<"mutation", Args, Out>("mutation", `_system/scheduler:${name}`);
 
-/** The admin-only scheduler functions (`_system/scheduler:*`, crates/ferrix/src/scheduler/mod.rs). */
+/** The admin-only scheduler functions (`_system/scheduler:*`, crates/rxferrix/src/scheduler/mod.rs). */
 export const scheduler = {
   jobs: sq<{ state?: JobState | null; paginationOpts: PaginationOpts }, PaginationResult<ScheduledJob>>("jobs"),
   cancelJob: sm<{ id: string }, CancelOutcome>("cancel_job"),
@@ -256,7 +256,7 @@ export const scheduler = {
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Workflows (`_system/workflow:*`, crates/ferrix/src/workflow)
+// Workflows (`_system/workflow:*`, crates/rxferrix/src/workflow)
 
 export type WorkflowState = "running" | "success" | "failed" | "canceled";
 
@@ -309,7 +309,7 @@ const wq = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out
 const wm = <Args, Out>(name: string) =>
   makeFunctionReference<"mutation", Args, Out>("mutation", `_system/workflow:${name}`);
 
-/** The admin-only workflow functions (`_system/workflow:*`, crates/ferrix/src/workflow/mod.rs). */
+/** The admin-only workflow functions (`_system/workflow:*`, crates/rxferrix/src/workflow/mod.rs). */
 export const workflows = {
   list: wq<{ state?: WorkflowState | null; paginationOpts: PaginationOpts }, PaginationResult<Workflow>>("list"),
   steps: wq<{ id: string }, WorkflowStep[]>("steps"),
@@ -317,7 +317,7 @@ export const workflows = {
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Migrations (`_system/migrations:*`, crates/ferrix/src/migrations)
+// Migrations (`_system/migrations:*`, crates/rxferrix/src/migrations)
 
 export type MigrationState = "pending" | "running" | "done" | "failed" | "canceled";
 
@@ -393,7 +393,7 @@ export const migrations = {
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Settings (`_system/settings:*`, actions: crates/ferrix/src/settings)
+// Settings (`_system/settings:*`, actions: crates/rxferrix/src/settings)
 
 export type OAuthKind = "github" | "google" | "discord" | "apple" | "oidc";
 /** What the server shows in place of a stored secret (and accepts back as "keep it"). */
@@ -431,7 +431,7 @@ export interface SettingsView {
   accessTokenTtlSecs: number | null;
   sessionTtlSecs: number | null;
   corsOrigins: string[] | null;
-  /** Scheduled backups and their destination (crates/ferrix/src/settings/backups.rs). */
+  /** Scheduled backups and their destination (crates/rxferrix/src/settings/backups.rs). */
   backups: BackupsView | null;
   /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `oauth.<id>`,
    * `backups.schedule`, `backups.destination`. */
@@ -555,7 +555,7 @@ export const settings = {
 } as const;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Environment variables (`_system/env:*`, crates/ferrix/src/env.rs)
+// Environment variables (`_system/env:*`, crates/rxferrix/src/env.rs)
 
 export interface EnvVarView {
   name: string;
@@ -575,7 +575,7 @@ export const env = {
 export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Audit log (`_system/audit:list`, crates/ferrix/src/audit.rs)
+// Audit log (`_system/audit:list`, crates/rxferrix/src/audit.rs)
 
 export const AUDIT_ACTIONS = [
   "insert",
@@ -670,7 +670,7 @@ export interface OlapColumn {
   typeName: string;
 }
 
-/** `OlapResult` (crates/ferrix/src/olap/mod.rs): `POST /api/admin/olap/query` with format json. */
+/** `OlapResult` (crates/rxferrix/src/olap/mod.rs): `POST /api/admin/olap/query` with format json. */
 export interface OlapResult {
   columns: OlapColumn[];
   rows: Record<string, Json>[];
@@ -678,7 +678,7 @@ export interface OlapResult {
   asOfTs: number;
 }
 
-/** `OlapStatus` (crates/ferrix/src/olap/mod.rs): the analytics copy (`--olap`). */
+/** `OlapStatus` (crates/rxferrix/src/olap/mod.rs): the analytics copy (`--olap`). */
 export interface OlapStatus {
   /** `building`, `ready` or `failed` (retried). */
   state: string;
@@ -757,7 +757,7 @@ export interface Timeseries {
   points: TimePoint[];
 }
 
-/** `BackupInfo` (crates/ferrix/src/ops/backup.rs). */
+/** `BackupInfo` (crates/rxferrix/src/ops/backup.rs). */
 export interface BackupInfo {
   name: string;
   bytes: number;
@@ -767,7 +767,7 @@ export interface BackupInfo {
   ts: number | null;
 }
 
-/** `PendingRestore` (crates/ferrix/src/ops/restore.rs): a backup staged to replace the database at the next start. */
+/** `PendingRestore` (crates/rxferrix/src/ops/restore.rs): a backup staged to replace the database at the next start. */
 export interface PendingRestore {
   /** The backup's name, or the uploaded file's. */
   source: string;
@@ -788,7 +788,7 @@ export interface PendingRestore {
   pointInTime?: PointInTimeInfo | null;
 }
 
-/** `PointInTimeInfo` (crates/ferrix/src/ops/replicate.rs): what a point-in-time restore restores. */
+/** `PointInTimeInfo` (crates/rxferrix/src/ops/replicate.rs): what a point-in-time restore restores. */
 export interface PointInTimeInfo {
   generation: string;
   /** The snapshot it starts from, and its ts. */
@@ -829,7 +829,7 @@ export interface ReplicationGeneration {
   toTime: number | null;
 }
 
-/** `ReplicationStatus` (crates/ferrix/src/ops/replicate.rs): `GET /api/admin/replication` (`--replicate-to`). */
+/** `ReplicationStatus` (crates/rxferrix/src/ops/replicate.rs): `GET /api/admin/replication` (`--replicate-to`). */
 export interface ReplicationStatus {
   target: string;
   everyMs: number;

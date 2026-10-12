@@ -2,7 +2,7 @@
 //! Environment page (or `chat-server env set CHAT_ANNOUNCEMENT`). Reading it with `ctx.env` makes the query depend on
 //! it, so changing or removing it updates every open chat at once.
 
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 /// The announcement, if one is set (blank counts as none).
 #[query]

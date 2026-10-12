@@ -1,4 +1,4 @@
-export { setupFerrix, getFerrixClient } from "./context.js";
+export { setupRxFerrix, getRxFerrixClient } from "./context.js";
 export { useQuery, type UseQueryResult, type UseQueryOptions, type ArgsThunk } from "./use_query.svelte.js";
 export {
   usePaginatedQuery,
@@ -9,9 +9,9 @@ export { useMutation, useAction, type Mutation, type Action } from "./use_mutati
 export { useConnectionState } from "./connection.js";
 export { useAuth, useCurrentUser, type UseAuthResult } from "./auth.js";
 export {
-  FerrixClient,
-  FerrixError,
-  FerrixAuth,
+  RxFerrixClient,
+  RxFerrixError,
+  RxFerrixAuth,
   getAuth,
   systemApi,
   MemoryAuthStorage,
@@ -20,7 +20,7 @@ export {
   type AuthTokens,
   type AuthProviders,
   type CodeProof,
-  type FerrixAuthOptions,
+  type RxFerrixAuthOptions,
   type RedirectResult,
   type User,
   makeFunctionReference,
@@ -39,4 +39,4 @@ export {
   uploadFile,
   type UploadFileOptions,
   type UploadProgress,
-} from "@ferrix/client";
+} from "@rxferrix/client";

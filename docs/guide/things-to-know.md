@@ -20,13 +20,13 @@
 - **`ctx.now()` in a query is the snapshot's time, not a reactive clock.** A query reruns when its data changes, not
   when time passes. For expiry, store the state and flip it with a scheduled mutation (`run_at`); format "5 minutes
   ago" in the client.
-- **A query's result must depend only on its arguments and the data it reads.** In `--dev` and `TestApp`, ferrix
+- **A query's result must depend only on its arguments and the data it reads.** In `--dev` and `TestApp`, rxferrix
   reruns each query in the same snapshot now and then and logs a warning (also sent as a log line) if the result
   differs: `SystemTime::now()`, random numbers or `HashMap` order. Use `ctx.now()`, and a `BTreeMap` or a sort.
 - **Invalidation is coarse**: any write to a document reruns the queries that read it, even when nothing changed.
   Skip no-op writes, keep fast-changing fields (presence, typing, counters) in small tables of their own, read narrow
   ranges (`eq` prefixes, `_creationTime` bounds, `take(n)`), and count with `.count()`.
-- **Tests** (`ferrix::testing::TestApp`, in dev mode): `t.create_user("ann@example.com", Some("password"))` makes a
+- **Tests** (`rxferrix::testing::TestApp`, in dev mode): `t.create_user("ann@example.com", Some("password"))` makes a
   user, `t.as_user(id).query::<list>(args)` calls as them, `t.advance_time(d)` runs due jobs.
 
 More in [docs/CONTRACT.md](../CONTRACT.md) §1.10.

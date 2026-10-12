@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use ferrix::log;
-use ferrix::prelude::*;
-use ferrix::scheduler::ScheduledJob;
-use ferrix::storage::StoredFile;
+use rxferrix::log;
+use rxferrix::prelude::*;
+use rxferrix::scheduler::ScheduledJob;
+use rxferrix::storage::StoredFile;
 
 /// One item on the list, with an optional image (a stored file).
 #[table(name = "todos")]
@@ -97,7 +97,7 @@ async fn delete_image(ctx: &MutationCtx, todo: &Todo) -> Result<()> {
     Ok(())
 }
 
-/// Step 1 of attaching an image: a short-lived URL to upload it to (`uploadFile` in `@ferrix/client`).
+/// Step 1 of attaching an image: a short-lived URL to upload it to (`uploadFile` in `@rxferrix/client`).
 #[mutation]
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
     ctx.storage.generate_upload_url().await

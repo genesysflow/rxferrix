@@ -1,5 +1,5 @@
 /**
- * Binary values: `ferrix::Bytes` travels (and is stored) as `{ $bytes: "<base64>" }`, which is also its generated
+ * Binary values: `rxferrix::Bytes` travels (and is stored) as `{ $bytes: "<base64>" }`, which is also its generated
  * TypeScript type. These helpers convert between that form and `Uint8Array`.
  *
  * ```ts
@@ -9,7 +9,7 @@
  * ```
  */
 
-/** The JSON form of `ferrix::Bytes`: standard, padded base64. */
+/** The JSON form of `rxferrix::Bytes`: standard, padded base64. */
 export type Bytes = { $bytes: string };
 
 const CHUNK = 0x8000;

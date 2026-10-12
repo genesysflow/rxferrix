@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@ferrix/react";
-import { api } from "../ferrix";
+import { useMutation, useQuery } from "@rxferrix/react";
+import { api } from "../rxferrix";
 import { errorMessage, useChannelRoute } from "../lib";
 import { ChannelView } from "./ChannelView";
 import { ErrorBoundary } from "./ErrorBoundary";

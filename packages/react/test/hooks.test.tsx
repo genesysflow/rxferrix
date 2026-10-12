@@ -1,10 +1,10 @@
 import { Component, StrictMode, useState, type ReactNode } from "react";
 import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FerrixClient, makeFunctionReference, type Id } from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { RxFerrixClient, makeFunctionReference, type Id } from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import {
-  FerrixProvider,
+  RxFerrixProvider,
   useAction,
   useConnectionState,
   useMutation,
@@ -23,11 +23,11 @@ const api = {
 };
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 
 beforeEach(async () => {
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", {
+  client = new RxFerrixClient("http://localhost:3210", {
     webSocketConstructor: server.WebSocket,
     unsavedChangesWarning: false,
   });
@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 function renderWithClient(ui: ReactNode, strict = false) {
-  const tree = <FerrixProvider client={client}>{ui}</FerrixProvider>;
+  const tree = <RxFerrixProvider client={client}>{ui}</RxFerrixProvider>;
   return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
 }
 
@@ -97,17 +97,17 @@ describe("useQuery", () => {
     await settle();
     server.drain();
     rerender(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <TodoList done={false} />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     expect(server.drain()).toEqual([]);
 
     rerender(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <TodoList done={true} />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     expect(server.drain()).toEqual([
@@ -134,9 +134,9 @@ describe("useQuery", () => {
     expect(server.drain()).toEqual([]);
 
     rerender(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <Maybe id="a" />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     expect(server.sentOfType("ModifyQuerySet")).toHaveLength(1);

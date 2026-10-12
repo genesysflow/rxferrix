@@ -23,7 +23,7 @@ database under the running server. The backup is checked there and then, exactly
 refused with the reason. A good one is *staged* in `<dir>/restore-staged/` with a `pending-restore.json` marker, and
 the next start of `serve` applies it before opening the database (the current files go to `pre-restore-<time>/`).
 Until then the dashboard shows it as pending and can cancel it (or `todo-server restore --cancel` offline). With
-`serve --restart-exit-code 75` (set in `deploy/ferrix.service`; for Docker add a restart policy), the dashboard also
+`serve --restart-exit-code 75` (set in `deploy/rxferrix.service`; for Docker add a restart policy), the dashboard also
 offers "Restart now": a graceful shutdown and an exit with that code, for systemd or Docker to start the server again.
 Without it, restart the server yourself. A staged restore never restores `auth_secret.key` (only `restore` does), and
 it replaces everything else, administrators and sessions included: whoever is signed in may have to sign in again.

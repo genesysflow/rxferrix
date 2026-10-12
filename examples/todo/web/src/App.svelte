@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { setupFerrix } from "@ferrix/svelte";
+  import { setupRxFerrix } from "@rxferrix/svelte";
   import TodoList from "./TodoList.svelte";
 
-  // Same origin: Vite proxies /api (including the /api/sync WebSocket) to the Ferrix server.
-  setupFerrix(window.location.origin);
+  // Same origin: Vite proxies /api (including the /api/sync WebSocket) to the RxFerrix server.
+  setupRxFerrix(window.location.origin);
 </script>
 
 <main>

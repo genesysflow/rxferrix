@@ -1,0 +1,56 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration(quote!(table = Todo, batch = 100), quote!\n{\n    #[doc = r\" Adds a default priority.\"] pub async fn\n    add_priority(ctx: &MutationCtx, doc: serde_json::Value) ->\n    Result<Option<serde_json::Value>>\n    { Ok(doc.get(\"priority\").is_none().then(|| json!({ \"priority\": 0 }))) }\n})"
+---
+/// Adds a default priority.
+pub async fn add_priority(
+    ctx: &MutationCtx,
+    doc: serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    Ok(doc.get("priority").is_none().then(|| json!({ "priority" : 0 })))
+}
+/// Migration reference for [`add_priority`](fn@add_priority).
+#[allow(non_camel_case_types, dead_code)]
+pub struct add_priority {}
+impl ::rxferrix::migrations::MigrationRef for add_priority {
+    fn name() -> ::std::string::String {
+        ::rxferrix::__private::MigrationDef::name(&__RXFERRIX_MIGRATION_add_priority)
+    }
+    fn table() -> &'static str {
+        __RXFERRIX_MIGRATION_add_priority.table
+    }
+}
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_MIGRATION_add_priority: ::rxferrix::__private::MigrationDef = ::rxferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "add_priority",
+    name: ::core::option::Option::None,
+    table: <Todo as ::rxferrix::Table>::NAME,
+    batch_size: 100usize,
+    after: &[],
+    handler: {
+        fn __rxferrix_migrate<'a>(
+            __rxferrix_ctx: &'a ::rxferrix::MutationCtx,
+            __rxferrix_doc: ::rxferrix::__private::serde_json::Value,
+        ) -> ::rxferrix::__private::BoxFuture<
+            'a,
+            ::rxferrix::Result<::rxferrix::migrations::DocChange>,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let __rxferrix_doc: serde_json::Value = ::rxferrix::__private::decode_migration_doc::<
+                    serde_json::Value,
+                >(__rxferrix_doc)?;
+                let __rxferrix_out: Option<serde_json::Value> = add_priority(
+                        __rxferrix_ctx,
+                        __rxferrix_doc,
+                    )
+                    .await?;
+                ::rxferrix::__private::migration_output(__rxferrix_out)
+            })
+        }
+        __rxferrix_migrate
+    },
+    on_read: ::core::option::Option::None,
+};

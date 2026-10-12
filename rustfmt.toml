@@ -1,5 +1,5 @@
 # `cargo fmt --all` formats the workspace; CI fails on unformatted code (`cargo fmt --all --check`). The trybuild
-# fixtures (crates/ferrix-macros/tests/ui) are not part of any crate, so they keep their layout (their .stderr files
+# fixtures (crates/rxferrix-macros/tests/ui) are not part of any crate, so they keep their layout (their .stderr files
 # record line numbers).
 # 120 columns, like the rest of the repository (docs and TS); "Max" lets calls, chains and struct literals use the
 # full width before breaking.

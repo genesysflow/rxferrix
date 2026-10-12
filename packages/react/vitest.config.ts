@@ -6,8 +6,8 @@ export default defineConfig({
   resolve: {
     // Test against the client's sources so no build step is needed.
     alias: [
-      { find: /^@ferrix\/client$/, replacement: clientSrc("index.ts") },
-      { find: /^@ferrix\/client\/testing$/, replacement: clientSrc("testing.ts") },
+      { find: /^@rxferrix\/client$/, replacement: clientSrc("index.ts") },
+      { find: /^@rxferrix\/client\/testing$/, replacement: clientSrc("testing.ts") },
     ],
   },
   test: {

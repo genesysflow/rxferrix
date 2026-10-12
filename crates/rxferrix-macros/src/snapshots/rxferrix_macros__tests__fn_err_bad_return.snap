@@ -1,0 +1,5 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func_err(Query, quote!(),\nquote!(async fn f(ctx: &QueryCtx) -> Option<u32> {}))"
+---
+the return type must be `Result<T>` (`rxferrix::Result<T>` or `anyhow::Result<T>`)

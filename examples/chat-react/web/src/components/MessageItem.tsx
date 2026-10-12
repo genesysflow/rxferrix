@@ -1,6 +1,6 @@
 import { memo, useState, type KeyboardEvent } from "react";
-import { useMutation, type ReactMutation } from "@ferrix/react";
-import { api, type MessageView } from "../ferrix";
+import { useMutation, type ReactMutation } from "@rxferrix/react";
+import { api, type MessageView } from "../rxferrix";
 import { errorMessage, formatTime, initials, thumbUrl } from "../lib";
 
 export const EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🚀"];

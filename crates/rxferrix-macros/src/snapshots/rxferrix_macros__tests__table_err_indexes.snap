@@ -1,0 +1,12 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table_err(quote!(), quote!\n{\n    #[index(by_x = [x], by_x = [x], by_id = [x], by_creation_time = [x])]\n    #[index(by_missing = [nope], by_dup = [x, x], by_empty = [], by_sys =\n    [_creation_time], x = [x])] struct T { x: u32 }\n})"
+---
+duplicate index name `by_x`
+index name `by_id` is reserved for a built-in index
+index name `by_creation_time` is reserved for a built-in index
+unknown field `nope` in index `by_missing`; struct `T` has no such field
+field `x` appears twice in index `by_dup`
+an index needs at least one field
+system field `_creation_time` cannot be listed in an index (every index implicitly ends with `_creationTime, _id`; bound `_creation_time` in the range instead)
+index name `x` conflicts with the field handle `T::x`

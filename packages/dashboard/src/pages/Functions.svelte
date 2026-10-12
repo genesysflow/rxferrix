@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useAction, usePaginatedQuery, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { dashboard, type FunctionSummary, type Json, type RunResult } from "../lib/api.js";
   import { parseJson, pretty } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
@@ -62,7 +62,7 @@
       result = await runFunction({ path: selected.path, args: parsed.value as Json, asUser: asUser || null });
     } catch (e) {
       result = null;
-      error = e instanceof FerrixError ? e.message : String(e);
+      error = e instanceof RxFerrixError ? e.message : String(e);
     } finally {
       running = false;
     }

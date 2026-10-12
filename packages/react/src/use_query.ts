@@ -2,14 +2,14 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   canonicalJSON,
 
-  type FerrixError,
+  type RxFerrixError,
   type FunctionReference,
   type OptionalArgsOrSkip,
   type OutputOf,
   type QueryState,
   type QueryWatch,
-} from "@ferrix/client";
-import { useFerrix } from "./context.js";
+} from "@rxferrix/client";
+import { useRxFerrix } from "./context.js";
 
 const SKIPPED = Object.freeze({ status: "skipped" as const });
 type Snapshot = QueryState | typeof SKIPPED;
@@ -18,7 +18,7 @@ const noopUnsubscribe = () => {};
 
 /** Subscribes to a query and returns its current state (or `SKIPPED`). Shared by the public hooks. */
 function useQueryState(ref: FunctionReference<"query">, argsOrSkip: unknown): Snapshot {
-  const client = useFerrix();
+  const client = useRxFerrix();
   const skip = argsOrSkip === "skip";
   // Args are compared by canonical JSON so `useQuery(ref, { a: 1 })` with an inline object does not resubscribe.
   const argsKey = skip ? null : canonicalJSON(argsOrSkip ?? {});
@@ -46,7 +46,7 @@ function useQueryState(ref: FunctionReference<"query">, argsOrSkip: unknown): Sn
 
 /**
  * Subscribes to a query. Returns `undefined` while loading (or when skipped with `"skip"`), then the latest value,
- * re-rendering whenever it changes. Throws the query's {@link FerrixError} if it fails, so an ErrorBoundary can
+ * re-rendering whenever it changes. Throws the query's {@link RxFerrixError} if it fails, so an ErrorBoundary can
  * render it.
  *
  * ```tsx
@@ -66,7 +66,7 @@ export function useQuery<Q extends FunctionReference<"query">>(
 export type UseQueryResult<T> =
   | { data: undefined; error: undefined; isLoading: true }
   | { data: T; error: undefined; isLoading: false }
-  | { data: undefined; error: FerrixError; isLoading: false }
+  | { data: undefined; error: RxFerrixError; isLoading: false }
   /** Skipped. */
   | { data: undefined; error: undefined; isLoading: false };
 

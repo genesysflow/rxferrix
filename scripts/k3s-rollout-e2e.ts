@@ -1,4 +1,4 @@
-// End-to-end test of a zero-downtime rollout on Kubernetes (deploy/k8s/ferrix.yaml), under write load, in a k3s
+// End-to-end test of a zero-downtime rollout on Kubernetes (deploy/k8s/rxferrix.yaml), under write load, in a k3s
 // cluster that runs in a Docker container (k3s's own Traefik in front, local-path storage):
 //
 //   docker build -t todo-server . && bun scripts/k3s-rollout-e2e.ts
@@ -15,11 +15,11 @@
 import { join } from "node:path";
 
 const K3S = process.env.K3S_IMAGE ?? "rancher/k3s:v1.33.5-k3s1";
-const NAME = "ferrix-k3s-e2e";
+const NAME = "rxferrix-k3s-e2e";
 const PORT = 18081;
 const BASE = `http://127.0.0.1:${PORT}`;
 const HOST = "app.example.com";
-const MANIFEST = join(import.meta.dir, "../deploy/k8s/ferrix.yaml");
+const MANIFEST = join(import.meta.dir, "../deploy/k8s/rxferrix.yaml");
 const failures: string[] = [];
 
 async function run(cmd: string[], stdin?: string | ReadableStream): Promise<{ code: number; out: string }> {
@@ -87,7 +87,7 @@ function check(name: string, cond: boolean, detail: string) {
 }
 
 const pods = async () =>
-  (await kubectl(["get", "pods", "-l", "app=ferrix", "-o", "jsonpath={range .items[*]}{.metadata.name}={.spec.containers[0].image}={.status.phase} {end}"])).out.trim();
+  (await kubectl(["get", "pods", "-l", "app=rxferrix", "-o", "jsonpath={range .items[*]}{.metadata.name}={.spec.containers[0].image}={.status.phase} {end}"])).out.trim();
 
 try {
   await run(["docker", "rm", "-f", NAME]);
@@ -126,7 +126,7 @@ spec:
   const manifest = (await Bun.file(MANIFEST).text()).replace("image: todo-server:latest", "image: todo-server:v1");
   const applied = await kubectl(["apply", "-f", "-"], manifest);
   if (applied.code !== 0) throw new Error(`kubectl apply failed: ${applied.out}`);
-  await until("the first pod", 180_000, async () => (await kubectl(["rollout", "status", "deployment/ferrix", "--timeout=5s"])).code === 0);
+  await until("the first pod", 180_000, async () => (await kubectl(["rollout", "status", "deployment/rxferrix", "--timeout=5s"])).code === 0);
   await until("the ingress", 60_000, async () => (await fetch(`${BASE}/api/health`, { headers: { host: HOST } })).ok);
   let written = 0;
 
@@ -135,8 +135,8 @@ spec:
   let l = load();
   await Bun.sleep(2000);
   const t0 = Date.now();
-  await kubectl(["set", "image", "deployment/ferrix", "app=todo-server:v2"]);
-  const status = await kubectl(["rollout", "status", "deployment/ferrix", "--timeout=180s"]);
+  await kubectl(["set", "image", "deployment/rxferrix", "app=todo-server:v2"]);
+  const status = await kubectl(["rollout", "status", "deployment/rxferrix", "--timeout=180s"]);
   const took = Date.now() - t0;
   await until("the old pod to go", 60_000, async () => !(await pods()).includes("Terminating") && (await pods()).split(" ").length === 1);
   await Bun.sleep(2000);
@@ -157,22 +157,22 @@ spec:
   // 2. A version that fails to start.
   l = load();
   await Bun.sleep(1000);
-  await kubectl(["set", "env", "deployment/ferrix", "FERRIX_LOG_FORMAT=nonsense"]);
-  const stuck = await kubectl(["rollout", "status", "deployment/ferrix", "--timeout=20s"]);
+  await kubectl(["set", "env", "deployment/rxferrix", "RXFERRIX_LOG_FORMAT=nonsense"]);
+  const stuck = await kubectl(["rollout", "status", "deployment/rxferrix", "--timeout=20s"]);
   await l.stop();
   written += l.stats.ok;
   check("bad version: the rollout doesn't finish", stuck.code !== 0, stuck.out);
   check("bad version: no failed request", l.stats.failed === 0, `${l.stats.failed} failed ${[...l.stats.errors].join("; ")}`);
   check("bad version: every write kept", (await remaining()) === written, `${await remaining()} vs ${written}`);
-  await kubectl(["rollout", "undo", "deployment/ferrix"]);
-  const undone = await kubectl(["rollout", "status", "deployment/ferrix", "--timeout=60s"]);
+  await kubectl(["rollout", "undo", "deployment/rxferrix"]);
+  const undone = await kubectl(["rollout", "status", "deployment/rxferrix", "--timeout=60s"]);
   check("bad version: rollout undo ends it", undone.code === 0 && (await remaining()) === written, `${undone.out} ${await pods()}`);
 } catch (e) {
   failures.push(e instanceof Error ? (e.stack ?? e.message) : String(e));
 } finally {
   if (failures.length) {
     console.error((await kubectl(["get", "pods", "-A", "-o", "wide"])).out);
-    const logs = await kubectl(["logs", "-l", "app=ferrix", "--tail", "-1", "--prefix"]);
+    const logs = await kubectl(["logs", "-l", "app=rxferrix", "--tail", "-1", "--prefix"]);
     const traefik = await kubectl(["-n", "kube-system", "logs", "deploy/traefik", "--tail", "-1"]);
     await Bun.write("/tmp/k3s-rollout-e2e.log", `${logs.out}\n--- traefik:\n${traefik.out}`);
     console.error("logs: /tmp/k3s-rollout-e2e.log");

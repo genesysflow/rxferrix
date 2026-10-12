@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { FerrixError } from "@ferrix/react";
-import type { Doc, Id } from "./ferrix";
+import { RxFerrixError } from "@rxferrix/react";
+import type { Doc, Id } from "./rxferrix";
 
 // The server's view structs (`#[object]`) are declared by codegen under their own names.
-export type { ChannelInfo, ChannelSummary, MessageView } from "./ferrix";
+export type { ChannelInfo, ChannelSummary, MessageView } from "./rxferrix";
 export type Profile = Doc<"profiles">;
 
 const FRIENDLY: Record<string, string> = {
@@ -18,13 +18,13 @@ const FRIENDLY: Record<string, string> = {
 
 /** A message for the UI: the server's `UserError` message, or a friendlier one for well-known codes. */
 export function errorMessage(e: unknown): string {
-  if (e instanceof FerrixError) return (e.code && FRIENDLY[e.code]) || e.message;
+  if (e instanceof RxFerrixError) return (e.code && FRIENDLY[e.code]) || e.message;
   if (e instanceof Error) return e.message;
   return String(e);
 }
 
 export function errorCode(e: unknown): string | undefined {
-  return e instanceof FerrixError ? e.code : undefined;
+  return e instanceof RxFerrixError ? e.code : undefined;
 }
 
 export function formatTime(ms: number): string {

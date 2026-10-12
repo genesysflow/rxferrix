@@ -1,0 +1,178 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table(quote!(), quote!\n{\n    #[search_index(s_porter, search = body, tokenizer = \"porter\", language =\n    \"english\")]\n    #[search_index(s_porter_keep, search = body, tokenizer = \"porter\",\n    diacritics = \"keep\")]\n    #[search_index(s_trigram, search = body, filter = [channel], tokenizer =\n    \"trigram\")]\n    #[search_index(s_plain, search = title, tokenizer = \"unicode61\",\n    diacritics = \"remove\")]\n    #[search_index(s_ro, search = body, tokenizer = \"snowball\", language =\n    \"romanian\")]\n    #[search_index(s_fr_keep, search = body, language = \"french\", tokenizer =\n    \"snowball\", diacritics = \"keep\")]\n    #[vector_index(v_hnsw, field = embedding, dims = 4, kind = \"hnsw\")]\n    #[vector_index(v_tuned, field = embedding, dims = 4, kind = \"hnsw\", m =\n    32, ef_construction = 400, ef_search = 64)]\n    #[vector_index(v_ef, field = embedding, dims = 4, ef_search = 20, kind =\n    \"hnsw\")]\n    #[vector_index(v_exact, field = embedding, dims = 4, filter = [channel],\n    kind = \"exact\")] struct Doc\n    {\n        channel: String, body: String, title: Option<String>, embedding:\n        Vec<f32>\n    }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+struct Doc {
+    channel: String,
+    body: String,
+    title: Option<String>,
+    embedding: Vec<f32>,
+}
+impl ::rxferrix::Table for Doc {
+    const NAME: &'static str = "doc";
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef {
+            name: "doc",
+            indexes: ::std::vec![],
+            search_indexes: ::std::vec![
+                ::rxferrix::SearchIndexDef { name : "s_porter", search_field : "body",
+                filter_fields : ::std::vec![], tokenizer :
+                ::rxferrix::Tokenizer::porter("english"), }, ::rxferrix::SearchIndexDef {
+                name : "s_porter_keep", search_field : "body", filter_fields :
+                ::std::vec![], tokenizer : ::rxferrix::Tokenizer::porter("english")
+                .keep_diacritics(), }, ::rxferrix::SearchIndexDef { name : "s_trigram",
+                search_field : "body", filter_fields : ::std::vec!["channel"], tokenizer
+                : ::rxferrix::Tokenizer::trigram(), }, ::rxferrix::SearchIndexDef { name
+                : "s_plain", search_field : "title", filter_fields : ::std::vec![],
+                tokenizer : ::rxferrix::Tokenizer::unicode61(), },
+                ::rxferrix::SearchIndexDef { name : "s_ro", search_field : "body",
+                filter_fields : ::std::vec![], tokenizer :
+                ::rxferrix::Tokenizer::snowball("romanian"), },
+                ::rxferrix::SearchIndexDef { name : "s_fr_keep", search_field : "body",
+                filter_fields : ::std::vec![], tokenizer :
+                ::rxferrix::Tokenizer::snowball("french").keep_diacritics(), }
+            ],
+            vector_indexes: ::std::vec![
+                ::rxferrix::VectorIndexDef { name : "v_hnsw", vector_field : "embedding",
+                dimensions : 4usize, filter_fields : ::std::vec![], kind :
+                ::rxferrix::VectorIndexKind::Hnsw, hnsw :
+                ::rxferrix::HnswParams::DEFAULT, }, ::rxferrix::VectorIndexDef { name :
+                "v_tuned", vector_field : "embedding", dimensions : 4usize, filter_fields
+                : ::std::vec![], kind : ::rxferrix::VectorIndexKind::Hnsw, hnsw :
+                ::rxferrix::HnswParams { m : 32usize, ef_construction : 400usize,
+                ef_search : 64usize, }, }, ::rxferrix::VectorIndexDef { name : "v_ef",
+                vector_field : "embedding", dimensions : 4usize, filter_fields :
+                ::std::vec![], kind : ::rxferrix::VectorIndexKind::Hnsw, hnsw :
+                ::rxferrix::HnswParams { ef_search : 20usize, ..
+                ::rxferrix::HnswParams::DEFAULT }, }, ::rxferrix::VectorIndexDef { name :
+                "v_exact", vector_field : "embedding", dimensions : 4usize, filter_fields
+                : ::std::vec!["channel"], kind : ::rxferrix::VectorIndexKind::Exact, hnsw
+                : ::rxferrix::HnswParams::DEFAULT, }
+            ],
+            ts: || ::rxferrix::__private::ts_inline::<Doc>(),
+            validate: ::rxferrix::__private::validate_doc::<Doc>,
+            shape: || {
+                let mut s = ::rxferrix::shape::StructShape::default();
+                s.field(
+                    "channel",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "body",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "title",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "embedding",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<Vec<f32>>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                ::rxferrix::shape::Shape::Struct(s)
+            },
+            aggregates: ::std::vec![],
+        }
+    }
+}
+#[allow(non_upper_case_globals)]
+impl Doc {
+    pub const channel: ::rxferrix::Field<Doc, String> = ::rxferrix::Field::new(
+        "channel",
+    );
+    pub const body: ::rxferrix::Field<Doc, String> = ::rxferrix::Field::new("body");
+    pub const title: ::rxferrix::Field<Doc, Option<String>> = ::rxferrix::Field::new(
+        "title",
+    );
+    pub const embedding: ::rxferrix::Field<Doc, Vec<f32>> = ::rxferrix::Field::new(
+        "embedding",
+    );
+    pub const _id: ::rxferrix::Field<Doc, ::rxferrix::Id<Doc>> = ::rxferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::rxferrix::Field<Doc, ::core::primitive::f64> = ::rxferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_creation_time: ::rxferrix::Index<Doc> = ::rxferrix::Index::new(
+        "by_creation_time",
+    );
+    pub const s_porter: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new(
+        "s_porter",
+    );
+    pub const s_porter_keep: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new(
+        "s_porter_keep",
+    );
+    pub const s_trigram: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new(
+        "s_trigram",
+    );
+    pub const s_plain: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new(
+        "s_plain",
+    );
+    pub const s_ro: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new("s_ro");
+    pub const s_fr_keep: ::rxferrix::SearchIndex<Doc> = ::rxferrix::SearchIndex::new(
+        "s_fr_keep",
+    );
+    pub const v_hnsw: ::rxferrix::VectorIndex<Doc> = ::rxferrix::VectorIndex::new(
+        "v_hnsw",
+    );
+    pub const v_tuned: ::rxferrix::VectorIndex<Doc> = ::rxferrix::VectorIndex::new(
+        "v_tuned",
+    );
+    pub const v_ef: ::rxferrix::VectorIndex<Doc> = ::rxferrix::VectorIndex::new("v_ef");
+    pub const v_exact: ::rxferrix::VectorIndex<Doc> = ::rxferrix::VectorIndex::new(
+        "v_exact",
+    );
+}
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_search_field::<Option<String>>();
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_vector_field::<Vec<f32>>();
+const _: () = ::rxferrix::__private::assert_vector_field::<Vec<f32>>();
+const _: () = ::rxferrix::__private::assert_vector_field::<Vec<f32>>();
+const _: () = ::rxferrix::__private::assert_vector_field::<Vec<f32>>();
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_TABLE_Doc: fn() -> ::rxferrix::TableDef = <Doc as ::rxferrix::Table>::table_def;

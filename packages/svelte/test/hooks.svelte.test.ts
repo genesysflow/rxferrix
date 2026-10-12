@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FerrixClient } from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { RxFerrixClient } from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { useAction, useMutation, useQuery } from "../src/lib/index.js";
 import { api } from "./api.js";
 import QueryView from "./QueryView.svelte";
@@ -9,13 +9,13 @@ import Root from "./Root.svelte";
 import TodoList from "./TodoList.svelte";
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 let target: HTMLElement;
 let mounted: ReturnType<typeof mount> | null = null;
 
 beforeEach(async () => {
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", {
+  client = new RxFerrixClient("http://localhost:3210", {
     webSocketConstructor: server.WebSocket,
     unsavedChangesWarning: false,
   });

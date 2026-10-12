@@ -3,7 +3,7 @@
 For group-bys, joins and time series over many documents, `serve --olap` keeps a columnar copy of the data in an
 embedded DuckDB (`<data dir>/olap.duckdb`), a few hundred milliseconds behind, and actions query it with read-only
 SQL. It needs the cargo feature `olap` (DuckDB is built from source: a static binary grows from ~25 to ~57 MB, and a
-first build takes a few minutes): `ferrix = { version = "…", features = ["olap"] }`.
+first build takes a few minutes): `rxferrix = { version = "…", features = ["olap"] }`.
 
 ```rust
 #[object]

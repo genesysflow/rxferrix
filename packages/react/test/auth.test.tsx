@@ -1,26 +1,26 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FerrixClient, MemoryAuthStorage, getAuth } from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { RxFerrixClient, MemoryAuthStorage, getAuth } from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { useEffect, useState } from "react";
 import {
-  FerrixProvider,
+  RxFerrixProvider,
   useAuthActions,
   useCurrentUser,
-  useFerrixAuth,
+  useRxFerrixAuth,
   type AuthProviders,
   type AuthTokens,
   type CodeProof,
 } from "../src/index.js";
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 
 const tokens = { accessToken: "a.b.c", refreshToken: "r1", expiresIn: 900, userId: "u1" };
 
 beforeEach(() => {
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+  client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
   const fetch = vi.fn(async () => new Response(JSON.stringify(tokens), { status: 200 }));
   getAuth(client, { storage: new MemoryAuthStorage(), fetch: fetch as unknown as typeof globalThis.fetch, syncTabs: false });
 });
@@ -38,7 +38,7 @@ async function settle() {
 }
 
 function Status() {
-  const { isLoading, isAuthenticated } = useFerrixAuth();
+  const { isLoading, isAuthenticated } = useRxFerrixAuth();
   const user = useCurrentUser();
   const { signIn, signOut } = useAuthActions();
   return (
@@ -54,9 +54,9 @@ function Status() {
 describe("auth hooks", () => {
   it("track sign-in, the current user and sign-out", async () => {
     render(
-      <FerrixProvider client={client}>
+      <RxFerrixProvider client={client}>
         <Status />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     server.open();
     await settle();
@@ -89,7 +89,7 @@ describe("auth hooks", () => {
 
   it("list the server's sign-in methods", async () => {
     const providers: AuthProviders = { password: true, magicLink: true, signups: false, oauth: ["github"] };
-    const other = new FerrixClient("http://localhost:3211", {
+    const other = new RxFerrixClient("http://localhost:3211", {
       webSocketConstructor: server.WebSocket,
       unsavedChangesWarning: false,
     });
@@ -108,15 +108,15 @@ describe("auth hooks", () => {
       return <p data-testid="methods">{methods ? methods.oauth.join(",") + (methods.magicLink ? " +link" : "") : "…"}</p>;
     }
     render(
-      <FerrixProvider client={other}>
+      <RxFerrixProvider client={other}>
         <Methods />
-      </FerrixProvider>,
+      </RxFerrixProvider>,
     );
     await settle();
     expect(screen.getByTestId("methods").textContent).toBe("github +link");
     expect(fetch.mock.calls.map((c) => String(c[0]))).toContain("http://localhost:3211/api/auth/providers");
     other.close();
-    // The auth types are re-exported from @ferrix/react.
+    // The auth types are re-exported from @rxferrix/react.
     const proof: CodeProof = { email: "a@b.co", code: "123456" };
     const t: AuthTokens = tokens;
     void proof;

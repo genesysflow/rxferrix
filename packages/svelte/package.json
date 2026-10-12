@@ -1,7 +1,7 @@
 {
-  "name": "@ferrix/svelte",
+  "name": "@rxferrix/svelte",
   "version": "0.1.0",
-  "description": "Svelte 5 (runes) bindings for Ferrix",
+  "description": "Svelte 5 (runes) bindings for RxFerrix",
   "type": "module",
   "sideEffects": false,
   "svelte": "./dist/index.js",
@@ -24,7 +24,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ferrix/client": "workspace:*"
+    "@rxferrix/client": "workspace:*"
   },
   "peerDependencies": {
     "svelte": "^5.0.0"

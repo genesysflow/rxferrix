@@ -1,7 +1,7 @@
 {
-  "name": "@ferrix/client",
+  "name": "@rxferrix/client",
   "version": "0.1.0",
-  "description": "Framework-agnostic reactive sync client for Ferrix",
+  "description": "Framework-agnostic reactive sync client for RxFerrix",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",

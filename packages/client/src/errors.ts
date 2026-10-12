@@ -1,14 +1,14 @@
 import type { ErrorData } from "./protocol.js";
 
 /**
- * An error raised by a Ferrix function or by the client itself.
+ * An error raised by a RxFerrix function or by the client itself.
  *
  * For a server `UserError`, `code` and `data` carry the error's `errorData` (`{ code, data }`). For any other server
  * error, `code` and `data` are undefined and `message` is the server's `errorMessage` (`"Server Error"` outside
  * `--dev`).
  */
-export class FerrixError extends Error {
-  override name = "FerrixError";
+export class RxFerrixError extends Error {
+  override name = "RxFerrixError";
   readonly code?: string;
   readonly data?: unknown;
 
@@ -19,15 +19,15 @@ export class FerrixError extends Error {
   }
 
   /** Builds an error from a server failure payload (`errorMessage` + optional `errorData`). */
-  static fromServer(errorMessage: string | undefined, errorData: ErrorData | null | undefined): FerrixError {
+  static fromServer(errorMessage: string | undefined, errorData: ErrorData | null | undefined): RxFerrixError {
     const message = typeof errorMessage === "string" && errorMessage.length > 0 ? errorMessage : "Server Error";
     if (errorData && typeof errorData === "object") {
-      return new FerrixError(message, {
+      return new RxFerrixError(message, {
         code: typeof errorData.code === "string" ? errorData.code : undefined,
         data: errorData.data,
       });
     }
-    return new FerrixError(message);
+    return new RxFerrixError(message);
   }
 }
 

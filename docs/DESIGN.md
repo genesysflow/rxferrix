@@ -1,13 +1,13 @@
 # Design
 
-Why Ferrix is built the way it is: the decisions, how the core works, what was measured, and the known trade-offs.
+Why RxFerrix is built the way it is: the decisions, how the core works, what was measured, and the known trade-offs.
 For the exact API see the [API contract](CONTRACT.md), and for the wire format the [protocol](PROTOCOL.md).
 
 ## Decisions
 
 | Area | Decision |
 |---|---|
-| Backend functions | Rust, as a library. An app depends on the `ferrix` crate, writes `#[query]` / `#[mutation]` / `#[action]` functions, and its `main` builds one binary. No JavaScript runtime is embedded. |
+| Backend functions | Rust, as a library. An app depends on the `rxferrix` crate, writes `#[query]` / `#[mutation]` / `#[action]` functions, and its `main` builds one binary. No JavaScript runtime is embedded. |
 | Data model | Tables of typed documents with secondary indexes and typed ids (`Id<T>`), stored in SQLite. |
 | Schema | Rust structs are the source of truth. The dashboard can browse and edit data but not change the schema. |
 | Transport | A WebSocket sync protocol for queries, mutations and actions, plus an HTTP JSON API for server-side rendering, scripts and webhooks. |
@@ -28,12 +28,12 @@ For the exact API see the [API contract](CONTRACT.md), and for the wire format t
 ## Architecture
 
 ```text
-                         ┌──────────────────────── ferrix binary (your app) ────────────────────────┐
+                         ┌──────────────────────── rxferrix binary (your app) ────────────────────────┐
  Browser / app           │                                                                           │
  ┌───────────────┐  WS   │  axum ──► sync worker (per socket) ──► function runtime                   │
- │ @ferrix/react │◄─────►│   │        query set, auth, versions     ├─ QueryCtx    (read-only snapshot)
- │ @ferrix/svelte│       │   │                                      ├─ MutationCtx (the writer)      │
- │ @ferrix/client│  HTTP │   ├─ /api/{query,mutation,action}        └─ ActionCtx   (any I/O)         │
+ │ @rxferrix/react │◄─────►│   │        query set, auth, versions     ├─ QueryCtx    (read-only snapshot)
+ │ @rxferrix/svelte│       │   │                                      ├─ MutationCtx (the writer)      │
+ │ @rxferrix/client│  HTTP │   ├─ /api/{query,mutation,action}        └─ ActionCtx   (any I/O)         │
  └───────────────┘◄─────►│   ├─ /api/auth/*       ┌──────────────┐        │ commit(ts, writes)      │
                          │   ├─ /api/storage/*    │ subscription │◄── write log (recent commits)     │
  Admin browser           │   ├─ /_/ (dashboard)   │ manager      │──► invalidate ► rerun ► Transition│
@@ -56,7 +56,7 @@ CREATE TABLE index_entries (index_id INTEGER NOT NULL, key BLOB NOT NULL, doc_id
                             PRIMARY KEY (index_id, key)) WITHOUT ROWID;
 ```
 
-Why one generic layout instead of a SQLite table per Ferrix table:
+Why one generic layout instead of a SQLite table per RxFerrix table:
 
 - Every index lookup is a byte-range scan over `index_entries`, so what a query read is just a set of byte ranges.
   That is what makes [reactivity](#reactivity) cheap and exact.
@@ -148,10 +148,10 @@ Release builds on one machine, from development (dates are when they were taken)
 | Risk | How it's handled |
 |---|---|
 | A slow mutation holds the single writer, and every write queued behind it waits. | No network in mutations, a timeout, durations on the dashboard. Group commit keeps a slow mutation from holding back the batch before it. Since queries already record read sets, optimistic concurrency could be added if this ever matters. |
-| Rust compile times slow the development loop. | The `ferrix` crate is a precompiled dependency, so only the app rebuilds; clients reconnect and resubscribe on their own after a restart. Accepted as the cost of writing the backend in Rust. |
+| Rust compile times slow the development loop. | The `rxferrix` crate is a precompiled dependency, so only the app rebuilds; clients reconnect and resubscribe on their own after a restart. Accepted as the cost of writing the backend in Rust. |
 | Non-deterministic queries break caching silently. | The determinism contract, `ctx.now()`, and the check in `--dev`. |
 | Data that no longer matches a changed type. | The schema is checked at startup, and the server refuses to start on a mismatch unless [migrations](/guide/migrations) for the table are pending. |
-| SQLite's default build flags serialize readers. | The build flags in `.cargo/config.toml` (and in every app made by `ferrix new`); the server warns at startup when they're missing. |
+| SQLite's default build flags serialize readers. | The build flags in `.cargo/config.toml` (and in every app made by `rxferrix new`); the server warns at startup when they're missing. |
 | DuckDB makes the binary bigger and the build longer. | The analytics copy is an opt-in feature (`olap`). |
 | SQL in actions reaching data or files it shouldn't. | One read-only SELECT per call, no file or network access, no extensions, locked settings, limits and a timeout; tables with secrets are never copied. |
 | The analytics copy holding back the database. | It only reads the change journal; a copy that falls too far behind is rebuilt from a snapshot instead. |

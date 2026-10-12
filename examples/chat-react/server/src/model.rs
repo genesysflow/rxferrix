@@ -1,9 +1,9 @@
 //! Tables and the access helpers every function uses.
 
-use ferrix::QueryDb;
-use ferrix::auth::User;
-use ferrix::prelude::*;
-use ferrix::storage::StoredFile;
+use rxferrix::QueryDb;
+use rxferrix::auth::User;
+use rxferrix::prelude::*;
+use rxferrix::storage::StoredFile;
 
 /// App-level profile data for a `_users` row: the display name and avatar color shown next to messages.
 #[table(name = "profiles")]

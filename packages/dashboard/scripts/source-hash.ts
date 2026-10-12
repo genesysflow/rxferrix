@@ -1,6 +1,6 @@
 // The hash of the sources the committed dashboard bundle is built from.
 //
-//   bun scripts/source-hash.ts --write   after `vite build`: stamp crates/ferrix/dashboard-dist/source-hash.txt
+//   bun scripts/source-hash.ts --write   after `vite build`: stamp crates/rxferrix/dashboard-dist/source-hash.txt
 //   bun scripts/source-hash.ts --check   exit 1 if the committed bundle was built from other sources
 //
 // The Rust test `dashboard::assets::tests::committed_dist_is_fresh` computes the same hash (keep the two in sync):
@@ -13,7 +13,7 @@ import { join, relative, sep } from "node:path";
 
 const here = decodeURIComponent(new URL("..", import.meta.url).pathname);
 const repo = join(here, "..", "..");
-const stampPath = join(repo, "crates", "ferrix", "dashboard-dist", "source-hash.txt");
+const stampPath = join(repo, "crates", "rxferrix", "dashboard-dist", "source-hash.txt");
 
 function walk(dir: string, out: string[]): void {
   for (const name of readdirSync(dir)) {
@@ -52,7 +52,7 @@ if (import.meta.main) {
   } else if (mode === "--check") {
     const stamped = existsSync(stampPath) ? readFileSync(stampPath, "utf8").trim() : "(missing)";
     if (stamped !== hash) {
-      console.error(`crates/ferrix/dashboard-dist is stale (built from ${stamped.slice(0, 12)}, sources are ${hash.slice(0, 12)}).`);
+      console.error(`crates/rxferrix/dashboard-dist is stale (built from ${stamped.slice(0, 12)}, sources are ${hash.slice(0, 12)}).`);
       console.error("Run `bun run build:dashboard` at the repository root and commit the result.");
       process.exit(1);
     }

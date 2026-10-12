@@ -1,15 +1,15 @@
 import { createSubscriber } from "svelte/reactivity";
 import {
   canonicalJSON,
-  type FerrixClient,
-  type FerrixError,
+  type RxFerrixClient,
+  type RxFerrixError,
   type PaginatedQueryArgs,
   type PaginatedQueryItem,
   type PaginatedQueryReference,
   type PaginatedQueryResult,
   type PaginationStatus,
-} from "@ferrix/client";
-import { getFerrixClient } from "./context.js";
+} from "@rxferrix/client";
+import { getRxFerrixClient } from "./context.js";
 
 /** The reactive result of {@link usePaginatedQuery}. Read its fields in templates, `$derived` or `$effect`. */
 export interface UsePaginatedQueryResult<Item> {
@@ -19,7 +19,7 @@ export interface UsePaginatedQueryResult<Item> {
   /** True while the first page or a further page is loading. */
   readonly isLoading: boolean;
   /** The error of a failed page, if any. */
-  readonly error: FerrixError | undefined;
+  readonly error: RxFerrixError | undefined;
   /** Loads `numItems` more items; a no-op unless `status` is `"CanLoadMore"`. */
   loadMore(numItems: number): void;
 }
@@ -28,7 +28,7 @@ export interface UsePaginatedQueryOptions {
   /** The size of the first page. */
   initialNumItems: number;
   /** Use this client instead of the one from context. */
-  client?: FerrixClient;
+  client?: RxFerrixClient;
 }
 
 const SKIPPED: PaginatedQueryResult<never> = Object.freeze({
@@ -61,7 +61,7 @@ export function usePaginatedQuery<Q extends PaginatedQueryReference>(
   args: () => PaginatedQueryArgs<Q> | "skip",
   options: UsePaginatedQueryOptions,
 ): UsePaginatedQueryResult<PaginatedQueryItem<Q>> {
-  const client = options.client ?? getFerrixClient();
+  const client = options.client ?? getRxFerrixClient();
   const initialNumItems = options.initialNumItems;
 
   const argsKey = $derived.by(() => {

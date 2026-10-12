@@ -1,0 +1,165 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table(quote!(name = \"messages\"), quote!\n{\n    #[index(by_channel = [channel])]\n    #[search_index(search_body, search = body, filter =\n    [channel, author_name])]\n    #[vector_index(by_embedding, field = embedding, dims = 1536, filter =\n    [channel])] #[search_index(search_title, search = title)]\n    #[cfg(feature = \"x\")] pub struct Message\n    {\n        pub channel: String, pub body: String, pub title: Option<String>,\n        #[serde(rename = \"author\")] pub author_name: Option<String>, pub\n        embedding: Option<Vec<f32>>,\n    }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+#[cfg(feature = "x")]
+pub struct Message {
+    pub channel: String,
+    pub body: String,
+    pub title: Option<String>,
+    #[serde(rename = "author")]
+    pub author_name: Option<String>,
+    pub embedding: Option<Vec<f32>>,
+}
+#[cfg(feature = "x")]
+impl ::rxferrix::Table for Message {
+    const NAME: &'static str = "messages";
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef {
+            name: "messages",
+            indexes: ::std::vec![
+                ::rxferrix::IndexDef { name : "by_channel", fields :
+                ::std::vec!["channel"] }
+            ],
+            search_indexes: ::std::vec![
+                ::rxferrix::SearchIndexDef { name : "search_body", search_field : "body",
+                filter_fields : ::std::vec!["channel", "author"], tokenizer :
+                ::rxferrix::Tokenizer::unicode61(), }, ::rxferrix::SearchIndexDef { name
+                : "search_title", search_field : "title", filter_fields : ::std::vec![],
+                tokenizer : ::rxferrix::Tokenizer::unicode61(), }
+            ],
+            vector_indexes: ::std::vec![
+                ::rxferrix::VectorIndexDef { name : "by_embedding", vector_field :
+                "embedding", dimensions : 1536usize, filter_fields :
+                ::std::vec!["channel"], kind : ::rxferrix::VectorIndexKind::Exact, hnsw :
+                ::rxferrix::HnswParams::DEFAULT, }
+            ],
+            ts: || ::rxferrix::__private::ts_inline::<Message>(),
+            validate: ::rxferrix::__private::validate_doc::<Message>,
+            shape: || {
+                let mut s = ::rxferrix::shape::StructShape::default();
+                s.field(
+                    "channel",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "body",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "title",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "author",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<String>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "embedding",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<Vec<f32>>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                ::rxferrix::shape::Shape::Struct(s)
+            },
+            aggregates: ::std::vec![],
+        }
+    }
+}
+#[cfg(feature = "x")]
+#[allow(non_upper_case_globals)]
+impl Message {
+    pub const channel: ::rxferrix::Field<Message, String> = ::rxferrix::Field::new(
+        "channel",
+    );
+    pub const body: ::rxferrix::Field<Message, String> = ::rxferrix::Field::new("body");
+    pub const title: ::rxferrix::Field<Message, Option<String>> = ::rxferrix::Field::new(
+        "title",
+    );
+    pub const author_name: ::rxferrix::Field<Message, Option<String>> = ::rxferrix::Field::new(
+        "author",
+    );
+    pub const embedding: ::rxferrix::Field<Message, Option<Vec<f32>>> = ::rxferrix::Field::new(
+        "embedding",
+    );
+    pub const _id: ::rxferrix::Field<Message, ::rxferrix::Id<Message>> = ::rxferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::rxferrix::Field<Message, ::core::primitive::f64> = ::rxferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_channel: ::rxferrix::Index<Message> = ::rxferrix::Index::new(
+        "by_channel",
+    );
+    pub const by_creation_time: ::rxferrix::Index<Message> = ::rxferrix::Index::new(
+        "by_creation_time",
+    );
+    pub const search_body: ::rxferrix::SearchIndex<Message> = ::rxferrix::SearchIndex::new(
+        "search_body",
+    );
+    pub const by_embedding: ::rxferrix::VectorIndex<Message> = ::rxferrix::VectorIndex::new(
+        "by_embedding",
+    );
+    pub const search_title: ::rxferrix::SearchIndex<Message> = ::rxferrix::SearchIndex::new(
+        "search_title",
+    );
+}
+#[cfg(feature = "x")]
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+#[cfg(feature = "x")]
+const _: () = ::rxferrix::__private::assert_vector_field::<Option<Vec<f32>>>();
+#[cfg(feature = "x")]
+const _: () = ::rxferrix::__private::assert_search_field::<Option<String>>();
+#[cfg(feature = "x")]
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_TABLE_Message: fn() -> ::rxferrix::TableDef = <Message as ::rxferrix::Table>::table_def;

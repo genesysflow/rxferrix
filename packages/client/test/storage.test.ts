@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FerrixError, uploadFile } from "../src/index.js";
+import { RxFerrixError, uploadFile } from "../src/index.js";
 import { uploadRequestUrl } from "../src/storage.js";
 
 const UPLOAD_URL = "http://localhost:3210/api/storage/upload?token=abc.def";
@@ -53,16 +53,16 @@ describe("uploadFile with fetch", () => {
     });
   });
 
-  it("turns server errors into FerrixErrors with their code", async () => {
+  it("turns server errors into RxFerrixErrors with their code", async () => {
     const fetch = vi.fn(async () =>
       json(413, { status: "error", errorMessage: "Files may be at most 10 bytes", errorData: { code: "file_too_large", data: null } }),
     );
     const err = await uploadFile(UPLOAD_URL, new Blob(["x".repeat(20)]), {
       fetch: fetch as unknown as typeof globalThis.fetch,
     }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(FerrixError);
-    expect((err as FerrixError).code).toBe("file_too_large");
-    expect((err as FerrixError).message).toBe("Files may be at most 10 bytes");
+    expect(err).toBeInstanceOf(RxFerrixError);
+    expect((err as RxFerrixError).code).toBe("file_too_large");
+    expect((err as RxFerrixError).message).toBe("Files may be at most 10 bytes");
 
     const html = vi.fn(async () => new Response("<h1>Bad gateway</h1>", { status: 502 }));
     await expect(uploadFile(UPLOAD_URL, new Blob(["x"]), { fetch: html as unknown as typeof globalThis.fetch })).rejects.toMatchObject({

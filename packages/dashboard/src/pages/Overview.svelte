@@ -92,7 +92,7 @@
 <div class="page">
   <header class="page-header">
     <h1>Overview</h1>
-    {#if stats}<span class="muted small">ferrix {stats.overview.version}{stats.overview.dev ? " · dev mode" : ""}</span>{/if}
+    {#if stats}<span class="muted small">rxferrix {stats.overview.version}{stats.overview.dev ? " · dev mode" : ""}</span>{/if}
     <span class="spacer"></span>
     <span class="faint small">refreshes every 3s · last 24 hours</span>
   </header>

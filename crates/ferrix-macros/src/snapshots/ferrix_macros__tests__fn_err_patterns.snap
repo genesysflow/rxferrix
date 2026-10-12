@@ -1,7 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(),\nquote!(async fn f(ctx: &QueryCtx, (a, b): (u32, u32), ref c: u32, _: u32) ->\nResult<()> {}))"
----
-parameter patterns must be plain identifiers (they become the argument names)
-parameter patterns must be plain identifiers (they become the argument names)
-parameter patterns must be plain identifiers (they become the argument names)

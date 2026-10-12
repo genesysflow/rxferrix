@@ -1,0 +1,9 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration_err(quote!(table = 5, batch = \"big\", name = x),\nquote!(async fn m(ctx: &MutationCtx, (a, b): (u32, u32)) -> Option<()> {}))"
+---
+`table` must be a table type (`table = Todo`) or a table name (`table = "todos"`)
+`batch` must be an integer literal, e.g. `batch = 100`
+`name` must be a string literal, e.g. `name = "0002_add_priority"`
+the return type must be `Result<T>` (`rxferrix::Result<T>` or `anyhow::Result<T>`)
+parameter patterns must be plain identifiers

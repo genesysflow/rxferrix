@@ -1,5 +1,5 @@
 /**
- * Reactive pagination on top of {@link FerrixClient.watchQuery}.
+ * Reactive pagination on top of {@link RxFerrixClient.watchQuery}.
  *
  * A paginated query is a server query that takes `paginationOpts: PaginationOpts` and returns a
  * `PaginationResult<Item>` (in Rust: `Query::paginate`). The client subscribes to it once per loaded page:
@@ -15,12 +15,12 @@
  */
 import type { ArgsOf, FunctionReference, OutputOf } from "./api.js";
 import { jsonEqual, normalizeArgs } from "./canonical.js";
-import type { FerrixClient, QueryWatch } from "./client.js";
-import type { FerrixError } from "./errors.js";
+import type { RxFerrixClient, QueryWatch } from "./client.js";
+import type { RxFerrixError } from "./errors.js";
 import type { OptimisticLocalStore } from "./optimistic_updates.js";
 import type { QueryState } from "./query_state.js";
 
-/** Which page to read: the `paginationOpts` argument of a paginated query (Rust `ferrix::PaginationOpts`). */
+/** Which page to read: the `paginationOpts` argument of a paginated query (Rust `rxferrix::PaginationOpts`). */
 export interface PaginationOpts {
   /** How many items to return (ignored when `endCursor` is set). */
   numItems: number;
@@ -30,7 +30,7 @@ export interface PaginationOpts {
   endCursor?: string | null;
 }
 
-/** One page of results (Rust `ferrix::PaginationResult<T>`). */
+/** One page of results (Rust `rxferrix::PaginationResult<T>`). */
 export interface PaginationResult<T> {
   page: T[];
   /** True when there is nothing after this page. */
@@ -61,7 +61,7 @@ export interface PaginatedQueryResult<Item> {
   /** True while the first page or a further page is loading (and no page failed). */
   readonly isLoading: boolean;
   /** The error of the first failed page, if any. A failed page counts as not loaded for `status`. */
-  readonly error: FerrixError | undefined;
+  readonly error: RxFerrixError | undefined;
   /**
    * Loads `numItems` more items. Does nothing (and returns false) unless the last page is loaded and not done
    * (status `"CanLoadMore"`).
@@ -101,7 +101,7 @@ function validateNumItems(numItems: number, what: string): void {
   }
 }
 
-/** @internal Created by {@link FerrixClient.paginatedQuery}. */
+/** @internal Created by {@link RxFerrixClient.paginatedQuery}. */
 export class PaginatedQueryImpl<Item> implements PaginatedQuery<Item> {
   private readonly pages: Page<Item>[] = [];
   private readonly listeners = new Set<() => void>();
@@ -111,7 +111,7 @@ export class PaginatedQueryImpl<Item> implements PaginatedQuery<Item> {
   private snapshotStates: QueryState[] = [];
 
   constructor(
-    private readonly client: FerrixClient,
+    private readonly client: RxFerrixClient,
     private readonly ref: FunctionReference<"query">,
     args: Record<string, unknown>,
     options: PaginatedQueryOptions,
@@ -152,7 +152,7 @@ export class PaginatedQueryImpl<Item> implements PaginatedQuery<Item> {
     }
     let results: Item[] = [];
     let loading = false;
-    let error: FerrixError | undefined;
+    let error: RxFerrixError | undefined;
     for (const state of states) {
       if (state.status === "success") results = results.concat(state.value.page);
       else if (state.status === "loading") loading = true;

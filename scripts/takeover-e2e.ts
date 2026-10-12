@@ -29,7 +29,7 @@ function freePort(): number {
 }
 
 function dataDir(): string {
-  const d = mkdtempSync(join(tmpdir(), "ferrix-takeover-"));
+  const d = mkdtempSync(join(tmpdir(), "rxferrix-takeover-"));
   dirs.push(d);
   return d;
 }

@@ -1,0 +1,85 @@
+# systemd unit for a RxFerrix app (here the reference app, todo-server, built by scripts/release.sh).
+#
+#   sudo install -m 0755 dist/todo-server /usr/local/bin/todo-server
+#   sudo install -m 0644 deploy/rxferrix.service /etc/systemd/system/rxferrix.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rxferrix
+#   journalctl -u rxferrix -f                         # the setup link for the first admin is printed here
+#
+# The data lives in /var/lib/rxferrix (StateDirectory); the service runs as a dynamic, unprivileged user.
+# Run CLI commands on the same data as that user, e.g. a backup while it runs:
+#   sudo systemd-run --pipe --wait -p DynamicUser=yes -p StateDirectory=rxferrix \
+#     /usr/local/bin/todo-server backup --dir /var/lib/rxferrix
+# Deploys with no downtime: install the new binary over the old one, then `sudo systemctl reload rxferrix`. The new
+# version starts next to the running one (`serve --takeover`), opens a copy of the data (index builds, schema check),
+# catches up, takes over the listening socket and swaps the copy in; clients keep their connections or reconnect at
+# once. If it can't serve the data, it exits and the running version carries on (`journalctl -u rxferrix` says why).
+# `todo-server check --dir /var/lib/rxferrix` (as above) tells beforehand.
+# Restores: from the dashboard (Backups, "Restore": validated while the server runs, applied when it restarts; the
+# "Restart now" button exits with code 75, which systemd restarts below), or offline: `systemctl stop rxferrix`,
+# `todo-server restore <archive> --dir /var/lib/rxferrix` (as above),
+# `systemctl start rxferrix`.
+
+[Unit]
+Description=RxFerrix app (todo-server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The server tells systemd when it is ready, and a takeover's new process becomes the main process (needs `all`).
+Type=notify
+NotifyAccess=all
+# Behind a reverse proxy (Caddy, nginx) that terminates TLS:
+Environment="ARGS=--http 127.0.0.1:8090 --dir /var/lib/rxferrix --public-url https://example.com"
+# Or HTTPS directly with Let's Encrypt (ports 443 and 80; needs the capability below):
+#Environment="ARGS=--https example.com --acme-email you@example.com --dir /var/lib/rxferrix"
+ExecStart=/usr/local/bin/todo-server serve $ARGS
+# `systemctl reload`: the (new) binary takes over from the running one, with no downtime.
+ExecReload=/bin/sh -c '/usr/local/bin/todo-server serve $ARGS --takeover &'
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+#CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Secrets and settings (RXFERRIX_SMTP_URL, AWS_* for S3 storage or backups, RXFERRIX_METRICS_TOKEN, ...):
+EnvironmentFile=-/etc/rxferrix/env
+Environment=RUST_LOG=info
+# Logs are JSON lines (not a terminal); `journalctl -u rxferrix -o cat | jq` reads them. RXFERRIX_LOG_FORMAT=pretty for text.
+# Lets an administrator restart the service from the dashboard to apply a staged restore (exit code 75, restarted
+# by RestartForceExitStatus below).
+Environment=RXFERRIX_RESTART_EXIT_CODE=75
+# Scheduled backups, e.g. every 6 hours to S3, keeping 28:
+#Environment=RXFERRIX_BACKUP_TO=s3://my-bucket/backups
+# (and add `--backup-every 6h --backup-keep 28` to ExecStart)
+
+# SIGTERM stops gracefully: no new connections, open requests finish.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2
+RestartForceExitStatus=75
+LimitNOFILE=65536
+
+DynamicUser=yes
+StateDirectory=rxferrix
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/rxferrix
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

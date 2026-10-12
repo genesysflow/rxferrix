@@ -1,7 +1,7 @@
 # Functions, tables and indexes
 
 ```rust
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 #[table(name = "todos")]
 #[index(by_done = [done])]
@@ -21,7 +21,7 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     ctx.db.insert(Todo { text, done: false }).await
 }
 
-fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
+fn main() -> rxferrix::Result<()> { rxferrix::RxFerrix::new().run() }
 ```
 
 Actions call other functions through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`
@@ -34,7 +34,7 @@ time can be bounded after the declared fields: `q.eq(Message::channel, c).gt(Mes
 `.count()` counts an index range without reading the documents (unless the query has a `filter`).
 
 **Types that aren't tables** (a function's output "view" struct, an enum argument) use `#[object]`: it derives
-serde and ts-rs through ferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in
+serde and ts-rs through rxferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in
 `dataModel.ts` by name (`Array<MessageView>`), with field doc comments as JSDoc. A document can be embedded whole:
 
 ```rust

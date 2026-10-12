@@ -16,7 +16,7 @@ import {
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
-/** The Rust id encoding (crates/ferrix/src/id.rs): Crockford base32 of [table number BE u32][12 bytes]. */
+/** The Rust id encoding (crates/rxferrix/src/id.rs): Crockford base32 of [table number BE u32][12 bytes]. */
 function makeId(table: number, fill = 0xab): string {
   const bytes = [table >>> 24, (table >>> 16) & 255, (table >>> 8) & 255, table & 255, ...Array(12).fill(fill)];
   let bits = "";

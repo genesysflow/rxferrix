@@ -1,8 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(),\nquote!(async fn\nf(ctx: &QueryCtx, s: &str, c: Cow<'a, str>, k: Cow<'static, str>, i: impl\nInto<u32>,) -> Result<&'static str> {}))"
----
-return types must be owned: references are not allowed (use e.g. `String` instead of `&str`)
-argument types must be owned: references are not allowed (use e.g. `String` instead of `&str`)
-argument types must be owned and `'static`: lifetimes are not allowed
-argument types cannot use `impl Trait`

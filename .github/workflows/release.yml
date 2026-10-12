@@ -65,9 +65,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          # The `ferrix new` apps and the macro tests build into target directories of their own.
+          # The `rxferrix new` apps and the macro tests build into target directories of their own.
           cache-directories: |
-            target/tests/ferrix-new
+            target/tests/rxferrix-new
             target/macros
 
       - name: Chromium for the end-to-end tests
@@ -96,19 +96,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: macro tests
-        run: CARGO_TARGET_DIR=target/macros cargo test -p ferrix-macros
+        run: CARGO_TARGET_DIR=target/macros cargo test -p rxferrix-macros
 
       - name: generated TS type-checks
-        run: cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored
+        run: cargo test -p rxferrix --test it codegen_typechecks_with_tsc -- --ignored
 
       - name: TS type check and tests
         run: bun run typecheck && bun run test
 
-      - name: apps created by `ferrix new` build and typecheck
-        run: cargo test -p ferrix-cli --test new -- --ignored
+      - name: apps created by `rxferrix new` build and typecheck
+        run: cargo test -p rxferrix-cli --test new -- --ignored
 
       - name: dashboard build is current
-        run: bun run build:dashboard && bun run check:dashboard && git diff --exit-code -- crates/ferrix/dashboard-dist
+        run: bun run build:dashboard && bun run check:dashboard && git diff --exit-code -- crates/rxferrix/dashboard-dist
 
       - name: build the example servers
         run: cargo build -p todo-server -p chat-server && df -h /
@@ -122,7 +122,7 @@ jobs:
       - name: todo e2e (two tabs, reconnect)
         env:
           CHROMIUM: ${{ steps.chrome.outputs.chrome-path }}
-          FERRIX_URL: http://127.0.0.1:8092
+          RXFERRIX_URL: http://127.0.0.1:8092
           VITE_PORT: "5175"
         working-directory: examples/todo/web
         run: |
@@ -179,10 +179,10 @@ jobs:
           cache-on-failure: true
 
       - name: cargo clippy --features olap
-        run: cargo clippy -p ferrix -p todo-server --features ferrix/olap,todo-server/olap --all-targets -- -D warnings
+        run: cargo clippy -p rxferrix -p todo-server --features rxferrix/olap,todo-server/olap --all-targets -- -D warnings
 
       - name: cargo test --features olap
-        run: cargo test -p ferrix --features olap --lib --test it && df -h /
+        run: cargo test -p rxferrix --features olap --lib --test it && df -h /
 
   release:
     needs: gates
@@ -314,12 +314,12 @@ jobs:
         run: |
           docker image inspect todo-server:ci --format '{{.Config.User}} {{.Config.Entrypoint}}'
           docker run --rm todo-server:ci functions | grep -q 'todos:'
-          docker volume create ferrix-ci
-          docker run -d --name ferrix-ci -p 18090:8090 -v ferrix-ci:/data todo-server:ci
+          docker volume create rxferrix-ci
+          docker run -d --name rxferrix-ci -p 18090:8090 -v rxferrix-ci:/data todo-server:ci
           for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:18090/api/health && break; sleep 0.3; done
           curl -fsS http://127.0.0.1:18090/api/health | grep -q ok
-          docker logs ferrix-ci 2>&1 | head -5
-          docker rm -f ferrix-ci
+          docker logs rxferrix-ci 2>&1 | head -5
+          docker rm -f rxferrix-ci
 
   docker-push:
     needs: [gates, docker]

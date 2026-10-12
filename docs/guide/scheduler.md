@@ -4,7 +4,7 @@ Mutations and actions can schedule other mutations and actions (internal ones to
 
 ```rust
 use std::time::Duration;
-use ferrix::scheduler::ScheduledJob;
+use rxferrix::scheduler::ScheduledJob;
 
 #[mutation]
 pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> Result<Id<ScheduledJob>> {
@@ -12,8 +12,8 @@ pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> R
     ctx.scheduler.run_after::<add>(Duration::from_secs(delay_seconds.into()), (text,)).await
 }
 
-fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new()
+fn main() -> rxferrix::Result<()> {
+    rxferrix::RxFerrix::new()
         .cron::<purge_completed>("purge-completed", "0 0 * * * *", ())   // sec min hour day month weekday, UTC
         .cron_tz::<daily_digest>("digest", "0 0 9 * * *", "Europe/Bucharest", ())   // 09:00 local, DST-aware
         .run()
@@ -37,7 +37,7 @@ mutation with the outcome once a job has finished (exactly once: the transaction
 it, and it runs in its own transaction):
 
 ```rust
-ferrix::Ferrix::new().workpool(Workpool::new("emails").max_parallelism(5).retries(3))
+rxferrix::RxFerrix::new().workpool(Workpool::new("emails").max_parallelism(5).retries(3))
 
 ctx.scheduler.pool("emails").on_complete::<sent>(user).enqueue::<send_email>((to,)).await?;
 // sent(ctx, work_id: Id<ScheduledJob>, context: Id<User>, result: WorkResult<String>)

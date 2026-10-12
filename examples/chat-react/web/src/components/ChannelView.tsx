@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { useMutation, useQueryWithStatus } from "@ferrix/react";
-import { api, type Id } from "../ferrix";
+import { useMutation, useQueryWithStatus } from "@rxferrix/react";
+import { api, type Id } from "../rxferrix";
 import { errorMessage, initials, type ChannelInfo, type Profile } from "../lib";
 import { AccessError } from "./AccessError";
 import { Composer } from "./Composer";

@@ -1,5 +1,5 @@
 import { applyDiff, DiffMismatch } from "./diff.js";
-import { FerrixError } from "./errors.js";
+import { RxFerrixError } from "./errors.js";
 import {
   formatVersion,
   versionsEqual,
@@ -72,7 +72,7 @@ export class RemoteQuerySet {
         case "QueryFailed":
           this.results.set(queryId, {
             status: "error",
-            error: FerrixError.fromServer(modification.errorMessage, modification.errorData),
+            error: RxFerrixError.fromServer(modification.errorMessage, modification.errorData),
           });
           break;
         case "QueryRemoved":

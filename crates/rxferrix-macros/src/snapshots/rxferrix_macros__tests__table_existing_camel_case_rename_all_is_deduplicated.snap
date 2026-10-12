@@ -1,0 +1,67 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table(quote!(), quote!\n{\n    #[serde(rename_all = \"camelCase\", deny_unknown_fields)]\n    #[ts(rename_all = \"camelCase\")] #[cfg(feature = \"x\")] struct User\n    { name: String }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[cfg(feature = "x")]
+struct User {
+    name: String,
+}
+#[cfg(feature = "x")]
+impl ::rxferrix::Table for User {
+    const NAME: &'static str = "user";
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef {
+            name: "user",
+            indexes: ::std::vec![],
+            search_indexes: ::std::vec![],
+            vector_indexes: ::std::vec![],
+            ts: || ::rxferrix::__private::ts_inline::<User>(),
+            validate: ::rxferrix::__private::validate_doc::<User>,
+            shape: || {
+                let mut s = ::rxferrix::shape::StructShape::default();
+                s.field(
+                    "name",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                ::rxferrix::shape::Shape::Struct(s)
+            },
+            aggregates: ::std::vec![],
+        }
+    }
+}
+#[cfg(feature = "x")]
+#[allow(non_upper_case_globals)]
+impl User {
+    pub const name: ::rxferrix::Field<User, String> = ::rxferrix::Field::new("name");
+    pub const _id: ::rxferrix::Field<User, ::rxferrix::Id<User>> = ::rxferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::rxferrix::Field<User, ::core::primitive::f64> = ::rxferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_creation_time: ::rxferrix::Index<User> = ::rxferrix::Index::new(
+        "by_creation_time",
+    );
+}
+#[cfg(feature = "x")]
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_TABLE_User: fn() -> ::rxferrix::TableDef = <User as ::rxferrix::Table>::table_def;

@@ -11,7 +11,7 @@
       },
     },
     "docs": {
-      "name": "@ferrix/docs",
+      "name": "@rxferrix/docs",
       "devDependencies": {
         "vitepress": "^1.6.4",
       },
@@ -19,8 +19,8 @@
     "examples/chat-react/web": {
       "name": "chat-react-web",
       "dependencies": {
-        "@ferrix/client": "workspace:*",
-        "@ferrix/react": "workspace:*",
+        "@rxferrix/client": "workspace:*",
+        "@rxferrix/react": "workspace:*",
         "react": "^19.3.0",
         "react-dom": "^19.3.0",
       },
@@ -36,8 +36,8 @@
     "examples/todo/web": {
       "name": "todo-web",
       "dependencies": {
-        "@ferrix/client": "workspace:*",
-        "@ferrix/svelte": "workspace:*",
+        "@rxferrix/client": "workspace:*",
+        "@rxferrix/svelte": "workspace:*",
       },
       "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^7.3.1",
@@ -49,7 +49,7 @@
       },
     },
     "packages/client": {
-      "name": "@ferrix/client",
+      "name": "@rxferrix/client",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "^6.0.3",
@@ -57,11 +57,11 @@
       },
     },
     "packages/dashboard": {
-      "name": "@ferrix/dashboard",
+      "name": "@rxferrix/dashboard",
       "version": "0.1.0",
       "dependencies": {
-        "@ferrix/client": "workspace:*",
-        "@ferrix/svelte": "workspace:*",
+        "@rxferrix/client": "workspace:*",
+        "@rxferrix/svelte": "workspace:*",
       },
       "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^7.3.1",
@@ -76,10 +76,10 @@
       },
     },
     "packages/react": {
-      "name": "@ferrix/react",
+      "name": "@rxferrix/react",
       "version": "0.1.0",
       "dependencies": {
-        "@ferrix/client": "workspace:*",
+        "@rxferrix/client": "workspace:*",
       },
       "devDependencies": {
         "@testing-library/react": "^16.3.3",
@@ -96,10 +96,10 @@
       },
     },
     "packages/svelte": {
-      "name": "@ferrix/svelte",
+      "name": "@rxferrix/svelte",
       "version": "0.1.0",
       "dependencies": {
-        "@ferrix/client": "workspace:*",
+        "@rxferrix/client": "workspace:*",
       },
       "devDependencies": {
         "@sveltejs/package": "^3.0.0",
@@ -238,16 +238,6 @@
 
     "@exodus/bytes": ["@exodus/bytes@1.16.0", "", { "peerDependencies": { "@noble/hashes": "^1.8.0 || ^2.0.0" }, "optionalPeers": ["@noble/hashes"] }, "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA=="],
 
-    "@ferrix/client": ["@ferrix/client@workspace:packages/client"],
-
-    "@ferrix/dashboard": ["@ferrix/dashboard@workspace:packages/dashboard"],
-
-    "@ferrix/docs": ["@ferrix/docs@workspace:docs"],
-
-    "@ferrix/react": ["@ferrix/react@workspace:packages/react"],
-
-    "@ferrix/svelte": ["@ferrix/svelte@workspace:packages/svelte"],
-
     "@iconify-json/simple-icons": ["@iconify-json/simple-icons@1.2.100", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-536pN2RCEQyy5bYwzayrs4e9egr8cmtVcbdSHLaQl/ULUsihzn1eZ0+Hhn50zgz9cbEotiynKsKQSEjFJ7qKmw=="],
 
     "@iconify/types": ["@iconify/types@2.0.0", "", {}, "sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg=="],
@@ -347,6 +337,16 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.64.5", "", { "os": "win32", "cpu": "x64" }, "sha512-ngUJ/XvOWrqbd2IMsfXfh2xXFLTP3sY7sCKvxbGvYdBZ1KmXFd3ewDZ9n3/GNzAUgzRuhLT/UvJRivbNoAQRBw=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.64.5", "", { "os": "win32", "cpu": "x64" }, "sha512-IhV6ew/DuzUWwHaYmlh7MrPCV3lKFUq/amTEwysi4r/mwNPAEfAMh5dYWeTSPTeMy2pFHGMEWYtPkHzfX3tG5A=="],
+
+    "@rxferrix/client": ["@rxferrix/client@workspace:packages/client"],
+
+    "@rxferrix/dashboard": ["@rxferrix/dashboard@workspace:packages/dashboard"],
+
+    "@rxferrix/docs": ["@rxferrix/docs@workspace:docs"],
+
+    "@rxferrix/react": ["@rxferrix/react@workspace:packages/react"],
+
+    "@rxferrix/svelte": ["@rxferrix/svelte@workspace:packages/svelte"],
 
     "@shikijs/core": ["@shikijs/core@2.5.0", "", { "dependencies": { "@shikijs/engine-javascript": "2.5.0", "@shikijs/engine-oniguruma": "2.5.0", "@shikijs/types": "2.5.0", "@shikijs/vscode-textmate": "^10.0.2", "@types/hast": "^3.0.4", "hast-util-to-html": "^9.0.4" } }, "sha512-uu/8RExTKtavlpH7XqnVYBrfBkUc20ngXiX9NSrBhOVZYv/7XQRKUyhtkeflY5QsxC0GbJThCerruZfsUaSldg=="],
 

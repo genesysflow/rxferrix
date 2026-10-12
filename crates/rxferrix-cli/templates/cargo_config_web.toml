@@ -1,0 +1,2 @@
+# Where `serve --dev` writes the generated TypeScript API (`api`, `Doc`, `Id`, ...) for the web app.
+RXFERRIX_CODEGEN_OUT = { value = "web/src/rxferrix", relative = true }

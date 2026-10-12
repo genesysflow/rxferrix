@@ -1,0 +1,15 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "object(quote!(), quote!\n{\n    #[serde(rename_all = \"snake_case\", deny_unknown_fields)] pub struct Raw<T>\n    { pub some_field: T }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::rxferrix::__private::serde")]
+#[ts(crate = "::rxferrix::__private::ts_rs")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct Raw<T> {
+    pub some_field: T,
+}

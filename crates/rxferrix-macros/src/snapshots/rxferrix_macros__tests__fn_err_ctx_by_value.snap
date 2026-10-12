@@ -1,0 +1,5 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func_err(Mutation, quote!(),\nquote!(async fn f(ctx: MutationCtx) -> Result<()> {}))"
+---
+#[mutation] functions take the context by shared reference: `ctx: &MutationCtx`

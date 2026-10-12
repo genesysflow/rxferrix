@@ -3,11 +3,11 @@
 Enable sign-in methods in `main`, then use `ctx.auth` in functions:
 
 ```rust
-use ferrix::auth::{AuthConfig, GitHub, User};
-use ferrix::prelude::*;
+use rxferrix::auth::{AuthConfig, GitHub, User};
+use rxferrix::prelude::*;
 
-fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new()
+fn main() -> rxferrix::Result<()> {
+    rxferrix::RxFerrix::new()
         .auth(AuthConfig::password().magic_link().oauth(GitHub::from_env()).redirect_url("http://localhost:5173"))
         .run()
 }
@@ -24,7 +24,7 @@ pub async fn add_note(ctx: &MutationCtx, text: String) -> Result<Id<Note>> {
 ```
 
 On the client, `getAuth(client)` signs in and keeps the socket authenticated (tokens in `localStorage`, refreshed
-automatically). React has `useFerrixAuth()`, `useAuthActions()` and `useCurrentUser()`; Svelte has `useAuth()`
+automatically). React has `useRxFerrixAuth()`, `useAuthActions()` and `useCurrentUser()`; Svelte has `useAuth()`
 and `useCurrentUser()`:
 
 ```ts
@@ -41,15 +41,15 @@ rotated refresh token (past a 10-second grace, `refresh_reuse_grace`) ends the s
 one-time `/_/setup#token=…` link; `admin create <email>` works too.
 
 OAuth presets: `GitHub`, `Google`, `Discord` (only a Discord-verified email is used) and `Apple` (Sign in with Apple),
-plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`FERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
-`Oidc::from_env(id)` also reads `FERRIX_AUTH_<ID>_ISSUER`) and can also
+plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`RXFERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
+`Oidc::from_env(id)` also reads `RXFERRIX_AUTH_<ID>_ISSUER`) and can also
 be set up in the dashboard's Settings. For Apple, give the Services ID, team id, key id and the `.p8` private key
-(`FERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): ferrix signs and rotates the short-lived client secret
+(`RXFERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): rxferrix signs and rotates the short-lived client secret
 itself, accepts Apple's `form_post` callback (register `https://<public url>/api/auth/oauth/apple/callback`; the
 public URL must be https), verifies the ID token against Apple's keys, and keeps the name Apple sends on the first
 sign-in only. The key is a secret: keep it out of source control (the dashboard stores it encrypted).
 
-**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): ferrix verifies their JWTs
+**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): rxferrix verifies their JWTs
 against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
 subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in method:
 

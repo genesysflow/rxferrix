@@ -1,12 +1,12 @@
 // Server restart while a tab is open: the tab goes offline, reconnects, re-subscribes, and stays live.
 // Usage: bun e2e/reconnect.ts <todo-server binary> <data dir>   (Vite must be running; the backend must NOT be.)
-// Ports: FERRIX_URL (backend, default http://127.0.0.1:8090) and APP_URL (Vite, default http://localhost:5173); run
-// Vite with the same FERRIX_URL so its /api proxy points at this backend.
+// Ports: RXFERRIX_URL (backend, default http://127.0.0.1:8090) and APP_URL (Vite, default http://localhost:5173); run
+// Vite with the same RXFERRIX_URL so its /api proxy points at this backend.
 import { chromium } from "playwright-core";
 
 const [bin, dir] = process.argv.slice(2);
 if (!bin || !dir) throw new Error("usage: bun e2e/reconnect.ts <todo-server binary> <data dir>");
-const BACKEND = process.env.FERRIX_URL ?? "http://127.0.0.1:8090";
+const BACKEND = process.env.RXFERRIX_URL ?? "http://127.0.0.1:8090";
 const APP = process.env.APP_URL ?? "http://localhost:5173";
 const start = () =>
   Bun.spawn([bin, "serve", "--dev", "--dir", dir, "--http", new URL(BACKEND).host], { stdout: "ignore", stderr: "ignore" });

@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { useAuthActions, useMutation, useQuery } from "@ferrix/react";
-import { api, type Id } from "../ferrix";
+import { useAuthActions, useMutation, useQuery } from "@rxferrix/react";
+import { api, type Id } from "../rxferrix";
 import { errorMessage, initials, type ChannelSummary, type Profile } from "../lib";
 import { ConnectionStatus } from "./ConnectionStatus";
 
@@ -30,7 +30,7 @@ export function Sidebar({ me, channels, activeId, insights, onSelect, onInsights
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
-        <span className="workspace">💬 Ferrix Chat</span>
+        <span className="workspace">💬 RxFerrix Chat</span>
         <ConnectionStatus />
       </div>
 

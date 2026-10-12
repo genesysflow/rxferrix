@@ -7,8 +7,8 @@ You need Rust (the repository's `mise.toml` installs it with [mise](https://mise
 
 ```sh
 bun install && bun run build               # build the TypeScript packages
-cargo install --path crates/ferrix-cli     # install the `ferrix` command
-ferrix new my-app                          # --web react (default), svelte or none
+cargo install --path crates/rxferrix-cli     # install the `rxferrix` command
+rxferrix new my-app                          # --web react (default), svelte or none
 ```
 
 Then run it, the backend and the web app in two terminals:
@@ -18,17 +18,17 @@ cd my-app && cargo run -- serve --dev      # backend on http://127.0.0.1:8090
 cd my-app/web && bun install && bun run dev   # web app
 ```
 
-`ferrix new` uses the checkout it was installed from for the crate and the @ferrix packages; `--published` uses
-crates.io and npm instead, and `--ferrix-path DIR` another checkout.
+`rxferrix new` uses the checkout it was installed from for the crate and the @rxferrix packages; `--published` uses
+crates.io and npm instead, and `--rxferrix-path DIR` another checkout.
 
 ## What's in the app
 
 | Path | What |
 |---|---|
-| `src/main.rs` | Starts the server: `ferrix::Ferrix::new().run()`, plus auth, crons and other options. |
+| `src/main.rs` | Starts the server: `rxferrix::RxFerrix::new().run()`, plus auth, crons and other options. |
 | `src/tasks.rs` | A sample `tasks` table with a query and mutations. Add your own modules next to it. |
 | `web/` | The web app (React or Svelte). |
-| `web/src/ferrix` | The generated TypeScript API. `serve --dev` rewrites it each time it starts, so restart it after you change your functions. |
+| `web/src/rxferrix` | The generated TypeScript API. `serve --dev` rewrites it each time it starts, so restart it after you change your functions. |
 | `.cargo/config.toml` | Build flags that let SQLite run queries in parallel (see [Deploying](/operations/deploying)), and where `serve --dev` writes the TypeScript API. |
 
 ## Functions
@@ -74,7 +74,7 @@ Run the todo example from the repository root:
 
 ```sh
 bun install && bun run build
-cargo run -p todo-server -- serve --dev --codegen-out examples/todo/web/src/lib/ferrix    # backend on :8090
+cargo run -p todo-server -- serve --dev --codegen-out examples/todo/web/src/lib/rxferrix    # backend on :8090
 cd examples/todo/web && bun run dev                                                       # app on :5173
 ```
 

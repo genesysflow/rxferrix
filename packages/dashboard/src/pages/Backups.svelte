@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useAction, useMutation, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction, useMutation, useQuery } from "@rxferrix/svelte";
   import { onMount } from "svelte";
   import {
     scheduler,
@@ -171,7 +171,7 @@
       await runCronNow({ name: "ferrix-backup" });
       ctx.toast("Scheduled backup started");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 
@@ -392,7 +392,7 @@
         A backup is a consistent snapshot taken while the server runs (writes are not blocked). It never contains
         <code>auth_secret.key</code>: settings secrets restore only with the same key file. <strong>Restore</strong>
         checks a backup completely and stages it; it replaces the database when the server starts next (or use
-        <code>ferrix restore &lt;archive&gt;</code> while the server is stopped).
+        <code>rxferrix restore &lt;archive&gt;</code> while the server is stopped).
       </p>
       {#if pending}
         <div class="pending" class:failed={pending.error} role="status" data-testid="pending-restore">
@@ -417,7 +417,7 @@
               passed every check. It replaces the current data
               <strong>the next time the server starts</strong>; the current files are kept in
               <code>pre-restore-…/</code>.
-              {#if pending.secretIgnored}<div class="faint">The archive's <code>auth_secret.key</code> is not restored (only <code>ferrix restore</code> restores it).</div>{/if}
+              {#if pending.secretIgnored}<div class="faint">The archive's <code>auth_secret.key</code> is not restored (only <code>rxferrix restore</code> restores it).</div>{/if}
               {#if restarting === "waiting"}
                 <div data-testid="restarting">Restarting… this page reloads when the server is back.</div>
               {:else if restarting === "timeout"}
@@ -601,7 +601,7 @@
         <p class="faint small">
           Every commit is journaled with the data and shipped in segments; a point is rebuilt from the newest snapshot before it
           and the journal after it, then checked and staged like a backup. Offline:
-          <code>ferrix restore --from {r.target} --to-time 2026-10-09T12:00:00Z</code>. The blobs of stored files are not
+          <code>rxferrix restore --from {r.target} --to-time 2026-10-09T12:00:00Z</code>. The blobs of stored files are not
           journaled.
         </p>
       {/if}

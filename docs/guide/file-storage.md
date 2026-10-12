@@ -5,7 +5,7 @@ the standard `AWS_*` variables for credentials, region and endpoint, e.g. R2 or 
 
 ```rust
 use std::time::Duration;
-use ferrix::storage::{DownloadOptions, StoredFile};
+use rxferrix::storage::{DownloadOptions, StoredFile};
 
 #[mutation]
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {

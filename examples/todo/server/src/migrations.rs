@@ -1,7 +1,7 @@
 //! Data migrations. Pending ones run with `todo-server serve --migrate`, `todo-server migrate`, or from the
 //! dashboard's Migrations page (which also does dry runs).
 
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 use crate::todos::Todo;
 

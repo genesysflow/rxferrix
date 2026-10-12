@@ -55,7 +55,7 @@ export function jsonEqual(a: unknown, b: unknown): boolean {
 export function normalizeArgs(args: unknown): Record<string, unknown> {
   if (args === undefined || args === null) return {};
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new TypeError(`Ferrix function args must be an object, got ${Array.isArray(args) ? "array" : typeof args}`);
+    throw new TypeError(`RxFerrix function args must be an object, got ${Array.isArray(args) ? "array" : typeof args}`);
   }
   return args as Record<string, unknown>;
 }

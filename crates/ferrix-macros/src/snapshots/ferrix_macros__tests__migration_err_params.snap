@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "migration_err(quote!(table = Todo),\nquote!(async fn m(ctx: MutationCtx) -> Result<()> {}))"
----
-#[migration] functions take the context and the document: `(ctx: &MutationCtx, doc: serde_json::Value)`

@@ -3,7 +3,7 @@
  * database, so they are read over HTTP with the admin's bearer token instead of through the sync protocol; so are
  * backups, export and import, and impersonation (docs/CONTRACT.md §4.2).
  */
-import { FerrixError, type FerrixAuth } from "@ferrix/client";
+import { RxFerrixError, type RxFerrixAuth } from "@rxferrix/client";
 import type {
   BackupInfo,
   BackupListing,
@@ -34,28 +34,28 @@ export function filterQuery(filter: LogFilter): string {
 }
 
 /** `fetch` with `Authorization: Bearer <admin access token>`, retrying once with a refreshed token on 401. */
-export async function adminFetch(auth: FerrixAuth, path: string, init: RequestInit = {}): Promise<Response> {
+export async function adminFetch(auth: RxFerrixAuth, path: string, init: RequestInit = {}): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const token = await auth.getAccessToken({ forceRefresh: attempt > 0 });
-    if (!token) throw new FerrixError("Not signed in", { code: "unauthenticated" });
+    if (!token) throw new RxFerrixError("Not signed in", { code: "unauthenticated" });
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${token}`);
     const res = await fetch(path, { ...init, headers });
     if (res.status === 401 && attempt === 0) continue;
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { errorMessage?: string; errorData?: { code: string } } | null;
-      throw new FerrixError(body?.errorMessage ?? `HTTP ${res.status}`, body?.errorData ?? { code: "http_error" });
+      throw new RxFerrixError(body?.errorMessage ?? `HTTP ${res.status}`, body?.errorData ?? { code: "http_error" });
     }
     return res;
   }
 }
 
-export async function fetchLogs(auth: FerrixAuth, filter: LogFilter): Promise<LogEntry[]> {
+export async function fetchLogs(auth: RxFerrixAuth, filter: LogFilter): Promise<LogEntry[]> {
   const res = await adminFetch(auth, `/api/admin/logs${filterQuery(filter)}`);
   return ((await res.json()) as { entries: LogEntry[] }).entries;
 }
 
-export async function fetchStats(auth: FerrixAuth): Promise<Stats> {
+export async function fetchStats(auth: RxFerrixAuth): Promise<Stats> {
   const res = await adminFetch(auth, "/api/admin/stats");
   return (await res.json()) as Stats;
 }
@@ -73,7 +73,7 @@ export interface TailHandlers {
  * Follow the live tail until `signal` aborts. Reconnects (with a fresh token) when the stream ends, which it does
  * when the access token expires, or fails.
  */
-export async function tailLogs(auth: FerrixAuth, filter: LogFilter, handlers: TailHandlers, signal: AbortSignal) {
+export async function tailLogs(auth: RxFerrixAuth, filter: LogFilter, handlers: TailHandlers, signal: AbortSignal) {
   let delay = 500;
   while (!signal.aborted) {
     handlers.onStatus("connecting");
@@ -109,7 +109,7 @@ export interface TimeseriesOptions {
   until?: number;
 }
 
-export async function fetchTimeseries(auth: FerrixAuth, opts: TimeseriesOptions): Promise<Timeseries> {
+export async function fetchTimeseries(auth: RxFerrixAuth, opts: TimeseriesOptions): Promise<Timeseries> {
   const p = new URLSearchParams({ bucket: String(opts.bucket), since: String(Math.floor(opts.since)) });
   if (opts.path) p.set("path", opts.path);
   if (opts.until !== undefined) p.set("until", String(Math.ceil(opts.until)));
@@ -142,7 +142,7 @@ export function filenameFromDisposition(header: string | null, fallback: string)
   return name ? name.replace(/[/\\]/g, "_") : fallback;
 }
 
-async function download(auth: FerrixAuth, path: string, fallback: string): Promise<Download> {
+async function download(auth: RxFerrixAuth, path: string, fallback: string): Promise<Download> {
   const res = await adminFetch(auth, path);
   const blob = await res.blob();
   return { blob, filename: filenameFromDisposition(res.headers.get("content-disposition"), fallback) };
@@ -164,13 +164,13 @@ export function saveBlob({ blob, filename }: Download, doc: Document = document)
 }
 
 /** `GET /api/admin/export/{table}?format=…`: the whole table from one snapshot (secrets of system tables masked). */
-export function exportTable(auth: FerrixAuth, table: string, format: ExportFormat): Promise<Download> {
+export function exportTable(auth: RxFerrixAuth, table: string, format: ExportFormat): Promise<Download> {
   return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}`, `${table}.${format}`);
 }
 
 /** `POST /api/admin/import/{table}?mode=…&format=…` with a JSONL or CSV body (CSV as exported, with a header). */
 export async function importTable(
-  auth: FerrixAuth,
+  auth: RxFerrixAuth,
   table: string,
   mode: ImportMode,
   body: Blob | string,
@@ -192,14 +192,14 @@ export function importFormatOf(name: string): ExportFormat {
 // ---------------------------------------------------------------------------------------------------------------------
 // Backups
 
-export async function listBackups(auth: FerrixAuth): Promise<BackupListing> {
+export async function listBackups(auth: RxFerrixAuth): Promise<BackupListing> {
   const res = await adminFetch(auth, "/api/admin/backups");
   const r = (await res.json()) as Partial<BackupListing> & { target: string; backups: BackupInfo[] };
   return { pendingRestore: null, restart: { available: false, exitCode: null }, replication: null, ...r };
 }
 
 /** `GET /api/admin/replication`: the replication status, or null when replication is off. */
-export async function getReplication(auth: FerrixAuth): Promise<ReplicationStatus | null> {
+export async function getReplication(auth: RxFerrixAuth): Promise<ReplicationStatus | null> {
   const res = await adminFetch(auth, "/api/admin/replication");
   const r = (await res.json()) as { enabled: boolean } & Partial<ReplicationStatus>;
   if (!r.enabled) return null;
@@ -208,7 +208,7 @@ export async function getReplication(auth: FerrixAuth): Promise<ReplicationStatu
 }
 
 /** `POST /api/admin/replication/snapshot`: take a snapshot of the current generation now. */
-export async function replicationSnapshot(auth: FerrixAuth): Promise<ReplicationSnapshot> {
+export async function replicationSnapshot(auth: RxFerrixAuth): Promise<ReplicationSnapshot> {
   const res = await adminFetch(auth, "/api/admin/replication/snapshot", { method: "POST" });
   return (await res.json()) as ReplicationSnapshot;
 }
@@ -224,7 +224,7 @@ export interface PointInTimeRequest {
  * `POST /api/admin/restore/point-in-time`: restore the replicated state at a commit ts or time (the newest snapshot
  * before it plus the journal up to it), check it like a backup, and stage it for the next start.
  */
-export async function stagePointInTime(auth: FerrixAuth, point: PointInTimeRequest): Promise<RestoreState> {
+export async function stagePointInTime(auth: RxFerrixAuth, point: PointInTimeRequest): Promise<RestoreState> {
   const res = await adminFetch(auth, "/api/admin/restore/point-in-time", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -240,13 +240,13 @@ export type RestoreState = Pick<BackupListing, "pendingRestore" | "restart">;
  * `POST /api/admin/backups/{name}/restore`: validate a stored backup completely (checksums, SQLite integrity, schema,
  * indexes) and stage it to replace the database at the next start. Throws with the reason when it can't be restored.
  */
-export async function stageRestore(auth: FerrixAuth, name: string): Promise<RestoreState> {
+export async function stageRestore(auth: RxFerrixAuth, name: string): Promise<RestoreState> {
   const res = await adminFetch(auth, `/api/admin/backups/${encodeURIComponent(name)}/restore`, { method: "POST" });
   return (await res.json()) as RestoreState;
 }
 
 /** `POST /api/admin/restore?name=…` with an archive from this computer: the same validation and staging. */
-export async function uploadRestore(auth: FerrixAuth, file: Blob, name: string): Promise<RestoreState> {
+export async function uploadRestore(auth: RxFerrixAuth, file: Blob, name: string): Promise<RestoreState> {
   const res = await adminFetch(auth, `/api/admin/restore?name=${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { "Content-Type": "application/zstd" },
@@ -256,12 +256,12 @@ export async function uploadRestore(auth: FerrixAuth, file: Blob, name: string):
 }
 
 /** `DELETE /api/admin/restore`: cancel the staged restore. */
-export async function cancelRestore(auth: FerrixAuth): Promise<void> {
+export async function cancelRestore(auth: RxFerrixAuth): Promise<void> {
   await adminFetch(auth, "/api/admin/restore", { method: "DELETE" });
 }
 
 /** `POST /api/admin/restore/restart`: the server shuts down gracefully and exits for its supervisor to restart it. */
-export async function restartServer(auth: FerrixAuth): Promise<{ restarting: boolean; exitCode: number }> {
+export async function restartServer(auth: RxFerrixAuth): Promise<{ restarting: boolean; exitCode: number }> {
   const res = await adminFetch(auth, "/api/admin/restore/restart", { method: "POST" });
   return (await res.json()) as { restarting: boolean; exitCode: number };
 }
@@ -284,7 +284,7 @@ export async function waitForRestart(timeoutMs = 120_000, interval = 500): Promi
 }
 
 export async function createBackup(
-  auth: FerrixAuth,
+  auth: RxFerrixAuth,
   options: { includeAux: boolean; includeFiles: boolean },
 ): Promise<BackupInfo> {
   const res = await adminFetch(auth, "/api/admin/backups", {
@@ -295,11 +295,11 @@ export async function createBackup(
   return (await res.json()) as BackupInfo;
 }
 
-export function downloadBackup(auth: FerrixAuth, name: string): Promise<Download> {
+export function downloadBackup(auth: RxFerrixAuth, name: string): Promise<Download> {
   return download(auth, `/api/admin/backups/${encodeURIComponent(name)}`, name);
 }
 
-export async function deleteBackup(auth: FerrixAuth, name: string): Promise<void> {
+export async function deleteBackup(auth: RxFerrixAuth, name: string): Promise<void> {
   await adminFetch(auth, `/api/admin/backups/${encodeURIComponent(name)}`, { method: "DELETE" });
 }
 
@@ -311,7 +311,7 @@ export async function deleteBackup(auth: FerrixAuth, name: string): Promise<void
  * (which carries them in its fragment, to be opened in a new tab) and the expiry are kept.
  */
 export async function impersonate(
-  auth: FerrixAuth,
+  auth: RxFerrixAuth,
   body: { user: string; ttlSeconds: number; redirectTo?: string | null },
 ): Promise<Impersonation> {
   const res = await adminFetch(auth, "/api/admin/impersonate", {
@@ -327,7 +327,7 @@ export async function impersonate(
 // Analytics (`--olap`)
 
 /** `GET /api/admin/olap`: the analytics copy's status, or null when the server runs without `--olap`. */
-export async function getOlap(auth: FerrixAuth): Promise<OlapStatus | null> {
+export async function getOlap(auth: RxFerrixAuth): Promise<OlapStatus | null> {
   const res = await adminFetch(auth, "/api/admin/olap");
   const r = (await res.json()) as { enabled: boolean } & Partial<OlapStatus>;
   if (!r.enabled) return null;
@@ -336,7 +336,7 @@ export async function getOlap(auth: FerrixAuth): Promise<OlapStatus | null> {
 }
 
 /** `POST /api/admin/olap/query`: one SELECT over the analytics copy (the sandbox of `ctx.olap`; audited). */
-export async function olapQuery(auth: FerrixAuth, sql: string, params: Json[] = []): Promise<OlapResult> {
+export async function olapQuery(auth: RxFerrixAuth, sql: string, params: Json[] = []): Promise<OlapResult> {
   const res = await adminFetch(auth, "/api/admin/olap/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -346,7 +346,7 @@ export async function olapQuery(auth: FerrixAuth, sql: string, params: Json[] = 
 }
 
 /** The whole result of one SELECT as a CSV or Parquet file. */
-export async function olapExport(auth: FerrixAuth, sql: string, format: "csv" | "parquet", params: Json[] = []): Promise<Download> {
+export async function olapExport(auth: RxFerrixAuth, sql: string, format: "csv" | "parquet", params: Json[] = []): Promise<Download> {
   const res = await adminFetch(auth, "/api/admin/olap/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -357,6 +357,6 @@ export async function olapExport(auth: FerrixAuth, sql: string, format: "csv" | 
 }
 
 /** `POST /api/admin/olap/rebuild`: rebuild every table of the copy from a snapshot, in the background. */
-export async function olapRebuild(auth: FerrixAuth): Promise<void> {
+export async function olapRebuild(auth: RxFerrixAuth): Promise<void> {
   await adminFetch(auth, "/api/admin/olap/rebuild", { method: "POST" });
 }

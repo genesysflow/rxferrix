@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(), quote!(fn f(ctx: &QueryCtx) -> Result<()> {}))"
----
-#[query] functions must be `async fn`

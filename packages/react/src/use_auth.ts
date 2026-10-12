@@ -1,24 +1,24 @@
 import { useMemo, useSyncExternalStore } from "react";
-import { getAuth, systemApi, type AuthState, type FerrixAuth, type User } from "@ferrix/client";
-import { useFerrix } from "./context.js";
+import { getAuth, systemApi, type AuthState, type RxFerrixAuth, type User } from "@rxferrix/client";
+import { useRxFerrix } from "./context.js";
 import { useQuery } from "./use_query.js";
 
 /**
- * The auth state of the client from `FerrixProvider`: `{ isLoading, isAuthenticated, userId, isAdmin }`, re-rendering
+ * The auth state of the client from `RxFerrixProvider`: `{ isLoading, isAuthenticated, userId, isAdmin }`, re-rendering
  * when it changes. `isAuthenticated` turns true once the server has accepted the token.
  *
  * Uses `getAuth(client)`: call `getAuth(client, { storage })` before rendering to customize it.
  */
-export function useFerrixAuth(): AuthState {
-  const auth = getAuth(useFerrix());
+export function useRxFerrixAuth(): AuthState {
+  const auth = getAuth(useRxFerrix());
   const subscribe = useMemo(() => (cb: () => void) => auth.subscribe(cb), [auth]);
   const getSnapshot = useMemo(() => () => auth.state(), [auth]);
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** Sign-in, sign-out and the other auth actions, bound to the client's {@link FerrixAuth}. Stable across renders. */
+/** Sign-in, sign-out and the other auth actions, bound to the client's {@link RxFerrixAuth}. Stable across renders. */
 export type AuthActions = Pick<
-  FerrixAuth,
+  RxFerrixAuth,
   | "signUp"
   | "signIn"
   | "signInAsAdmin"
@@ -38,7 +38,7 @@ export type AuthActions = Pick<
 >;
 
 export function useAuthActions(): AuthActions {
-  const auth = getAuth(useFerrix());
+  const auth = getAuth(useRxFerrix());
   return useMemo(
     (): AuthActions => ({
       signUp: auth.signUp.bind(auth),
@@ -67,7 +67,7 @@ export function useAuthActions(): AuthActions {
  * loading.
  */
 export function useCurrentUser(): User | null | undefined {
-  const { isLoading, isAuthenticated } = useFerrixAuth();
+  const { isLoading, isAuthenticated } = useRxFerrixAuth();
   const user = useQuery(systemApi.auth.me, isAuthenticated ? {} : "skip");
   if (isLoading) return undefined;
   if (!isAuthenticated) return null;

@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, it } from "vitest";
 import {
-  FerrixClient,
+  RxFerrixClient,
   makeFunctionReference,
   type ArgsOf,
   type Id,
@@ -26,7 +26,7 @@ describe("type inference", () => {
     expectTypeOf<OptionalArgs<typeof api.todos.get>>().toEqualTypeOf<[args: { id: Id<"todos"> }]>();
 
     // Compile-time only: never executed.
-    const _check = (client: FerrixClient) => {
+    const _check = (client: RxFerrixClient) => {
     expectTypeOf(client.watchQuery(api.todos.list).localQueryResult()).toEqualTypeOf<Doc[] | undefined>();
     expectTypeOf(client.query(api.todos.get, { id: "1" as Id<"todos"> })).toEqualTypeOf<Promise<Doc | null>>();
     expectTypeOf(client.mutation(api.todos.add, { text: "a" })).toEqualTypeOf<Promise<Id<"todos">>>();

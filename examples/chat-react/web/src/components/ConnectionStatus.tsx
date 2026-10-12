@@ -1,4 +1,4 @@
-import { useConnectionState } from "@ferrix/react";
+import { useConnectionState } from "@rxferrix/react";
 
 /** A dot and a word: live, connecting, or reconnecting (with pending writes). */
 export function ConnectionStatus() {

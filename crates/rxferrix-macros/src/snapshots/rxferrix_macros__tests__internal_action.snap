@@ -1,0 +1,66 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "func(FnKind::Action, true, quote!\n{\n    #[cfg(feature = \"x\")] pub async fn ia(ctx: &ActionCtx) ->\n    std::result::Result<String, MyError> { todo!() }\n})"
+---
+#[cfg(feature = "x")]
+pub async fn ia(ctx: &ActionCtx) -> std::result::Result<String, MyError> {
+    todo!()
+}
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types)]
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(
+    crate = "::rxferrix::__private::ts_rs",
+    rename_all = "camelCase",
+    optional_fields = nullable
+)]
+pub struct __rxferrix_args_ia {}
+#[cfg(feature = "x")]
+impl ::core::convert::From<()> for __rxferrix_args_ia {
+    fn from(_: ()) -> Self {
+        Self {}
+    }
+}
+/// Function reference for [`ia`](fn@ia).
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types, dead_code)]
+pub struct ia {}
+#[cfg(feature = "x")]
+impl ::rxferrix::FunctionRef for ia {
+    type Args = __rxferrix_args_ia;
+    type Output = String;
+    fn path() -> ::std::string::String {
+        ::rxferrix::__private::function_path(::core::module_path!(), "ia")
+    }
+}
+#[cfg(feature = "x")]
+impl ::rxferrix::ActionFunction for ia {}
+#[cfg(feature = "x")]
+impl ::rxferrix::SchedulableFunction for ia {}
+#[cfg(feature = "x")]
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_FN_ia: ::rxferrix::__private::FunctionDef = ::rxferrix::__private::FunctionDef {
+    module_path: ::core::module_path!(),
+    name: "ia",
+    visibility: ::rxferrix::__private::Visibility::Internal,
+    dev_only: false,
+    handler: ::rxferrix::__private::Handler::Action(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
+        let __rxferrix_decoded: __rxferrix_args_ia = ::rxferrix::__private::decode_args(
+            "ia",
+            __rxferrix_args,
+        )?;
+        let __rxferrix_out = ia(&__rxferrix_ctx).await?;
+        ::rxferrix::__private::encode_output(__rxferrix_out)
+    })),
+    ts: || (
+        ::rxferrix::__private::ts_inline::<__rxferrix_args_ia>(),
+        ::rxferrix::__private::ts_output::<String>(),
+    ),
+};

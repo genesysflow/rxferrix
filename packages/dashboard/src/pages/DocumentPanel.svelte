@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
+  import { RxFerrixError } from "@rxferrix/client";
   import { untrack } from "svelte";
-  import { useMutation, useQuery } from "@ferrix/svelte";
+  import { useMutation, useQuery } from "@rxferrix/svelte";
   import { dashboard, type Json, type JsonObject, type TableSummary } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { parseJson, pretty } from "../lib/format.js";
@@ -69,7 +69,7 @@
         router.navigate(href("data", [table.name], { doc: newId }));
       }
     } catch (e) {
-      error = e instanceof FerrixError ? e.message : String(e);
+      error = e instanceof RxFerrixError ? e.message : String(e);
     } finally {
       busy = false;
     }
@@ -82,7 +82,7 @@
       ctx.toast("Deleted");
       onclose();
     } catch (e) {
-      error = e instanceof FerrixError ? e.message : String(e);
+      error = e instanceof RxFerrixError ? e.message : String(e);
     }
   }
 

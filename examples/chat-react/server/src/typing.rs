@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use ferrix::auth::User;
-use ferrix::log;
-use ferrix::prelude::*;
+use rxferrix::auth::User;
+use rxferrix::log;
+use rxferrix::prelude::*;
 
 use crate::messages::clear_typing;
 use crate::model::{Channel, Typing, require_member, require_readable};

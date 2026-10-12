@@ -1,5 +1,5 @@
-import { FerrixClient } from "@ferrix/client";
-import { FakeServer, flushMicrotasks } from "@ferrix/client/testing";
+import { RxFerrixClient } from "@rxferrix/client";
+import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MASK, type SettingsView } from "../src/lib/api.js";
@@ -61,7 +61,7 @@ function button(name: string | RegExp): HTMLButtonElement {
 
 describe("Settings page", () => {
   let server: FakeServer;
-  let client: FerrixClient;
+  let client: RxFerrixClient;
   const toast = vi.fn();
   const ctx: DashboardContext = {
     auth: {} as DashboardContext["auth"],
@@ -93,7 +93,7 @@ describe("Settings page", () => {
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
     toast.mockClear();
   });
   afterEach(() => client.close());
@@ -116,7 +116,7 @@ describe("Settings page", () => {
     mounted = mount(Settings, {
       target,
       context: new Map<unknown, unknown>([
-        [Symbol.for("@ferrix/svelte:client"), client],
+        [Symbol.for("@rxferrix/svelte:client"), client],
         [DASHBOARD_CONTEXT, ctx],
       ]),
     });
@@ -168,7 +168,7 @@ describe("Settings page", () => {
 
 describe("Backups page", () => {
   let server: FakeServer;
-  let client: FerrixClient;
+  let client: RxFerrixClient;
   const toast = vi.fn();
   const ctx: DashboardContext = {
     auth: { getAccessToken: async () => "token" } as unknown as DashboardContext["auth"],
@@ -217,7 +217,7 @@ describe("Backups page", () => {
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
     toast.mockClear();
   });
   afterEach(() => client.close());
@@ -252,7 +252,7 @@ describe("Backups page", () => {
     mounted = mount(Backups, {
       target,
       context: new Map<unknown, unknown>([
-        [Symbol.for("@ferrix/svelte:client"), client],
+        [Symbol.for("@rxferrix/svelte:client"), client],
         [DASHBOARD_CONTEXT, ctx],
       ]),
     });
@@ -286,7 +286,7 @@ describe("Backups page", () => {
 describe("Workflows page", () => {
   it("lists workflows, shows an open one's steps, and cancels it", async () => {
     const server = new FakeServer();
-    const client = new FerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    const client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
     const toast = vi.fn();
     const ctx: DashboardContext = {
       auth: { getAccessToken: async () => "token" } as unknown as DashboardContext["auth"],
@@ -337,7 +337,7 @@ describe("Workflows page", () => {
       target,
       props: { route: { page: "workflows", rest: [], params: new URLSearchParams("id=w1") } },
       context: new Map<unknown, unknown>([
-        [Symbol.for("@ferrix/svelte:client"), client],
+        [Symbol.for("@rxferrix/svelte:client"), client],
         [DASHBOARD_CONTEXT, ctx],
       ]),
     });

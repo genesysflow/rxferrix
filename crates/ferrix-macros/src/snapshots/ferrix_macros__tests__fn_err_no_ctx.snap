@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "func_err(Query, quote!(), quote!(async fn f() -> Result<()> {}))"
----
-#[query] functions take the context as their first parameter: `ctx: &QueryCtx`

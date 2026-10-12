@@ -1,0 +1,11 @@
+error: the return type must be `Result<T>` (`rxferrix::Result<T>` or `anyhow::Result<T>`)
+ --> tests/ui/fn_bad_return.rs:6:38
+  |
+6 | pub async fn list(ctx: &QueryCtx) -> Option<u32> { Some(1) }
+  |                                      ^^^^^^^^^^^
+
+error: the return type must be `Result<T>` (`rxferrix::Result<T>` or `anyhow::Result<T>`)
+ --> tests/ui/fn_bad_return.rs:9:39
+  |
+9 | pub async fn list2(ctx: &QueryCtx) -> u32 { 1 }
+  |                                       ^^^

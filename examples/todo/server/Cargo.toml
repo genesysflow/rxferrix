@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-ferrix = { path = "../../../crates/ferrix" }
+rxferrix = { path = "../../../crates/rxferrix" }
 
 [features]
-olap = ["ferrix/olap"]
+olap = ["rxferrix/olap"]

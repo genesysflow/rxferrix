@@ -4,7 +4,7 @@
 
 `serve` writes JSON lines when stdout isn't a terminal (systemd, Docker): `timestamp`, `level`, `target`,
 `fields` and the span context, one object per line, for Loki, Vector or `jq`. `--log-format pretty|compact|json` (or
-`FERRIX_LOG_FORMAT`) chooses explicitly; `RUST_LOG` filters as usual.
+`RXFERRIX_LOG_FORMAT`) chooses explicitly; `RUST_LOG` filters as usual.
 
 ## Metrics
 

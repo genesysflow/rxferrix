@@ -1,8 +1,8 @@
-# Ferrix Rust contract: user API, runtime internals, and macro expansions
+# RxFerrix Rust contract: user API, runtime internals, and macro expansions
 
-This document is the **contract between `crates/ferrix` (runtime) and `crates/ferrix-macros` (proc macros)**,
+This document is the **contract between `crates/rxferrix` (runtime) and `crates/rxferrix-macros` (proc macros)**,
 plus the user-facing API that both serve. Everything the macros emit refers only to paths listed under
-"`::ferrix::__private` items" or under the public API. The runtime must provide exactly those items.
+"`::rxferrix::__private` items" or under the public API. The runtime must provide exactly those items.
 
 Wire and storage naming: tables, args and system fields use **camelCase JSON keys**. The macros add
 `#[serde(rename_all = "camelCase")]` to table structs and to generated args structs. Field and index handles always
@@ -13,12 +13,12 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 ## 1. User-facing API (what app code writes)
 
 ```rust
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 // prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
 //           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, Aggregate, DocChange,
 //           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
-//           workflow, WorkflowCtx, json!, Ferrix
-use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
+//           workflow, WorkflowCtx, json!, RxFerrix
+use rxferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
 
 #[table(name = "todos")]                      // name is optional; default = snake_case(struct name), e.g. TodoItem → "todo_item"
 #[index(by_done = [done, created_by])]        // zero or more #[index(name = [rust_field, ...])] attributes
@@ -49,19 +49,19 @@ pub async fn add_many(ctx: &ActionCtx, n: u32) -> Result<()> {
     Ok(())
 }
 
-fn main() -> ferrix::Result<()> {
-    Ferrix::new().run()        // tables and functions are discovered automatically (linkme)
+fn main() -> rxferrix::Result<()> {
+    RxFerrix::new().run()        // tables and functions are discovered automatically (linkme)
 }
 ```
 
 Rules:
 - A function's first parameter is the context, `&QueryCtx`, `&MutationCtx` or `&ActionCtx`, matching the macro.
   The remaining parameters become the args. Parameter patterns must be plain identifiers.
-- The return type must be `ferrix::Result<T>` (written `Result<T>` with the prelude), where
+- The return type must be `rxferrix::Result<T>` (written `Result<T>` with the prelude), where
   `T: Serialize + DeserializeOwned + ts_rs::TS + Send + 'static`.
 - Every arg type must be `Serialize + DeserializeOwned + ts_rs::TS + Send + 'static`. For types that are not tables
-  (a function's output "view" struct, an enum argument), `#[ferrix::object]` derives all three with camelCase JSON
-  through ferrix's re-exports, so apps need no serde / ts-rs dependency (§3.4).
+  (a function's output "view" struct, an enum argument), `#[rxferrix::object]` derives all three with camelCase JSON
+  through rxferrix's re-exports, so apps need no serde / ts-rs dependency (§3.4).
 - `#[query(dev_only)]` (also `mutation`, `action` and the `internal_*` variants): a function for development (seeding,
   reading a dev inbox). It is refused unless the app runs in dev mode (`serve --dev`, `TestApp`), whoever calls it,
   with the not-found error `'<path>' is a dev-only function: it only runs when the server is started with --dev`
@@ -73,7 +73,7 @@ Rules:
   `ctx.run_action::<..>(args)`, `app.query::<list>(args)`, where `args` is the generated args struct or a tuple of the
   params (`(x,)` for one param, `()` for none).
 
-### 1.1 Core types (in `ferrix`, re-exported by the prelude)
+### 1.1 Core types (in `rxferrix`, re-exported by the prelude)
 
 ```rust
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -117,8 +117,8 @@ pub struct TableDef {
     /// Ok iff a stored document (system fields included) deserializes as `Doc<Self>`; Err = the serde error.
     /// Used by the startup schema check (§1.4). Emitted as `__private::validate_doc::<Self>`.
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
-    /// The fields' JSON shape (`ferrix::shape::Shape`, §3.1 "Shapes"): the analytics copy's columns (§1.11).
-    pub shape: fn() -> ferrix::shape::Shape,
+    /// The fields' JSON shape (`rxferrix::shape::Shape`, §3.1 "Shapes"): the analytics copy's columns (§1.11).
+    pub shape: fn() -> rxferrix::shape::Shape,
     /// `#[aggregate]`s (§1.12): `AggregateDef { name, group_fields, sum_fields }`, JSON names. Compared by PartialEq.
     pub aggregates: Vec<AggregateDef>,
 }   // PartialEq compares name, all index and aggregate definitions and the rendered `ts()`, never the fn pointers
@@ -146,9 +146,9 @@ pub struct VectorIndex<T> { /* … */ }
 
 pub enum Order { Asc, Desc }
 
-/// Binary data (`ferrix::Bytes`, in the prelude). JSON on the wire and in storage: `{"$bytes": "<base64>"}`
+/// Binary data (`rxferrix::Bytes`, in the prelude). JSON on the wire and in storage: `{"$bytes": "<base64>"}`
 /// (standard alphabet, padded; decoding is strict, so every value has exactly one form). TS: `{ $bytes: string }`;
-/// `@ferrix/client` exports `type Bytes`, `bytesToJson(Uint8Array | ArrayBuffer | ArrayBufferView)`,
+/// `@rxferrix/client` exports `type Bytes`, `bytesToJson(Uint8Array | ArrayBuffer | ArrayBufferView)`,
 /// `bytesFromJson(b): Uint8Array` and `isBytes(v)`.
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bytes(pub Vec<u8>);   // Deref<Target = Vec<u8>>, AsRef<[u8]>, From<Vec<u8> | &[u8] | [u8; N]>, Into<Vec<u8>>,
@@ -160,7 +160,7 @@ impl Bytes {
     pub fn from_json(v: &serde_json::Value) -> Option<Bytes>; // only an object whose single key is "$bytes"
 }
 ```
-**Bytes in indexes.** The key encoding ([Design](DESIGN.md#storage), `ferrix::keys`) recognizes the tagged form and gives it its own
+**Bytes in indexes.** The key encoding ([Design](DESIGN.md#storage), `rxferrix::keys`) recognizes the tagged form and gives it its own
 type tag between strings and arrays, `Undefined < Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`,
 with an order-preserving body (bytes compare byte-wise; a prefix sorts first), so `Bytes` fields work in `#[index]`,
 `with_index` ranges, search filter fields and the dashboard's index filters. Any other object, including one whose
@@ -182,7 +182,7 @@ pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub schedul
 
 // ctx.auth: the caller, from a validated access token (WS `Authenticate` or HTTP `Authorization: Bearer`).
 // Identity flows unchanged into every `ctx.run_*` call an action makes.
-pub struct Auth { /* identity */ }                      // ferrix::Auth = ferrix::auth::Auth
+pub struct Auth { /* identity */ }                      // rxferrix::Auth = rxferrix::auth::Auth
 impl Auth {
     pub fn user_id(&self) -> Option<Id<User>>;          // None when anonymous or for admin sessions
     pub fn require_user(&self) -> Result<Id<User>>;     // else UserError { code: "unauthenticated" }
@@ -201,7 +201,7 @@ impl Auth {
 // nothing → every socket; user/admin id (user_id, require_user, user, is_admin, admin_id, require_admin) → every
 // socket of that principal (all anonymous sockets share one); session_id or identity → that session only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Identity {                                   // ferrix::Identity = ferrix::auth::Identity
+pub struct Identity {                                   // rxferrix::Identity = rxferrix::auth::Identity
     pub user_id: Option<String>, pub admin_id: Option<String>, pub session_id: Option<String>,  // string ids, no tokens
 }
 impl Identity {
@@ -209,7 +209,7 @@ impl Identity {
     pub fn log_summary(&self) -> Option<String>;        // "user:<id>" | "admin:<id>" (execution log), None = anonymous
     pub fn principal_key(&self) -> String;              // log_summary or "anonymous" (scopes mutation dedup keys)
 }
-// `ferrix::auth::User` is the `_users` table type: { email: Option<String>, email_verified: bool, name: Option<String>,
+// `rxferrix::auth::User` is the `_users` table type: { email: Option<String>, email_verified: bool, name: Option<String>,
 // image: Option<String> } (creation time = `_creationTime`). Reference it from app tables as `Id<User>`; codegen
 // emits it as `Id<"_users">` (declared in `SystemDataModel`). It never contains secrets.
 
@@ -317,7 +317,7 @@ impl<T> PaginationResult<T> {
                                                                                  // results in page order
 }
 // e.g. `page.try_map(|m| view(ctx, &names, m)).await` turns a PaginationResult<Doc<Message>> into PaginationResult<MessageView>.
-pub const ferrix::db::pagination::MAX_PAGE_SCAN: usize = 10_000;
+pub const rxferrix::db::pagination::MAX_PAGE_SCAN: usize = 10_000;
 
 #[query]
 pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOpts)
@@ -356,10 +356,10 @@ pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOp
   (`__private::ts_output`); only table types and the generated args structs are written out as object types
   (`__private::ts_inline`). Field doc comments become JSDoc on their own lines: an object type with a documented field
   is laid out one field per line, indented (`codegen::format_ts`); a one-line type doc becomes `/** … */`.
-- **Clients** also have `usePaginatedQueryWithStatus` (`@ferrix/react`): the same, but a failed page comes back as
-  `error` (with the pages that did load still in `results`) instead of being thrown. (`@ferrix/svelte`'s
+- **Clients** also have `usePaginatedQueryWithStatus` (`@rxferrix/react`): the same, but a failed page comes back as
+  `error` (with the pages that did load still in `results`) instead of being thrown. (`@rxferrix/svelte`'s
   `usePaginatedQuery` always returns `error`.)
-- **Clients** (`client.paginatedQuery`, `usePaginatedQuery` in `@ferrix/react` / `@ferrix/svelte`) subscribe to
+- **Clients** (`client.paginatedQuery`, `usePaginatedQuery` in `@rxferrix/react` / `@rxferrix/svelte`) subscribe to
   page 0 as `{ ...args, paginationOpts: { numItems, cursor: null } }`, each further page from the previous page's
   `continueCursor`, and re-subscribe a page with `endCursor` pinned to its `continueCursor` as soon as a next page
   follows it (showing the unpinned result until the pinned one arrives). Every page is an ordinary query, so
@@ -385,21 +385,21 @@ pub trait SchedulableFunction: FunctionRef {}
 
 ### 1.4 Logging, the execution log, and runtime options
 
-**Function log lines.** `ferrix::log` re-exports the `tracing` macros `trace!`, `debug!`, `info!`, `warn!`,
-`error!`. Write `use ferrix::log;` and then `log::info!(...)` (plain `tracing::info!` is the same thing). Events
+**Function log lines.** `rxferrix::log` re-exports the `tracing` macros `trace!`, `debug!`, `info!`, `warn!`,
+`error!`. Write `use rxferrix::log;` and then `log::info!(...)` (plain `tracing::info!` is the same thing). Events
 emitted while a function runs, at DEBUG and above (WARN and above for a few chatty crates: hyper, h2, reqwest, rustls,
 tokio, tower, ...), are captured per execution as `"[LEVEL] message key=value ..."` (at most 256 lines of 4KB each). A nested `ctx.run_*` call's lines are also appended to its caller's. Events from
 tasks the function spawns are not captured. Lines are always stored in the execution log and sent to clients as
-`logLines` only in `--dev`. The events still reach the normal subscriber: `ferrix serve` prints them to stdout,
+`logLines` only in `--dev`. The events still reach the normal subscriber: `rxferrix serve` prints them to stdout,
 filtered by `RUST_LOG`.
 
 *Why not in the prelude:* glob-importing a `log` module or `info!`-style macros is ambiguous (E0659) wherever the app
 also uses the `log` crate or `#[macro_use] extern crate log`, so the prelude leaves them out and the explicit
-`use ferrix::log;` (which shadows the `log` crate cleanly in that file) is the one import to add.
+`use rxferrix::log;` (which shadows the `log` crate cleanly in that file) is the one import to add.
 
-Capture uses a tracing layer, `ferrix::log::layer()`, plus a task-local buffer. `ferrix serve` installs stdout output (`--log-format json|pretty|compact`, §4.4)
-and the layer, each with its own filter. If no global subscriber is set when an `App` opens, ferrix installs one
-with just the layer. An app that installs its own subscriber should add `ferrix::log::layer()` to it, and do so
+Capture uses a tracing layer, `rxferrix::log::layer()`, plus a task-local buffer. `rxferrix serve` installs stdout output (`--log-format json|pretty|compact`, §4.4)
+and the layer, each with its own filter. If no global subscriber is set when an `App` opens, rxferrix installs one
+with just the layer. An app that installs its own subscriber should add `rxferrix::log::layer()` to it, and do so
 before opening the `App`.
 
 **Runtime options.**
@@ -408,21 +408,21 @@ pub struct AppOptions {
     pub dev: bool,                    // real error messages and logLines to clients
     pub readers: usize,
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
-    pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with ferrix::QueryTimeout
+    pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with rxferrix::QueryTimeout
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
     pub log_retention: LogRetention,  // { max_age: 7 days, max_rows: 200_000, trim_interval: 1 min }
     pub scheduler: SchedulerOptions,  // concurrency, job retention, retry backoff, declared crons and workpools (§1.7)
-    pub auth: ferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
-    pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
-    pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
-    pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
+    pub auth: rxferrix::auth::AuthConfig, // sign-in methods, token lifetimes, email, OAuth (see §1.5)
+    pub storage: rxferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
+    pub ops: rxferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
+    pub query_cache: rxferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
     pub fsync_commits: bool,          // default false (synchronous = NORMAL); true (`--fsync-commits`): commits wait for the disk (FULL)
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
-    pub olap: ferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
+    pub olap: rxferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
-- **Query timeout.** A query still running after `query_timeout` fails with `ferrix::QueryTimeout { path, timeout }`
+- **Query timeout.** A query still running after `query_timeout` fails with `rxferrix::QueryTimeout { path, timeout }`
   (a server error; checked at `.await` points only). A stuck query would otherwise keep a reader connection, and the
   older results its subscribers' other queries are kept at, for good.
 - **Determinism check.** With `determinism_check: Some(every)`, a query is run a second time in the same snapshot,
@@ -433,10 +433,10 @@ impl Default for AppOptions { /* the defaults above, dev = false */ }
   `HashMap` iteration order): subscribers get updates for nothing and cached results are wrong. Runs that read the
   time (`ctx.now()`, signed URLs) and timeouts are not compared. The rerun is not an execution (no log entry, no
   metrics, its log lines dropped; stdout still prints them) and isn't counted in the run's duration.
-- **Slow mutations.** A mutation that holds the database writer for 100 ms or more (`ferrix::db::WARN_WRITE`) is
+- **Slow mutations.** A mutation that holds the database writer for 100 ms or more (`rxferrix::db::WARN_WRITE`) is
   logged as a warning, at most once a minute per path: every other write waited for it.
 - **Mutation timeout.** A mutation still running after `mutation_timeout` is dropped and rolled back, and fails with
-  `ferrix::MutationTimeout { path, timeout }`, a server error (its message reaches clients only in `--dev`). It can
+  `rxferrix::MutationTimeout { path, timeout }`, a server error (its message reaches clients only in `--dev`). It can
   only fire at an `.await`: synchronous code in a mutation (a busy loop, blocking I/O) is never preempted and keeps
   holding the writer lock.
 - **Idempotency.** `App::execute_mutation(path, args, &identity, Some(&IdempotencyKey { session_id, request_id }))`
@@ -480,7 +480,7 @@ impl App {
     pub fn dir(&self) -> &Path;               // the data directory
     pub fn metrics(&self) -> &Metrics;        // .sockets(), .subscriptions(), .shared_queries(): open WebSockets, live
                                               // (socket, queryId) subscriptions, distinct shared queries
-    pub fn subscription_stats(&self) -> SubscriptionStats; // ferrix::sync::subscriptions: { connections, shared_queries,
+    pub fn subscription_stats(&self) -> SubscriptionStats; // rxferrix::sync::subscriptions: { connections, shared_queries,
                                               // subscriptions, index_ranges, rounds, reruns, last_round_reruns }
     pub fn subscriptions(&self) -> &SubscriptionManager;   // the shared subscription manager (started on first use)
     pub fn started_at(&self) -> f64;          // ms since the epoch
@@ -547,21 +547,21 @@ pub struct TimePoint {                     // only buckets with executions
 ### 1.5 Auth configuration and services
 
 ```rust
-use ferrix::auth::{Apple, AuthConfig, Discord, GitHub, Google, Oidc, SmtpConfig};
-fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new()
+use rxferrix::auth::{Apple, AuthConfig, Discord, GitHub, Google, Oidc, SmtpConfig};
+fn main() -> rxferrix::Result<()> {
+    rxferrix::RxFerrix::new()
         .auth(AuthConfig::password()                // email + password (verification and reset included)
             .magic_link()                           // magic link + 6-digit code by email
-            .oauth(GitHub::from_env())              // FERRIX_AUTH_GITHUB_CLIENT_ID / _SECRET (skipped with a warning if unset)
-            .oauth(Google::from_env())              // FERRIX_AUTH_GOOGLE_CLIENT_ID / _SECRET
-            .oauth(Discord::from_env())             // FERRIX_AUTH_DISCORD_CLIENT_ID / _SECRET
-            .oauth(Apple::from_env())               // FERRIX_AUTH_APPLE_{CLIENT_ID,TEAM_ID,KEY_ID,PRIVATE_KEY[_FILE]}
+            .oauth(GitHub::from_env())              // RXFERRIX_AUTH_GITHUB_CLIENT_ID / _SECRET (skipped with a warning if unset)
+            .oauth(Google::from_env())              // RXFERRIX_AUTH_GOOGLE_CLIENT_ID / _SECRET
+            .oauth(Discord::from_env())             // RXFERRIX_AUTH_DISCORD_CLIENT_ID / _SECRET
+            .oauth(Apple::from_env())               // RXFERRIX_AUTH_APPLE_{CLIENT_ID,TEAM_ID,KEY_ID,PRIVATE_KEY[_FILE]}
             .oauth(Oidc::new("corp", "https://idp.example.com", "client-id", "secret"))   // discovery
             .redirect_url("https://app.example.com")) // allowlist for OAuth redirects and email links
         .run()
 }
 ```
-OAuth presets (`ferrix::auth`): `GitHub`, `Google`, `Discord::new(client_id, secret)` (`identify email`; the
+OAuth presets (`rxferrix::auth`): `GitHub`, `Google`, `Discord::new(client_id, secret)` (`identify email`; the
 `/users/@me` profile; the email is kept only when Discord marks it `verified`), `Apple::new(services_id, team_id,
 key_id, p8_pem)` and `Oidc::new(id, issuer, client_id, secret)`; each is an `OAuthProvider` (`.id(..)`,
 `.scopes(..)`, and `.base_url(..)` to point Discord or Apple at a mock or proxy). Sign in with Apple: the client
@@ -582,8 +582,8 @@ command line or in `_settings`; never used outside `--dev`; it can forward to `D
 log lines), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
 `impersonation(bool)` (`POST /api/admin/impersonate`, default true).
-CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
-`FERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`FERRIX_SMTP_URL`, `FERRIX_SMTP_FROM`),
+CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
+`RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted).
 
@@ -598,11 +598,11 @@ credential when given; no auth method needs to be enabled and no email is sent; 
 set, so a test can check which commits invalidate it: `run.read_set.overlaps(&commit)`, with the commit from
 `app.db().write_log().entries_between(ts - 1, ts)` and `ts` from `TestApp::mutation_ts`.
 
-**External JWTs** (`ferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
-HTTP Bearer tokens, alongside ferrix's own:
+**External JWTs** (`rxferrix::auth::jwt`). Tokens of another identity provider are accepted on `Authenticate` and as
+HTTP Bearer tokens, alongside rxferrix's own:
 
 ```rust
-use ferrix::auth::{AuthConfig, JwtProvider, JwtAlgorithm};
+use rxferrix::auth::{AuthConfig, JwtProvider, JwtAlgorithm};
 AuthConfig::default()
     .jwt(JwtProvider::new("https://clerk.example.com").any_audience())                // JWKS by OIDC discovery
     .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com"))
@@ -612,7 +612,7 @@ AuthConfig::default()
 // algorithms([JwtAlgorithm::Rs256, Es256, EdDsa]), jwks_refetch_interval(30s), jwks_cache_ttl(1h).
 ```
 
-- Routing: a header `alg` of `HS256` means a ferrix token; anything else is looked up by its `iss` (exact match). An
+- Routing: a header `alg` of `HS256` means a rxferrix token; anything else is looked up by its `iss` (exact match). An
   unknown issuer is refused without network traffic. HMAC and `none` are never accepted for external tokens, and the
   `alg` must match the key's type and curve (and the JWK's own `alg`, if any).
 - Keys: the issuer's JWKS, cached for an hour; an unknown `kid` refetches it (key rotation), at most once per
@@ -629,7 +629,7 @@ AuthConfig::default()
   no session id; the connection's identity ends at the token's `exp` (plus leeway), or as soon as the user is
   deleted. Deleting a user doesn't block the subject: its next token provisions a new user (block it at the issuer).
 
-**Live revocation** (`ferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
+**Live revocation** (`rxferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
 log stream) authenticate with `authenticate_watched`, which registers the token's session id (or, for external
 tokens, the user id) in the app's `Revocations` registry *before* checking that it exists, and returns a
 `SessionWatch` whose `ended()` future resolves when the document is deleted. One watcher task per app follows the
@@ -639,7 +639,7 @@ fires the watches of deleted ones. So every way a session ends is covered (sign-
 deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
 guarantee 10).
 
-**Runtime settings and precedence** (`ferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
+**Runtime settings and precedence** (`rxferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
 the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
 encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
 wins, field by field: an explicit `signups(..)`, `access_token_ttl(..)` or `session_ttl(..)` call; a non-empty
@@ -647,7 +647,7 @@ redirect list (`redirect_url`, `--auth-redirect-url`); any `smtp(..)` / `--smtp-
 provider id, an OAuth provider with credentials (settings may add providers with other ids). Everything else is taken
 from `_settings` when set there, else the defaults apply. CORS origins exist only as a setting (default: any origin).
 
-**System tables** (all defined with `#[table]` in `ferrix::auth::tables`): `_users` (`User`), `_credentials`
+**System tables** (all defined with `#[table]` in `rxferrix::auth::tables`): `_users` (`User`), `_credentials`
 (argon2id password hash per user), `_accounts` (provider + provider account id; for external JWTs the provider is
 the issuer URL), `_sessions` (user or admin, keyed hash of the current refresh token, sliding `expires_at`, user
 agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on impersonation sessions, whose expiry is
@@ -658,14 +658,14 @@ reads and writes them directly through `QueryDb` / `MutationDb` (not through reg
 appear in function args or the execution log.
 
 **System functions**: `_system/auth:me` (query: the signed-in `Doc<User>` or null) and `_system/auth:update_profile`
-(mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@ferrix/client` exports hand-written references
+(mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@rxferrix/client` exports hand-written references
 as `systemApi.auth.me` / `systemApi.auth.updateProfile`. The admin-only dashboard functions are listed in §4.1;
-`FerrixAuth.setupAdmin({ token, email, password })` completes the printed setup link.
+`RxFerrixAuth.setupAdmin({ token, email, password })` completes the printed setup link.
 
 ### 1.6 File storage
 
 ```rust
-use ferrix::storage::{StorageConfig, StoredFile};
+use rxferrix::storage::{StorageConfig, StoredFile};
 
 #[mutation]
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> { ctx.storage.generate_upload_url().await }
@@ -683,12 +683,12 @@ pub async fn private_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<
     ctx.storage.get_signed_url(file, Duration::from_secs(3600)).await
 }
 
-fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new().storage(StorageConfig::s3("my-bucket", "uploads").max_upload_size(20 << 20).private(true)).run()
+fn main() -> rxferrix::Result<()> {
+    rxferrix::RxFerrix::new().storage(StorageConfig::s3("my-bucket", "uploads").max_upload_size(20 << 20).private(true)).run()
 }
 ```
 
-**The `_storage` table** (`ferrix::storage::StoredFile`, defined with `#[table]`; TS `Id<"_storage">`, declared in
+**The `_storage` table** (`rxferrix::storage::StoredFile`, defined with `#[table]`; TS `Id<"_storage">`, declared in
 `SystemDataModel` so app tables may reference it):
 ```rust
 #[table(name = "_storage")]
@@ -729,7 +729,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
 - **URLs.** `get_url` returns `<public url>/api/storage/<id>`. The base is `StorageConfig::public_url`, else the auth
   public URL (`--public-url`, which `serve` defaults to `http://<--http address>`), else nothing (a root-relative
   `/api/storage/<id>`, e.g. in `TestApp`). **In `--dev`**, unless a public URL is set explicitly (`--public-url` /
-  `FERRIX_PUBLIC_URL`, `AuthConfig::public_url`, a TLS domain, or `StorageConfig::public_url`), file, signed and
+  `RXFERRIX_PUBLIC_URL`, `AuthConfig::public_url`, a TLS domain, or `StorageConfig::public_url`), file, signed and
   upload URLs are root-relative, so an app served by a dev server that proxies `/api` (Vite) loads and uploads files
   through it, same-origin. (`StorageConfig::public_url("")` asks for root-relative URLs explicitly.) The id carries 96 random bits, so the URL is an **unguessable capability
   URL**: whoever has it can read the file, nobody can enumerate files. It never changes, which keeps
@@ -750,20 +750,20 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   expires: pick a `ttl` longer than the result will be shown, or fetch fresh URLs from a mutation or action.
 - **Direct download URLs** (`get_download_url(id, ttl)`, `get_download_url_with(.., DownloadOptions)`): with the S3
   backend (or a custom store with `StorageConfig::signer(Arc<dyn object_store::signer::Signer>)`), a **presigned
-  SigV4 URL to the bucket** (`<endpoint>/<bucket>/<prefix>/<id>?X-Amz-…`), so the bytes don't go through ferrix and
+  SigV4 URL to the bucket** (`<endpoint>/<bucket>/<prefix>/<id>?X-Amz-…`), so the bytes don't go through rxferrix and
   the bucket stays private. It carries signed `response-content-type` (the file's), `response-content-disposition`
-  (`inline` for the types ferrix serves inline, else `attachment`; always `attachment` with `.attachment()`; with
+  (`inline` for the types rxferrix serves inline, else `attachment`; always `attachment` with `.attachment()`; with
   the file name) and `response-cache-control` (`private, max-age=<lifetime>`). S3 can't add `nosniff` or the CSP
-  ferrix sends; unsafe types are attachments, on the bucket's origin, not the app's. `ttl` is 1 s to
+  rxferrix sends; unsafe types are attachments, on the bucket's origin, not the app's. `ttl` is 1 s to
   `max_signed_url_ttl`, and at most 7 days (S3's limit, `MAX_DIRECT_URL_TTL`), else `invalid_ttl`; lifetime exactly `ttl` in mutations and actions, `ttl` to
   `2·ttl` (at most 7 days) in queries, where the URL also changes with every run (it embeds the signing time).
-  `?thumb=` can't be appended (the signature covers the whole URL): thumbnails use signed URLs of ferrix. Once the
+  `?thumb=` can't be appended (the signature covers the whole URL): thumbnails use signed URLs of rxferrix. Once the
   file is deleted its blob goes after the commit and the URL fails (404), except with `keep_deleted`, where the blob
   (and so an earlier URL) lasts until the sweep or the URL's expiry. Temporary credentials (STS, instance roles) end
   a URL early when they expire. **Without a presigning backend** (local storage) `get_download_url` is
   `get_signed_url` (plus `&download=1` with `.attachment()`), so the same code works in development.
   `StorageService::presigns_downloads()` tells which.
-- **Private mode** (`StorageConfig::private(true)`, `--storage-private` / `FERRIX_STORAGE_PRIVATE`): `GET
+- **Private mode** (`StorageConfig::private(true)`, `--storage-private` / `RXFERRIX_STORAGE_PRIVATE`): `GET
   /api/storage/<id>` without `exp`/`sig` is 403 `signature_required` (for unknown ids too), so only signed URLs
   work; `get_url` fails with `storage_private`. The dashboard's file list returns signed URLs (an hour, bucketed).
 - **Single use.** A token's nonce is recorded (raw table `_storage_used_upload_tokens` in `data.db`, kept until the
@@ -799,7 +799,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   ```rust
   pub struct StorageConfig {
       pub backend: StorageBackend,              // Local(Option<PathBuf>) | S3 { bucket, prefix } | Custom { store: Arc<dyn ObjectStore>, prefix }
-      pub max_upload_size: u64,                 // 100 MiB; `--max-upload-size 100MB` (FERRIX_MAX_UPLOAD_SIZE)
+      pub max_upload_size: u64,                 // 100 MiB; `--max-upload-size 100MB` (RXFERRIX_MAX_UPLOAD_SIZE)
       pub upload_url_ttl: Duration,             // 1 h
       pub cache_max_age: Duration,              // 30 days (Cache-Control of served files)
       pub public_url: Option<String>,           // see URLs
@@ -818,10 +818,10 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder
   // setters (`.private(true)`, `.thumbnail_sizes(&[(64, 64), (256, 256)])`, ...).
   ```
-  `--storage <location>` (`FERRIX_STORAGE`): a directory, `file:///dir`, or `s3://bucket[/prefix]`. S3 (feature `s3`,
+  `--storage <location>` (`RXFERRIX_STORAGE`): a directory, `file:///dir`, or `s3://bucket[/prefix]`. S3 (feature `s3`,
   default) reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` /
   `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (R2, MinIO), `AWS_ALLOW_HTTP`, ... (`object_store`'s `from_env`).
-  `ferrix::storage::object_store` re-exports the crate, e.g. `object_store::memory::InMemory` for tests. Configure an
+  `rxferrix::storage::object_store` re-exports the crate, e.g. `object_store::memory::InMemory` for tests. Configure an
   abort-incomplete-multipart-uploads lifecycle rule on S3 buckets.
 - `App::storage() -> &Arc<StorageService>`: `object_store()`, `blob_path(id)`, `thumbnail_path(id, variant)`,
   `file_url(id)`, `signed_url(id, expires_s)`, `config()`, `sweep(&app)`.
@@ -829,7 +829,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
 
 ```rust
 use std::time::Duration;
-use ferrix::scheduler::ScheduledJob;   // the `_scheduled_jobs` table type
+use rxferrix::scheduler::ScheduledJob;   // the `_scheduled_jobs` table type
 
 #[mutation]
 pub async fn send(ctx: &MutationCtx, body: String) -> Result<Id<ScheduledJob>> {
@@ -848,8 +848,8 @@ pub async fn import(ctx: &ActionCtx, pages: u32) -> Result<u32> {
     Ok(pages)
 }
 
-fn main() -> ferrix::Result<()> {
-    ferrix::Ferrix::new()
+fn main() -> rxferrix::Result<()> {
+    rxferrix::RxFerrix::new()
         .cron::<cleanup>("cleanup", "0 0 3 * * *", ())                       // 6 fields with seconds, UTC
         .cron_tz::<report>("report", "0 0 9 * * Mon-Fri", "Europe/Bucharest", ())   // local time, DST-aware
         .interval::<sync_feeds>("sync-feeds", Duration::from_secs(300), ())
@@ -921,8 +921,8 @@ error `ActionAborted` ("canceled: the action was aborted 5s after its job was ca
 - **Waking:** the background loop sleeps until the next job or cron is due (at most 60s) and wakes as soon as a commit
   in the write log touches `_scheduled_jobs`.
 
-**Crons.** `Ferrix::cron::<F>(name, expr, args)` / `Ferrix::cron_tz::<F>(name, expr, tz, args)` /
-`Ferrix::interval::<F>(name, every, args)` (or the same methods on `SchedulerOptions`; `CronSpec::cron` /
+**Crons.** `RxFerrix::cron::<F>(name, expr, args)` / `RxFerrix::cron_tz::<F>(name, expr, tz, args)` /
+`RxFerrix::interval::<F>(name, every, args)` (or the same methods on `SchedulerOptions`; `CronSpec::cron` /
 `CronSpec::cron_tz` / `CronSpec::interval`, and `CronSpec::timezone(tz)`). Expressions have 6 fields with seconds
 (`sec min hour day-of-month month day-of-week`, an optional 7th is the year; `cron` crate syntax), evaluated in UTC or
 in the given IANA zone (`chrono-tz`); an interval runs first `every` after it is first declared (or changed), then
@@ -934,7 +934,7 @@ with `_` (reserved for system crons), a zero interval, or args that don't serial
   one in a **fall-back fold** runs once, at its first occurrence, except for expressions whose hour field is `*`,
   which also run in the repeated hour (they follow elapsed time). `_crons.timezone` holds the zone (`null` for UTC;
   `"UTC"` is normalized to `null`).
-- **System crons** are declared by ferrix itself, named with a leading `_`: today `_storage_sweep` (§1.6). They are
+- **System crons** are declared by rxferrix itself, named with a leading `_`: today `_storage_sweep` (§1.6). They are
   ordinary `_crons` rows and jobs (origin `cron:_storage_sweep`); the dashboard's `crons` lists them last with
   `system: true`. Their row is inserted by the startup reconcile, so a fresh app has already committed once
   before any function runs; don't assume a new `TestApp` starts at ts 0 (`app.db().write_log().latest()` is the
@@ -956,17 +956,17 @@ after they finished, by a built-in cleanup that runs at startup and every `clean
 
 ```rust
 #[derive(Debug, Clone)]
-pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::scheduler(opts) keeps declared crons and workpools
+pub struct SchedulerOptions {          // AppOptions::scheduler; RxFerrix::scheduler(opts) keeps declared crons and workpools
     pub concurrency: usize,            // 10
     pub retention: Option<Duration>,   // Some(7 days)
     pub cleanup_interval: Duration,    // 1 hour
     pub retry_backoff: Duration,       // 1 second
     pub cancel_grace: Duration,        // 5 seconds: a canceled action is aborted this long after the cancel
     pub crons: Vec<CronSpec>,
-    pub pools: Vec<Workpool>,          // Ferrix::workpool(..) / SchedulerOptions::workpool(..)
+    pub pools: Vec<Workpool>,          // RxFerrix::workpool(..) / SchedulerOptions::workpool(..)
 }
 impl App {
-    pub async fn start_scheduler(&self) -> Result<()>;      // `ferrix serve` calls it; idempotent
+    pub async fn start_scheduler(&self) -> Result<()>;      // `rxferrix serve` calls it; idempotent
     pub async fn run_due_jobs(&self) -> Result<usize>;      // run what is due now, until nothing is (tests)
     pub async fn cleanup_scheduled_jobs(&self) -> Result<usize>;
 }
@@ -982,7 +982,7 @@ restart; `t.start_scheduler()` runs the background loop (e.g. for tests over a s
 how many of its actions run at once, with defaults for their retries:
 
 ```rust
-ferrix::Ferrix::new()
+rxferrix::RxFerrix::new()
     .workpool(Workpool::new("emails").max_parallelism(5).retries(3).backoff(Duration::from_millis(250), 2.0))
 
 #[mutation]
@@ -1220,7 +1220,7 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
     each other (the last term is a prefix of the stem). `language` is only accepted with `porter` (only
     `"english"`, the default; FTS5's stemmer is English-only) and `snowball`.
   - `"snowball"` with `language = "…"` (required; one of `Tokenizer::SNOWBALL_LANGUAGES`): the custom FTS5 tokenizer
-    `ferrix_snowball <language> remove_diacritics <0|2>` (`db::search::stem`), wrapping `unicode61`: words are split
+    `rxferrix_snowball <language> remove_diacritics <0|2>` (`db::search::stem`), wrapping `unicode61`: words are split
     and case-folded exactly as by `unicode61`, then reduced to their stem by the language's Snowball stemmer
     (`rust-stemmers`), so inflected forms match each other (Romanian "orașul" / "orașelor", French "chanter" /
     "chantait", German "Haus" / "Häusern"); the last term is a prefix of the stem, as with `porter`. Stemming sees
@@ -1230,7 +1230,7 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
     word's stem is added as a colocated synonym (in documents and in queries), so a word typed without accents still
     finds the accented forms. Synonyms don't change relevance: they add no occurrences and no length. With `"keep"`
     accents distinguish terms. The tokenizer is registered on every SQLite connection (by the same auto extension as
-    `ferrix_score`): the writer, the read-only readers, and those opened by the HNSW thread, backups and exports.
+    `rxferrix_score`): the writer, the read-only readers, and those opened by the HNSW thread, backups and exports.
   - `"trigram"`: FTS5 `trigram`: substring search; each term matches anywhere inside a word ("ell" finds "hello"),
     the last term is not a prefix (substrings cover it), and terms shorter than 3 characters are ignored (FTS5
     can't match them), so text whose terms are all shorter matches nothing. Case-insensitive.
@@ -1381,7 +1381,7 @@ graph's catch-up; it can only make a query rerun more often.
 ### 1.9 Migrations
 
 ```rust
-use ferrix::prelude::*;          // migration, DocChange
+use rxferrix::prelude::*;          // migration, DocChange
 use serde_json::Value;
 
 /// Old todos have no priority. Untyped: the document is the stored JSON (system fields included), so it works
@@ -1435,7 +1435,7 @@ pub struct MigrationReport {   // camelCase JSON
                                         // migrating table (on "failed" the table stays migrating)
     pub examples: Vec<ChangeExample>,   // dry runs: up to 5 { id, before, after (null = deleted) }
 }
-// ferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
+// rxferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
 // of `A-Za-z0-9_-.:/`, batch sizes, `after` names that exist, no cycle, no duplicate); App::open also fails if a
 // migration's table is not defined in code. Migrations::iter() is in run order; Migrations::dependencies(name).
 ```
@@ -1447,12 +1447,12 @@ pub struct MigrationReport {   // camelCase JSON
   `name = "..."` or the default function path). The dependencies form a DAG, checked at startup: an unknown name, a
   cycle (a migration after itself included) or a name listed twice is an error naming the migrations involved.
   Migrations run in a **topological order with name order as the tie-break** (Kahn's algorithm, taking the smallest
-  name among the migrations whose dependencies are ordered; without `after` it is plain name order): `ferrix migrate`,
+  name among the migrations whose dependencies are ordered; without `after` it is plain name order): `rxferrix migrate`,
   `serve --migrate`, `run_pending_migrations` and `run` without a name, stopping at the first that fails, is
   canceled, or is `blocked` (a dependency not done, e.g. running in another process). Running **one** migration
   whose dependencies aren't all `done` is refused before anything is written, with the user error
   `dependencies_not_done` ("Migration `x` runs after `a` (pending), …"), unless forced (`RunOptions::force`,
-  `ferrix migrate --name x --force`, `force` in `_system/migrations:run`); the check is in the `start` transaction.
+  `rxferrix migrate --name x --force`, `force` in `_system/migrations:run`); the check is in the `start` transaction.
   Dry runs are never refused (they write nothing, and see the data without the changes of dependencies that haven't
   run).
 - **Batches.** A run first marks the migration `running` (creating its `_migrations` row). Each batch is one mutation
@@ -1498,12 +1498,12 @@ pub struct MigrationReport {   // camelCase JSON
   Index ranges, search filters and aggregates use the stored values until the migration rewrote a document; a query
   that reads the transformed result depends on the document, so it reruns (with the same result) when the migration
   rewrites it.
-- **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--force --name NAME] [--dir DIR]`
+- **Running.** `rxferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--force --name NAME] [--dir DIR]`
   runs every migration that isn't done (or one) and prints a report per migration (exit code 1 if one failed or was
-  blocked); `ferrix migrate status` lists them in run order with their state, progress and dependencies. Both refuse
+  blocked); `rxferrix migrate status` lists them in run order with their state, progress and dependencies. Both refuse
   while a server holds the data directory (its lock; opening the app writes, and a running server would not see the
   writes in its subscriptions): stop the server first. For a running server use the dashboard functions
-  (§4.1.3) or start it with `serve --migrate` (`FERRIX_MIGRATE`), which runs pending migrations in the background
+  (§4.1.3) or start it with `serve --migrate` (`RXFERRIX_MIGRATE`), which runs pending migrations in the background
   after startup. Without `--migrate`, `serve` logs a warning listing the migrations that aren't done.
 
 ---
@@ -1534,7 +1534,7 @@ pub struct MigrationReport {   // camelCase JSON
   commit is still committed (its idempotency record too, so a retry replays its response), and a duplicate request
   waits for the original's commit before replaying. A mutation that recently took over 0.5 ms (tracked per path)
   commits the open group before it starts, so fast mutations are not held back by a slow one queued behind them;
-  the slow one still blocks every write while it runs (`ferrix::db` module docs, `MAX_BATCH`, `MAX_BATCH_AGE`,
+  the slow one still blocks every write while it runs (`rxferrix::db` module docs, `MAX_BATCH`, `MAX_BATCH_AGE`,
   `SLOW_WRITE`).
 - **Query cache.** A query's result is reused, not recomputed, while nothing it read has changed: by every subscriber
   of the same query (always), by the next subscriber after the last one left, and by HTTP queries and
@@ -1576,7 +1576,7 @@ pub async fn stats_by_day(ctx: &ActionCtx, since: f64) -> Result<Vec<DayStats>> 
     ).await
 }
 
-impl ActionCtx { pub olap: ferrix::olap::Olap }
+impl ActionCtx { pub olap: rxferrix::olap::Olap }
 impl Olap {
     pub async fn query(&self, sql: &str, params: impl OlapParams) -> Result<OlapResult>;
     pub async fn query_as<T: DeserializeOwned>(&self, sql: &str, params: impl OlapParams) -> Result<Vec<T>>;
@@ -1592,7 +1592,7 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
 - **Actions only**, not queries or mutations: the copy lags the data (a few hundred milliseconds) and is not
   reactive. `as_of_ts`: the copy reflects every commit up to it and none after (a query sees whole commits). After
   `ctx.run_mutation`, `ctx.olap.latest()` (or `at_least(ts)` with a known commit ts) reads its writes.
-- **Tables** are named like ferrix's: every user table, and the system tables `_users`, `_accounts`, `_storage`,
+- **Tables** are named like rxferrix's: every user table, and the system tables `_users`, `_accounts`, `_storage`,
   `_scheduled_jobs`, `_crons`, `_workflows`, `_workflow_steps`, `_migrations`. The others hold secrets (password and
   token hashes, settings) or admin-only history (`_audit_log`) and are never copied. Columns: `_id` VARCHAR,
   `_creationTime` DOUBLE (ms), `_ts` BIGINT (the document's commit ts), then the fields in declaration order, typed
@@ -1623,7 +1623,7 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
   when more than `max_lag_bytes` (512 MiB) of journal wait to be applied, or alone when its shape changed (a
   fingerprint per table). Queries during a rebuild fail with `olap_unavailable`. The copy is derived data: backups
   and replication skip it; deleting the file rebuilds it.
-- **Options** (`AppOptions::olap: OlapOptions`; flags): `enabled` (`--olap`, `FERRIX_OLAP`), `memory_limit`
+- **Options** (`AppOptions::olap: OlapOptions`; flags): `enabled` (`--olap`, `RXFERRIX_OLAP`), `memory_limit`
   (`--olap-memory 2GB`; default DuckDB's, 80% of RAM), `threads` (`--olap-threads`), `query_timeout`
   (`--olap-timeout 30s`), `max_lag_bytes` (`--olap-max-lag 512MB`), `max_concurrent_queries`, `max_result_rows`,
   `max_export_rows` (10M), `export_timeout` (5 min), `apply_every`, `background` (off: tests drive it with
@@ -1634,7 +1634,7 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
   `detail`, `appliedTs`, `appliedTime`, `latestTs`, `lagMs`, tables with row counts and columns, `sizeBytes`, `rowsApplied`,
   `rebuilds`), `POST /api/admin/olap/rebuild` (202; rebuilds every table in the background; audited),
   `POST /api/admin/olap/query` (SQL as an administrator, JSON or a CSV / Parquet download; audited), the
-  `ferrix_olap_*` metrics (§4.2, `GET /metrics`), `olap` in `/api/admin/stats`, the dashboard Overview and its Analytics page, and
+  `rxferrix_olap_*` metrics (§4.2, `GET /metrics`), `olap` in `/api/admin/stats`, the dashboard Overview and its Analytics page, and
   each table's analytics columns in `_system/dashboard:tables` (`analytics`, `columns: [{ name, sqlType }]`).
 - **Tests**: `TestApp::with_options(AppOptions { olap: OlapOptions { enabled: true, background: false, .. }, .. })`
   and `t.olap_sync().await?` before querying.
@@ -1704,7 +1704,7 @@ pub enum AggregateSum { Int(i64), Float(f64) }
 ### 1.13 Environment variables
 
 Named string values set at run time by an administrator (the dashboard's Environment page, `_system/env:set`) or
-offline from the command line, read by functions through `ctx.env` (`ferrix::env::Env`):
+offline from the command line, read by functions through `ctx.env` (`rxferrix::env::Env`):
 
 ```rust
 impl Env {
@@ -1727,13 +1727,13 @@ impl Env {
   `_system/env:put`, so the write is audited (with no administrator) like a dashboard edit.
 - `std::env::var` is unaffected: process environment variables are fixed at startup and not tracked.
 
-## 2. `::ferrix::__private` items (used ONLY by macro output)
+## 2. `::rxferrix::__private` items (used ONLY by macro output)
 
 ```rust
-pub use ::linkme;           // macro output uses #[linkme(crate = ::ferrix::__private::linkme)]
-pub use ::serde;            // #[serde(crate = "::ferrix::__private::serde")]
+pub use ::linkme;           // macro output uses #[linkme(crate = ::rxferrix::__private::linkme)]
+pub use ::serde;            // #[serde(crate = "::rxferrix::__private::serde")]
 pub use ::serde_json;
-pub use ::ts_rs;            // #[ts(crate = "::ferrix::__private::ts_rs")]
+pub use ::ts_rs;            // #[ts(crate = "::rxferrix::__private::ts_rs")]
 pub use ::futures::future::BoxFuture;
 
 #[linkme::distributed_slice] pub static TABLES: [fn() -> TableDef];
@@ -1759,7 +1759,7 @@ pub struct FunctionDef {
 
 /// "todo_server::todos" + "list" → "todos:list"; "todo_server" + "list" → "list"; "a::b::c" + "f" → "b/c:f".
 pub fn function_path(module_path: &str, name: &str) -> String;
-/// True for paths of ferrix's own functions (first segment `_system`, §4).
+/// True for paths of rxferrix's own functions (first segment `_system`, §4).
 pub fn is_system_path(path: &str) -> bool;
 
 /// Deserialize args; on failure returns an error whose message starts with "Invalid args for <name>: ".
@@ -1814,52 +1814,52 @@ pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<Strin
 ```
 Output (the `#[index]` attributes are consumed; any other user attributes and doc comments are kept):
 ```rust
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize,
-         ::ferrix::__private::ts_rs::TS, ::core::clone::Clone, ::core::fmt::Debug)]
-#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
-#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase")]
+#[derive(::rxferrix::__private::serde::Serialize, ::rxferrix::__private::serde::Deserialize,
+         ::rxferrix::__private::ts_rs::TS, ::core::clone::Clone, ::core::fmt::Debug)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
 pub struct Todo { pub text: String, pub done: bool, pub created_by: Option<String> }
 
-impl ::ferrix::Table for Todo {
+impl ::rxferrix::Table for Todo {
     const NAME: &'static str = "todos";
-    fn table_def() -> ::ferrix::TableDef {
-        ::ferrix::TableDef { name: "todos", indexes: vec![
-            ::ferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
-        ], ts: || ::ferrix::__private::ts_inline::<Todo>(),
-        validate: ::ferrix::__private::validate_doc::<Todo>,
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef { name: "todos", indexes: vec![
+            ::rxferrix::IndexDef { name: "by_done", fields: vec!["done", "createdBy"] },
+        ], ts: || ::rxferrix::__private::ts_inline::<Todo>(),
+        validate: ::rxferrix::__private::validate_doc::<Todo>,
         shape: || {
-            let mut s = ::ferrix::shape::StructShape::default();
+            let mut s = ::rxferrix::shape::StructShape::default();
             s.field("text", SHAPE_OF!(String));          // see "Shapes" below
             s.field("done", SHAPE_OF!(bool));
             s.field("createdBy", SHAPE_OF!(Option<String>));
-            ::ferrix::shape::Shape::Struct(s)
+            ::rxferrix::shape::Shape::Struct(s)
         } }
     }
 }
 
 #[allow(non_upper_case_globals)]
 impl Todo {
-    pub const text: ::ferrix::Field<Todo, String> = ::ferrix::Field::new("text");
-    pub const done: ::ferrix::Field<Todo, bool> = ::ferrix::Field::new("done");
-    pub const created_by: ::ferrix::Field<Todo, Option<String>> = ::ferrix::Field::new("createdBy");
-    pub const _id: ::ferrix::Field<Todo, ::ferrix::Id<Todo>> = ::ferrix::Field::new("_id");
-    pub const _creation_time: ::ferrix::Field<Todo, f64> = ::ferrix::Field::new("_creationTime");
-    pub const by_done: ::ferrix::Index<Todo> = ::ferrix::Index::new("by_done");
-    pub const by_creation_time: ::ferrix::Index<Todo> = ::ferrix::Index::new("by_creation_time");
+    pub const text: ::rxferrix::Field<Todo, String> = ::rxferrix::Field::new("text");
+    pub const done: ::rxferrix::Field<Todo, bool> = ::rxferrix::Field::new("done");
+    pub const created_by: ::rxferrix::Field<Todo, Option<String>> = ::rxferrix::Field::new("createdBy");
+    pub const _id: ::rxferrix::Field<Todo, ::rxferrix::Id<Todo>> = ::rxferrix::Field::new("_id");
+    pub const _creation_time: ::rxferrix::Field<Todo, f64> = ::rxferrix::Field::new("_creationTime");
+    pub const by_done: ::rxferrix::Index<Todo> = ::rxferrix::Index::new("by_done");
+    pub const by_creation_time: ::rxferrix::Index<Todo> = ::rxferrix::Index::new("by_creation_time");
 }
 
-#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::TABLES)]
-#[linkme(crate = ::ferrix::__private::linkme)]
-static __FERRIX_TABLE_Todo: fn() -> ::ferrix::TableDef = <Todo as ::ferrix::Table>::table_def;
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+static __RXFERRIX_TABLE_Todo: fn() -> ::rxferrix::TableDef = <Todo as ::rxferrix::Table>::table_def;
 ```
 Compile errors (with spans) for: tuple or unit structs, enums, generics, an index naming an unknown field, a duplicate
 index name, an index named `by_id` or `by_creation_time`, and an existing `#[serde(rename_all)]` other than camelCase.
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
 
 **Shapes.** `SHAPE_OF!(T)` above stands for the block
-`{ use ::ferrix::shape::{ProbeFallback as _, ProbeHasShape as _}; #[allow(clippy::needless_borrow)] let shape =
-(&&::ferrix::shape::ShapeProbe::<T>::new()).probe_shape(); shape }`: `T`'s `HasShape::shape()` when `T` implements
-`ferrix::shape::HasShape`, else `Shape::Json` (autoref specialization), so a field of a type without one still
+`{ use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _}; #[allow(clippy::needless_borrow)] let shape =
+(&&::rxferrix::shape::ShapeProbe::<T>::new()).probe_shape(); shape }`: `T`'s `HasShape::shape()` when `T` implements
+`rxferrix::shape::HasShape`, else `Shape::Json` (autoref specialization), so a field of a type without one still
 compiles. Field names follow serde: the struct's `rename_all` (camelCase for tables), `rename = "x"`; `skip` /
 `skip_serializing` fields are left out, `skip_serializing_if` ones become `optional_field` (they may be missing),
 `flatten` fields `s.flatten(SHAPE_OF!(T))` (a struct's fields join, anything else makes the shape open: `s.open()`),
@@ -1870,10 +1870,10 @@ compiles. Field names follow serde: the struct's `rename_all` (camelCase for tab
 table's), and `serde_json::Value`, maps, `i128`, `u128`, `()` (Json).
 
 **Aggregates.** `#[aggregate(name, group = [f, ...], sum = [f, ...])]` (consumed; `group` and `sum` optional, any
-order) adds `::ferrix::AggregateDef { name: "name", group_fields: vec!["f"], sum_fields: vec!["f"] }` (JSON names) to
-`aggregates` in the `TableDef` literal (`vec![]` when unused), `pub const name: ::ferrix::Aggregate<T> =
-::ferrix::Aggregate::new("name");` next to the index handles, and `const _: () =
-::ferrix::__private::assert_sum_field::<Ty>();` per sum field (numbers and `Option`s of them). Compile errors: a name
+order) adds `::rxferrix::AggregateDef { name: "name", group_fields: vec!["f"], sum_fields: vec!["f"] }` (JSON names) to
+`aggregates` in the `TableDef` literal (`vec![]` when unused), `pub const name: ::rxferrix::Aggregate<T> =
+::rxferrix::Aggregate::new("name");` next to the index handles, and `const _: () =
+::rxferrix::__private::assert_sum_field::<Ty>();` per sum field (numbers and `Option`s of them). Compile errors: a name
 taken by an index, a search or vector index, another aggregate, a field handle or a built-in; unknown, duplicate or
 system (`_id`, `_creation_time`) fields; keys other than `group` and `sum`.
 
@@ -1890,26 +1890,26 @@ pub struct Message { pub channel: String, pub body: String, pub embedding: Optio
 ```
 these items to the expansion above (the `TableDef` literal always has both fields, `vec![]` when unused):
 ```rust
-::ferrix::TableDef { name: "messages", indexes: vec![],
+::rxferrix::TableDef { name: "messages", indexes: vec![],
     search_indexes: vec![
-        ::ferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"],
-                                   tokenizer: ::ferrix::Tokenizer::unicode61() },
-        ::ferrix::SearchIndexDef { name: "search_stems", search_field: "body", filter_fields: vec![],
-                                   tokenizer: ::ferrix::Tokenizer::porter("english").keep_diacritics() }],
-    vector_indexes: vec![::ferrix::VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 1536usize,
-                                                     filter_fields: vec![], kind: ::ferrix::VectorIndexKind::Hnsw,
-                                                     hnsw: ::ferrix::HnswParams { m: 32usize, ..::ferrix::HnswParams::DEFAULT } }],
+        ::rxferrix::SearchIndexDef { name: "search_body", search_field: "body", filter_fields: vec!["channel"],
+                                   tokenizer: ::rxferrix::Tokenizer::unicode61() },
+        ::rxferrix::SearchIndexDef { name: "search_stems", search_field: "body", filter_fields: vec![],
+                                   tokenizer: ::rxferrix::Tokenizer::porter("english").keep_diacritics() }],
+    vector_indexes: vec![::rxferrix::VectorIndexDef { name: "by_embedding", vector_field: "embedding", dimensions: 1536usize,
+                                                     filter_fields: vec![], kind: ::rxferrix::VectorIndexKind::Hnsw,
+                                                     hnsw: ::rxferrix::HnswParams { m: 32usize, ..::rxferrix::HnswParams::DEFAULT } }],
     ts: …, validate: … }
 // tokenizer: unicode61() (default or "unicode61"), porter("<language>") (language defaults to "english"), trigram(),
 // snowball("<language>") (language required); `.keep_diacritics()` is appended for diacritics = "keep".
-// kind: Exact (default or "exact") or Hnsw. hnsw: ::ferrix::HnswParams::DEFAULT without parameters, the struct with
-// the given ones and `..::ferrix::HnswParams::DEFAULT` for the rest (no `..` when all three are given).
+// kind: Exact (default or "exact") or Hnsw. hnsw: ::rxferrix::HnswParams::DEFAULT without parameters, the struct with
+// the given ones and `..::rxferrix::HnswParams::DEFAULT` for the rest (no `..` when all three are given).
 // in `impl Message { … }`, after by_creation_time:
-pub const search_body: ::ferrix::SearchIndex<Message> = ::ferrix::SearchIndex::new("search_body");
-pub const by_embedding: ::ferrix::VectorIndex<Message> = ::ferrix::VectorIndex::new("by_embedding");
+pub const search_body: ::rxferrix::SearchIndex<Message> = ::rxferrix::SearchIndex::new("search_body");
+pub const by_embedding: ::rxferrix::VectorIndex<Message> = ::rxferrix::VectorIndex::new("by_embedding");
 // one check per index, spanned at the field's type (with the struct's #[cfg]s):
-const _: () = ::ferrix::__private::assert_search_field::<String>();
-const _: () = ::ferrix::__private::assert_vector_field::<Option<Vec<f32>>>();
+const _: () = ::rxferrix::__private::assert_search_field::<String>();
+const _: () = ::rxferrix::__private::assert_vector_field::<Option<Vec<f32>>>();
 ```
 Compile errors (with spans) for: a missing or unknown `search`/`field`, unknown or duplicate filter fields (or the
 searched field itself), system fields, a missing `dims` or one outside `1..=8192`, more than 16 filter fields,
@@ -1938,16 +1938,16 @@ Output:
 pub async fn list(ctx: &QueryCtx, done: Option<bool>, limit: u32) -> Result<Vec<Doc<Todo>>> { BODY }
 
 #[allow(non_camel_case_types)]
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
-#[serde(crate = "::ferrix::__private::serde", rename_all = "camelCase")]
-#[ts(crate = "::ferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
-pub struct __ferrix_args_list {
+#[derive(::rxferrix::__private::serde::Serialize, ::rxferrix::__private::serde::Deserialize, ::rxferrix::__private::ts_rs::TS)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
+pub struct __rxferrix_args_list {
     #[serde(skip_serializing_if = "::core::option::Option::is_none")]
     pub done: Option<bool>,
     pub limit: u32,
 }
 
-impl ::core::convert::From<(Option<bool>, u32,)> for __ferrix_args_list {
+impl ::core::convert::From<(Option<bool>, u32,)> for __rxferrix_args_list {
     fn from((done, limit,): (Option<bool>, u32,)) -> Self { Self { done, limit } }
 }
 
@@ -1955,48 +1955,48 @@ impl ::core::convert::From<(Option<bool>, u32,)> for __ferrix_args_list {
 #[allow(non_camel_case_types, dead_code)]
 pub struct list {}
 
-impl ::ferrix::FunctionRef for list {
-    type Args = __ferrix_args_list;
+impl ::rxferrix::FunctionRef for list {
+    type Args = __rxferrix_args_list;
     type Output = Vec<Doc<Todo>>;
-    fn path() -> String { ::ferrix::__private::function_path(module_path!(), "list") }
+    fn path() -> String { ::rxferrix::__private::function_path(module_path!(), "list") }
 }
-impl ::ferrix::QueryFunction for list {}
-// (a mutation or action also gets `impl ::ferrix::SchedulableFunction for <name> {}` here)
+impl ::rxferrix::QueryFunction for list {}
+// (a mutation or action also gets `impl ::rxferrix::SchedulableFunction for <name> {}` here)
 
-#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::FUNCTIONS)]
-#[linkme(crate = ::ferrix::__private::linkme)]
-static __FERRIX_FN_list: ::ferrix::__private::FunctionDef = ::ferrix::__private::FunctionDef {
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::FUNCTIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+static __RXFERRIX_FN_list: ::rxferrix::__private::FunctionDef = ::rxferrix::__private::FunctionDef {
     module_path: module_path!(),
     name: "list",
-    visibility: ::ferrix::__private::Visibility::Public,     // Internal for internal_*
+    visibility: ::rxferrix::__private::Visibility::Public,     // Internal for internal_*
     dev_only: false,                                         // true for #[query(dev_only)]
-    handler: ::ferrix::__private::Handler::Query(|ctx, args| ::std::boxed::Box::pin(async move {
-        let a: __ferrix_args_list = ::ferrix::__private::decode_args("list", args)?;
+    handler: ::rxferrix::__private::Handler::Query(|ctx, args| ::std::boxed::Box::pin(async move {
+        let a: __rxferrix_args_list = ::rxferrix::__private::decode_args("list", args)?;
         let out = list(&ctx, a.done, a.limit).await?;            // value namespace => the user's fn
-        ::ferrix::__private::encode_output(out)
+        ::rxferrix::__private::encode_output(out)
     })),
-    ts: || (::ferrix::__private::ts_inline::<__ferrix_args_list>(),
-            ::ferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
+    ts: || (::rxferrix::__private::ts_inline::<__rxferrix_args_list>(),
+            ::rxferrix::__private::ts_output::<Vec<Doc<Todo>>>()),
 };
 ```
 - The only attribute argument is `dev_only` (`#[query(dev_only)]`); anything else, a value (`dev_only = true`) or a
   repeat is a compile error.
-- `Output` is the `T` in `Result<T>`. The macro must handle `Result<T>`, `ferrix::Result<T>` and
+- `Output` is the `T` in `Result<T>`. The macro must handle `Result<T>`, `rxferrix::Result<T>` and
   `anyhow::Result<T>`: it takes the first generic argument of the last path segment named `Result`. Anything else is
   a compile error.
 - `optional_fields = nullable` makes `Option<T>` args optional in TS (`done?: boolean | null`); serde already treats a missing `Option` field as `None`.
 - `skip_serializing_if` on every field written as `Option<T>` (unless the param sets its own `skip_serializing*`): a
   typed call with `None` (`ctx.run_query`, the scheduler) sends the args without the field, as clients that omit it
   do, so both share one subscription and query cache entry (args are compared as canonical JSON).
-- Zero params: `pub struct __ferrix_args_list {}` and `impl From<()>`.
+- Zero params: `pub struct __rxferrix_args_list {}` and `impl From<()>`.
 - Compile errors (with spans) for: a non-async fn, a missing ctx param, a ctx type that doesn't match the macro kind
   (match on the last path segment: `QueryCtx` / `MutationCtx` / `ActionCtx`), `self` params, non-identifier
   patterns, generics, and a missing return type.
 - Mutations use `Handler::Mutation` + `impl MutationFunction`; actions use `Handler::Action` + `impl ActionFunction`.
-  Both also get `impl ::ferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
+  Both also get `impl ::rxferrix::SchedulableFunction for <name> {}` (same `#[cfg]`s), right after that impl; queries
   don't.
 - **`#[workflow]`** expands the same way (args struct, `From` tuple, reference struct, `FunctionRef`) with ctx type
-  `WorkflowCtx`, `impl ::ferrix::workflow::WorkflowFunction` instead of a function trait, no `SchedulableFunction`,
+  `WorkflowCtx`, `impl ::rxferrix::workflow::WorkflowFunction` instead of a function trait, no `SchedulableFunction`,
   and registers a `WorkflowDef { module_path, name, handler }` in `__private::WORKFLOWS` (not `FUNCTIONS`: workflows
   are started by functions, never called by clients, and aren't in codegen). It takes no arguments (`dev_only` is an
   error).
@@ -2017,31 +2017,31 @@ pub async fn add_priority(ctx: &MutationCtx, doc: serde_json::Value) -> Result<O
 /// Migration reference for [`add_priority`](fn@add_priority).
 #[allow(non_camel_case_types, dead_code)]
 pub struct add_priority {}
-impl ::ferrix::migrations::MigrationRef for add_priority {
-    fn name() -> ::std::string::String { ::ferrix::__private::MigrationDef::name(&__FERRIX_MIGRATION_add_priority) }
-    fn table() -> &'static str { __FERRIX_MIGRATION_add_priority.table }
+impl ::rxferrix::migrations::MigrationRef for add_priority {
+    fn name() -> ::std::string::String { ::rxferrix::__private::MigrationDef::name(&__RXFERRIX_MIGRATION_add_priority) }
+    fn table() -> &'static str { __RXFERRIX_MIGRATION_add_priority.table }
 }
 
-#[::ferrix::__private::linkme::distributed_slice(::ferrix::__private::MIGRATIONS)]
-#[linkme(crate = ::ferrix::__private::linkme)]
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
 #[allow(non_upper_case_globals)]
-static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::ferrix::__private::MigrationDef {
+static __RXFERRIX_MIGRATION_add_priority: ::rxferrix::__private::MigrationDef = ::rxferrix::__private::MigrationDef {
     module_path: ::core::module_path!(),
     fn_name: "add_priority",
     name: ::core::option::Option::None,                      // Some("...") with `name = "..."`
-    table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
+    table: <Todo as ::rxferrix::Table>::NAME,                  // `table = "todos"` → "todos"
     batch_size: 100usize,
     after: &[],                                              // `after = ["a", "b"]` → &["a", "b"]
     handler: {
-        fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
-            -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
+        fn __rxferrix_migrate<'a>(__rxferrix_ctx: &'a ::rxferrix::MutationCtx, __rxferrix_doc: ::rxferrix::__private::serde_json::Value)
+            -> ::rxferrix::__private::BoxFuture<'a, ::rxferrix::Result<::rxferrix::migrations::DocChange>> {
             ::std::boxed::Box::pin(async move {
-                let __ferrix_doc: serde_json::Value = ::ferrix::__private::decode_migration_doc::<serde_json::Value>(__ferrix_doc)?;
-                let __ferrix_out: Option<serde_json::Value> = add_priority(__ferrix_ctx, __ferrix_doc).await?;
-                ::ferrix::__private::migration_output(__ferrix_out)
+                let __rxferrix_doc: serde_json::Value = ::rxferrix::__private::decode_migration_doc::<serde_json::Value>(__rxferrix_doc)?;
+                let __rxferrix_out: Option<serde_json::Value> = add_priority(__rxferrix_ctx, __rxferrix_doc).await?;
+                ::rxferrix::__private::migration_output(__rxferrix_out)
             })
         }
-        __ferrix_migrate
+        __rxferrix_migrate
     },
     on_read: ::core::option::Option::None,                  // `on_read`: Some(fn) calling the (sync) fn, see below
 };
@@ -2054,7 +2054,7 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
   ...) and returns `Result<O>` (any `...::Result`) with `O: MigrationOutput`; an unsupported `O` is reported by
   `#[diagnostic::on_unimplemented]`.
 - With the flag `on_read`, the fn is a plain (not async) `fn(doc: &serde_json::Value) -> Result<O>`: the handler
-  ignores the context and calls it with `&doc`, and `on_read` is `Some(__ferrix_on_read)`, a
+  ignores the context and calls it with `&doc`, and `on_read` is `Some(__rxferrix_on_read)`, a
   `fn(&Value) -> Result<DocChange>` doing the same. Compile errors for an async fn, a context parameter, or a document
   taken by value.
 - Compile errors (with spans) for: a missing `table`, unknown or duplicate arguments, values of the wrong kind, `batch`
@@ -2079,9 +2079,9 @@ pub struct MessageView {
 ```
 Output:
 ```rust
-#[derive(::ferrix::__private::serde::Serialize, ::ferrix::__private::serde::Deserialize, ::ferrix::__private::ts_rs::TS)]
-#[serde(crate = "::ferrix::__private::serde")]
-#[ts(crate = "::ferrix::__private::ts_rs")]
+#[derive(::rxferrix::__private::serde::Serialize, ::rxferrix::__private::serde::Deserialize, ::rxferrix::__private::ts_rs::TS)]
+#[serde(crate = "::rxferrix::__private::serde")]
+#[ts(crate = "::rxferrix::__private::ts_rs")]
 #[serde(rename_all = "camelCase")]          // these two only when the item has no `rename_all` of its own
 #[ts(rename_all = "camelCase")]
 /// A message as the app shows it.
@@ -2090,13 +2090,13 @@ pub struct MessageView { #[serde(flatten)] pub message: Doc<Message>, pub author
 ```
 and, for a type without generics, its shape (§3.1 "Shapes"):
 ```rust
-impl ::ferrix::shape::HasShape for MessageView {
-    fn shape() -> ::ferrix::shape::Shape {
-        ::ferrix::shape::guard(::core::any::type_name::<Self>(), || {
-            let mut s = ::ferrix::shape::StructShape::default();
+impl ::rxferrix::shape::HasShape for MessageView {
+    fn shape() -> ::rxferrix::shape::Shape {
+        ::rxferrix::shape::guard(::core::any::type_name::<Self>(), || {
+            let mut s = ::rxferrix::shape::StructShape::default();
             s.flatten(SHAPE_OF!(Doc<Message>));
             s.field("authorName", SHAPE_OF!(String));
-            ::ferrix::shape::Shape::Struct(s)
+            ::rxferrix::shape::Shape::Struct(s)
         })
     }
 }
@@ -2119,27 +2119,27 @@ struct of several fields or a unit struct: `Shape::Json`; a newtype or `transpar
 
 ## 4. Built-in (system) tables and functions
 
-ferrix ships some tables and functions of its own (auth, dashboard, bookkeeping). They are defined **inside the
-`ferrix` crate with the same macros** (`extern crate self as ferrix;` makes `::ferrix::` paths resolve there).
+rxferrix ships some tables and functions of its own (auth, dashboard, bookkeeping). They are defined **inside the
+`rxferrix` crate with the same macros** (`extern crate self as rxferrix;` makes `::rxferrix::` paths resolve there).
 
 - **System tables** have names starting with `_` (e.g. `_users`, `_sessions`). `#[table]` rejects `_`-prefixed names
-  in any crate other than `ferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
+  in any crate other than `rxferrix`, checked via `CARGO_CRATE_NAME` at expansion time. Codegen leaves system tables out
   of `DataModel`. The few that app tables may reference (`codegen::REFERENCEABLE_SYSTEM_TABLES`: `_users`, `_storage`, `_workflows`
   and `_scheduled_jobs`, whose TS types inline their enums so no extra named types are declared)
   are declared in a separate `SystemDataModel`, and the generated `Id<T>` / `Doc<T>` accept
   `TableNames | keyof SystemDataModel`.
-- **System functions** get paths under `_system/` (`function_path` maps crate `ferrix` to `_system`), e.g.
-  `ferrix::auth::api::sign_in` → `"_system/auth/api:sign_in"`. Use `__private::is_system_path(path)` to test for
+- **System functions** get paths under `_system/` (`function_path` maps crate `rxferrix` to `_system`), e.g.
+  `rxferrix::auth::api::sign_in` → `"_system/auth/api:sign_in"`. Use `__private::is_system_path(path)` to test for
   them. Codegen leaves them out of the app's `api`. Who may call a public system function from a client (anyone, a
   signed-in user, or only an admin) is decided by the function itself (e.g. `ctx.auth.require_admin()`), not by the
   path.
 
 ### 4.1 Dashboard system functions
 
-`crates/ferrix/src/dashboard` defines the admin dashboard's backend with the same macros. Every function starts with
+`crates/rxferrix/src/dashboard` defines the admin dashboard's backend with the same macros. Every function starts with
 `ctx.auth.require_admin()`: anonymous callers get the user error `unauthenticated`, signed-in users `forbidden`. They
 are called over the normal sync protocol (or the HTTP function API), so every dashboard view is a live query.
-`@ferrix/dashboard` holds hand-written references (`packages/dashboard/src/lib/api.ts`).
+`@rxferrix/dashboard` holds hand-written references (`packages/dashboard/src/lib/api.ts`).
 
 | Path `_system/dashboard:…` | Kind | Args → result |
 |---|---|---|
@@ -2180,7 +2180,7 @@ field: `read_only_field`; `image` must be an http(s) URL). Users and sessions ar
 
 ### 4.1.1 Files page functions
 
-`crates/ferrix/src/storage/mod.rs` defines the Files page backend, admin-only like §4.1 (`unauthenticated` /
+`crates/rxferrix/src/storage/mod.rs` defines the Files page backend, admin-only like §4.1 (`unauthenticated` /
 `forbidden`). References: `storage` in `packages/dashboard/src/lib/api.ts`.
 
 | Path `_system/storage:…` | Kind | Args → result |
@@ -2194,7 +2194,7 @@ field: `read_only_field`; `image` must be an http(s) URL). Users and sessions ar
 Thumbnails for previews: `<url>?thumb=WxH&fit=cover` (or `&thumb=…` on a signed URL), see docs/PROTOCOL.md.
 ### 4.1.2 Scheduler tables and system functions
 
-Defined in `crates/ferrix/src/scheduler` with the normal macros (§1.7).
+Defined in `crates/rxferrix/src/scheduler` with the normal macros (§1.7).
 
 **`_scheduled_jobs`** (`ScheduledJob`): `{ path, kind: "mutation" | "action", args, runAt, state: "pending" |
 "inProgress" | "success" | "failed" | "canceled", attempts, maxAttempts, result: string | null (the return value as
@@ -2225,7 +2225,7 @@ dashboard's references are in `packages/dashboard/src/lib/api.ts` (`scheduler`),
 
 ### 4.1.2.1 Workflow tables and system functions
 
-Defined in `crates/ferrix/src/workflow` (§1.7.1).
+Defined in `crates/rxferrix/src/workflow` (§1.7.1).
 
 **`_workflows`** (`Workflow`): `{ name (the workflow's path), args, state: "running" | "success" | "failed" |
 "canceled", result (the return value, in full), error, steps (started so far), startedAt, completedAt, origin,
@@ -2253,7 +2253,7 @@ The dashboard's Workflows page (`/_/workflows[?state=…&id=…]`) lists them an
 
 ### 4.1.3 Migration table and system functions
 
-Defined in `crates/ferrix/src/migrations` with the normal macros (§1.9).
+Defined in `crates/rxferrix/src/migrations` with the normal macros (§1.9).
 
 **`_migrations`** (`MigrationRecord`), one row per migration that has run at least once (a declared migration without
 a row is pending): `{ name, table, state: "pending" | "running" | "done" | "failed" | "canceled", cursor: string |
@@ -2277,7 +2277,7 @@ The admin functions start with `ctx.auth.require_admin()` like §4.1.
 
 ### 4.1.4 Settings (`_settings`, `_system/settings:*`)
 
-Defined in `crates/ferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
+Defined in `crates/rxferrix/src/settings`. Admin-only (`unauthenticated` / `forbidden`). They are **actions** (they
 need the server's configuration and keys), so the dashboard calls them with `useAction` / `client.action`
 (references: `settings` in `packages/dashboard/src/lib/api.ts`; the form logic is `lib/settings.ts`).
 
@@ -2285,7 +2285,7 @@ need the server's configuration and keys), so the dashboard calls them with `use
 per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`
 (§4.4). `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
 SMTP password, or the backups' S3 secret access key), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
-from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
+from `auth_secret.key` (BLAKE3 KDF, context `rxferrix settings v1 …`), a random 192-bit nonce per write, and the row's
 key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
 A row that can't be decrypted (another `auth_secret.key`) is ignored with an error in the log: its providers are off
 until the secret is entered again.
@@ -2328,7 +2328,7 @@ field whose name contains `password`, `secret` or `token` (case-insensitive) and
 
 ### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
 
-Defined in `crates/ferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
+Defined in `crates/rxferrix/src/audit.rs`. **`_audit_log`** (`AuditEntry`): `{ admin: string | null, adminEmail,
 action, targetTable, targetId, before, after, details, at }` with indexes `by_at = [at]`, `by_admin = [admin, at]`,
 `by_action = [action, at]`, `by_table = [targetTable, at]`, `by_target = [targetId, at]`. Actions: `insert`, `patch`,
 `replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
@@ -2343,7 +2343,7 @@ the canceled `source`; or the `exitCode`), `replication_snapshot` (`details`: th
 
 Each entry is written in the same transaction as the write it describes. The table is a system table, so the
 dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
-entries older than `AuthConfig::audit_retention` (90 days) are swept at startup and hourly (`ferrix::audit::sweep`).
+entries older than `AuthConfig::audit_retention` (90 days) are swept at startup and hourly (`rxferrix::audit::sweep`).
 
 | Path | Kind | Args → result |
 |---|---|---|
@@ -2351,7 +2351,7 @@ entries older than `AuthConfig::audit_retention` (90 days) are swept at startup 
 
 ### 4.1.6 Environment variables (`_env`, `_system/env:*`)
 
-Defined in `crates/ferrix/src/env.rs` (API: §1.13). **`_env`** (`EnvVar`): `{ name, valueEncrypted, updatedAt,
+Defined in `crates/rxferrix/src/env.rs` (API: §1.13). **`_env`** (`EnvVar`): `{ name, valueEncrypted, updatedAt,
 updatedBy: string | null }`, index `by_name`. `valueEncrypted` is sealed like `_settings` secrets (§4.1.4: XChaCha20-
 Poly1305 under the settings key derived from `auth_secret.key`), with `env:<name>` as associated data. The data
 browser shows it as `"••••"`; generic writes are refused (`read_only_table`). The execution log masks the `value`
@@ -2373,7 +2373,7 @@ The execution log and server stats live outside the reactive database, so they a
 requires `Authorization: Bearer <access token>` with the `adm` claim: 401 `unauthenticated` without a token, 401
 `invalid_token` for an invalid, expired or revoked one, 403 `forbidden` for a user's token. Errors have the auth
 endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export and import endpoints are defined in
-`crates/ferrix/src/ops/http.rs` (see §4.4 for what the archives and files contain).
+`crates/rxferrix/src/ops/http.rs` (see §4.4 for what the archives and files contain).
 
 | Endpoint | Response |
 |---|---|
@@ -2387,17 +2387,17 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
 | `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
 | `POST /api/admin/olap/rebuild` | 202 `{ rebuilding: true }`: every table of the analytics copy is rebuilt from a snapshot in the background (audited `olap_rebuild`); 404 `olap_off` without `--olap`. |
-| `POST /api/admin/olap/query` | Body `{ sql, params?: Json[], format?: "json" \| "csv" \| "parquet" }`: one SELECT over the analytics copy in the sandbox of `ctx.olap` (§1.11). `json` (default): an `OlapResult` `{ columns: [{ name, typeName }], rows, asOfTs }` (at most `max_result_rows`; audited `olap_query`). `csv` / `parquet`: the whole result as a download (`query.csv`, RFC 4180 with a header, nested values as JSON; `query.parquet`, zstd, DuckDB's types nested), headers `x-ferrix-rows` and `x-ferrix-as-of-ts`, at most `max_export_rows` (10M) rows within `export_timeout` (5 min); written to a temporary file in the data directory by ferrix (DuckDB itself has no file access), streamed, then deleted (audited `olap_export`). 400 `olap_query_failed` / `olap_timeout` / `olap_unavailable`, 404 `olap_off`. |
+| `POST /api/admin/olap/query` | Body `{ sql, params?: Json[], format?: "json" \| "csv" \| "parquet" }`: one SELECT over the analytics copy in the sandbox of `ctx.olap` (§1.11). `json` (default): an `OlapResult` `{ columns: [{ name, typeName }], rows, asOfTs }` (at most `max_result_rows`; audited `olap_query`). `csv` / `parquet`: the whole result as a download (`query.csv`, RFC 4180 with a header, nested values as JSON; `query.parquet`, zstd, DuckDB's types nested), headers `x-rxferrix-rows` and `x-rxferrix-as-of-ts`, at most `max_export_rows` (10M) rows within `export_timeout` (5 min); written to a temporary file in the data directory by rxferrix (DuckDB itself has no file access), streamed, then deleted (audited `olap_export`). 400 `olap_query_failed` / `olap_timeout` / `olap_unavailable`, 404 `olap_off`. |
 | `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
 | `POST /api/admin/replication/snapshot` | 201 `SnapshotInfo`: a snapshot of the current generation now (after shipping), then retention. 404 `replication_off`. Audited (`replication_snapshot`). |
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
 | `POST /api/admin/restore/restart` | 202 `{ restarting: true, exitCode }`, then a graceful shutdown and exit with `--restart-exit-code`, for the supervisor (systemd, Docker) to start the server again, which applies the restore. 400 `restart_unavailable` without `--restart-exit-code`; 409 `no_pending_restore`; 400 `invalid_backup` when the staged restore has an `error`. Audited (`restore_restart`). |
 | `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
 | `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
-| `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/ferrix/src/ops/metrics.rs`. |
+| `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/rxferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 `invalid_request` for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
-| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
+| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], olap: OlapStatus \| null, overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, cachedQueries, cacheBytes, cacheHits, cacheMisses, metricsEnabled } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns; `cachedQueries` / `cacheBytes` / `cacheHits` / `cacheMisses` describe the cache of unwatched query results. `olap` is as for `GET /api/admin/olap` (null without `--olap`). `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
 | `GET /api/admin/stats/timeseries?path=&bucket=&since=&until=` | `{ path, bucket, since, until, points: TimePoint[] }`: the executions of `path` (every app function, system ones excluded, without it) that started in `[since, until)`, in buckets of `bucket` (ms, or `30s` / `1m` / `15m` / `1h` / `1d`; default `1m`), oldest first, only buckets with executions. `TimePoint` = `{ t (bucket start), calls, errors, userErrors, serverErrors, p50Us, p95Us, maxUs }` (nearest-rank percentiles). `since` is rounded down to a multiple of `bucket` (the returned `since`); defaults: `until` now, `since` an hour before. At most 1500 buckets, else 400 `invalid_request` (also for a malformed bucket or `until <= since`). From the execution log (`Logs::timeseries`), so only as far back as its retention. For the Functions page's charts. |
 
@@ -2418,7 +2418,7 @@ stores them in that browser's app storage, replacing whoever was signed in there
 ### 4.3 The embedded dashboard
 
 With the cargo feature `dashboard` (default), `GET /_/` and `/_/{*path}` serve the SPA from
-`crates/ferrix/dashboard-dist` (embedded with `rust-embed`): existing files as is (`assets/*` cached immutably; an unknown
+`crates/rxferrix/dashboard-dist` (embedded with `rust-embed`): existing files as is (`assets/*` cached immutably; an unknown
 `assets/*` file is a 404), everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<id>` and `/_/setup#token=…`), with a
 restrictive Content-Security-Policy and `X-Frame-Options: DENY`. Without the feature, only a minimal `/_/setup` page
 is served; the system functions and `/api/admin/*` exist either way.
@@ -2458,9 +2458,9 @@ sockets weren't taken (and on a normal stop), accepts what has queued and closes
 begins (`Pauser::close`): new connections are refused, which a proxy can retry (a connection reset after the request
 was sent can't be retried safely); open connections are served through the drain with `Connection: close`. `serve --takeover` takes `require`
 (the default: no server running is an error) or `auto` (start normally when the ping fails), also as
-`FERRIX_TAKEOVER`. `serve --after-handover wait` (`FERRIX_AFTER_HANDOVER`; default `exit`): after a handover the
+`RXFERRIX_TAKEOVER`. `serve --after-handover wait` (`RXFERRIX_AFTER_HANDOVER`; default `exit`): after a handover the
 process releases everything (database, lock, listeners, control socket; it exits its runtime) and waits for SIGTERM
-or SIGINT, then exits 0. The Docker image sets `FERRIX_TAKEOVER=auto` and `FERRIX_AFTER_HANDOVER=wait`. `ferrix
+or SIGINT, then exits 0. The Docker image sets `RXFERRIX_TAKEOVER=auto` and `RXFERRIX_AFTER_HANDOVER=wait`. `rxferrix
 health [url]` (default `http://127.0.0.1:8090/api/health`) exits 0 if the URL answers 2xx within 3 s, 1 otherwise.
 
 ### 4.4 Operations: backups, export and import (`crate::ops`)
@@ -2475,7 +2475,7 @@ blocks the writer; the copy's replication journal and state are removed, below),
 createdAt, ferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
 "remote", missingBlobs, files: [{ path, bytes, sha256 }] }`.
 
-**Backups from the dashboard** (`_settings` key `backups`, `crates/ferrix/src/settings/backups.rs`): `update { backups:
+**Backups from the dashboard** (`_settings` key `backups`, `crates/rxferrix/src/settings/backups.rs`): `update { backups:
 { everySecs: number | null (60 s – 30 days; null: no schedule), keep? (1–1000, default 7), includeAux?, includeFiles?,
 destination, secretAccessKey? } }` where `destination` is `{ kind: "default" }` (`<data dir>/backups`), `{ kind:
 "local", path }` (absolute) or `{ kind: "s3", bucket, prefix?, region?, endpoint?, accessKeyId? }` (without
@@ -2495,19 +2495,19 @@ Replication (`--replicate-to`) stays a command-line setting.
 Scheduler page like any cron; "run now" works). Each run stores a `ferrix-auto-*` archive and deletes the oldest
 scheduled ones beyond `keep`; manual archives are never rotated.
 
-**Restore** (`ferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/ferrix.lock` (held by `serve` and
+**Restore** (`rxferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/ferrix.lock` (held by `serve` and
 `import`, so it refuses while a server runs), extracts next to the data, checks entries against the manifest
 (unexpected, missing or altered entries are refused), runs `PRAGMA integrity_check`, opens the database with the
 binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
 `data.db`(`-wal`, `-shm`), `aux.db` (when the archive has one), persisted HNSW indexes (`vector_index_<id>.hnsw`) and, if restored,
 `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the restored files put in place; blobs are added to the
-storage directory. A database with a trigger or a view (ferrix creates neither) is refused. While a restore is staged
+storage directory. A database with a trigger or a view (rxferrix creates neither) is refused. While a restore is staged
 (below), `restore` refuses (`restore --cancel` cancels the staged one, offline).
 
 **Staged restores** (`crate::ops::restore`; the endpoints in §4.2, the dashboard's Backups page). Restoring under a
 running server would replace a database it has open, so a restore from the dashboard is split in two. *Staging*, while
 the server runs: the archive is extracted into a temporary directory in the data directory and checked exactly like
-`ferrix restore` (manifest, `integrity_check`, no triggers or views, opened with the binary's tables, `verify_indexes`;
+`rxferrix restore` (manifest, `integrity_check`, no triggers or views, opened with the binary's tables, `verify_indexes`;
 never `--skip-verify`); a failing archive is refused with the reason and leaves nothing behind. A passing one is
 renamed to `<dir>/restore-staged/`, the SHA-256 of its databases recorded, and `<dir>/pending-restore.json` (the
 `PendingRestore` of §4.2 plus those checksums) written last, atomically. `auth_secret.key` is never staged, even when
@@ -2518,14 +2518,14 @@ the archive has it. One restore can be staged at a time. *Applying*, when `serve
 files take their place and blobs are added to local storage; the marker is removed, then the staging directory.
 Each step only moves what is still to be moved, so a crash halfway is completed by the next start. Staged files that
 don't match their checksums are not applied: the server starts on its current data and the marker keeps the `error`
-until the restore is canceled. *Restart*: `serve --restart-exit-code N` (`FERRIX_RESTART_EXIT_CODE`, 1–255) lets an
+until the restore is canceled. *Restart*: `serve --restart-exit-code N` (`RXFERRIX_RESTART_EXIT_CODE`, 1–255) lets an
 admin request `POST /api/admin/restore/restart`: `serve` shuts down gracefully (as on SIGTERM) and exits with `N`
-for the supervisor to start it again (`deploy/ferrix.service` sets 75 with `RestartForceExitStatus=75`; with Docker,
+for the supervisor to start it again (`deploy/rxferrix.service` sets 75 with `RestartForceExitStatus=75`; with Docker,
 `--restart unless-stopped`). Without the flag nothing restarts by itself: the restore waits for the next start.
 
 **Continuous replication** (`crate::ops::replicate`, `crate::db::journal`; `serve --replicate-to <dir | file:///dir |
 s3://bucket/prefix> [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d] [--replicate-max-pending 1GB]`,
-env `FERRIX_REPLICATE_TO`; `AppOptions::ops.replication`). *Journal*: with replication configured the database opens
+env `RXFERRIX_REPLICATE_TO`; `AppOptions::ops.replication`). *Journal*: with replication configured the database opens
 with journaling on, and every write transaction that commits documents inserts one row into the raw SQLite table
 `_journal (ts INTEGER PRIMARY KEY, time REAL, changes TEXT)` when it finishes, in the same SQLite transaction as its
 writes and the `_meta.ts` bump (a group-commit batch, §1.10): `changes` is `[[table, id, document | null], …]`, the final state of every document
@@ -2559,7 +2559,7 @@ document JSON the write already serialized; measured with `bench_journal_overhea
 build, 5000 sequential insert/patch mutations of a small indexed document, median of 3 rounds): 7065 commits/s
 without replication, 6747/s journaling (-4.5%), 6708/s journaling and shipping every second (-5.1%).
 
-**Point-in-time restore** (`ferrix restore --from <target> [--to-ts N | --to-time <RFC 3339>] [--generation G]
+**Point-in-time restore** (`rxferrix restore --from <target> [--to-ts N | --to-time <RFC 3339>] [--generation G]
 [--storage-dir]`, offline under `ferrix.lock`; `--list` prints the generations and their restorable ranges; or staged
 with `POST /api/admin/restore/point-in-time`). The generation is `--generation`, else with `--to-time` the newest one
 created at or before that time, else the newest; the base is its newest snapshot at or before the ts (taken at or
@@ -2576,10 +2576,10 @@ A backup holds the whole database, system tables included (`_users`, `_settings`
 the same key file. Persisted HNSW vector indexes (`vector_index_<id>.hnsw`) are caches and are not backed up:
 they are rebuilt from the restored database at startup.
 
-**Export directories** (`ferrix export`): `<table>.jsonl` or `<table>.csv` per table (all app tables by default;
+**Export directories** (`rxferrix export`): `<table>.jsonl` or `<table>.csv` per table (all app tables by default;
 `--tables` may name system tables), `files/<storage id>` for exported `_storage` documents, and `manifest.json`:
 `{ format: "ferrix-export", version: 1, documentFormat, exportedAt, ts, ferrixVersion, tables: [{ name, number,
-documents, file }], catalog: { <table>: <number> }, files, missingFiles }`. **Import** (`ferrix import`, offline;
+documents, file }], catalog: { <table>: <number> }, files, missingFiles }`. **Import** (`rxferrix import`, offline;
 or the HTTP endpoint above) reads JSONL or CSV: an export directory (its `documentFormat`; ids of tables whose number
 differs in the target are rewritten everywhere in the imported documents using `catalog`, and `files/` are stored), a
 directory of `<table>.jsonl` / `<table>.csv`, or one file (`--table`); `--format jsonl|csv` (default: from the
@@ -2601,11 +2601,11 @@ a changed pair that loads replaces the certificate for new handshakes (the rustl
 connections keep theirs), a pair that doesn't (a half-written renewal, a mismatched key) is ignored with one error in
 the log per change.
 
-**Logs**: `serve --log-format json|pretty|compact` (`FERRIX_LOG_FORMAT`; default `pretty` on a terminal, `json`
+**Logs**: `serve --log-format json|pretty|compact` (`RXFERRIX_LOG_FORMAT`; default `pretty` on a terminal, `json`
 otherwise) formats the server's `tracing` output on stdout. `json` writes one object per line: `timestamp` (RFC 3339),
 `level`, `target`, `fields` (`message` and the event's key-values), `span` and `spans` (the current span and every
 enclosing one, with their fields). `RUST_LOG` filters every format; function log lines are captured the same way
-(`ferrix::log::layer`, §1.4).
+(`rxferrix::log::layer`, §1.4).
 
 ```rust
 // crate::ops (selected)
@@ -2641,9 +2641,9 @@ web::router(app, &WebOptions { static_files, routes }) -> axum::Router;   // wha
 tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertFiles { https, redirect, cert, key, reload_every }}) -> Result<RunningServer>;
 ```
 
-**Builder**: `Ferrix::static_dir(dir)`, `Ferrix::embed_static::<A: rust_embed::RustEmbed>()` (derive with
-`#[derive(ferrix::rust_embed::Embed)] #[crate_path = "ferrix::rust_embed"]`) and `Ferrix::routes(axum::Router)`.
-Routing and caching rules are in `crates/ferrix/src/ops/web.rs`: Ferrix's routes and the app's routes first, static
+**Builder**: `RxFerrix::static_dir(dir)`, `RxFerrix::embed_static::<A: rust_embed::RustEmbed>()` (derive with
+`#[derive(rxferrix::rust_embed::Embed)] #[crate_path = "rxferrix::rust_embed"]`) and `RxFerrix::routes(axum::Router)`.
+Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.
 

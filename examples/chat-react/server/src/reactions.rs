@@ -1,6 +1,6 @@
 //! Emoji reactions on messages.
 
-use ferrix::prelude::*;
+use rxferrix::prelude::*;
 
 use crate::model::{Message, Reaction, require_member, user_error};
 

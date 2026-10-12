@@ -1,4 +1,4 @@
-import { CONNECTION_LOST, FerrixError } from "./errors.js";
+import { CONNECTION_LOST, RxFerrixError } from "./errors.js";
 import type {
   ActionMessage,
   ActionResponseMessage,
@@ -106,7 +106,7 @@ export class RequestManager {
     if (!request || request.kind !== "mutation" || request.completed) return null;
     if (!response.success) {
       this.requests.delete(response.requestId);
-      const error = FerrixError.fromServer(response.errorMessage, response.errorData);
+      const error = RxFerrixError.fromServer(response.errorMessage, response.errorData);
       return { requestId: response.requestId, settle: () => request.reject(error) };
     }
     request.completed = { ts: response.ts, result: response.result };
@@ -127,7 +127,7 @@ export class RequestManager {
       const result = response.result;
       return () => request.resolve(result);
     }
-    const error = FerrixError.fromServer(response.errorMessage, response.errorData);
+    const error = RxFerrixError.fromServer(response.errorMessage, response.errorData);
     return () => request.reject(error);
   }
 
@@ -156,7 +156,7 @@ export class RequestManager {
       }
       if (!request.sent) continue;
       this.requests.delete(requestId);
-      const error = new FerrixError(
+      const error = new RxFerrixError(
         `Connection lost while action "${request.message.udfPath}" was in flight`,
         { code: CONNECTION_LOST },
       );
@@ -166,7 +166,7 @@ export class RequestManager {
   }
 
   /** Rejects everything (client closed). */
-  rejectAll(error: FerrixError): void {
+  rejectAll(error: RxFerrixError): void {
     const all = [...this.requests.values()];
     this.requests.clear();
     for (const request of all) request.reject(error);

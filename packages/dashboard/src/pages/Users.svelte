@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useAction, useMutation, usePaginatedQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction, useMutation, usePaginatedQuery } from "@rxferrix/svelte";
   import { dashboard, settings, type Impersonation, type UserSummary } from "../lib/api.js";
   import { impersonate } from "../lib/admin.js";
   import { dashboardContext } from "../lib/context.js";
@@ -63,7 +63,7 @@
       ctx.toast(`Opened the app as ${u.email ?? u._id} until ${formatTime(r.expiresAt).slice(11)}`);
     } catch (e) {
       tab?.close();
-      impersonateError = e instanceof FerrixError ? e.message : String(e);
+      impersonateError = e instanceof RxFerrixError ? e.message : String(e);
     } finally {
       impersonating = false;
     }
@@ -83,7 +83,7 @@
       ctx.toast(`Deleted user (${d.sessions} sessions, ${d.accounts} accounts)`);
       if (open === u._id) open = null;
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 </script>

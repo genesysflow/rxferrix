@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { useQuery } from "@ferrix/svelte";
+  import { useQuery } from "@rxferrix/svelte";
   import { migrations, type JsonObject } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";

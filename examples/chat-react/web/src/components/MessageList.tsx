@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
-import { getAllPages, useMutation, usePaginatedQueryWithStatus } from "@ferrix/react";
-import { api, type MessageView } from "../ferrix";
+import { getAllPages, useMutation, usePaginatedQueryWithStatus } from "@rxferrix/react";
+import { api, type MessageView } from "../rxferrix";
 import type { ChannelInfo, Profile } from "../lib";
 import { AccessError } from "./AccessError";
 import { MessageItem } from "./MessageItem";

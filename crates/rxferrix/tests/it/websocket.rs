@@ -1,0 +1,565 @@
+//! End to end over a real socket: tokio-tungstenite clients against a server on 127.0.0.1:0, plus the HTTP API.
+
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use futures::{SinkExt, StreamExt};
+use rxferrix::AppOptions;
+use rxferrix::FunctionRef;
+use rxferrix::testing::TestApp;
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+use crate::common::todos;
+
+struct Ws {
+    stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    /// Current StateVersion, checked against every Transition's startVersion.
+    version: Value,
+}
+
+impl Ws {
+    /// Connect with a fresh sessionId (sessions key mutation deduplication).
+    async fn connect(addr: SocketAddr) -> Ws {
+        static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
+        Self::connect_session(addr, &format!("s{}", NEXT_SESSION.fetch_add(1, Ordering::Relaxed))).await
+    }
+
+    async fn connect_session(addr: SocketAddr, session_id: &str) -> Ws {
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
+        let mut ws = Ws { stream, version: json!({ "querySet": 0, "identity": 0, "ts": 0 }) };
+        ws.send(json!({ "type": "Connect", "sessionId": session_id, "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0" })).await;
+        ws
+    }
+
+    async fn send(&mut self, v: Value) {
+        self.stream.send(Message::text(v.to_string())).await.unwrap();
+    }
+
+    async fn send_raw(&mut self, s: &str) {
+        self.stream.send(Message::text(s.to_string())).await.unwrap();
+    }
+
+    /// Next message (Pings skipped). Transitions are checked for version continuity.
+    async fn recv(&mut self) -> Value {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), self.stream.next())
+                .await
+                .expect("timed out waiting for a message")
+                .expect("socket closed")
+                .unwrap();
+            let Message::Text(text) = msg else { continue };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            match v["type"].as_str().unwrap() {
+                "Ping" => continue,
+                "Transition" => {
+                    assert_eq!(v["startVersion"], self.version, "startVersion must equal the previous endVersion");
+                    assert!(v["endVersion"]["ts"].as_u64() >= v["startVersion"]["ts"].as_u64());
+                    self.version = v["endVersion"].clone();
+                }
+                _ => {}
+            }
+            return v;
+        }
+    }
+
+    async fn recv_type(&mut self, ty: &str) -> Value {
+        let v = self.recv().await;
+        assert_eq!(v["type"], ty, "unexpected message {v}");
+        v
+    }
+
+    /// Expect the server to close the socket (after an optional FatalError already consumed).
+    async fn expect_closed(&mut self) {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), self.stream.next()).await.expect("socket not closed") {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    }
+
+    fn ts(&self) -> u64 {
+        self.version["ts"].as_u64().unwrap()
+    }
+
+    async fn subscribe(&mut self, base: u64, query_id: u64, path: &str, args: Value) -> Value {
+        self.send(json!({ "type": "ModifyQuerySet", "baseVersion": base, "newVersion": base + 1,
+            "modifications": [{ "type": "Add", "queryId": query_id, "udfPath": path, "args": args }] }))
+            .await;
+        let t = self.recv_type("Transition").await;
+        assert_eq!(t["endVersion"]["querySet"], base + 1);
+        t
+    }
+
+    /// Run a mutation and wait until it is "resolved" the way the client resolves it: its MutationResponse AND a
+    /// Transition with ts >= the commit ts, in either order. Returns (response, order) where order is
+    /// "response_first" or "transition_first". Other Transitions are collected into `seen`.
+    async fn mutate(
+        &mut self,
+        request_id: u64,
+        path: &str,
+        args: Value,
+        seen: &mut Vec<Value>,
+    ) -> (Value, &'static str) {
+        self.send(json!({ "type": "Mutation", "requestId": request_id, "udfPath": path, "args": args })).await;
+        loop {
+            let v = self.recv().await;
+            match v["type"].as_str().unwrap() {
+                "Transition" => seen.push(v),
+                "MutationResponse" => {
+                    assert_eq!(v["requestId"], request_id);
+                    if v["success"] != true {
+                        return (v, "failed");
+                    }
+                    let m = v["ts"].as_u64().unwrap();
+                    if self.ts() >= m {
+                        return (v, "transition_first");
+                    }
+                    loop {
+                        let t = self.recv_type("Transition").await;
+                        seen.push(t);
+                        if self.ts() >= m {
+                            return (v, "response_first");
+                        }
+                    }
+                }
+                other => panic!("unexpected {other}: {v}"),
+            }
+        }
+    }
+}
+
+fn texts(value: &Value) -> Vec<String> {
+    value.as_array().unwrap().iter().map(|d| d["text"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test]
+async fn subscribe_mutate_and_receive_updates() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let list = todos::list::path();
+
+    let mut a = Ws::connect(addr).await;
+    let first = a.subscribe(0, 0, &list, json!({})).await;
+    assert_eq!(first["startVersion"], json!({ "querySet": 0, "identity": 0, "ts": 0 }));
+    assert_eq!(first["modifications"], json!([{ "type": "QueryUpdated", "queryId": 0, "value": [], "logLines": [] }]));
+
+    // B has no subscriptions, so its Transition can only come from the read-your-writes guarantee: the response
+    // arrives first, then an empty Transition with ts >= M.
+    let mut b = Ws::connect(addr).await;
+    let mut seen = Vec::new();
+    let (resp, order) = b.mutate(0, &todos::add::path(), json!({ "text": "hi" }), &mut seen).await;
+    assert_eq!(resp["success"], true);
+    assert_eq!(resp["logLines"], json!([]));
+    let m = resp["ts"].as_u64().unwrap();
+    assert!(resp["result"].as_str().unwrap().len() == 26, "result is the new id");
+    assert_eq!(order, "response_first");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["modifications"], json!([]));
+    assert!(seen[0]["endVersion"]["ts"].as_u64().unwrap() >= m);
+
+    // A gets the new item, at ts >= M.
+    let update = a.recv_type("Transition").await;
+    assert!(update["endVersion"]["ts"].as_u64().unwrap() >= m);
+    let mods = update["modifications"].as_array().unwrap();
+    assert_eq!(mods.len(), 1);
+    assert_eq!(mods[0]["queryId"], 0);
+    assert_eq!(texts(&mods[0]["value"]), vec!["hi"]);
+
+    // A mutation that writes nothing returns the current ts, which A has already seen: the covering Transition
+    // came first, and nothing more is sent.
+    let (resp, order) = a.mutate(1, &todos::noop::path(), json!({}), &mut seen).await;
+    assert_eq!((resp["result"].clone(), order), (json!(7), "transition_first"));
+
+    // A subscriber mutating what it watches: resolved in whichever order; the Transition carries the update.
+    let mut seen = Vec::new();
+    let (resp, _order) = a.mutate(2, &todos::add::path(), json!({ "text": "second" }), &mut seen).await;
+    assert_eq!(resp["success"], true);
+    let latest = seen.iter().rev().flat_map(|t| t["modifications"].as_array().unwrap()).next().expect("an update");
+    assert_eq!(texts(&latest["value"]), vec!["second", "hi"]);
+
+    // Actions over the socket.
+    a.send(json!({ "type": "Action", "requestId": 3, "udfPath": todos::add_many::path(), "args": { "n": 2 } })).await;
+    loop {
+        let v = a.recv().await;
+        if v["type"] == "ActionResponse" {
+            assert_eq!(
+                v,
+                json!({ "type": "ActionResponse", "requestId": 3, "success": true, "result": null, "logLines": [] })
+            );
+            break;
+        }
+    }
+    a.send(json!({ "type": "Action", "requestId": 4, "udfPath": "nope:nothing", "args": {} })).await;
+    loop {
+        let v = a.recv().await;
+        if v["type"] == "ActionResponse" {
+            assert_eq!(v["success"], false);
+            assert!(v["errorMessage"].as_str().unwrap().contains("Could not find public function"));
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn modify_query_set_versions_and_remove() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let mut a = Ws::connect(addr).await;
+    // Arbitrary, non-contiguous queryIds (as after a reconnect) are fine.
+    a.subscribe(0, 42, &todos::list::path(), json!({})).await;
+    let t2 = a.subscribe(1, 1000, &todos::latest::path(), json!({ "n": 1 })).await;
+    assert_eq!(t2["modifications"].as_array().unwrap().len(), 1, "only the new query is sent; the other is unchanged");
+
+    a.send(json!({ "type": "ModifyQuerySet", "baseVersion": 2, "newVersion": 3,
+        "modifications": [{ "type": "Remove", "queryId": 42 }] }))
+        .await;
+    let removed = a.recv_type("Transition").await;
+    assert_eq!(removed["endVersion"]["querySet"], 3);
+    assert_eq!(removed["modifications"], json!([{ "type": "QueryRemoved", "queryId": 42 }]));
+
+    // Removed queries receive no further updates; live ones do.
+    let mut b = Ws::connect(addr).await;
+    b.mutate(0, &todos::add::path(), json!({ "text": "x" }), &mut Vec::new()).await;
+    let update = a.recv_type("Transition").await;
+    let mods = update["modifications"].as_array().unwrap();
+    assert_eq!(mods.len(), 1);
+    assert_eq!(mods[0]["queryId"], 1000);
+
+    // Wrong baseVersion: FatalError, then the server closes the socket.
+    a.send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1, "modifications": [] })).await;
+    let fatal = a.recv_type("FatalError").await;
+    assert!(fatal["error"].as_str().unwrap().contains("baseVersion"), "{fatal}");
+    a.expect_closed().await;
+
+    // newVersion must be baseVersion + 1.
+    let mut c = Ws::connect(addr).await;
+    c.send(json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 2, "modifications": [] })).await;
+    c.recv_type("FatalError").await;
+    c.expect_closed().await;
+
+    // Duplicate live queryId.
+    let mut d = Ws::connect(addr).await;
+    d.subscribe(0, 1, &todos::list::path(), json!({})).await;
+    d.send(json!({ "type": "ModifyQuerySet", "baseVersion": 1, "newVersion": 2,
+        "modifications": [{ "type": "Add", "queryId": 1, "udfPath": todos::list::path(), "args": {} }] }))
+        .await;
+    d.recv_type("FatalError").await;
+    d.expect_closed().await;
+}
+
+#[tokio::test]
+async fn query_failed_then_recovers() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let mut a = Ws::connect(addr).await;
+    let first = a.subscribe(0, 5, &todos::find::path(), json!({ "text": "later" })).await;
+    assert_eq!(
+        first["modifications"],
+        json!([{ "type": "QueryFailed", "queryId": 5, "errorMessage": "no todo \"later\"",
+                 "errorData": { "code": "not_found", "data": null }, "logLines": [] }])
+    );
+
+    // An unrelated write doesn't re-send the (unchanged) failure.
+    let mut b = Ws::connect(addr).await;
+    b.mutate(0, &todos::add::path(), json!({ "text": "other" }), &mut Vec::new()).await;
+    b.mutate(1, &todos::add::path(), json!({ "text": "later" }), &mut Vec::new()).await;
+    let update = a.recv_type("Transition").await;
+    let mods = update["modifications"].as_array().unwrap();
+    assert_eq!(mods.len(), 1, "{update}");
+    assert_eq!(mods[0]["type"], "QueryUpdated");
+    assert_eq!(mods[0]["value"]["text"], "later");
+}
+
+#[tokio::test]
+async fn mutation_user_error_and_bad_messages() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let mut a = Ws::connect(addr).await;
+
+    let (resp, _) = a.mutate(9, &todos::add::path(), json!({ "text": "" }), &mut Vec::new()).await;
+    assert_eq!(
+        resp,
+        json!({ "type": "MutationResponse", "requestId": 9, "success": false, "errorMessage": "text is empty",
+                "errorData": { "code": "empty", "data": { "min": 1 } }, "logLines": [] })
+    );
+    let (resp, _) = a.mutate(10, &todos::add::path(), json!({ "text": 5 }), &mut Vec::new()).await;
+    assert!(resp["errorMessage"].as_str().unwrap().starts_with("Invalid args for add: "), "{resp}");
+    assert_eq!(resp["errorData"], Value::Null);
+
+    // Authenticate bumps the identity version; a stale baseVersion is fatal. (Real tokens: tests/it/auth.rs.)
+    a.subscribe(0, 1, &todos::list::path(), json!({})).await;
+    a.send(json!({ "type": "Authenticate", "baseVersion": 0, "token": null })).await;
+    let t1 = a.recv_type("Transition").await;
+    assert_eq!(t1["endVersion"]["identity"], 1);
+    assert_eq!(t1["modifications"], json!([]), "results did not change");
+    a.send(json!({ "type": "Authenticate", "baseVersion": 1, "token": null })).await;
+    assert_eq!(a.recv_type("Transition").await["endVersion"]["identity"], 2);
+    a.send(json!({ "type": "Authenticate", "baseVersion": 0, "token": null })).await;
+    a.recv_type("FatalError").await;
+    a.expect_closed().await;
+
+    // Malformed JSON and unknown message types are fatal.
+    let mut b = Ws::connect(addr).await;
+    b.send_raw("{not json").await;
+    assert!(b.recv_type("FatalError").await["error"].as_str().unwrap().contains("malformed"));
+    b.expect_closed().await;
+    let mut c = Ws::connect(addr).await;
+    c.send(json!({ "type": "Bogus" })).await;
+    c.recv_type("FatalError").await;
+    c.expect_closed().await;
+}
+
+#[tokio::test]
+async fn server_errors_are_hidden_outside_dev() {
+    let t = TestApp::with_options(AppOptions { dev: false, ..Default::default() }).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let mut a = Ws::connect(addr).await;
+    let first = a.subscribe(0, 0, &todos::server_error::path(), json!({})).await;
+    assert_eq!(first["modifications"][0]["errorMessage"], "Server Error");
+    assert_eq!(first["modifications"][0]["errorData"], Value::Null);
+    let (status, body) = http(addr, "POST", "/api/query", Some(json!({ "path": todos::server_error::path() }))).await;
+    assert_eq!((status, body["errorMessage"].clone()), (500, json!("Server Error")));
+
+    let dev = TestApp::new().await.unwrap();
+    let addr = dev.serve().await.unwrap();
+    let (status, body) =
+        http(addr, "POST", "/api/query", Some(json!({ "path": todos::server_error::path(), "args": {} }))).await;
+    assert_eq!(status, 500);
+    assert!(body["errorMessage"].as_str().unwrap().contains("secret internal detail"));
+}
+
+/// A minimal HTTP/1.1 client (no extra dependency): returns (status, JSON body). Anonymous (no Authorization).
+async fn http(addr: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8(buf).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn http_fallback_endpoints() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+
+    assert_eq!(http(addr, "GET", "/api/health", None).await, (200, json!({ "status": "ok" })));
+
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "h" } }))).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "success");
+    // The commit ts (startup may already have committed, e.g. the reconcile of rxferrix's system crons).
+    assert!(body["ts"].as_u64().is_some_and(|ts| ts >= 1), "{body}");
+    assert_eq!(body["logLines"], json!([]));
+
+    let (status, body) =
+        http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await;
+    assert_eq!(status, 200);
+    assert_eq!(texts(&body["value"]), vec!["h"]);
+
+    let (status, body) =
+        http(addr, "POST", "/api/action", Some(json!({ "path": todos::count_via_action::path(), "args": {} }))).await;
+    assert_eq!((status, body["value"].clone()), (200, json!(1)));
+
+    // User error: 400 with code and data.
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": { "text": "" } }))).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        body,
+        json!({ "status": "error", "errorMessage": "text is empty", "errorData": { "code": "empty", "data": { "min": 1 } }, "logLines": [] })
+    );
+    // Bad args: 400.
+    let (status, body) =
+        http(addr, "POST", "/api/mutation", Some(json!({ "path": todos::add::path(), "args": {} }))).await;
+    assert_eq!(status, 400);
+    assert!(body["errorMessage"].as_str().unwrap().starts_with("Invalid args for add: "));
+    // Unknown and internal functions: 404.
+    let (status, _) = http(addr, "POST", "/api/query", Some(json!({ "path": "nope:x", "args": {} }))).await;
+    assert_eq!(status, 404);
+    let (status, _) = http(addr, "POST", "/api/query", Some(json!({ "path": todos::count::path(), "args": {} }))).await;
+    assert_eq!(status, 404);
+    // Malformed body: 400.
+    let (status, body) = http(addr, "POST", "/api/query", None).await;
+    assert_eq!((status, body["status"].clone()), (400, json!("error")));
+}
+
+/// The client resends unacknowledged mutations after a reconnect with the same (sessionId, requestId): the
+/// mutation must run once, and every copy gets the same response.
+#[tokio::test]
+async fn duplicate_mutations_are_applied_once() {
+    let t = TestApp::new().await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let count =
+        || async { http(addr, "POST", "/api/query", Some(json!({ "path": todos::list::path(), "args": {} }))).await.1 };
+
+    // Sequential: the second socket is the "reconnected" client resending request 5.
+    let mut a = Ws::connect_session(addr, "same-session").await;
+    let (first, _) = a.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_eq!(first["success"], true);
+    let mut b = Ws::connect_session(addr, "same-session").await;
+    let (again, _) = b.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_eq!(again, first, "identical response: same id and same commit ts");
+    assert_eq!(texts(&count().await["value"]), vec!["once"], "a single insert");
+
+    // Concurrent duplicates on two sockets: the second waits for the writer lock, then finds the first's response.
+    let mut c = Ws::connect_session(addr, "concurrent").await;
+    let mut d = Ws::connect_session(addr, "concurrent").await;
+    let msg = json!({ "type": "Mutation", "requestId": 0, "udfPath": todos::add::path(), "args": { "text": "race" } });
+    c.send(msg.clone()).await;
+    d.send(msg).await;
+    let mut responses = Vec::new();
+    for ws in [&mut c, &mut d] {
+        loop {
+            let v = ws.recv().await;
+            if v["type"] == "MutationResponse" {
+                responses.push(v);
+                break;
+            }
+        }
+    }
+    assert_eq!(responses[0], responses[1]);
+    assert_eq!(texts(&count().await["value"]).iter().filter(|t| *t == "race").count(), 1);
+
+    // Same requestId in another session, or another requestId in the same session: a new mutation.
+    let mut e = Ws::connect_session(addr, "other-session").await;
+    let (other, _) = e.mutate(5, &todos::add::path(), json!({ "text": "once" }), &mut Vec::new()).await;
+    assert_ne!(other["result"], first["result"]);
+    let (next, _) = b.mutate(6, &todos::add::path(), json!({ "text": "next" }), &mut Vec::new()).await;
+    assert_eq!(next["success"], true);
+    assert_eq!(texts(&count().await["value"]).len(), 4);
+
+    // Failures are replayed too (the mutation is not retried).
+    let (failed, _) = a.mutate(7, &todos::add::path(), json!({ "text": "" }), &mut Vec::new()).await;
+    let (failed_again, _) = b.mutate(7, &todos::add::path(), json!({ "text": "" }), &mut Vec::new()).await;
+    assert_eq!(failed["errorData"]["code"], "empty");
+    assert_eq!(failed_again, failed);
+}
+
+/// Live aggregates over a real socket: a write to one group updates only the subscriptions reading it.
+#[tokio::test]
+async fn aggregate_subscriptions_update_per_group() {
+    use crate::aggregates::fns;
+
+    let t = TestApp::new().await.unwrap();
+    let mut a = Ws::connect(t.serve().await.unwrap()).await;
+    let count = fns::customer_count::path();
+    let first = a.subscribe(0, 0, &count, json!({ "customer": "ann" })).await;
+    assert_eq!(first["modifications"][0]["value"], 0);
+    let second = a.subscribe(1, 1, &count, json!({ "customer": "bob" })).await;
+    assert_eq!(second["modifications"][0]["value"], 0);
+    for expected in 1..=2 {
+        t.mutation::<fns::add>(("ann".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
+        let update = a.recv_type("Transition").await;
+        assert_eq!(
+            update["modifications"],
+            json!([{ "type": "QueryUpdated", "queryId": 0, "value": expected, "logLines": [] }]),
+            "bob's query isn't rerun"
+        );
+    }
+    t.mutation::<fns::add>(("bob".to_string(), "d".to_string(), 1.0, None)).await.unwrap();
+    let update = a.recv_type("Transition").await;
+    assert_eq!(update["modifications"], json!([{ "type": "QueryUpdated", "queryId": 1, "value": 1, "logLines": [] }]));
+}
+
+#[tokio::test]
+async fn determinism_warnings_reach_clients_in_dev() {
+    use crate::determinism::{fns, warnings};
+
+    let t = TestApp::new().await.unwrap();
+    let mut a = Ws::connect(t.serve().await.unwrap()).await;
+    let first = a.subscribe(0, 0, &fns::counter::path(), json!({})).await;
+    let lines: Vec<String> = serde_json::from_value(first["modifications"][0]["logLines"].clone()).unwrap();
+    assert_eq!(warnings(&lines).len(), 1, "{lines:?}");
+}
+
+#[tokio::test]
+async fn log_lines_reach_clients_only_in_dev() {
+    use crate::hardening::fns;
+
+    for dev in [true, false] {
+        let t = TestApp::with_options(AppOptions { dev, ..Default::default() }).await.unwrap();
+        let addr = t.serve().await.unwrap();
+        let expect = |lines: Value| if dev { lines } else { json!([]) };
+        let mut a = Ws::connect(addr).await;
+
+        let first = a.subscribe(0, 0, &fns::logged_query::path(), json!({ "n": 3 })).await;
+        assert_eq!(first["modifications"][0]["logLines"], expect(json!(["[INFO] querying n=3", "[DEBUG] details"])));
+        let failed = a.subscribe(1, 1, &todos::server_error::path(), json!({})).await;
+        assert_eq!(failed["modifications"][0]["type"], "QueryFailed");
+        assert_eq!(failed["modifications"][0]["logLines"], json!([]));
+
+        let (resp, _) = a.mutate(0, &fns::logged_add::path(), json!({ "text": "x" }), &mut Vec::new()).await;
+        assert_eq!(resp["logLines"], expect(json!(["[INFO] adding x"])));
+        let (resp, _) = a.mutate(1, &fns::logged_fail::path(), json!({}), &mut Vec::new()).await;
+        assert_eq!(
+            (resp["success"].clone(), resp["logLines"].clone()),
+            (json!(false), expect(json!(["[WARN] about to fail"])))
+        );
+
+        a.send(
+            json!({ "type": "Action", "requestId": 2, "udfPath": fns::logged_action::path(), "args": { "text": "y" } }),
+        )
+        .await;
+        let resp = loop {
+            let v = a.recv().await;
+            if v["type"] == "ActionResponse" {
+                break v;
+            }
+        };
+        assert_eq!(resp["result"], 7);
+        assert_eq!(
+            resp["logLines"],
+            expect(json!([
+                "[WARN] action start",
+                "[INFO] adding y",
+                "[INFO] querying n=7",
+                "[DEBUG] details",
+                "[ERROR] action end code=42"
+            ]))
+        );
+
+        // HTTP.
+        let (_, body) =
+            http(addr, "POST", "/api/query", Some(json!({ "path": fns::logged_query::path(), "args": { "n": 1 } })))
+                .await;
+        assert_eq!(body["logLines"], expect(json!(["[INFO] querying n=1", "[DEBUG] details"])));
+        let (_, body) =
+            http(addr, "POST", "/api/mutation", Some(json!({ "path": fns::logged_fail::path(), "args": {} }))).await;
+        assert_eq!(body["logLines"], expect(json!(["[WARN] about to fail"])));
+        let (_, body) = http(
+            addr,
+            "POST",
+            "/api/action",
+            Some(json!({ "path": fns::logged_action::path(), "args": { "text": "z" } })),
+        )
+        .await;
+        assert_eq!(body["logLines"].as_array().unwrap().len(), if dev { 5 } else { 0 });
+
+        // Whatever the mode, the execution log keeps them.
+        t.app().logs().flush().await.unwrap();
+        let logged = t
+            .app()
+            .logs()
+            .query(rxferrix::LogFilter { path_prefix: Some(fns::logged_fail::path()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(logged.len(), 2);
+        assert!(logged.iter().all(|e| e.log_lines == vec!["[WARN] about to fail".to_string()]));
+    }
+}

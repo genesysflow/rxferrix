@@ -1,4 +1,4 @@
-export { FerrixProvider, useFerrix, type FerrixProviderProps } from "./context.js";
+export { RxFerrixProvider, useRxFerrix, type RxFerrixProviderProps } from "./context.js";
 export { useQuery, useQueryWithStatus, type UseQueryResult } from "./use_query.js";
 export {
   usePaginatedQuery,
@@ -14,11 +14,11 @@ export {
   type ReactMutation,
   type ReactAction,
 } from "./use_mutation.js";
-export { useFerrixAuth, useAuthActions, useCurrentUser, type AuthActions } from "./use_auth.js";
+export { useRxFerrixAuth, useAuthActions, useCurrentUser, type AuthActions } from "./use_auth.js";
 export {
-  FerrixClient,
-  FerrixError,
-  FerrixAuth,
+  RxFerrixClient,
+  RxFerrixError,
+  RxFerrixAuth,
   getAuth,
   systemApi,
   MemoryAuthStorage,
@@ -27,7 +27,7 @@ export {
   type AuthTokens,
   type AuthProviders,
   type CodeProof,
-  type FerrixAuthOptions,
+  type RxFerrixAuthOptions,
   type RedirectResult,
   type User,
   makeFunctionReference,
@@ -46,4 +46,4 @@ export {
   uploadFile,
   type UploadFileOptions,
   type UploadProgress,
-} from "@ferrix/client";
+} from "@rxferrix/client";

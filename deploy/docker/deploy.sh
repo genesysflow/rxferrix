@@ -3,7 +3,7 @@
 #
 #   IMAGE=todo-server:latest deploy/docker/deploy.sh      # the image tag compose.yaml uses (rebuilt or pulled)
 #
-# 1. Starts a second `app` container next to the running one (same volume). It takes over (FERRIX_TAKEOVER=auto).
+# 1. Starts a second `app` container next to the running one (same volume). It takes over (RXFERRIX_TAKEOVER=auto).
 # 2. Waits until it is healthy, i.e. serving. If it exits or restarts while the old one still serves, this version
 #    can't take over: it is removed and the running container carries on (its logs say why).
 # 3. Stops and removes the old container (which handed over and was waiting, serving nothing).

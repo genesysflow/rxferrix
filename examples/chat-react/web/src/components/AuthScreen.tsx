@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useAuthActions, type AuthProviders } from "@ferrix/react";
+import { useAuthActions, type AuthProviders } from "@rxferrix/react";
 import { errorMessage } from "../lib";
 
 type Mode = "signin" | "signup" | "code";
@@ -63,7 +63,7 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
         <div className="auth-brand">
           <span className="logo">💬</span>
           <div>
-            <h1>Ferrix Chat</h1>
+            <h1>RxFerrix Chat</h1>
             <p>A Slack-lite on a single Rust binary.</p>
           </div>
         </div>

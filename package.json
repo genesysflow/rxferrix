@@ -1,5 +1,5 @@
 {
-  "name": "ferrix-js",
+  "name": "rxferrix-js",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -8,13 +8,13 @@
     "docs"
   ],
   "scripts": {
-    "build": "bun run --filter @ferrix/client build && bun run --filter @ferrix/react build && bun run --filter @ferrix/svelte build",
-    "typecheck": "bun run --filter @ferrix/client build && bun run --filter '*' typecheck",
+    "build": "bun run --filter @rxferrix/client build && bun run --filter @rxferrix/react build && bun run --filter @rxferrix/svelte build",
+    "typecheck": "bun run --filter @rxferrix/client build && bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
-    "build:dashboard": "bun run --filter @ferrix/dashboard build",
-    "check:dashboard": "bun run --filter @ferrix/dashboard check:dist",
-    "docs:dev": "bun run --filter @ferrix/docs dev",
-    "docs:build": "bun run --filter @ferrix/docs build"
+    "build:dashboard": "bun run --filter @rxferrix/dashboard build",
+    "check:dashboard": "bun run --filter @rxferrix/dashboard check:dist",
+    "docs:dev": "bun run --filter @rxferrix/docs dev",
+    "docs:build": "bun run --filter @rxferrix/docs build"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

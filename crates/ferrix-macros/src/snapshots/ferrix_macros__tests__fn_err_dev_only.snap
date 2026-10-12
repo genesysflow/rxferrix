@@ -1,7 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "[quote!(dev_only, dev_only), quote!(dev_only = true),\nquote!(internal)].into_iter().map(|attr|\nfunc_err(FnKind::Mutation, attr,\nquote!(async fn f(ctx: &MutationCtx) -> Result<()>\n{}))).collect::<Vec<_>>().join(\"\\n\")"
----
-duplicate `dev_only`
-`dev_only` takes no value: write `#[mutation(dev_only)]`
-unknown #[mutation] argument; the only one is `dev_only` (refused unless the server runs with --dev)

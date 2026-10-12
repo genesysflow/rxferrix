@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { FerrixError } from "@ferrix/client";
-  import { useAction } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction } from "@rxferrix/svelte";
   import { settings, type SettingsView } from "../lib/api.js";
   import { formError, toForm, toInput, type BackupForm } from "../lib/backupSettings.js";
   import { dashboardContext } from "../lib/context.js";
@@ -32,7 +32,7 @@
   });
 
   function message(e: unknown): string {
-    return e instanceof FerrixError ? e.message : String(e);
+    return e instanceof RxFerrixError ? e.message : String(e);
   }
 
   async function runTest() {

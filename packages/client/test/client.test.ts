@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CONNECTION_LOST,
-  FerrixClient,
-  FerrixError,
+  RxFerrixClient,
+  RxFerrixError,
   makeFunctionReference,
   type ConnectionState,
   type Id,
@@ -25,10 +25,10 @@ const api = {
 };
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 
-function newClient(): FerrixClient {
-  return new FerrixClient("http://localhost:3210", {
+function newClient(): RxFerrixClient {
+  return new RxFerrixClient("http://localhost:3210", {
     webSocketConstructor: server.WebSocket,
     unsavedChangesWarning: false,
   });
@@ -56,7 +56,7 @@ afterEach(() => {
 describe("connection", () => {
   it("derives the sync URL from the http base URL", () => {
     expect(server.socket.url).toBe("ws://localhost:3210/api/sync");
-    const c = new FerrixClient("https://example.com/base/", {
+    const c = new RxFerrixClient("https://example.com/base/", {
       webSocketConstructor: server.WebSocket,
       unsavedChangesWarning: false,
     });
@@ -422,7 +422,7 @@ describe("mutations", () => {
     expect(resolved).toHaveBeenCalledWith("id1");
   });
 
-  it("rejects failures immediately with FerrixError carrying errorData", async () => {
+  it("rejects failures immediately with RxFerrixError carrying errorData", async () => {
     await setup();
     const p = client.mutation(api.todos.add, { text: "" });
     server.push({
@@ -434,7 +434,7 @@ describe("mutations", () => {
       logLines: [],
     });
     const err = await p.catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(FerrixError);
+    expect(err).toBeInstanceOf(RxFerrixError);
     expect(err).toMatchObject({ message: "text must not be empty", code: "EMPTY_TEXT", data: { field: "text" } });
   });
 
@@ -515,7 +515,7 @@ describe("mutations", () => {
     expect(watch.localQueryResult()?.map((t) => t.text)).toEqual(["a", "b"]);
     server.push({ type: "MutationResponse", requestId: 1, success: false, errorMessage: "x", errorData: null });
     expect(watch.localQueryResult()?.map((t) => t.text)).toEqual(["a"]);
-    await expect(p2).rejects.toBeInstanceOf(FerrixError);
+    await expect(p2).rejects.toBeInstanceOf(RxFerrixError);
     server.push({ type: "MutationResponse", requestId: 0, success: true, result: "a1", ts: 4 });
     server.transition({ ts: 4 }, [{ type: "QueryUpdated", queryId: 0, value: [{ _id: "a1", text: "a" }] }]);
     await expect(p1).resolves.toBe("a1");
@@ -589,8 +589,8 @@ describe("reconnect", () => {
 
     server.close(1006, "network");
     const actionError = await a.catch((e: unknown) => e);
-    expect(actionError).toBeInstanceOf(FerrixError);
-    expect((actionError as FerrixError).code).toBe(CONNECTION_LOST);
+    expect(actionError).toBeInstanceOf(RxFerrixError);
+    expect((actionError as RxFerrixError).code).toBe(CONNECTION_LOST);
 
     // Calls made while disconnected are queued.
     const a2 = client.action(api.ai.summarize, { text: "later" });
@@ -658,7 +658,7 @@ describe("reconnect", () => {
 });
 
 describe("errors", () => {
-  it("maps QueryFailed errorData.code onto FerrixError.code", async () => {
+  it("maps QueryFailed errorData.code onto RxFerrixError.code", async () => {
     const watch = client.watchQuery(api.todos.get, { id: "zzz" });
     watch.onUpdate(() => {});
     await openAndDrain();
@@ -673,7 +673,7 @@ describe("errors", () => {
     ]);
     const state = watch.localQueryState();
     expect(state.status).toBe("error");
-    expect(() => watch.localQueryResult()).toThrow(FerrixError);
+    expect(() => watch.localQueryResult()).toThrow(RxFerrixError);
     try {
       watch.localQueryResult();
     } catch (e) {

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { FerrixError } from "@ferrix/client";
-  import { useMutation, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useMutation, useQuery } from "@rxferrix/svelte";
   import { ENV_NAME, env, type EnvVarView } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { parseDotenv } from "../lib/dotenv.js";
@@ -61,7 +61,7 @@
   });
 
   function errorText(e: unknown): string {
-    return e instanceof FerrixError ? e.message : String(e);
+    return e instanceof RxFerrixError ? e.message : String(e);
   }
 
   async function add(e: SubmitEvent) {

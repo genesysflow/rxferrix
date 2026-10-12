@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ferrix", "crates/ferrix-macros", "crates/ferrix-cli", "examples/todo/server", "examples/chat-react/server"]
+members = ["crates/rxferrix", "crates/rxferrix-macros", "crates/rxferrix-cli", "examples/todo/server", "examples/chat-react/server"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,165 @@
+# A RxFerrix app on Kubernetes (written for k3s: local-path storage, Traefik ingress), rolled out with no downtime.
+#
+#   kubectl apply -f deploy/k8s/rxferrix.yaml
+#   kubectl set image deployment/rxferrix app=ghcr.io/you/todo-server:v2      # or edit the image here and apply again
+#   kubectl rollout status deployment/rxferrix
+#
+# How a rollout works: the Deployment starts the new pod next to the running one (maxSurge 1, maxUnavailable 0) on the
+# same volume. The image runs with RXFERRIX_TAKEOVER=auto, so the new pod takes over from the old one: it copies the
+# database, opens the copy with the new code (index builds, schema check), catches up, then the old pod stops serving
+# and the new one swaps the copy in and starts listening. It turns Ready, the old pod (RXFERRIX_AFTER_HANDOVER=wait:
+# alive, serving nothing) is terminated, and the rollout is done. Traefik connects through the Service's cluster IP
+# and retries refused connections (see the Service), so clients see no errors. If the new version can't serve the data,
+# its pod exits (and keeps failing: CrashLoopBackOff) while the old pod carries on serving; `kubectl rollout undo
+# deployment/rxferrix` ends it.
+#
+# One replica only: SQLite has one writer. Both pods of a rollout must run on the same node with the same local
+# directory (the takeover talks over a Unix socket in it): local-path volumes pin pods to their node, and the pod
+# affinity below keeps a new pod next to the old one with other ReadWriteOnce storage. Don't put the data on network
+# storage (NFS, CephFS): SQLite needs a local disk.
+#
+# Change `default` in the ingress annotation if you deploy to another namespace.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rxferrix-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rxferrix
+  labels:
+    app: rxferrix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rxferrix
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # Preparing a takeover of a big database (copy, index builds) takes a while.
+  progressDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: rxferrix
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        fsGroup: 65532
+      affinity:
+        podAffinity:
+          # Next to the pod being replaced (the first pod matches itself, so it schedules anywhere).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: rxferrix
+              topologyKey: kubernetes.io/hostname
+      # Long enough for open requests to finish on a normal stop.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: app
+          image: todo-server:latest
+          args: ["serve", "--http", "0.0.0.0:8090", "--dir", "/data", "--public-url", "https://app.example.com"]
+          env:
+            # Set in the image already; repeated so the manifest says what it relies on.
+            - name: RXFERRIX_TAKEOVER
+              value: auto
+            - name: RXFERRIX_AFTER_HANDOVER
+              value: wait
+          # Secrets and settings (RXFERRIX_SMTP_URL, AWS_* for S3, ...):
+          # envFrom:
+          #   - secretRef:
+          #       name: rxferrix-env
+          ports:
+            - name: http
+              containerPort: 8090
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # SQLite's temporary files (big sorts); the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          # A new pod isn't listening while it prepares the takeover: up to 30 min, checked every second so it turns
+          # Ready as soon as it serves.
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 1
+            failureThreshold: 1800
+          # The old pod refuses connections from the handover on and soon leaves the Service.
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 1
+            failureThreshold: 2
+          # No liveness probe: the old pod doesn't answer while it waits to be terminated, and must not be restarted
+          # (it would take over again). A server that fails exits, and Kubernetes restarts it.
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rxferrix-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rxferrix
+  annotations:
+    # Traefik connects to the cluster IP rather than to the pods' addresses, so each connection goes to a pod that is
+    # Ready at that moment (or is refused, and retried, while none is): requests already waiting for a retry reach the
+    # new pod as soon as it is Ready, without waiting for Traefik to reload its configuration.
+    traefik.ingress.kubernetes.io/service.nativelb: "true"
+spec:
+  selector:
+    app: rxferrix
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Connections refused during the handover (the old pod stopped listening, the new one isn't Ready yet: a second or two)
+# are retried, for 5 s or more. Traefik retries only when the connection failed, so a mutation never runs twice.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rxferrix-retry
+spec:
+  retry:
+    attempts: 20
+    initialInterval: 250ms
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rxferrix
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-rxferrix-retry@kubernetescrd
+spec:
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rxferrix
+                port:
+                  name: http

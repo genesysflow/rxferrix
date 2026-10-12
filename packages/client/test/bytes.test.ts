@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bytesFromJson, bytesToJson, isBytes, type Bytes } from "../src/index.js";
 
 describe("bytes", () => {
-  it("encodes like ferrix::Bytes (standard, padded base64)", () => {
+  it("encodes like rxferrix::Bytes (standard, padded base64)", () => {
     expect(bytesToJson(new Uint8Array([]))).toEqual({ $bytes: "" });
     expect(bytesToJson(new Uint8Array([0, 255]))).toEqual({ $bytes: "AP8=" });
     expect(bytesToJson(new Uint8Array([1, 2, 3]))).toEqual({ $bytes: "AQID" });

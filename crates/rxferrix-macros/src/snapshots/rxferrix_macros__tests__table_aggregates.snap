@@ -1,0 +1,131 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "table(quote!(name = \"orders\"), quote!\n{\n    #[index(by_customer = [customer])]\n    #[aggregate(by_customer_day, group = [customer, day], sum =\n    [amount, quantity])] #[aggregate(total, sum = [amount])]\n    #[aggregate(count_only)] pub struct Order\n    {\n        pub customer: String, pub day: String, pub amount: f64,\n        #[serde(rename = \"qty\")] pub quantity: Option<i64>,\n    }\n})"
+---
+#[derive(
+    ::rxferrix::__private::serde::Serialize,
+    ::rxferrix::__private::serde::Deserialize,
+    ::rxferrix::__private::ts_rs::TS,
+    ::core::clone::Clone,
+    ::core::fmt::Debug
+)]
+#[serde(crate = "::rxferrix::__private::serde", rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct Order {
+    pub customer: String,
+    pub day: String,
+    pub amount: f64,
+    #[serde(rename = "qty")]
+    pub quantity: Option<i64>,
+}
+impl ::rxferrix::Table for Order {
+    const NAME: &'static str = "orders";
+    fn table_def() -> ::rxferrix::TableDef {
+        ::rxferrix::TableDef {
+            name: "orders",
+            indexes: ::std::vec![
+                ::rxferrix::IndexDef { name : "by_customer", fields :
+                ::std::vec!["customer"] }
+            ],
+            search_indexes: ::std::vec![],
+            vector_indexes: ::std::vec![],
+            ts: || ::rxferrix::__private::ts_inline::<Order>(),
+            validate: ::rxferrix::__private::validate_doc::<Order>,
+            shape: || {
+                let mut s = ::rxferrix::shape::StructShape::default();
+                s.field(
+                    "customer",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "day",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<String>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "amount",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<f64>::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                s.field(
+                    "qty",
+                    {
+                        #[allow(unused_imports)]
+                        use ::rxferrix::shape::{ProbeFallback as _, ProbeHasShape as _};
+                        #[allow(clippy::needless_borrow)]
+                        let shape = (&&::rxferrix::shape::ShapeProbe::<
+                            Option<i64>,
+                        >::new())
+                            .probe_shape();
+                        shape
+                    },
+                );
+                ::rxferrix::shape::Shape::Struct(s)
+            },
+            aggregates: ::std::vec![
+                ::rxferrix::AggregateDef { name : "by_customer_day", group_fields :
+                ::std::vec!["customer", "day"], sum_fields : ::std::vec!["amount", "qty"]
+                }, ::rxferrix::AggregateDef { name : "total", group_fields :
+                ::std::vec![], sum_fields : ::std::vec!["amount"] },
+                ::rxferrix::AggregateDef { name : "count_only", group_fields :
+                ::std::vec![], sum_fields : ::std::vec![] }
+            ],
+        }
+    }
+}
+#[allow(non_upper_case_globals)]
+impl Order {
+    pub const customer: ::rxferrix::Field<Order, String> = ::rxferrix::Field::new(
+        "customer",
+    );
+    pub const day: ::rxferrix::Field<Order, String> = ::rxferrix::Field::new("day");
+    pub const amount: ::rxferrix::Field<Order, f64> = ::rxferrix::Field::new("amount");
+    pub const quantity: ::rxferrix::Field<Order, Option<i64>> = ::rxferrix::Field::new(
+        "qty",
+    );
+    pub const _id: ::rxferrix::Field<Order, ::rxferrix::Id<Order>> = ::rxferrix::Field::new(
+        "_id",
+    );
+    pub const _creation_time: ::rxferrix::Field<Order, ::core::primitive::f64> = ::rxferrix::Field::new(
+        "_creationTime",
+    );
+    pub const by_customer: ::rxferrix::Index<Order> = ::rxferrix::Index::new(
+        "by_customer",
+    );
+    pub const by_creation_time: ::rxferrix::Index<Order> = ::rxferrix::Index::new(
+        "by_creation_time",
+    );
+    pub const by_customer_day: ::rxferrix::Aggregate<Order> = ::rxferrix::Aggregate::new(
+        "by_customer_day",
+    );
+    pub const total: ::rxferrix::Aggregate<Order> = ::rxferrix::Aggregate::new("total");
+    pub const count_only: ::rxferrix::Aggregate<Order> = ::rxferrix::Aggregate::new(
+        "count_only",
+    );
+}
+const _: () = ::rxferrix::__private::assert_sum_field::<f64>();
+const _: () = ::rxferrix::__private::assert_sum_field::<Option<i64>>();
+const _: () = ::rxferrix::__private::assert_sum_field::<f64>();
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::TABLES)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_TABLE_Order: fn() -> ::rxferrix::TableDef = <Order as ::rxferrix::Table>::table_def;

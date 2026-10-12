@@ -1,5 +1,5 @@
-import { useQuery } from "@ferrix/react";
-import { api, type Id } from "../ferrix";
+import { useQuery } from "@rxferrix/react";
+import { api, type Id } from "../rxferrix";
 
 export function TypingIndicator({ channel }: { channel: Id<"channels"> }) {
   const typing = useQuery(api.typing.list, { channel }) ?? [];

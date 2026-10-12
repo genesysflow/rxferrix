@@ -1,5 +1,5 @@
 /**
- * File uploads to a Ferrix server.
+ * File uploads to a RxFerrix server.
  *
  * The flow: a mutation returns `ctx.storage.generate_upload_url()`, the client `POST`s the file to it
  * with {@link uploadFile}, and a second mutation stores the returned `Id<"_storage">` in a document. Serve it with
@@ -12,7 +12,7 @@
  * ```
  */
 import type { Id } from "./api.js";
-import { FerrixError } from "./errors.js";
+import { RxFerrixError } from "./errors.js";
 import type { ErrorData } from "./protocol.js";
 
 export interface UploadProgress {
@@ -51,7 +51,7 @@ export function uploadRequestUrl(uploadUrl: string, filename: string | null | un
   try {
     url = base === undefined ? new URL(uploadUrl) : new URL(uploadUrl, base);
   } catch {
-    throw new FerrixError(`Invalid upload URL ${JSON.stringify(uploadUrl)} (pass options.baseUrl for relative URLs)`, {
+    throw new RxFerrixError(`Invalid upload URL ${JSON.stringify(uploadUrl)} (pass options.baseUrl for relative URLs)`, {
       code: "invalid_upload_url",
     });
   }
@@ -68,14 +68,14 @@ function parseResult(status: number, text: string): Id<"_storage"> {
   }
   if (status >= 200 && status < 300) {
     const id = (body as UploadResponse | null)?.storageId;
-    if (typeof id !== "string") throw new FerrixError(`Unexpected upload response: ${text.slice(0, 200)}`);
+    if (typeof id !== "string") throw new RxFerrixError(`Unexpected upload response: ${text.slice(0, 200)}`);
     return id as Id<"_storage">;
   }
   const err = body as { errorMessage?: string; errorData?: ErrorData | null } | null;
   if (err && typeof err === "object" && (err.errorMessage || err.errorData)) {
-    throw FerrixError.fromServer(err.errorMessage, err.errorData ?? null);
+    throw RxFerrixError.fromServer(err.errorMessage, err.errorData ?? null);
   }
-  throw new FerrixError(`Upload failed with HTTP ${status}`, { code: status === 413 ? "file_too_large" : "http_error" });
+  throw new RxFerrixError(`Upload failed with HTTP ${status}`, { code: status === 413 ? "file_too_large" : "http_error" });
 }
 
 function abortError(signal: AbortSignal | undefined): unknown {
@@ -84,7 +84,7 @@ function abortError(signal: AbortSignal | undefined): unknown {
 
 /**
  * Upload `file` to an upload URL from `ctx.storage.generate_upload_url()` and return the new file's
- * `Id<"_storage">`. Rejects with a {@link FerrixError} whose `code` is the server's (`file_too_large`,
+ * `Id<"_storage">`. Rejects with a {@link RxFerrixError} whose `code` is the server's (`file_too_large`,
  * `upload_url_expired`, `upload_url_used`, `invalid_upload_url`, `rate_limited`, ...), or `network_error`.
  */
 export async function uploadFile(uploadUrl: string, file: Blob, options: UploadFileOptions = {}): Promise<Id<"_storage">> {
@@ -131,7 +131,7 @@ function uploadWithXhr(
     };
     xhr.onerror = () => {
       cleanup();
-      reject(new FerrixError("The upload failed: network error", { code: "network_error" }));
+      reject(new RxFerrixError("The upload failed: network error", { code: "network_error" }));
     };
     xhr.onabort = () => {
       cleanup();
@@ -160,7 +160,7 @@ async function uploadWithFetch(
     });
   } catch (e) {
     if (options.signal?.aborted) throw abortError(options.signal);
-    throw new FerrixError(`The upload failed: ${e instanceof Error ? e.message : String(e)}`, {
+    throw new RxFerrixError(`The upload failed: ${e instanceof Error ? e.message : String(e)}`, {
       code: "network_error",
       cause: e,
     });

@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use ferrix::auth::User;
-use ferrix::prelude::*;
-use ferrix::testing::TestApp;
+use rxferrix::auth::User;
+use rxferrix::prelude::*;
+use rxferrix::testing::TestApp;
 
 use crate::model::Channel;
 use crate::{channels, messages, profiles, reactions, typing};
@@ -20,7 +20,7 @@ async fn user(t: &TestApp, email: &str) -> Id<User> {
     id
 }
 
-fn code(err: ferrix::Error) -> String {
+fn code(err: rxferrix::Error) -> String {
     err.downcast_ref::<UserError>().map(|e| e.code.clone()).unwrap_or_else(|| format!("not a user error: {err:#}"))
 }
 
@@ -178,7 +178,7 @@ async fn the_dev_inbox_is_dev_only() {
     let t = app().await;
     assert_eq!(t.action::<crate::dev::last_code>(("nobody@example.com".to_string(),)).await.unwrap(), None);
     // Outside --dev it is refused.
-    let prod = TestApp::with_options(ferrix::AppOptions::default()).await.unwrap();
+    let prod = TestApp::with_options(rxferrix::AppOptions::default()).await.unwrap();
     let err = prod.action::<crate::dev::last_code>(("nobody@example.com".to_string(),)).await.unwrap_err();
     assert!(err.to_string().contains("dev-only"), "{err}");
 }

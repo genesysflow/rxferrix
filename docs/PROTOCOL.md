@@ -1,8 +1,8 @@
-# Ferrix sync protocol (v1)
+# RxFerrix sync protocol (v1)
 
 Transport: WebSocket at `GET /api/sync`. Every frame is a UTF-8 JSON text frame containing exactly one message.
 Every message has a `"type"` discriminator. Field names are camelCase. This document is the **contract between
-`crates/ferrix` (server) and `packages/client` (TS)**. If you change it, change both sides.
+`crates/rxferrix` (server) and `packages/client` (TS)**. If you change it, change both sides.
 
 ## Concepts
 
@@ -152,8 +152,8 @@ A diff is a JSON object, applied to the previous result:
 
 A diff that doesn't fit (an op past the end, a missing key, an array diff for a non-array) means the client's copy
 isn't what the server diffed against: the client drops the whole Transition (nothing applied) and reconnects, which
-starts over from full values. The reference implementations are `ferrix::sync::diff::apply` and
-`packages/client/src/diff.ts`; `crates/ferrix/tests/it/diff_fixtures.rs` checks they agree.
+starts over from full values. The reference implementations are `rxferrix::sync::diff::apply` and
+`packages/client/src/diff.ts`; `crates/rxferrix/tests/it/diff_fixtures.rs` checks they agree.
 
 ## Clarifications (resolved while building the client)
 
@@ -253,9 +253,9 @@ endpoints' error shape, without `logLines`).
   admin, `impersonatedBy` set) have a fixed expiry that refreshing never extends.
 - **External tokens** (`AuthConfig::jwt`, docs/CONTRACT.md §1.5): a JWT from a configured issuer (Clerk, Auth0,
   Supabase, any OIDC provider) is accepted wherever an access token is, on `Authenticate` and as an HTTP Bearer token.
-  A token whose header says `HS256` is always one of ferrix's own; any other is routed by its `iss` (exact match) to
+  A token whose header says `HS256` is always one of rxferrix's own; any other is routed by its `iss` (exact match) to
   the issuer's verifier: RS256, ES256 or EdDSA against the issuer's JWKS (by `kid`), then `exp` (required) and `nbf`
-  with a leeway (60s), and `aud`. Its subject maps to a ferrix user (created on first sight), so the identity is an
+  with a leeway (60s), and `aud`. Its subject maps to a rxferrix user (created on first sight), so the identity is an
   ordinary user without a session id. The client simply passes the provider's token getter:
   `client.setAuth(({ forceRefresh }) => clerk.session.getToken({ skipCache: forceRefresh }))`.
 
@@ -279,8 +279,8 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens`. Ends all other sessions of the user and marks the email verified. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
 | `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
-| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `ferrix_oauth_state`, `SameSite=Lax` (plus `Secure` over https), or `SameSite=None; Secure` for Apple behind an https public URL). |
-| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, or `#ferrix_error=<code>&ferrix_error_description=…`. A `state` that names no pending flow of the provider gets a plain-text 400 (there is no app URL to return to). |
+| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `rxferrix_oauth_state`, `SameSite=Lax` (plus `Secure` over https), or `SameSite=None; Secure` for Apple behind an https public URL). |
+| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, or `#rxferrix_error=<code>&rxferrix_error_description=…`. A `state` that names no pending flow of the provider gets a plain-text 400 (there is no app URL to return to). |
 | `POST /api/auth/oauth/{provider}/callback` | form `code, state, user?` (from Apple) | Apple only (`response_mode=form_post`; 405 for other providers): as the `GET`, answered with 303. `user` (the name) comes on the first sign-in only. |
 | `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
 | `GET /api/auth/admin/setup` | | `{ needsSetup }` |
@@ -301,7 +301,7 @@ once. Verification codes last 24 hours, reset codes 30 minutes, sign-in codes 15
 port as an entry, and, when the entry has a path, that path or one below it. In `--dev`, any `http://localhost` or
 loopback URL is allowed too. A URL that doesn't match is refused (400 `invalid_redirect`), never replaced. Without
 `redirectTo` the first allowlist entry is used. Email links point at the app with the token in the fragment:
-`<app url>#ferrix_verify_token=…`, `#ferrix_reset_token=…`, `#ferrix_magic_token=…`; the TS client's
+`<app url>#rxferrix_verify_token=…`, `#rxferrix_reset_token=…`, `#rxferrix_magic_token=…`; the TS client's
 `handleRedirectCallback()` consumes them (and the OAuth fragment) and removes them from the address bar.
 
 ## Admin endpoints
@@ -339,14 +339,14 @@ Operations endpoints, with the same admin bearer auth (docs/CONTRACT.md §4.2, �
 
 ## Serving the app
 
-Requests that match no Ferrix route (`/api/*`, `/_/*`, `/metrics`) or app route (`Ferrix::routes`) go to the app's
-static frontend when one is configured (`Ferrix::static_dir`, `Ferrix::embed_static`): the file, or `index.html` for
+Requests that match no RxFerrix route (`/api/*`, `/_/*`, `/metrics`) or app route (`RxFerrix::routes`) go to the app's
+static frontend when one is configured (`RxFerrix::static_dir`, `RxFerrix::embed_static`): the file, or `index.html` for
 client-side routes. Paths under `/api` and `/_` are never answered with static files. See docs/CONTRACT.md §4.4.
 
 ## File storage
 
 Files are uploaded through signed upload URLs and served by id. The Rust side (`ctx.storage`, the `_storage` table,
-configuration) is in docs/CONTRACT.md §1.6; `uploadFile(uploadUrl, blob, { onProgress })` in `@ferrix/client`
+configuration) is in docs/CONTRACT.md §1.6; `uploadFile(uploadUrl, blob, { onProgress })` in `@rxferrix/client`
 implements the client side of the upload.
 
 ### `POST /api/storage/upload?token=<token>[&filename=<name>]`

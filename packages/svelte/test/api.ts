@@ -1,4 +1,4 @@
-import { makeFunctionReference, type Id, type PaginationOpts, type PaginationResult } from "@ferrix/client";
+import { makeFunctionReference, type Id, type PaginationOpts, type PaginationResult } from "@rxferrix/client";
 
 export type Todo = { _id: Id<"todos">; text: string };
 export type Message = { _id: Id<"messages">; body: string };

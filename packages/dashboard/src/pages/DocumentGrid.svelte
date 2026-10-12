@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { FerrixError } from "@ferrix/client";
-  import { useMutation, usePaginatedQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useMutation, usePaginatedQuery } from "@rxferrix/svelte";
   import {
     dashboard,
     type ExportFormat,
@@ -204,7 +204,7 @@
       selected = new Set();
       ctx.toast(`Deleted ${n} document${n === 1 ? "" : "s"}`);
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 

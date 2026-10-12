@@ -1,0 +1,56 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration(quote!(table = \"todos\", name = \"0002_split-name\", batch = 7, after =\n[\"0001_add_priority\", \"todos:fix\"]), quote!\n{\n    #[cfg(feature = \"x\")] async fn\n    split(_ctx: &rxferrix::MutationCtx, doc: Doc<OldTodo>) ->\n    anyhow::Result<DocChange> { Ok(DocChange::Keep) }\n})"
+---
+#[cfg(feature = "x")]
+async fn split(
+    _ctx: &rxferrix::MutationCtx,
+    doc: Doc<OldTodo>,
+) -> anyhow::Result<DocChange> {
+    Ok(DocChange::Keep)
+}
+/// Migration reference for [`split`](fn@split).
+#[cfg(feature = "x")]
+#[allow(non_camel_case_types, dead_code)]
+struct split {}
+#[cfg(feature = "x")]
+impl ::rxferrix::migrations::MigrationRef for split {
+    fn name() -> ::std::string::String {
+        ::rxferrix::__private::MigrationDef::name(&__RXFERRIX_MIGRATION_split)
+    }
+    fn table() -> &'static str {
+        __RXFERRIX_MIGRATION_split.table
+    }
+}
+#[cfg(feature = "x")]
+#[::rxferrix::__private::linkme::distributed_slice(::rxferrix::__private::MIGRATIONS)]
+#[linkme(crate = ::rxferrix::__private::linkme)]
+#[allow(non_upper_case_globals)]
+static __RXFERRIX_MIGRATION_split: ::rxferrix::__private::MigrationDef = ::rxferrix::__private::MigrationDef {
+    module_path: ::core::module_path!(),
+    fn_name: "split",
+    name: ::core::option::Option::Some("0002_split-name"),
+    table: "todos",
+    batch_size: 7usize,
+    after: &["0001_add_priority", "todos:fix"],
+    handler: {
+        fn __rxferrix_migrate<'a>(
+            __rxferrix_ctx: &'a ::rxferrix::MutationCtx,
+            __rxferrix_doc: ::rxferrix::__private::serde_json::Value,
+        ) -> ::rxferrix::__private::BoxFuture<
+            'a,
+            ::rxferrix::Result<::rxferrix::migrations::DocChange>,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let __rxferrix_doc: Doc<OldTodo> = ::rxferrix::__private::decode_migration_doc::<
+                    Doc<OldTodo>,
+                >(__rxferrix_doc)?;
+                let __rxferrix_out: DocChange = split(__rxferrix_ctx, __rxferrix_doc)
+                    .await?;
+                ::rxferrix::__private::migration_output(__rxferrix_out)
+            })
+        }
+        __rxferrix_migrate
+    },
+    on_read: ::core::option::Option::None,
+};

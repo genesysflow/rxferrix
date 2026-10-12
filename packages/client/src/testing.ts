@@ -1,9 +1,9 @@
 /**
- * Test utilities: a scriptable fake of the Ferrix sync endpoint (`@ferrix/client/testing`).
+ * Test utilities: a scriptable fake of the RxFerrix sync endpoint (`@rxferrix/client/testing`).
  *
  * ```ts
  * const server = new FakeServer();
- * const client = new FerrixClient("http://localhost", { webSocketConstructor: server.WebSocket });
+ * const client = new RxFerrixClient("http://localhost", { webSocketConstructor: server.WebSocket });
  * server.open();                       // the socket connects
  * await flushMicrotasks();             // batched ModifyQuerySet goes out
  * server.sent;                         // what the client sent on this socket

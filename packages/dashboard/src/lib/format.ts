@@ -6,7 +6,7 @@ const ID_RE = /^[0-9a-hjkmnp-tv-z]{26}$/;
 
 /**
  * The table number encoded in a document id (its first 4 bytes, big-endian; ids are 26 chars of lowercase Crockford
- * base32 of 16 bytes, see crates/ferrix/src/id.rs), or null if `value` is not an id.
+ * base32 of 16 bytes, see crates/rxferrix/src/id.rs), or null if `value` is not an id.
  */
 export function idTableNumber(value: unknown): number | null {
   if (typeof value !== "string" || !ID_RE.test(value)) return null;

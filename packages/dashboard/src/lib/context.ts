@@ -1,13 +1,13 @@
 /** Shared dashboard state: the table list (for following ids) and the auth instance. */
 import { getContext, setContext } from "svelte";
-import type { FerrixAuth } from "@ferrix/client";
+import type { RxFerrixAuth } from "@rxferrix/client";
 import type { TableSummary } from "./api.js";
 
 /** The context key (exported for component tests). */
-export const DASHBOARD_CONTEXT = Symbol("ferrix-dashboard");
+export const DASHBOARD_CONTEXT = Symbol("rxferrix-dashboard");
 
 export interface DashboardContext {
-  auth: FerrixAuth;
+  auth: RxFerrixAuth;
   /** The live table list (undefined while loading). */
   readonly tables: TableSummary[] | undefined;
   /** Table name for a table number (from an id). */

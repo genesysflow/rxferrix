@@ -1,6 +1,6 @@
 import { useDeferredValue, useState, type ReactNode } from "react";
-import { useQueryWithStatus } from "@ferrix/react";
-import { api } from "../ferrix";
+import { useQueryWithStatus } from "@rxferrix/react";
+import { api } from "../rxferrix";
 import { errorMessage, formatTime, initials, type ChannelInfo } from "../lib";
 
 /** Full-text search in the channel (live: new matching messages show up as they're sent). */

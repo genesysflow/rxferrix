@@ -6,7 +6,7 @@ import type {
   OutputOf,
 } from "./api.js";
 import { normalizeArgs, queryToken, type QueryToken } from "./canonical.js";
-import { CLIENT_CLOSED, FerrixError } from "./errors.js";
+import { CLIENT_CLOSED, RxFerrixError } from "./errors.js";
 import { LocalQuerySet } from "./local_query_set.js";
 import { createLogger, type Logger } from "./logging.js";
 import {
@@ -37,7 +37,7 @@ import { RemoteQuerySet, TransitionVersionMismatch } from "./remote_query_set.js
 import { RequestManager, type SettledMutation } from "./request_manager.js";
 import { WebSocketManager } from "./web_socket_manager.js";
 
-export interface FerrixClientOptions {
+export interface RxFerrixClientOptions {
   /** WebSocket implementation to use (defaults to `globalThis.WebSocket`). Needed on Node < 22 or for tests. */
   webSocketConstructor?: typeof WebSocket;
   /** Log every protocol message to `console.debug`. */
@@ -78,7 +78,7 @@ export interface ConnectionState {
 export interface QueryWatch<T> {
   /** Subscribes to changes of this query. The server subscription lives while at least one callback is registered. */
   onUpdate(callback: () => void): () => void;
-  /** The current value, `undefined` while loading. Throws the query's {@link FerrixError} if it failed. */
+  /** The current value, `undefined` while loading. Throws the query's {@link RxFerrixError} if it failed. */
   localQueryResult(): T | undefined;
   /** The current state. The returned object is referentially stable while the visible value does not change. */
   localQueryState(): QueryState<T>;
@@ -89,7 +89,7 @@ function deriveSyncUrl(url: string): string {
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(`FerrixClient: invalid deployment URL ${JSON.stringify(url)}`);
+    throw new Error(`RxFerrixClient: invalid deployment URL ${JSON.stringify(url)}`);
   }
   switch (parsed.protocol) {
     case "http:":
@@ -101,7 +101,7 @@ function deriveSyncUrl(url: string): string {
       parsed.protocol = "wss:";
       break;
     default:
-      throw new Error(`FerrixClient: unsupported URL protocol ${parsed.protocol}`);
+      throw new Error(`RxFerrixClient: unsupported URL protocol ${parsed.protocol}`);
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "") + "/api/sync";
   parsed.search = "";
@@ -146,16 +146,16 @@ interface AuthState {
 }
 
 /**
- * The Ferrix sync client: subscribes to queries over a WebSocket and runs mutations and actions.
+ * The RxFerrix sync client: subscribes to queries over a WebSocket and runs mutations and actions.
  *
  * ```ts
- * const client = new FerrixClient("http://localhost:3210");
+ * const client = new RxFerrixClient("http://localhost:3210");
  * const watch = client.watchQuery(api.todos.list, {});
  * watch.onUpdate(() => console.log(watch.localQueryResult()));
  * await client.mutation(api.todos.add, { text: "hi" });
  * ```
  */
-export class FerrixClient {
+export class RxFerrixClient {
   /** The http(s) base URL this client was created with. */
   readonly url: string;
   /** The WebSocket URL (`ws(s)://host/api/sync`). */
@@ -195,8 +195,8 @@ export class FerrixClient {
 
   private readonly removeUnloadListener: () => void;
 
-  constructor(url: string, options: FerrixClientOptions = {}) {
-    if (typeof url !== "string") throw new Error("FerrixClient: url must be a string");
+  constructor(url: string, options: RxFerrixClientOptions = {}) {
+    if (typeof url !== "string") throw new Error("RxFerrixClient: url must be a string");
     this.url = url;
     this.syncUrl = deriveSyncUrl(url);
     this.sessionId = randomSessionId();
@@ -209,7 +209,7 @@ export class FerrixClient {
     const WS = options.webSocketConstructor ?? (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
     if (!WS) {
       throw new Error(
-        "FerrixClient: no global WebSocket available; pass `webSocketConstructor` (e.g. from the `ws` package)",
+        "RxFerrixClient: no global WebSocket available; pass `webSocketConstructor` (e.g. from the `ws` package)",
       );
     }
     this.ws = new WebSocketManager(
@@ -251,7 +251,7 @@ export class FerrixClient {
 
   /** Runs a query once: subscribes, waits for the first result, then unsubscribes. */
   query<Q extends FunctionReference<"query">>(ref: Q, ...args: OptionalArgs<Q>): Promise<OutputOf<Q>> {
-    if (this.closed) return Promise.reject(new FerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const watch = this.watchQuery(ref, ...args);
     return new Promise<OutputOf<Q>>((resolve, reject) => {
       let unsubscribe: (() => void) | null = null;
@@ -340,13 +340,13 @@ export class FerrixClient {
 
   /**
    * Runs a mutation. The returned promise resolves with the mutation's result once the client's queries reflect the
-   * mutation (read-your-writes); it rejects with a {@link FerrixError} if the mutation fails.
+   * mutation (read-your-writes); it rejects with a {@link RxFerrixError} if the mutation fails.
    */
   mutation<M extends FunctionReference<"mutation">>(
     ref: M,
     ...argsAndOptions: ArgsAndOptions<M, MutationOptions<ArgsOf<M>>>
   ): Promise<OutputOf<M>> {
-    if (this.closed) return Promise.reject(new FerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const args = normalizeArgs(argsAndOptions[0]);
     const options = argsAndOptions[1] as MutationOptions<ArgsOf<M>> | undefined;
     const requestId = this.requests.allocateRequestId();
@@ -365,7 +365,7 @@ export class FerrixClient {
 
   /** Runs an action. Rejects with a "connection lost" error if the socket drops while it is in flight. */
   action<A extends FunctionReference<"action">>(ref: A, ...args: OptionalArgs<A>): Promise<OutputOf<A>> {
-    if (this.closed) return Promise.reject(new FerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const requestId = this.requests.allocateRequestId();
     const message: ActionMessage = { type: "Action", requestId, udfPath: ref._path, args: normalizeArgs(args[0]) };
     const promise = this.requests.trackAction(message) as Promise<OutputOf<A>>;
@@ -706,7 +706,7 @@ export class FerrixClient {
     this.clearAuthRefreshTimer();
     this.ws.stop();
     this.removeUnloadListener();
-    this.requests.rejectAll(new FerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    this.requests.rejectAll(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     this.listeners.clear();
     this.notifyConnectionState();
   }

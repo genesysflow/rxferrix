@@ -1,0 +1,5 @@
+error: table names starting with `_` are reserved for rxferrix's built-in system tables
+ --> tests/ui/table_reserved_name.rs:5:16
+  |
+5 | #[table(name = "_users")]
+  |                ^^^^^^^^

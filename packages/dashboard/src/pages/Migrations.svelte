@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FerrixError } from "@ferrix/client";
-  import { useAction, useMutation, useQuery } from "@ferrix/svelte";
+  import { RxFerrixError } from "@rxferrix/client";
+  import { useAction, useMutation, useQuery } from "@rxferrix/svelte";
   import { migrations, type MigrationReport, type MigrationState, type MigrationSummary } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { diffFields } from "../lib/diff.js";
@@ -61,7 +61,7 @@
       for (const rep of r.reports) ctx.toast(`${rep.name}: ${outcomeLabels[rep.outcome] ?? rep.outcome}`);
       if (!r.started.length && !r.reports.length) ctx.toast("Nothing to run");
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     } finally {
       busy = null;
     }
@@ -73,7 +73,7 @@
       const r = await run({ name: m?.name ?? null, dryRun: true });
       report = { title: m ? `Dry run of ${m.name}` : "Dry run of every pending migration", reports: r.reports };
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     } finally {
       busy = null;
     }
@@ -84,7 +84,7 @@
       const outcome = await cancel({ name: m.name });
       ctx.toast(outcome === "canceled" ? `${m.name} stops after its current batch` : `${m.name} is not running`);
     } catch (e) {
-      ctx.toast(e instanceof FerrixError ? e.message : String(e), "error");
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
     }
   }
 
@@ -126,7 +126,7 @@
     {:else if rows.length === 0}
       <Empty
         title="No migrations"
-        hint="Declare one with #[migration(table = …)] on an async fn that returns a patch for each document. It shows here as pending until it runs (serve --migrate, ferrix migrate, or the Run button)."
+        hint="Declare one with #[migration(table = …)] on an async fn that returns a patch for each document. It shows here as pending until it runs (serve --migrate, rxferrix migrate, or the Run button)."
       />
     {:else}
       <table class="grid" data-testid="migrations">

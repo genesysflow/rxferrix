@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use ferrix::auth::User;
-use ferrix::prelude::*;
+use rxferrix::auth::User;
+use rxferrix::prelude::*;
 
 use crate::model::{Channel, Member, Message, get_channel, membership, require_member, require_readable, user_error};
 use crate::profiles::Names;
@@ -219,7 +219,7 @@ pub async fn unread(ctx: &QueryCtx) -> Result<Vec<UnreadCount>> {
         ctx.db.query::<Member>().with_index(Member::by_user, |q| q.eq(Member::user, user)).collect().await?;
     let mut out = Vec::new();
     for m in memberships {
-        let since_read = |q: ferrix::IndexRange<Message>| {
+        let since_read = |q: rxferrix::IndexRange<Message>| {
             q.eq(Message::channel, m.channel).gt(Message::_creation_time, m.last_read_at)
         };
         // Most channels have nothing new: an index count (no documents read) settles those.

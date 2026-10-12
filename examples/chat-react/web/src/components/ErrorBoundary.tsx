@@ -7,7 +7,7 @@ interface Props {
 }
 
 /**
- * Catches errors thrown while rendering, in particular the `FerrixError` that `useQuery` / `usePaginatedQuery`
+ * Catches errors thrown while rendering, in particular the `RxFerrixError` that `useQuery` / `usePaginatedQuery`
  * throw when a query fails (e.g. `not_a_member`). Give it a `key` to reset it when its subject changes.
  */
 export class ErrorBoundary extends Component<Props, { error: unknown }> {

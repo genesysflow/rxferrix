@@ -1,5 +1,0 @@
----
-source: crates/ferrix-macros/src/tests.rs
-expression: "table_err(quote!(), quote!(struct T<X> { x: X, }))"
----
-#[table] structs cannot be generic

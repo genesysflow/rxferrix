@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
-  FerrixClient,
+  RxFerrixClient,
   getAllPages,
   insertAtTop,
   makeFunctionReference,
@@ -41,12 +41,12 @@ const page = (ids: string[], continueCursor: string, isDone = false): Pagination
 const ids = (q: PaginatedQuery<Message>) => q.getCurrent().results.map((r) => r._id);
 
 let server: FakeServer;
-let client: FerrixClient;
+let client: RxFerrixClient;
 
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   server = new FakeServer();
-  client = new FerrixClient("http://localhost:3210", {
+  client = new RxFerrixClient("http://localhost:3210", {
     webSocketConstructor: server.WebSocket,
     unsavedChangesWarning: false,
   });
@@ -337,7 +337,7 @@ describe("types", () => {
   it("infers the item type and requires the args without paginationOpts", () => {
     expectTypeOf<PaginatedQueryItem<typeof api.messages.list>>().toEqualTypeOf<Message>();
     expectTypeOf<PaginatedQueryArgs<typeof api.messages.list>>().toEqualTypeOf<{ channel: string }>();
-    const _check = (c: FerrixClient) => {
+    const _check = (c: RxFerrixClient) => {
       const q = c.paginatedQuery(api.messages.list, { channel: "a" }, { initialNumItems: 1 });
       expectTypeOf(q.getCurrent().results).toEqualTypeOf<Message[]>();
       // @ts-expect-error missing `channel`

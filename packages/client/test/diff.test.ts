@@ -4,7 +4,7 @@ import { RemoteQuerySet } from "../src/remote_query_set.js";
 
 import fixtures from "./fixtures/diffs.json";
 
-/** (old, new, diff) cases from the server's diff algorithm (crates/ferrix/tests/it/diff_fixtures.rs). */
+/** (old, new, diff) cases from the server's diff algorithm (crates/rxferrix/tests/it/diff_fixtures.rs). */
 const cases = fixtures as { old: unknown; new: unknown; diff: unknown }[];
 
 describe("applyDiff", () => {

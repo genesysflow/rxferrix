@@ -1,0 +1,8 @@
+---
+source: crates/rxferrix-macros/src/tests.rs
+expression: "migration_err(quote!(table = Todo, name = \"0003_x\", after =\n[\"0001_ok\", \"bad name\", 3, \"0001_ok\", \"0003_x\"]),\nquote!(async fn m(ctx: &MutationCtx, doc: Value) -> Result<()> {}))"
+---
+a migration name may only contain letters, digits and `_ - . : /`, not ` `
+`after` lists migration names as string literals, e.g. `after = ["0001_add_priority"]`
+`0001_ok` is listed twice in `after`
+a migration can't run after itself

@@ -2,24 +2,26 @@
 
 ## Create an app
 
-You need Rust (the repository's `mise.toml` installs it with [mise](https://mise.jdx.dev)) and
-[bun](https://bun.sh). From a checkout of the repository:
+You need [Rust](https://rustup.rs) and [bun](https://bun.sh).
 
 ```sh
-bun install && bun run build               # build the TypeScript packages
-cargo install --path crates/rxferrix-cli     # install the `rxferrix` command
-rxferrix new my-app                          # --web react (default), svelte or none
+cargo install rxferrix-cli     # install the `rxferrix` command
+rxferrix new my-app            # --web react (default), svelte or none
 ```
 
 Then run it, the backend and the web app in two terminals:
 
 ```sh
-cd my-app && cargo run -- serve --dev      # backend on http://127.0.0.1:8090
+cd my-app && cargo run -- serve --dev         # backend on http://127.0.0.1:8090
 cd my-app/web && bun install && bun run dev   # web app
 ```
 
-`rxferrix new` uses the checkout it was installed from for the crate and the @rxferrix packages; `--published` uses
-crates.io and npm instead, and `--rxferrix-path DIR` another checkout.
+The app depends on the published [`rxferrix`](https://crates.io/crates/rxferrix) crate and the
+[`@rxferrix`](https://www.npmjs.com/org/rxferrix) packages on npm.
+
+To work on RxFerrix itself, build the TypeScript packages in a checkout (`bun install && bun run build`) and install
+the command from it (`cargo install --path crates/rxferrix-cli`): apps it creates then use the checkout's crate and
+packages (`--published` uses crates.io and npm instead, `--rxferrix-path DIR` another checkout).
 
 ## What's in the app
 

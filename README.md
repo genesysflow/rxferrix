@@ -19,23 +19,25 @@ How it works inside, and why: [Design](docs/DESIGN.md).
 
 ## Quick start
 
-You need Rust (via [mise](https://mise.jdx.dev), see `mise.toml`) and [bun](https://bun.sh).
+You need [Rust](https://rustup.rs) and [bun](https://bun.sh).
 
 ```sh
-bun install && bun run build               # build the TypeScript packages
-cargo install --path crates/rxferrix-cli     # the `rxferrix` command
-rxferrix new my-app                          # --web react (default), svelte or none
-cd my-app && cargo run -- serve --dev      # backend on http://127.0.0.1:8090
+cargo install rxferrix-cli                    # the `rxferrix` command
+rxferrix new my-app                           # --web react (default), svelte or none
+cd my-app && cargo run -- serve --dev         # backend on http://127.0.0.1:8090
 cd my-app/web && bun install && bun run dev   # web app, in a second terminal
 ```
 
-The new app is a Rust crate with a sample `tasks` table and functions in `src/tasks.rs`, and a web app in `web/`.
-`serve --dev` writes the TypeScript API to `web/src/rxferrix` each time it starts, so restart it after you change the
-functions. The admin dashboard is at http://127.0.0.1:8090/_/: open the setup link the server prints on first start to create an
+The new app is a Rust crate (it depends on [`rxferrix`](https://crates.io/crates/rxferrix)) with a sample `tasks`
+table and functions in `src/tasks.rs`, and a web app in `web/` (using
+[`@rxferrix/react`](https://www.npmjs.com/package/@rxferrix/react) or `@rxferrix/svelte`). `serve --dev` writes the
+TypeScript API to `web/src/rxferrix` each time it starts, so restart it after you change the functions. The admin
+dashboard is at http://127.0.0.1:8090/_/: open the setup link the server prints on first start to create an
 administrator.
 
-A `rxferrix` command installed from this checkout makes apps that use the checkout's crate and @rxferrix packages;
-`--published` uses crates.io and npm instead, and `--rxferrix-path DIR` another checkout.
+To work on RxFerrix itself, build the TypeScript packages in a checkout (`bun install && bun run build`) and install
+the command from it (`cargo install --path crates/rxferrix-cli`): apps it creates then use the checkout's crate and
+packages (`--published` uses crates.io and npm instead, `--rxferrix-path DIR` another checkout).
 
 ## What the code looks like
 

@@ -714,7 +714,19 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     std::fs::write(root.join("api/health"), "shadowed").unwrap();
     let hook = axum::Router::new()
         .route("/hooks/echo", axum::routing::post(|body: String| async move { format!("hook:{body}") }));
-    let options = WebOptions { static_files: Some(StaticFiles::Dir(root.to_path_buf())), routes: Some(hook) };
+    // A route that reaches the app (`RxFerrix::app_routes`): writes through a mutation, reads through a query.
+    let app_hook = axum::Router::new().route(
+        "/hooks/pair",
+        axum::routing::post(|axum::extract::State(app): axum::extract::State<App>, body: String| async move {
+            app.mutation::<app::add_pair>((41, body)).await.unwrap();
+            let pairs = app.query::<app::all_pairs>(()).await.unwrap();
+            pairs.iter().filter(|p| p.group == 41).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
+        }),
+    );
+    let options = WebOptions {
+        static_files: Some(StaticFiles::Dir(root.to_path_buf())),
+        routes: Some(hook.with_state(()).merge(app_hook)),
+    };
     let addr = serve(t.app(), &options).await;
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let get = |path: &str| client.get(format!("http://{addr}{path}"));
@@ -777,6 +789,8 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     // Custom routes.
     let r = client.post(format!("http://{addr}/hooks/echo")).body("ping").send().await.unwrap();
     assert_eq!(r.text().await.unwrap(), "hook:ping");
+    let r = client.post(format!("http://{addr}/hooks/pair")).body("from a route").send().await.unwrap();
+    assert_eq!(r.text().await.unwrap(), "from a route a|from a route b");
     let r = client.head(format!("http://{addr}/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
 

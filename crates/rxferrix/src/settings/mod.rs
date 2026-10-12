@@ -292,11 +292,8 @@ pub async fn send_test_email(ctx: &ActionCtx, to: String, smtp: Option<SmtpInput
             Error::from(UserError::new("email_not_configured", "Email is not configured on this server"))
         })?,
     };
-    let email = Email {
-        to,
-        subject: "RxFerrix test email".into(),
-        body: "This is a test email from your RxFerrix server. Email delivery works.".into(),
-    };
+    let email =
+        Email::new(to, "RxFerrix test email", "This is a test email from your RxFerrix server. Email delivery works.");
     match tokio::time::timeout(Duration::from_secs(30), mailer.send(email)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {

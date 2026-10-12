@@ -94,6 +94,26 @@ pub(crate) async fn create_password_user(
     .await
 }
 
+/// Replace a user's password hash with `new_hash` (same password, newer algorithm) if it is still `old_hash`. Sessions
+/// are kept: nothing changed for the user. Returns whether it was replaced.
+pub(crate) async fn upgrade_password_hash(
+    app: &App,
+    user: Id<User>,
+    old_hash: String,
+    new_hash: String,
+) -> crate::Result<bool> {
+    write(app, |db| async move {
+        match credential_of(&db, user).await? {
+            Some(c) if c.value.password_hash == old_hash => {
+                db.replace(c.id, Credential { user, password_hash: new_hash }).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    })
+    .await
+}
+
 /// Set (or add) a user's password and end all their sessions.
 pub(crate) async fn set_password(app: &App, user: Id<User>, password_hash: String) -> crate::Result<()> {
     write(app, |db| async move {

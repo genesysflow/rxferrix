@@ -70,3 +70,23 @@ from `auth_secret.key` and never shown again. Whatever the code, the command lin
 over these settings. Every administrator write is recorded in an audit log (`_audit_log`), and admins can act as a
 user through a short-lived, audited session. Details: [docs/PROTOCOL.md](../PROTOCOL.md) ("Auth") and
 [docs/CONTRACT.md](../CONTRACT.md) §1.2, §1.5, §4.1.4, §4.1.5.
+
+**Users from another system.** Import `_users` and `_credentials` with `<app> import --mode insert` (system tables
+can be imported from the command line). Besides argon2id, `_credentials.passwordHash` may hold a bcrypt hash
+(`$2a$`, `$2b$`, `$2y$`: PocketBase, Laravel, Devise, Supabase, ...): those users sign in with their old password,
+and the hash is replaced with an argon2id one on that sign-in.
+
+**Sending your own email.** Actions send through the same mailer as the auth emails (`--smtp-url`, `AuthConfig::mailer`
+or SMTP from the dashboard's settings, and the dev log mailer in `--dev`):
+
+```rust
+use rxferrix::auth::Email;
+
+#[action]
+pub async fn send_confirmation(ctx: &ActionCtx, to: String, text: String, html: String) -> Result<()> {
+    ctx.send_email(Email::new(to, "Your booking", text).html(html)).await   // `email_not_configured` without a mailer
+}
+```
+
+From a mutation, schedule the action (`ctx.scheduler.run_after::<send_confirmation>(Duration::ZERO, ..)`), so the
+email goes out only if the mutation commits; a workpool adds retries.

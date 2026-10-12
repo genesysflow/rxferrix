@@ -679,6 +679,9 @@
                 <strong>{t.documents}</strong> document{t.documents === 1 ? "" : "s"} imported into <a href={href("data", [t.table])} onclick={link}>{t.table}</a>
                 {#if t.replaced}· {t.replaced} replaced{/if}
                 {#if t.deleted}· {t.deleted} deleted first{/if}
+                {#if t.droppedFields.length}
+                  <div class="muted">Left out fields the table doesn't define: {t.droppedFields.join(", ")}</div>
+                {/if}
               </div>
             {/each}
             {#if r.remappedIds}<div class="muted">Ids were rewritten for this database's table numbers.</div>{/if}

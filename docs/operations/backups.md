@@ -72,6 +72,7 @@ consistent snapshot; `todo-server import <dir|file.jsonl|file.csv> [--format jso
 insert|upsert|replace]` loads JSONL or CSV through the normal write path in batches (validated, indexed, ids and
 creation times kept), offline. CSV is read as the export writes it (a header row, RFC 4180), and each cell is typed
 with the table's Rust type: `42` is a number in a number field and text in a `String` field, JSON cells become arrays
-and objects, an empty cell is `null` (or `""` for a non-optional string). Admins can stream one table with
-`GET /api/admin/export/{table}?format=csv` and import into a running server with
+and objects, an empty cell is `null` (or `""` for a non-optional string). Fields the table doesn't define are left
+out, and the report lists them, so files converted from another backend may carry extra columns. Admins can stream
+one table with `GET /api/admin/export/{table}?format=csv` and import into a running server with
 `POST /api/admin/import/{table}?format=csv`.

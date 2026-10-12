@@ -811,6 +811,31 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
 }
 
 #[tokio::test]
+async fn import_leaves_out_fields_the_table_does_not_define() {
+    let t = TestApp::new().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // As a converter from another backend might write them: system fields of the old one ride along.
+    let lines = [
+        json!({ "title": "a", "rank": 1, "tags": [], "collectionName": "docs", "legacyId": "pb1" }),
+        json!({ "title": "b", "rank": 2, "tags": ["x"], "legacyId": "pb2" }),
+    ];
+    let file = dir.path().join("ops_docs.jsonl");
+    std::fs::write(&file, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 1, allow_system_tables: false, format: None };
+    let report = export::import_path(t.app(), &file, None, &import).await.unwrap();
+    assert_eq!(report.tables[0].documents, 2);
+    assert_eq!(report.tables[0].dropped_fields, ["collectionName", "legacyId"]);
+
+    let options =
+        ExportOptions { tables: Some(vec!["ops_docs".into()]), format: ExportFormat::Jsonl, include_files: false };
+    let out = tempfile::tempdir().unwrap();
+    export::export_to_dir(t.dir(), None, out.path(), &options).await.unwrap();
+    let stored = std::fs::read_to_string(out.path().join("ops_docs.jsonl")).unwrap();
+    assert!(!stored.contains("legacyId") && !stored.contains("collectionName"), "{stored}");
+    assert_eq!(stored.lines().count(), 2);
+}
+
+#[tokio::test]
 async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     let t = TestApp::new().await.unwrap();
     let key = rcgen::KeyPair::generate().unwrap();

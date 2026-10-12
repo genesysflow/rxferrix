@@ -47,6 +47,7 @@ use crate::db::catalog::TableInfo;
 use crate::id::DocId;
 use crate::runtime::App;
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD};
+use crate::shape::Shape;
 
 /// `manifest.json`'s `format`.
 pub const EXPORT_FORMAT: &str = "rxferrix-export";
@@ -429,6 +430,9 @@ pub struct TableImport {
     /// Documents deleted first (`replace`).
     #[ts(type = "number")]
     pub deleted: u64,
+    /// Fields the documents had that the table doesn't define, by path (`notes`, `address.zip`, `items[].extra`):
+    /// they were left out.
+    pub dropped_fields: Vec<String>,
 }
 
 /// What [`import_path`] did.
@@ -509,7 +513,15 @@ struct ImportDoc {
     creation_time: Option<f64>,
 }
 
-fn parse_line(value: crate::Result<Value>, table: &TableInfo, remap: &IdRemap) -> crate::Result<ImportDoc> {
+/// One record as a document to write. Fields the table doesn't define (`shape`, the table's) are left out and their
+/// paths added to `dropped`.
+fn parse_line(
+    value: crate::Result<Value>,
+    table: &TableInfo,
+    shape: &Shape,
+    remap: &IdRemap,
+    dropped: &mut BTreeSet<String>,
+) -> crate::Result<ImportDoc> {
     let mut value = value?;
     let source_id = value.get(ID_FIELD).and_then(Value::as_str).map(str::to_string);
     remap.value(&mut value);
@@ -535,6 +547,9 @@ fn parse_line(value: crate::Result<Value>, table: &TableInfo, remap: &IdRemap) -
         Some(Value::Number(n)) => Some(n.as_f64().context("bad `_creationTime`")?),
         Some(other) => bail!("`_creationTime` must be a number, not {other}"),
     };
+    let mut fields = Value::Object(fields);
+    shape.drop_unknown_fields(&mut fields, dropped);
+    let Value::Object(fields) = fields else { unreachable!("still an object") };
     Ok(ImportDoc { source_id, id, fields, creation_time })
 }
 
@@ -587,7 +602,8 @@ fn import_table(app: &App, name: &str, options: &ImportOptions) -> crate::Result
     Ok(table)
 }
 
-/// Validate every line of `file` for `table` without writing (pass 1). Returns the ids and the count.
+/// Validate every line of `file` for `table` without writing (pass 1). Returns the paths of the fields the documents
+/// have that the table doesn't define (left out on import).
 async fn check_file(
     app: &App,
     table: &Arc<TableInfo>,
@@ -595,18 +611,18 @@ async fn check_file(
     format: ExportFormat,
     remap: &IdRemap,
     mode: ImportMode,
-) -> crate::Result<u64> {
-    let validate = table.def.as_ref().expect("checked by import_table").validate;
+) -> crate::Result<BTreeSet<String>> {
+    let def = table.def.as_ref().expect("checked by import_table");
+    let (validate, shape) = (def.validate, (def.shape)());
     let (t, path, rm) = (table.clone(), file.to_path_buf(), remap.clone());
-    let (count, ids) = tokio::task::spawn_blocking(move || -> crate::Result<(u64, Vec<DocId>)> {
+    let (dropped, ids) = tokio::task::spawn_blocking(move || -> crate::Result<(BTreeSet<String>, Vec<DocId>)> {
         let mut errors = Vec::new();
         let mut ids = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut count = 0;
+        let mut dropped = BTreeSet::new();
         for record in records(&path, format, &t)? {
             let (n, value) = record?;
-            count += 1;
-            let result = parse_line(value, &t, &rm).and_then(|doc| {
+            let result = parse_line(value, &t, &shape, &rm, &mut dropped).and_then(|doc| {
                 if !seen.insert(doc.id) {
                     bail!("duplicate `_id` {}", doc.id);
                 }
@@ -630,7 +646,7 @@ async fn check_file(
         if !errors.is_empty() {
             bail!("nothing was imported; invalid documents:\n  {}", errors.join("\n  "));
         }
-        Ok((count, ids))
+        Ok((dropped, ids))
     })
     .await??;
     if mode == ImportMode::Insert {
@@ -655,7 +671,7 @@ async fn check_file(
             );
         }
     }
-    Ok(count)
+    Ok(dropped)
 }
 
 /// Delete every document of `table`, in batches (`replace` mode).
@@ -699,8 +715,10 @@ pub async fn import_file(
     let table = import_table(app, table, options)?;
     let batch_size = options.batch_size.max(1);
     let format = file_format(file, options.format);
-    check_file(app, &table, file, format, remap, options.mode).await?;
-    let mut result = TableImport { table: table.name.clone(), ..Default::default() };
+    let dropped = check_file(app, &table, file, format, remap, options.mode).await?;
+    let mut result =
+        TableImport { table: table.name.clone(), dropped_fields: dropped.into_iter().collect(), ..Default::default() };
+    let shape = (table.def.as_ref().expect("checked by import_table").shape)();
     if options.mode == ImportMode::Replace {
         result.deleted = delete_all(app, &table, batch_size).await?;
     }
@@ -715,7 +733,7 @@ pub async fn import_file(
         while pending.len() < batch_size {
             let Some(record) = records.next() else { break };
             let (_, value) = record?;
-            pending.push(parse_line(value, &table, remap)?);
+            pending.push(parse_line(value, &table, &shape, remap, &mut BTreeSet::new())?);
         }
         if pending.is_empty() {
             break;

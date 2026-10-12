@@ -525,6 +525,9 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
                 "{:<24} {:>8} document(s) written ({} replaced, {} deleted first)",
                 t.table, t.documents, t.replaced, t.deleted
             );
+            if !t.dropped_fields.is_empty() {
+                println!("{:<24} left out fields the table doesn't define: {}", "", t.dropped_fields.join(", "));
+            }
         }
         if report.files > 0 || report.missing_files > 0 {
             println!("{} file blob(s) stored ({} documents without a blob)", report.files, report.missing_files);

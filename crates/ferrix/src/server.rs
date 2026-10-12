@@ -40,9 +40,6 @@ pub fn router(app: App) -> Router {
         .route("/api/mutation", post(http_mutation))
         .route("/api/action", post(http_action))
         .route("/api/health", get(|| async { axum::Json(json!({ "status": "ok" })) }))
-        // Liveness, as opposed to readiness (`/api/health`): a process that handed over to a new one answers this but
-        // not that (`serve --after-handover=wait`), so an orchestrator stops routing to it without restarting it.
-        .route("/api/live", get(|| async { axum::Json(json!({ "status": "ok" })) }))
         .merge(crate::auth::http::routes())
         .merge(crate::storage::http::routes())
         .merge(crate::dashboard::http::routes())

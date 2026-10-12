@@ -654,33 +654,6 @@ pub async fn check(dir: &Path) -> crate::Result<CheckReport> {
     .await?
 }
 
-/// What a server that handed over answers while it waits to be stopped (`serve --after-handover=wait`): `GET
-/// /api/live` → 200 (alive: an orchestrator mustn't restart it, which would make it take over again), `GET
-/// /api/health` → 503 (not ready: stop routing here), and any other request: the connection is closed without a
-/// response, which a proxy retries elsewhere (a 503 it would pass on).
-pub async fn answer_while_waiting(listener: tokio::net::TcpListener) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    while let Ok((mut stream, _)) = listener.accept().await {
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
-                Ok(Ok(n)) => n,
-                _ => return,
-            };
-            let request = &buf[..n];
-            let reply: &[u8] = if request.starts_with(b"GET /api/live ") {
-                b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
-            } else if request.starts_with(b"GET /api/health ") {
-                b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\ncontent-length: 11\r\nconnection: close\r\n\r\nhanded over"
-            } else {
-                return;
-            };
-            let _ = stream.write_all(reply).await;
-            let _ = stream.shutdown().await;
-        });
-    }
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // systemd
 // ---------------------------------------------------------------------------------------------------------------------

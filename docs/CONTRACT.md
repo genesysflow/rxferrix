@@ -2418,6 +2418,20 @@ new one serves regardless. Otherwise the app opens with
 inherited sockets (`tls::start_with`; a socket is reused only if the configured address matches). `check` performs the
 copy and open in `<dir>/check-<pid>/` and deletes it. Unix only.
 
+`{"op":"ping"}` answers `{ok, pid}` without starting anything (`takeover::server_running`). The `prepare` reply also
+carries the server's network namespace (`netns`: `readlink /proc/self/ns/net`, Linux) and its listening addresses (`addrs`:
+`[[role, address]]`). The new process asks for the sockets (`{"op":"handover","sockets":true}`, the default) only if
+it runs in the same namespace and the old server listens on the address it is configured with (`takeover::serves`);
+otherwise it sends `"sockets":false`, gets none, and binds its own address after the swap. The old server, when its
+sockets weren't taken (and on a normal stop), accepts what has queued and closes its plain HTTP listeners as its drain
+begins (`Pauser::close`): new connections are refused, which a proxy can retry (a connection reset after the request
+was sent can't be retried safely); open connections are served through the drain with `Connection: close`. `serve --takeover` takes `require`
+(the default: no server running is an error) or `auto` (start normally when the ping fails), also as
+`FERRIX_TAKEOVER`. `serve --after-handover wait` (`FERRIX_AFTER_HANDOVER`; default `exit`): after a handover the
+process releases everything (database, lock, listeners, control socket; it exits its runtime) and waits for SIGTERM
+or SIGINT, then exits 0. The Docker image sets `FERRIX_TAKEOVER=auto` and `FERRIX_AFTER_HANDOVER=wait`. `ferrix
+health [url]` (default `http://127.0.0.1:8090/api/health`) exits 0 if the URL answers 2xx within 3 s, 1 otherwise.
+
 ### 4.4 Operations: backups, export and import (`crate::ops`)
 
 **Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `ferrix-auto-…`; the

@@ -694,9 +694,38 @@ plus the swap: about 0.2–0.5 s in our tests under write load, during which req
 serve the data** (a changed type that existing documents don't fit, with no migration for it), it exits with the
 schema report and the old server carries on unaffected. `todo-server check` runs the same preparation on a copy
 (also while the server runs) and reports, for CI or before a deploy. Under systemd, `systemctl reload` does it: see
-`deploy/ferrix.service` (`Type=notify`, `NotifyAccess=all`, `ExecReload`). In a container, where the server is
-process 1, a takeover can't outlive it: replace the container (clients reconnect and resubscribe on their own, and
-retried mutations run once), or run the binary under systemd or another supervisor.
+`deploy/ferrix.service` (`Type=notify`, `NotifyAccess=all`, `ExecReload`).
+
+**Zero-downtime deploys with Docker or Kubernetes.** A container can't hand its process over, so a rollout starts
+the new version in a second container on the same volume, and the image is set up for it: `FERRIX_TAKEOVER=auto`
+(`serve --takeover=auto`: take over if a server is running in the data directory, else start normally) and
+`FERRIX_AFTER_HANDOVER=wait` (the container taken over stays up, serving nothing, until it is stopped, so a restart
+policy doesn't bring it back to take over again). The new container listens on its own address in its own network
+namespace (a server only hands its sockets to a process in the same namespace, on the same address); the old one
+closes its socket at the handover, so connections to it are refused from then on. The proxy must send each new
+connection to whichever container accepts it and retry refused ones: Traefik's `retry` middleware, with the Compose
+service name (`http://app:8090`: Docker's DNS gives every container of the service, and each connection tries them
+in turn) or a Kubernetes Service's cluster IP (`service.nativelb`) as the address. Routing to the containers'
+addresses fails instead: Traefik keeps retrying a request on the addresses it had when the request came in. Both
+containers must run on the same host with the data on a local volume. `todo-server health [url]` checks
+`/api/health` from inside the container (the image's `HEALTHCHECK`; the image has no curl).
+
+- [`deploy/docker/compose.yaml`](deploy/docker/compose.yaml): the app behind Traefik (3.6 or later: older releases
+  can't talk to Docker 29). [`deploy/docker/deploy.sh`](deploy/docker/deploy.sh) rolls out a new image: it starts a
+  second container, waits until it is healthy (or removes it if it exits while the old one still serves) and removes
+  the old one.
+- [`deploy/k8s/ferrix.yaml`](deploy/k8s/ferrix.yaml) (k3s: local-path volume, Traefik ingress): one replica, a
+  rolling update that starts the new pod before stopping the old one (`maxSurge: 1`, `maxUnavailable: 0`), a pod
+  affinity that keeps them on one node, a startup probe long enough to prepare a big database, a readiness probe, no
+  liveness probe (the old pod doesn't answer while it waits), and Traefik's retry on the ingress. `kubectl set image
+  deployment/ferrix app=…` deploys; a version that can't serve the data stays in CrashLoopBackOff while the old pod
+  serves (`kubectl rollout undo`).
+
+Tested under write load, through Traefik, by `bun scripts/docker-rollout-e2e.ts` and `bun scripts/k3s-rollout-e2e.ts`
+(k3s in a Docker container; both need a Docker daemon and the image built as `todo-server`): no failed request, every
+acknowledged write kept, about 1.5 s from start to finish for a small database. `bun scripts/takeover-e2e.ts` runs the
+same checks without Docker (same host; separate ports behind a proxy that behaves like Traefik; another network
+namespace with `unshare`).
 
 **Backups.** `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
 snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus

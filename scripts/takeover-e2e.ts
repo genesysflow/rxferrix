@@ -3,8 +3,8 @@
 //   cargo build -p todo-server && bun scripts/takeover-e2e.ts [todo-server binary]
 //
 // 1. Same host, same port: the new process takes the listening socket (systemd's `reload`).
-// 2. Containers: old and new on their own ports behind a proxy that health-checks and retries, as Traefik or a
-//    Kubernetes Service with an ingress retry would. `--takeover=auto` in both, `--after-handover=wait`: the old
+// 2. Containers: old and new on their own ports behind a proxy that routes to healthy upstreams and retries refused
+//    connections, as Traefik does. `--takeover=auto` in both, `--after-handover=wait`: the old
 //    process stays alive after handing over until it gets SIGTERM.
 // 3. Another network namespace (what a container or pod is), same port number: the new process, started with
 //    `unshare --net`, must notice and bind its own socket instead of using the old server's. Skipped where
@@ -108,32 +108,50 @@ function check(name: string, cond: boolean, detail: string) {
   if (!cond) failures.push(`${name}: ${detail}`);
 }
 
-/** A minimal Traefik stand-in: forwards to a healthy upstream, retrying others (and later) on connection errors. */
+/**
+ * A Traefik stand-in with its rules: requests go to the healthy upstreams only (one joins on its first passing health
+ * check, as Docker's start interval or a readiness probe has it, and leaves after 3 failing ones); with none, a 503 at
+ * once; a request is retried only when the connection was refused (Traefik doesn't retry once it sent the request),
+ * 40 times, 100 ms growing to 200 ms apart.
+ */
 function proxy(upstreams: string[]) {
   const healthy = new Set<string>();
+  const failing = new Map<string, number>();
   const probe = setInterval(() => {
     for (const u of upstreams) {
       fetch(`${u}/api/health`, { signal: AbortSignal.timeout(500) })
-        .then((r) => (r.ok ? healthy.add(u) : healthy.delete(u)))
-        .catch(() => healthy.delete(u));
+        .then((r) => r.ok)
+        .catch(() => false)
+        .then((ok) => {
+          const n = ok ? 0 : (failing.get(u) ?? 0) + 1;
+          failing.set(u, n);
+          if (ok) healthy.add(u);
+          else if (n >= 3) healthy.delete(u);
+        });
     }
-  }, 100);
+  }, 250);
+  const attempts = 40;
+  let next = 0;
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
       const body = await req.arrayBuffer();
-      for (let attempt = 0; attempt < 40; attempt++) {
+      let interval = 100;
+      for (let attempt = 1; ; attempt++) {
         const pool = [...healthy];
-        const target = pool.length ? pool[attempt % pool.length]! : upstreams[attempt % upstreams.length]!;
+        if (!pool.length) return new Response("no available server", { status: 503 });
+        const target = pool[next++ % pool.length]!;
         try {
           return await fetch(`${target}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body });
-        } catch {
-          await Bun.sleep(Math.min(25 * 2 ** Math.min(attempt, 3), 200));
+        } catch (e) {
+          const refused = (e as { code?: string }).code === "ConnectionRefused";
+          if (!refused || attempt >= attempts) return new Response(`bad gateway: ${e}`, { status: 502 });
+          await Bun.sleep(interval);
+          interval *= 2 ** (1 / (attempts - 1));
         }
       }
-      return new Response("no upstream", { status: 502 });
     },
   });
   return { base: `http://127.0.0.1:${server.port}`, stop: () => (clearInterval(probe), server.stop(true)) };
@@ -169,7 +187,7 @@ async function containers() {
   const env = ["--takeover=auto", "--after-handover=wait"];
   const old = spawn([BIN, "serve", "--dev", "--http", `127.0.0.1:${a}`, "--dir", dir, ...env], oldLog);
   await waitHealthy(A);
-  await Bun.sleep(300);
+  await waitHealthy(p.base);
   const l = load(p.base);
   await Bun.sleep(1000);
   spawn([BIN, "serve", "--dev", "--http", `127.0.0.1:${b}`, "--dir", dir, ...env], newLog);
@@ -183,9 +201,11 @@ async function containers() {
   check("containers: every write kept", (await remaining(B)) === l.stats.ok, `${await remaining(B)} vs ${l.stats.ok}`);
   const waiting = oldLog.join("").includes("waiting for SIGTERM") && old.exitCode === null;
   check("containers: the old process waits after handing over", waiting, oldLog.join("").slice(-500));
-  const live = await fetch(`${A}/api/live`).then((r) => r.status, () => 0);
-  const ready = await fetch(`${A}/api/health`).then((r) => r.status, () => 0);
-  check("containers: while waiting it is live but not ready", live === 200 && ready === 503, `live ${live}, health ${ready}`);
+  const refused = await fetch(`${A}/api/health`).then(
+    (r) => `answered ${r.status}`,
+    (e) => (e as { code?: string }).code ?? String(e),
+  );
+  check("containers: while waiting its port refuses connections", refused === "ConnectionRefused", refused);
   old.kill("SIGTERM");
   check("containers: and exits cleanly on SIGTERM", (await old.exited) === 0, `exit ${old.exitCode}`);
   // auto with nothing running: a normal start.

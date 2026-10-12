@@ -266,7 +266,7 @@ pub struct RunningServer {
     /// The HTTP→HTTPS redirect listener.
     pub redirect_addr: Option<SocketAddr>,
     stop: Stop,
-    pause: Arc<watch::Sender<bool>>,
+    pause: Arc<watch::Sender<Accepting>>,
     tasks: Vec<tokio::task::JoinHandle<crate::Result<()>>>,
     /// The listening sockets by role (`main`, `redirect`), for a takeover (`crate::ops::takeover`).
     #[cfg(unix)]
@@ -288,7 +288,7 @@ impl RunningServer {
     }
 
     /// A handle that stops the server from accepting connections while it keeps serving the open ones (before a
-    /// graceful stop; a takeover's new process then gets every new connection).
+    /// graceful stop).
     pub fn pauser(&self) -> Pauser {
         Pauser(self.pause.clone())
     }
@@ -379,11 +379,23 @@ fn std_listener(addr: SocketAddr) -> crate::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
-/// A listener that stops accepting while `paused` is set, without closing anything: during a takeover the socket
-/// stays open in the new process, so connections queue there instead of reaching a server about to stop.
+/// Whether a plain HTTP listener accepts connections ([`Pauser`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Accepting {
+    Yes,
+    /// Not accepting, the socket left open: during a takeover it is open in the new process too, so connections queue
+    /// there instead of reaching a server about to stop.
+    Paused,
+    /// The socket closed (after accepting what had queued): new connections are refused, which a proxy retries
+    /// elsewhere. A connection still queued when the socket closes would be reset instead, after the client sent its
+    /// request, which nobody can retry safely.
+    Closed,
+}
+
+/// A listener that stops accepting on [`Accepting::Paused`] or [`Accepting::Closed`].
 struct Pausable<L> {
-    inner: L,
-    paused: watch::Receiver<bool>,
+    inner: Option<L>,
+    state: watch::Receiver<Accepting>,
 }
 
 impl<L: axum::serve::Listener<Addr = SocketAddr>> axum::serve::Listener for Pausable<L> {
@@ -391,30 +403,48 @@ impl<L: axum::serve::Listener<Addr = SocketAddr>> axum::serve::Listener for Paus
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        use futures::FutureExt;
         loop {
-            if *self.paused.borrow() {
-                std::future::pending::<()>().await;
-            }
-            tokio::select! {
-                accepted = self.inner.accept() => return accepted,
-                _ = self.paused.changed() => {}
+            let state = *self.state.borrow_and_update();
+            match (state, self.inner.as_mut()) {
+                (Accepting::Yes, Some(inner)) => tokio::select! {
+                    accepted = inner.accept() => return accepted,
+                    _ = self.state.changed() => {}
+                },
+                (Accepting::Closed, Some(inner)) => match inner.accept().now_or_never() {
+                    Some(accepted) => return accepted,
+                    None => self.inner = None,
+                },
+                _ => {
+                    if self.state.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
             }
         }
     }
 
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.inner.local_addr()
+        match &self.inner {
+            Some(inner) => inner.local_addr(),
+            None => Err(std::io::Error::other("the listener is closed")),
+        }
     }
 }
 
-/// Stops a running server from accepting connections ([`RunningServer::pauser`]).
+/// Stops a running server from accepting connections ([`RunningServer::pauser`]; plain HTTP listeners).
 #[derive(Clone)]
-pub struct Pauser(Arc<watch::Sender<bool>>);
+pub struct Pauser(Arc<watch::Sender<Accepting>>);
 
 impl Pauser {
-    /// Stop accepting (plain HTTP listeners; open connections keep being served).
+    /// Stop accepting, leaving the socket open (a takeover's new process, which has it too, accepts instead).
     pub fn stop_accepting(&self) {
-        self.0.send_replace(true);
+        self.0.send_replace(Accepting::Paused);
+    }
+
+    /// Accept what has queued, then close the socket: from then on connections are refused.
+    pub fn close(&self) {
+        self.0.send_replace(Accepting::Closed);
     }
 }
 
@@ -422,7 +452,7 @@ fn spawn_plain(
     listener: tokio::net::TcpListener,
     router: Router,
     stop: Stop,
-    paused: watch::Receiver<bool>,
+    state: watch::Receiver<Accepting>,
 ) -> tokio::task::JoinHandle<crate::Result<()>> {
     tokio::spawn(async move {
         use axum::serve::ListenerExt;
@@ -431,7 +461,7 @@ fn spawn_plain(
                 tracing::debug!("could not set TCP_NODELAY: {e}");
             }
         }
-        let listener = Pausable { inner: listener, paused }.tap_io(nodelay as fn(&mut tokio::net::TcpStream));
+        let listener = Pausable { inner: Some(listener), state }.tap_io(nodelay as fn(&mut tokio::net::TcpStream));
         axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move { stopped(&stop).await })
             .await?;
@@ -481,7 +511,7 @@ fn fd_of(l: &impl std::os::fd::AsRawFd) -> std::os::fd::RawFd {
 /// connection is refused while one process hands over to the next).
 pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherited) -> crate::Result<RunningServer> {
     let stop = Arc::new(watch::channel(false).0);
-    let pause = Arc::new(watch::channel(false).0);
+    let pause = Arc::new(watch::channel(Accepting::Yes).0);
     match listen {
         Listen::Http(addr) => {
             let listener = bind_or_take(&mut inherited, "main", *addr).await?;
@@ -562,7 +592,7 @@ async fn start_tls(
     redirect: Option<SocketAddr>,
     domains: Vec<String>,
     stop: Stop,
-    pause: Arc<watch::Sender<bool>>,
+    pause: Arc<watch::Sender<Accepting>>,
     #[cfg(unix)] main_fd: std::os::fd::RawFd,
     #[cfg(not(unix))] _main_fd: (),
     mut inherited: Inherited,

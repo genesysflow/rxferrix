@@ -50,9 +50,10 @@ USER 65532:65532
 VOLUME /data
 EXPOSE 8090
 ENTRYPOINT ["/app"]
-# The image has no curl: the binary checks its own health endpoint. (A container still preparing a takeover isn't
-# listening yet, so it reports unhealthy until it serves; the start period covers a long preparation.)
-HEALTHCHECK --interval=2s --timeout=3s --start-period=10m --retries=3 CMD ["/app", "health"]
+# The image has no curl: the binary checks its own health endpoint. A container preparing a takeover isn't listening
+# yet, so it reports unhealthy until it serves (the start period covers a long preparation; checked every second until
+# then, so a proxy that routes to healthy containers only adds it at once). One that handed over refuses connections.
+HEALTHCHECK --interval=2s --start-interval=1s --start-period=30m --timeout=3s --retries=3 CMD ["/app", "health"]
 # Behind a proxy that terminates TLS. With --https, publish 80 and 443 instead (the user needs no extra rights: the
 # ports inside the container are remapped, e.g. `-p 443:8443 -p 80:8080` with `--https-addr 0.0.0.0:8443
 # --http-redirect 0.0.0.0:8080`).

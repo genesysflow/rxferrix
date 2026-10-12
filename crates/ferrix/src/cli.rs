@@ -949,18 +949,21 @@ fn serve(
                     }
                 }
                 crate::ops::takeover::sd_notify("STOPPING=1");
-                // Stop accepting (new connections wait in the socket, for the next process after a takeover) but keep
-                // serving the open ones a moment with `Connection: close`, so keep-alive clients finish and reconnect
-                // instead of racing the shutdown; then close WebSockets (1012) and stop.
+                // Stop accepting but keep serving the open connections a moment with `Connection: close`, so
+                // keep-alive clients finish and reconnect instead of racing the shutdown; then close WebSockets (1012)
+                // and stop.
                 app.begin_drain();
-                // The new process holds the listening sockets now: new connections wait there for it. (In another
-                // container it doesn't: keep serving through the drain; the orchestrator moves the traffic.)
+                // If the new process holds the listening sockets now, new connections wait there for it: leave them
+                // open. Otherwise (a normal stop, or a new process in another container, on its own address) close
+                // them, so new connections are refused and a proxy retries them on the new server.
                 #[cfg(unix)]
                 let taken = control.as_ref().is_some_and(|c| c.sockets_taken());
                 #[cfg(not(unix))]
                 let taken = false;
-                if taken || !handed_over.load(std::sync::atomic::Ordering::SeqCst) {
+                if taken {
                     pauser.stop_accepting();
+                } else {
+                    pauser.close();
                 }
                 tokio::time::sleep(DRAIN_GRACE).await;
                 app.begin_close();
@@ -976,35 +979,19 @@ fn serve(
         let last_ts = app.db().seal().await?;
         tracing::info!(ts = last_ts, "stopped");
         let wait = handed_over.load(std::sync::atomic::Ordering::SeqCst) && args.after_handover == AfterHandover::Wait;
-        #[cfg(unix)]
-        let taken = control.as_ref().is_some_and(|c| c.sockets_taken());
-        #[cfg(not(unix))]
-        let taken = false;
-        // Where to keep answering liveness while waiting: our own address, unless the new process took the socket.
-        let stub = match (&listen, taken) {
-            (crate::ops::tls::Listen::Http(addr), false) => Some(*addr),
-            _ => None,
-        };
-        Ok::<_, crate::Error>((restart.is_requested().then(|| restart.exit_code()).flatten(), wait.then_some(stub)))
+        Ok::<_, crate::Error>((restart.is_requested().then(|| restart.exit_code()).flatten(), wait))
     })?;
     let (exit_code, wait) = exit_code;
-    if let Some(stub) = wait {
-        // Everything is released (lock, sockets, database, control socket) with the runtime: idle until told to go,
-        // answering `/api/live` (200) but not `/api/health` (503) on our own port, so an orchestrator stops routing
-        // here without restarting this process (which would take over again from the new one).
+    if wait {
+        // Everything is released with the runtime (lock, sockets, database, control socket): our port refuses
+        // connections, so health checks fail and a proxy retries elsewhere what it sends here, but this process stays
+        // alive until it is told to go, so an orchestrator doesn't start it again (it would take over from the new one).
         drop(rt);
         tracing::info!("handed over to the new process; waiting for SIGTERM");
-        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async move {
-            if let Some(addr) = stub {
-                match tokio::net::TcpListener::bind(addr).await {
-                    Ok(listener) => {
-                        tokio::spawn(crate::ops::takeover::answer_while_waiting(listener));
-                    }
-                    Err(e) => tracing::warn!("not answering liveness while waiting ({addr}): {e}"),
-                }
-            }
-            crate::ops::tls::shutdown_signal().await;
-        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(crate::ops::tls::shutdown_signal());
         return Ok(());
     }
     // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.

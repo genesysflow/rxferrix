@@ -1,6 +1,6 @@
 # Gates, the static musl release binary and the Docker image.
 #
-#   gates   every check of README "Tests": rustfmt, Rust tests and clippy (no warnings), the macro tests, the TS type
+#   gates   every check of README "Development": rustfmt, Rust tests and clippy (no warnings), the macro tests, the TS type
 #           check of generated code, the TS packages, the committed dashboard build, and the end-to-end tests
 #           (dashboard, todo example, chat example) in Chromium.
 #   olap         clippy and the tests with the `olap` feature (DuckDB, built from source: a job of its own, with its

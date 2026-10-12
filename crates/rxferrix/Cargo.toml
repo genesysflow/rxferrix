@@ -4,6 +4,11 @@ description = "A single-binary reactive backend: typed Rust queries, mutations a
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["reactive", "backend", "realtime", "sqlite", "websocket"]
+categories = ["web-programming::http-server", "database"]
 
 [dependencies]
 rxferrix-macros = { path = "../rxferrix-macros", version = "0.1.0" }

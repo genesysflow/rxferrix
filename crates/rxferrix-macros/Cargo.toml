@@ -4,6 +4,11 @@ description = "Procedural macros for RxFerrix: #[table], #[query], #[mutation], 
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["reactive", "backend", "macros"]
+categories = ["web-programming"]
 
 [lib]
 proc-macro = true

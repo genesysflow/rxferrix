@@ -2,6 +2,20 @@
   "name": "@rxferrix/svelte",
   "version": "0.1.0",
   "description": "Svelte 5 (runes) bindings for RxFerrix",
+  "license": "MIT",
+  "homepage": "https://genesysflow.github.io/rxferrix/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genesysflow/rxferrix.git",
+    "directory": "packages/svelte"
+  },
+  "keywords": [
+    "rxferrix",
+    "reactive",
+    "realtime",
+    "websocket",
+    "svelte"
+  ],
   "type": "module",
   "sideEffects": false,
   "svelte": "./dist/index.js",
@@ -21,7 +35,8 @@
   "scripts": {
     "build": "rm -rf dist && svelte-package -i src/lib -o dist",
     "typecheck": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.json --threshold error",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@rxferrix/client": "workspace:*"
@@ -39,5 +54,8 @@
     "typescript": "^6.0.3",
     "vite": "^8.3.4",
     "vitest": "^5.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

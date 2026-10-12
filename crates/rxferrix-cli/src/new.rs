@@ -233,7 +233,10 @@ pub fn render(
     };
     let mut files = vec![
         (".gitignore", include_str!("../templates/gitignore").to_string()),
-        ("Cargo.toml", fill(include_str!("../templates/server/Cargo.toml")).replace("{{rxferrix_dep}}", &rxferrix_dep)),
+        (
+            "Cargo.toml",
+            fill(include_str!("../templates/server/Cargo.toml.template")).replace("{{rxferrix_dep}}", &rxferrix_dep),
+        ),
         ("src/tasks.rs", include_str!("../templates/server/src/tasks.rs").to_string()),
     ];
     let mut readme = fill(include_str!("../templates/README.md"));

@@ -4,6 +4,11 @@ description = "The `rxferrix` command: scaffolds new RxFerrix apps (`rxferrix ne
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["reactive", "backend", "scaffold", "cli"]
+categories = ["command-line-utilities", "web-programming"]
 
 [[bin]]
 name = "rxferrix"

@@ -2,6 +2,20 @@
   "name": "@rxferrix/react",
   "version": "0.1.0",
   "description": "React hooks for RxFerrix",
+  "license": "MIT",
+  "homepage": "https://genesysflow.github.io/rxferrix/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genesysflow/rxferrix.git",
+    "directory": "packages/react"
+  },
+  "keywords": [
+    "rxferrix",
+    "reactive",
+    "realtime",
+    "websocket",
+    "react"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -21,7 +35,8 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@rxferrix/client": "workspace:*"
@@ -38,5 +53,8 @@
     "react-dom": "^19.3.0",
     "typescript": "^6.0.3",
     "vitest": "^5.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -9,6 +9,7 @@
 //! RxFerrix::new()
 //!     .embed_static::<Assets>()                       // or .static_dir("./web/dist") (read at runtime)
 //!     .routes(axum::Router::new().route("/webhooks/stripe", post(stripe_webhook)))
+//!     .app_routes(axum::Router::new().route("/hooks/payment", post(payment)))   // handlers take `State<App>`
 //!     .run()
 //! ```
 //!
@@ -62,12 +63,13 @@ impl std::fmt::Debug for StaticFiles {
     }
 }
 
-/// The frontend and the extra routes of a server (`RxFerrix::static_dir`, `embed_static`, `routes`).
+/// The frontend and the extra routes of a server (`RxFerrix::static_dir`, `embed_static`, `routes`, `app_routes`).
 #[derive(Clone, Debug, Default)]
 pub struct WebOptions {
     pub static_files: Option<StaticFiles>,
-    /// Extra axum routes (webhooks, custom endpoints), merged with RxFerrix's own. They must not overlap them.
-    pub routes: Option<Router>,
+    /// Extra axum routes (webhooks, custom endpoints), merged with RxFerrix's own. They must not overlap them. Handlers
+    /// can take `State<App>`; a router without state becomes one with `router.with_state(())`.
+    pub routes: Option<Router<App>>,
 }
 
 /// The complete router of a server: RxFerrix's routes, the app's routes, the static frontend as the fallback, and
@@ -75,7 +77,7 @@ pub struct WebOptions {
 pub fn router(app: App, web: &WebOptions) -> Router {
     let mut router = crate::server::router(app.clone());
     if let Some(routes) = &web.routes {
-        router = router.merge(routes.clone());
+        router = router.merge(routes.clone().with_state(app.clone()));
     }
     if let Some(files) = &web.static_files {
         let files = Arc::new(files.clone());

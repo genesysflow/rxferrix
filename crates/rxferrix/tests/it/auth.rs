@@ -60,6 +60,12 @@ mod app {
         ctx.run_mutation::<add_note>((text,)).await
     }
 
+    /// App email through the server's mailer.
+    #[action]
+    pub async fn send_welcome(ctx: &ActionCtx, to: String) -> Result<()> {
+        ctx.send_email(rxferrix::auth::Email::new(to, "Welcome", "Hello").html("<p>Hello</p>")).await
+    }
+
     #[query]
     pub async fn admin_only(ctx: &QueryCtx) -> Result<String> {
         let admin = ctx.auth.require_admin()?;
@@ -921,4 +927,60 @@ async fn auth_endpoints_are_rate_limited() {
     assert_eq!(code_of(&body), "rate_limited");
     // Other endpoint groups have their own buckets.
     assert_eq!(http.post("/api/auth/refresh", json!({ "refreshToken": "x" })).await.0, 401);
+}
+
+#[tokio::test]
+async fn actions_send_email_through_the_server_mailer() {
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    t.action::<app::send_welcome>(("Ana Pop <ana@example.com>".to_string(),)).await.unwrap();
+    let sent = mailer.last_to("Ana Pop <ana@example.com>").expect("sent");
+    assert_eq!((sent.subject.as_str(), sent.body.as_str()), ("Welcome", "Hello"));
+    assert_eq!(sent.html.as_deref(), Some("<p>Hello</p>"));
+}
+
+/// The only credential, as exported (one JSONL line), and the export's directory.
+async fn exported_credential(t: &TestApp) -> (Value, tempfile::TempDir) {
+    use rxferrix::ops::export::{self, ExportFormat, ExportOptions};
+    let out = tempfile::tempdir().unwrap();
+    let options =
+        ExportOptions { tables: Some(vec!["_credentials".into()]), format: ExportFormat::Jsonl, include_files: false };
+    export::export_to_dir(t.dir(), None, out.path(), &options).await.unwrap();
+    let jsonl = std::fs::read_to_string(out.path().join("_credentials.jsonl")).unwrap();
+    let mut lines = jsonl.lines();
+    let line = serde_json::from_str(lines.next().expect("one credential")).unwrap();
+    assert!(lines.next().is_none());
+    (line, out)
+}
+
+#[tokio::test]
+async fn imported_bcrypt_password_signs_in_and_becomes_argon2() {
+    use rxferrix::ops::export::{self, ImportMode, ImportOptions};
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    t.create_user("ana@example.com", Some("placeholder")).await.unwrap();
+    let (_, other) = http.sign_in("ana@example.com", "placeholder").await;
+    let other_refresh = token(&other, "refreshToken");
+
+    let (mut credential, out) = exported_credential(&t).await;
+    let bcrypt = bcrypt::hash("correct horse", 4).unwrap().replacen("$2b$", "$2a$", 1);
+    credential["passwordHash"] = json!(bcrypt);
+    let file = out.path().join("bcrypt.jsonl");
+    std::fs::write(&file, format!("{credential}\n")).unwrap();
+    let import = ImportOptions { mode: ImportMode::Upsert, batch_size: 10, allow_system_tables: true, format: None };
+    export::import_path(t.app(), &file, Some("_credentials"), &import).await.unwrap();
+    assert_eq!(exported_credential(&t).await.0["passwordHash"], bcrypt);
+
+    let (s, b) = http.sign_in("ana@example.com", "wrong horse").await;
+    assert_eq!((s, code_of(&b)), (401, "invalid_credentials"));
+    assert_eq!(exported_credential(&t).await.0["passwordHash"], bcrypt, "a wrong password changes nothing");
+
+    let (s, b) = http.sign_in("ana@example.com", "correct horse").await;
+    assert_eq!(s, 200, "{b}");
+    let upgraded = exported_credential(&t).await.0["passwordHash"].as_str().unwrap().to_string();
+    assert!(upgraded.starts_with("$argon2id$"), "{upgraded}");
+    // Same password, new hash; the user's other sessions keep working.
+    assert_eq!(http.sign_in("ana@example.com", "correct horse").await.0, 200);
+    assert_eq!(http.post("/api/auth/refresh", json!({ "refreshToken": other_refresh })).await.0, 200);
 }

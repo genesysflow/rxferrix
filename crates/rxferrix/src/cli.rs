@@ -342,8 +342,16 @@ impl RxFerrix {
     }
 
     /// Add axum routes (webhooks, custom endpoints) next to RxFerrix's own; they must not overlap `/api/*`, `/_/*` or
-    /// `/metrics`. Repeated calls add up.
-    pub fn routes(mut self, routes: axum::Router) -> Self {
+    /// `/metrics`. Repeated calls add up (with [`app_routes`](Self::app_routes) too).
+    pub fn routes(self, routes: axum::Router) -> Self {
+        self.app_routes(routes.with_state(()))
+    }
+
+    /// Like [`routes`](Self::routes), for handlers that take the running [`App`](crate::App) as
+    /// `axum::extract::State<App>`: run functions (`app.mutation::<record_payment>(..)`, internal ones included), mint
+    /// sessions (`app.auth().sign_in_as(..)`), ... A webhook can verify its signature on the raw body, then hand the
+    /// event to a mutation.
+    pub fn app_routes(mut self, routes: axum::Router<crate::App>) -> Self {
         self.web.routes = Some(match self.web.routes.take() {
             Some(existing) => existing.merge(routes),
             None => routes,

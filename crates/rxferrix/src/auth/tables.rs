@@ -25,7 +25,7 @@ pub struct User {
 #[index(by_user = [user])]
 pub struct Credential {
     pub user: Id<User>,
-    /// argon2id PHC string.
+    /// argon2id PHC string; an imported bcrypt hash until the user's next sign-in (`auth::password`).
     pub password_hash: String,
 }
 
@@ -46,7 +46,7 @@ pub struct Account {
 #[index(by_email = [email])]
 pub struct Admin {
     pub email: String,
-    /// argon2id PHC string.
+    /// argon2id PHC string; an imported bcrypt hash until the user's next sign-in (`auth::password`).
     pub password_hash: String,
 }
 

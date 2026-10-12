@@ -424,11 +424,20 @@ impl AuthService {
             Some((u, h)) => (Some(u), Some(h)),
             None => (None, None),
         };
+        // An imported (bcrypt) hash becomes argon2id once the password is known to be right.
+        let rehash = stored.clone().filter(|h| password::needs_rehash(h)).map(|h| (h, password.clone()));
         // Always runs argon2 (against a dummy hash for unknown accounts), so timing reveals nothing.
         if !password::verify(password, stored).await {
             return Err(AuthFailure::invalid_credentials());
         }
         let user = user.expect("verified against a real hash");
+        if let Some((old_hash, password)) = rehash {
+            let upgraded =
+                async { store::upgrade_password_hash(app, user.id, old_hash, password::hash(password).await?).await };
+            if let Err(e) = upgraded.await {
+                tracing::warn!(user = %user.id, "could not upgrade an imported password hash: {e:#}");
+            }
+        }
         if self.config.require_email_verification && !user.email_verified {
             return Err(AuthFailure::new(403, "email_not_verified", "Verify your email address before signing in"));
         }
@@ -484,6 +493,12 @@ impl AuthService {
     // -----------------------------------------------------------------------------------------------------------------
     // Email codes
 
+    /// The mailer auth emails go through (code, `--smtp-url`, or SMTP from the dashboard's settings; the dev log
+    /// mailer in `--dev`), if any. Apps send their own email with it through `ActionCtx::send_email`.
+    pub fn mailer(&self) -> Option<Arc<dyn Mailer>> {
+        self.current().mailer.clone()
+    }
+
     fn require_mailer(&self) -> AuthResult<Arc<dyn Mailer>> {
         self.current()
             .mailer
@@ -519,7 +534,7 @@ impl AuthService {
             store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, expires_at).await?;
         let link = redirect.map(|r| format!("{r}#{}={token}", purpose.fragment_key()));
         let (subject, body) = purpose.render(&code, link.as_deref());
-        let message = Email { to: email, subject, body };
+        let message = Email::new(email, subject, body);
         tokio::spawn(async move {
             if let Err(e) = mailer.send(message).await {
                 tracing::warn!("auth: sending email failed: {e:#}");

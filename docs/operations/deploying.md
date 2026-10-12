@@ -53,6 +53,21 @@ rxferrix::RxFerrix::new()
     .run()
 ```
 
+Routes that need the app (a webhook that records a payment, an endpoint that signs a device in) go through
+`.app_routes`; their handlers take `State<App>` and call functions by their typed reference, internal ones included:
+
+```rust
+async fn stripe(State(app): State<App>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    let Ok(event) = verify_signature(&headers, &body) else { return StatusCode::BAD_REQUEST };
+    match app.mutation::<payments::record_event>((event,)).await {
+        Ok(()) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,   // the provider retries
+    }
+}
+
+rxferrix::RxFerrix::new().app_routes(axum::Router::new().route("/webhooks/stripe", post(stripe))).run()
+```
+
 Unknown paths get `index.html` (client-side routing) except under `/api` and `/_`, which static files never shadow,
 and a missing file with an extension (`/logo.png`) is a 404 unless the client asks for HTML.
 HTML is `no-cache`, hashed assets (`assets/*`, `name-<hash>.js`) are cached for a year, and `<file>.br` / `.gz`

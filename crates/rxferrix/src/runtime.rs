@@ -134,6 +134,23 @@ impl ActionCtx {
     pub async fn run_action<F: ActionFunction>(&self, args: impl Into<F::Args>) -> crate::Result<F::Output> {
         self.app.typed_action::<F>(args.into(), &self.identity).await
     }
+
+    /// The server's mailer, the one auth emails use (`--smtp-url`, `AuthConfig::mailer`, SMTP from the dashboard's
+    /// settings; the dev log mailer in `--dev`), or `None` when email isn't configured.
+    pub fn mailer(&self) -> Option<Arc<dyn crate::auth::Mailer>> {
+        self.app.auth().mailer()
+    }
+
+    /// Send an email through the server's mailer: `ctx.send_email(Email::new(to, subject, text).html(html))`. A
+    /// `UserError` `email_not_configured` when there is no mailer. From a mutation, schedule an action that sends
+    /// (`ctx.scheduler.run_after::<send>(Duration::ZERO, ..)`), so nothing goes out unless the mutation commits; a
+    /// workpool adds retries.
+    pub async fn send_email(&self, email: crate::auth::Email) -> crate::Result<()> {
+        let mailer = self.mailer().ok_or_else(|| {
+            crate::Error::from(crate::UserError::new("email_not_configured", "Email is not configured on this server"))
+        })?;
+        mailer.send(email).await
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

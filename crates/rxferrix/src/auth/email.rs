@@ -3,17 +3,32 @@
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
-use lettre::message::Mailbox;
+use lettre::message::{Mailbox, MultiPart};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use super::config::SmtpConfig;
 
-/// One plain-text email.
+/// One email: a plain-text body, and optionally an HTML version of it (sent as `multipart/alternative`). `to` is an
+/// address, or a name and an address (`Ana Pop <ana@example.com>`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Email {
     pub to: String,
     pub subject: String,
     pub body: String,
+    pub html: Option<String>,
+}
+
+impl Email {
+    /// A plain-text email: `Email::new(to, "Your booking", text)`.
+    pub fn new(to: impl Into<String>, subject: impl Into<String>, body: impl Into<String>) -> Self {
+        Email { to: to.into(), subject: subject.into(), body: body.into(), html: None }
+    }
+
+    /// Add an HTML version; `body` stays the plain-text one, for clients that don't show HTML.
+    pub fn html(mut self, html: impl Into<String>) -> Self {
+        self.html = Some(html.into());
+        self
+    }
 }
 
 impl std::fmt::Debug for Email {
@@ -48,7 +63,11 @@ impl Mailer for SmtpMailer {
     fn send(&self, email: Email) -> BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
             let to: Mailbox = email.to.parse().map_err(|e| anyhow::anyhow!("invalid recipient: {e}"))?;
-            let message = Message::builder().from(self.from.clone()).to(to).subject(email.subject).body(email.body)?;
+            let builder = Message::builder().from(self.from.clone()).to(to).subject(email.subject);
+            let message = match email.html {
+                Some(html) => builder.multipart(MultiPart::alternative_plain_html(email.body, html))?,
+                None => builder.body(email.body)?,
+            };
             self.transport.send(message).await?;
             Ok(())
         })
@@ -70,6 +89,9 @@ impl Mailer for DevLogMailer {
                 email.subject,
                 email.body.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
             );
+            if let Some(html) = &email.html {
+                tracing::info!("dev mailer: the email to {} also has an HTML version ({} bytes)", email.to, html.len());
+            }
             Ok(())
         })
     }

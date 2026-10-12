@@ -269,6 +269,8 @@ impl ActionCtx {
     pub async fn run_query<F: QueryFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output>;
     pub async fn run_mutation<F: MutationFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output>;
     pub async fn run_action<F: ActionFunction>(&self, args: impl Into<F::Args>) -> Result<F::Output>;
+    pub fn mailer(&self) -> Option<Arc<dyn Mailer>>;          // the auth mailer in effect (§1.5); None: not configured
+    pub async fn send_email(&self, email: Email) -> Result<()>;   // through it; UserError `email_not_configured`
     pub async fn vector_search<T: Table>(&self, index: VectorIndex<T>, vector: impl AsRef<[f32]>,
                                          opts: VectorSearchOpts<T>) -> Result<Vec<(Id<T>, f32)>>;   // §1.8
 }
@@ -579,7 +581,9 @@ builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(
 `mailer(Arc<dyn Mailer>)` (e.g. `MemoryMailer` in tests), `dev_mailer(Arc<dyn Mailer>)` (replaces the built-in
 `DevLogMailer`, which prints every email to the log, in `--dev` when no mailer or SMTP is configured in code, on the
 command line or in `_settings`; never used outside `--dev`; it can forward to `DevLogMailer.send(email)` to keep the
-log lines), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+log lines; `Email { to, subject, body, html: Option<String> }`, built with `Email::new(to, subject, text).html(..)`,
+an HTML version is sent as `multipart/alternative`; apps send their own email through the same mailer with
+`ActionCtx::send_email`), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
 `impersonation(bool)` (`POST /api/admin/impersonate`, default true).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
@@ -647,15 +651,15 @@ redirect list (`redirect_url`, `--auth-redirect-url`); any `smtp(..)` / `--smtp-
 provider id, an OAuth provider with credentials (settings may add providers with other ids). Everything else is taken
 from `_settings` when set there, else the defaults apply. CORS origins exist only as a setting (default: any origin).
 
-**System tables** (all defined with `#[table]` in `rxferrix::auth::tables`): `_users` (`User`), `_credentials`
-(argon2id password hash per user), `_accounts` (provider + provider account id; for external JWTs the provider is
-the issuer URL), `_sessions` (user or admin, keyed hash of the current refresh token, sliding `expires_at`, user
-agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on impersonation sessions, whose expiry is
-fixed), `_used_refresh_tokens`
-(rotated refresh token hashes, for reuse detection; deleted with their session), `_verification_codes` (keyed hashes
-of a 6-digit code and a link token, purpose, expiry, attempts), `_admins` (email, argon2id hash). The auth code
-reads and writes them directly through `QueryDb` / `MutationDb` (not through registered functions), so hashes never
-appear in function args or the execution log.
+**System tables** (all defined with `#[table]` in `rxferrix::auth::tables`): `_users` (`User`), `_credentials` (argon2id
+password hash per user; an imported bcrypt hash, `$2a$`/`$2b$`/`$2y$`, is accepted too and replaced with an argon2id
+hash at the user's next successful password sign-in, without ending their sessions), `_accounts` (provider and provider
+account id; for external JWTs the provider is the issuer URL), `_sessions` (user or admin, keyed hash of the current
+refresh token, sliding `expires_at`, user agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on
+impersonation sessions, whose expiry is fixed), `_used_refresh_tokens` (rotated refresh token hashes, for reuse
+detection; deleted with their session), `_verification_codes` (keyed hashes of a 6-digit code and a link token, purpose,
+expiry, attempts), `_admins` (email, argon2id hash). The auth code reads and writes them directly through `QueryDb` /
+`MutationDb` (not through registered functions), so hashes never appear in function args or the execution log.
 
 **System functions**: `_system/auth:me` (query: the signed-in `Doc<User>` or null) and `_system/auth:update_profile`
 (mutation: `{ name?, image? }`; omitted = unchanged, `""` = clear). `@rxferrix/client` exports hand-written references
@@ -2642,7 +2646,10 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 ```
 
 **Builder**: `RxFerrix::static_dir(dir)`, `RxFerrix::embed_static::<A: rust_embed::RustEmbed>()` (derive with
-`#[derive(rxferrix::rust_embed::Embed)] #[crate_path = "rxferrix::rust_embed"]`) and `RxFerrix::routes(axum::Router)`.
+`#[derive(rxferrix::rust_embed::Embed)] #[crate_path = "rxferrix::rust_embed"]`), `RxFerrix::routes(axum::Router)` and
+`RxFerrix::app_routes(axum::Router<App>)` (handlers take `State<App>`: typed `app.query/mutation/action::<F>` calls,
+internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
+with `.with_state(())`).
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

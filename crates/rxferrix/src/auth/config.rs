@@ -22,6 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::email::Mailer;
+use super::service::SignIn;
+
+/// What [`AuthConfig::on_sign_in`] runs.
+pub(crate) type SignInHook =
+    Arc<dyn Fn(crate::App, SignIn) -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static>;
 
 /// How users may sign in, plus token lifetimes, email and redirect settings.
 ///
@@ -51,6 +56,8 @@ pub struct AuthConfig {
     pub(crate) audit_retention: Duration,
     /// Whether admins may mint impersonation tokens (`POST /api/admin/impersonate`).
     pub(crate) impersonation: bool,
+    /// Runs after each successful user sign-in ([`AuthConfig::on_sign_in`]).
+    pub(crate) on_sign_in: Option<SignInHook>,
     /// Which defaults were set explicitly in code (they then win over `_settings`).
     pub(crate) explicit: Explicit,
 }
@@ -84,6 +91,7 @@ impl Default for AuthConfig {
             jwt: Vec::new(),
             audit_retention: Duration::from_secs(90 * 24 * 3600),
             impersonation: true,
+            on_sign_in: None,
             explicit: Explicit::default(),
         }
     }
@@ -110,6 +118,7 @@ impl fmt::Debug for AuthConfig {
             .field("jwt", &self.jwt)
             .field("audit_retention", &self.audit_retention)
             .field("impersonation", &self.impersonation)
+            .field("on_sign_in", &self.on_sign_in.as_ref().map(|_| "<hook>"))
             .finish()
     }
 }
@@ -235,6 +244,28 @@ impl AuthConfig {
     /// ```
     pub fn dev_mailer(mut self, mailer: Arc<dyn Mailer>) -> Self {
         self.dev_mailer = Some(mailer);
+        self
+    }
+
+    /// Run `hook` after each successful user sign-in that starts a session: password sign-in, a sign-up that signs
+    /// in, a password reset, a magic link or code, and OAuth. Not for `AuthService::sign_in_as`, impersonation,
+    /// admins, refreshes, or external JWTs (which start no session). The user is signed in when it runs: it can't
+    /// refuse the sign-in, and it handles its own errors. The response waits for it, so keep it short (record the
+    /// sign-in through a mutation; schedule anything slow):
+    ///
+    /// ```ignore
+    /// AuthConfig::password().on_sign_in(|app, sign_in| async move {
+    ///     if let Err(e) = app.mutation::<audit::record_sign_in>((sign_in.user, sign_in.method.to_string())).await {
+    ///         tracing::warn!("recording a sign-in failed: {e:#}");
+    ///     }
+    /// })
+    /// ```
+    pub fn on_sign_in<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(crate::App, SignIn) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.on_sign_in = Some(Arc::new(move |app, sign_in| Box::pin(hook(app, sign_in))));
         self
     }
 

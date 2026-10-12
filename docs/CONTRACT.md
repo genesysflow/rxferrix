@@ -585,7 +585,10 @@ log lines; `Email { to, subject, body, html: Option<String> }`, built with `Emai
 an HTML version is sent as `multipart/alternative`; apps send their own email through the same mailer with
 `ActionCtx::send_email`), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
-`impersonation(bool)` (`POST /api/admin/impersonate`, default true).
+`impersonation(bool)` (`POST /api/admin/impersonate`, default true), `on_sign_in(|app: App, sign_in: SignIn| async
+{ .. })` (after each successful user sign-in that starts a session, awaited before the response; `SignIn { user,
+session, method, client }`, `SignInMethod::{Password, SignUp, PasswordReset, MagicLink, OAuth(provider)}`; not for
+`sign_in_as`, impersonation, admins, refreshes or external JWTs).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ferrix-js",
+      "name": "rxferrix-js",
       "devDependencies": {
         "jsdom": "^30.1.2",
         "typescript": "^6.0.3",

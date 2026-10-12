@@ -90,4 +90,3 @@ pub async fn send_confirmation(ctx: &ActionCtx, to: String, text: String, html: 
 
 From a mutation, schedule the action (`ctx.scheduler.run_after::<send_confirmation>(Duration::ZERO, ..)`), so the
 email goes out only if the mutation commits; a workpool adds retries.
-

@@ -69,6 +69,7 @@ rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-l
 duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = true }
 # Parquet exports of analytics queries, written from DuckDB's Arrow batches (same Arrow major version as duckdb's).
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
+# Verifying imported bcrypt password hashes (`auth::password`).
 bcrypt = "0.19.3"
 
 [features]
@@ -86,8 +87,6 @@ olap = ["dep:duckdb", "dep:parquet"]
 nix = { version = "0.31.3", default-features = false, features = ["socket", "uio"] }
 
 [dev-dependencies]
-# Imported (bcrypt) password hashes in the auth tests.
-bcrypt = "0.19.3"
 # Paused time in tests (`#[tokio::test(start_paused = true)]`).
 tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # A failing `ObjectStore` wrapper in the replication tests (the trait is an `async_trait`).

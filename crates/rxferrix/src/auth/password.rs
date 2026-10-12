@@ -1,10 +1,10 @@
 //! Password hashing with argon2id (the `argon2` crate's defaults: m = 19 MiB, t = 2, p = 1, per OWASP). Hashing runs
 //! on the blocking pool, never inside a mutation (which would hold the writer lock).
 //!
-//! **Imported hashes.** Verification also accepts bcrypt hashes (`$2a$`, `$2b$`, `$2y$`: PocketBase, Laravel, Devise,
-//! Supabase, ...), so users imported from another system keep their passwords. A successful sign-in with one replaces
-//! it with an argon2id hash ([`needs_rehash`]). Until then, a bcrypt account answers in bcrypt's time instead of
-//! argon2's, so timing tells it apart from an unknown email.
+//! **Imported hashes.** Verification also accepts bcrypt hashes (`$2a$`, `$2b$`, `$2y$`: Pocketbase, Laravel, Devise, Supabase,
+//! ...), so users imported from another system keep their passwords. A successful user sign-in with one replaces it
+//! with an argon2id hash ([`needs_rehash`]). Until then, a bcrypt account answers in bcrypt's time instead of argon2's,
+//! so timing tells it apart from an unknown email.
 
 use std::sync::LazyLock;
 

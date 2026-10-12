@@ -46,7 +46,7 @@ pub struct Account {
 #[index(by_email = [email])]
 pub struct Admin {
     pub email: String,
-    /// argon2id PHC string; an imported bcrypt hash until the user's next sign-in (`auth::password`).
+    /// argon2id PHC string.
     pub password_hash: String,
 }
 

@@ -13,6 +13,8 @@ directory.
 - **Safe to change.** Deploys and schema changes happen without downtime; a version that can't read the existing
   data refuses to take over, and the old one keeps serving.
 
+**Documentation: https://genesysflow.github.io/ferrix/**
+
 All planned phases (0–10) are built; [PLAN.md](PLAN.md) has the design and, in §10, what each part still lacks.
 
 ## Quick start
@@ -87,29 +89,29 @@ When anyone adds a todo, every open `list` updates. There are three kinds of fun
 
 ## Features
 
-Each one is explained, with examples, in the [guide](docs/GUIDE.md).
+Each one is explained, with examples, in the [guide](https://genesysflow.github.io/ferrix/guide/functions).
 
 | Feature | In short |
 |---|---|
-| [Tables and indexes](docs/GUIDE.md#functions-tables-and-indexes) | Rust structs as tables, typed index queries, pagination, `#[object]` types for results. |
-| [Auth](docs/GUIDE.md#auth) | Passwords, magic links, OAuth (GitHub, Google, Discord, Apple, OIDC), or JWTs from Clerk, Auth0, Supabase. |
-| [File storage](docs/GUIDE.md#file-storage) | Uploads to disk or S3, thumbnails, signed and presigned URLs. |
-| [Scheduler and crons](docs/GUIDE.md#scheduler-and-crons) | Run functions later or on a schedule (time zones included), with workpools and retries. |
-| [Workflows](docs/GUIDE.md#workflows) | Durable multi-step functions that survive restarts, sleep for days and wait for events. |
-| [Search](docs/GUIDE.md#search) | Full-text search (stemming in 18 languages) and vector search, both reactive. |
-| [Live aggregates](docs/GUIDE.md#live-aggregates) | Counts and sums per group, kept current on every write, read without a scan. |
-| [Environment variables](docs/GUIDE.md#environment-variables) | Set on the dashboard, encrypted; queries rerun when one changes. |
-| [Analytics](docs/GUIDE.md#analytics-olap) | SQL over a columnar copy of the data (DuckDB), for reports and dashboards. |
-| [Migrations](docs/GUIDE.md#migrations) | Change a table's type and migrate documents in the background, without downtime. |
-| [Admin dashboard](docs/GUIDE.md#dashboard) | Data, functions, logs, users, files, scheduler, migrations, backups, analytics, settings, audit log. |
+| [Tables and indexes](docs/guide/functions.md) | Rust structs as tables, typed index queries, pagination, `#[object]` types for results. |
+| [Auth](docs/guide/auth.md) | Passwords, magic links, OAuth (GitHub, Google, Discord, Apple, OIDC), or JWTs from Clerk, Auth0, Supabase. |
+| [File storage](docs/guide/file-storage.md) | Uploads to disk or S3, thumbnails, signed and presigned URLs. |
+| [Scheduler and crons](docs/guide/scheduler.md) | Run functions later or on a schedule (time zones included), with workpools and retries. |
+| [Workflows](docs/guide/workflows.md) | Durable multi-step functions that survive restarts, sleep for days and wait for events. |
+| [Search](docs/guide/search.md) | Full-text search (stemming in 18 languages) and vector search, both reactive. |
+| [Live aggregates](docs/guide/aggregates.md) | Counts and sums per group, kept current on every write, read without a scan. |
+| [Environment variables](docs/guide/environment.md) | Set on the dashboard, encrypted; queries rerun when one changes. |
+| [Analytics](docs/guide/analytics.md) | SQL over a columnar copy of the data (DuckDB), for reports and dashboards. |
+| [Migrations](docs/guide/migrations.md) | Change a table's type and migrate documents in the background, without downtime. |
+| [Admin dashboard](docs/guide/dashboard.md) | Data, functions, logs, users, files, scheduler, migrations, backups, analytics, settings, audit log. |
 
-Before you build something real, read [Things to know](docs/GUIDE.md#things-to-know): limits, caching, and what
+Before you build something real, read [Things to know](docs/guide/things-to-know.md): limits, caching, and what
 makes a query rerun.
 
 ## Deploying
 
 A Ferrix app is one binary and one data directory (`--dir`, default `fx_data`). The details are in
-[docs/OPERATIONS.md](docs/OPERATIONS.md).
+[the operations docs](https://genesysflow.github.io/ferrix/operations/deploying).
 
 ```sh
 scripts/release.sh                                  # a static Linux binary of the todo example in dist/ (~20 MB)
@@ -159,7 +161,7 @@ command (backups, restores, migrations, export and import, …).
 | `packages/dashboard` | The admin dashboard (Svelte), embedded in the binary at `/_/`. |
 | `examples/` | The todo and chat apps. |
 | `deploy/` | systemd, Docker Compose and Kubernetes files. |
-| `docs/` | [Guide](docs/GUIDE.md), [operations](docs/OPERATIONS.md), [API contract](docs/CONTRACT.md), [protocol](docs/PROTOCOL.md). |
+| `docs/` | The documentation site (VitePress): guide, operations, [API contract](docs/CONTRACT.md), [protocol](docs/PROTOCOL.md). |
 
 ## Development
 
@@ -190,3 +192,7 @@ Benchmarks: `cargo test --release -p ferrix --test it bench_ -- --ignored --noca
 The dashboard's built files are committed, so `cargo build` needs no JavaScript toolchain. After changing
 `packages/dashboard` or the client packages, run `bun run build:dashboard` and commit `crates/ferrix/dashboard-dist`
 (`cargo test` fails while it is out of date). `cd packages/dashboard && bun run dev` serves it on :5174 for UI work.
+
+The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves it with live reload, and
+`bun run docs:build` builds it. Pushing to `master` publishes it to GitHub Pages
+([`.github/workflows/docs.yml`](.github/workflows/docs.yml)).

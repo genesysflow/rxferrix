@@ -591,7 +591,7 @@ pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<(u64, f6
 - **Serving the frontend**: `.static_dir(...)` or `.embed_static::<Assets>()` serves the SPA from the same binary with SPA fallback routing, so an entire app ships as one binary.
 - **Observability**: `tracing` to stdout as JSON in production, optional Prometheus `/metrics`, and dashboard metrics read from `aux.db`.
 - **Config**: CLI flags, then env vars (`FERRIX_*`), then `_settings` (set in the dashboard).
-- (As built, `crates/ferrix/src/ops`, docs/CONTRACT.md §4.4, docs/OPERATIONS.md: backups are `.tar.zst` archives of a
+- (As built, `crates/ferrix/src/ops`, docs/CONTRACT.md §4.4, docs/operations/backups.md: backups are `.tar.zst` archives of a
   `VACUUM INTO` snapshot plus, on request, `aux.db`, local file blobs and `auth_secret.key`, kept in `<dir>/backups`,
   any directory or S3 (`--backup-to`); scheduled with `--backup-every/--backup-keep` as the cron `ferrix-backup`;
   `restore` is offline behind `<dir>/ferrix.lock` and validates before swapping. `export` writes JSONL/CSV from one
@@ -859,7 +859,7 @@ Goal: a todo list that updates live across two browser tabs, with as little code
   `AsyncFnMut`: the futures of borrowing async closures aren't provably `Send` yet.)
 - [x] Docs: optimistic updates are replayed on every server change (create ids/timestamps outside the closure);
   scheduled functions run without identity (pass the user explicitly); `ctx.now()` in queries is not reactive.
-  (docs/GUIDE.md "Things to know", CONTRACT §1.10, with coarse-invalidation tips.)
+  (docs/guide/things-to-know.md, CONTRACT §1.10, with coarse-invalidation tips.)
 
 - [x] A dev-mode determinism check (§11): `AppOptions::determinism_check` (on in `serve --dev` and `TestApp`, every
   10 s per query) reruns a query in the same snapshot and warns, in the server log and as a log line of the run, where

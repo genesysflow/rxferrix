@@ -386,8 +386,9 @@ signature is refused, so signed URLs are the only way to read files.
 - **206** for a single `Range: bytes=a-b | a- | -n`, with `Content-Range: bytes a-b/size`. `If-Range` with another
   ETag, and malformed `Range` headers (one malformed range-spec invalidates the header), get the whole file (200).
 - **206 `multipart/byteranges`** for several ranges (RFC 9110 §14.6): `Content-Type: multipart/byteranges;
-  boundary=<32 hex chars>` and an exact `Content-Length`; each part is `--<boundary>\r\nContent-Type:
-  <type>\r\nContent-Range: bytes a-b/size\r\n\r\n<bytes>\r\n`, and the body ends with `--<boundary>--\r\n`.
+  boundary=<32 hex chars>` and an exact `Content-Length`; each part is
+  `--<boundary>\r\nContent-Type: <type>\r\nContent-Range: bytes a-b/size\r\n\r\n<bytes>\r\n`, and the body
+  ends with `--<boundary>--\r\n`.
   Unsatisfiable ranges in the set are dropped; overlapping and adjacent ranges are coalesced, and parts come in
   ascending order (whatever the request's order). If one range is left after that, the response is a plain single
   `206`. More than 16 ranges: the header is ignored (200 with the whole file).

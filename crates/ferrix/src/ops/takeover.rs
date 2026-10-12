@@ -27,7 +27,7 @@
 //!    fails, the process still serves: on the database as the old server left it.
 //!
 //! Under systemd the new process reports itself as the service's main process (`sd_notify`, `MAINPID=`; the unit
-//! needs `NotifyAccess=all`): see docs/OPERATIONS.md ("Deploys with no downtime").
+//! needs `NotifyAccess=all`): see docs/operations/zero-downtime.md.
 
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};

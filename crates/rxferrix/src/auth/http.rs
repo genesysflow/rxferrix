@@ -96,14 +96,24 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> AuthResult<T> {
         .map_err(|e| AuthFailure::new(400, "invalid_request", format!("Invalid request body: {e}")))
 }
 
-/// The caller's IP and user agent.
-pub(crate) struct Caller {
+/// The caller's IP address and user agent, as RxFerrix records them on sessions: the last `X-Forwarded-For` entry
+/// when the server trusts its proxy (`AuthConfig::trust_proxy`, `--trust-proxy`), else the peer address. An axum
+/// extractor for the app's own routes (`RxFerrix::app_routes`), so an allowlist or a rate limit sees the same address
+/// RxFerrix does:
+///
+/// ```ignore
+/// async fn webhook(State(app): State<App>, caller: Caller, body: Bytes) -> StatusCode { /* caller.ip */ }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Caller {
+    /// `unknown` when the connection's address isn't available.
     pub ip: String,
     pub user_agent: Option<String>,
 }
 
 impl Caller {
-    fn client(&self) -> ClientInfo {
+    /// As recorded on a session.
+    pub fn client(&self) -> ClientInfo {
         ClientInfo { user_agent: self.user_agent.clone(), ip: Some(self.ip.clone()) }
     }
 }

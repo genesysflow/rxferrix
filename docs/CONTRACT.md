@@ -2652,7 +2652,8 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 `#[derive(rxferrix::rust_embed::Embed)] #[crate_path = "rxferrix::rust_embed"]`), `RxFerrix::routes(axum::Router)` and
 `RxFerrix::app_routes(axum::Router<App>)` (handlers take `State<App>`: typed `app.query/mutation/action::<F>` calls,
 internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
-with `.with_state(())`).
+with `.with_state(())`). In app routes, the extractor `rxferrix::auth::Caller { ip, user_agent }` gives the client
+address as RxFerrix records it (the last `X-Forwarded-For` entry with `--trust-proxy`, else the peer).
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

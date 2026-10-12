@@ -715,14 +715,21 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     let hook = axum::Router::new()
         .route("/hooks/echo", axum::routing::post(|body: String| async move { format!("hook:{body}") }));
     // A route that reaches the app (`RxFerrix::app_routes`): writes through a mutation, reads through a query.
-    let app_hook = axum::Router::new().route(
-        "/hooks/pair",
-        axum::routing::post(|axum::extract::State(app): axum::extract::State<App>, body: String| async move {
-            app.mutation::<app::add_pair>((41, body)).await.unwrap();
-            let pairs = app.query::<app::all_pairs>(()).await.unwrap();
-            pairs.iter().filter(|p| p.group == 41).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
-        }),
-    );
+    let app_hook = axum::Router::new()
+        .route(
+            "/hooks/pair",
+            axum::routing::post(|axum::extract::State(app): axum::extract::State<App>, body: String| async move {
+                app.mutation::<app::add_pair>((41, body)).await.unwrap();
+                let pairs = app.query::<app::all_pairs>(()).await.unwrap();
+                pairs.iter().filter(|p| p.group == 41).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
+            }),
+        )
+        .route(
+            "/hooks/caller",
+            axum::routing::get(|caller: rxferrix::auth::Caller| async move {
+                format!("{} {}", caller.ip, caller.user_agent.unwrap_or_default())
+            }),
+        );
     let options = WebOptions {
         static_files: Some(StaticFiles::Dir(root.to_path_buf())),
         routes: Some(hook.with_state(()).merge(app_hook)),
@@ -791,6 +798,9 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     assert_eq!(r.text().await.unwrap(), "hook:ping");
     let r = client.post(format!("http://{addr}/hooks/pair")).body("from a route").send().await.unwrap();
     assert_eq!(r.text().await.unwrap(), "from a route a|from a route b");
+    // The caller's address as RxFerrix sees it (no trusted proxy here: the peer, not the forwarded header).
+    let r = get("/hooks/caller").header("user-agent", "probe").header("x-forwarded-for", "203.0.113.9").send().await;
+    assert_eq!(r.unwrap().text().await.unwrap(), "127.0.0.1 probe");
     let r = client.head(format!("http://{addr}/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
 

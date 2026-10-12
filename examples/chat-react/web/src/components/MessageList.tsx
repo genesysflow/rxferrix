@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { getAllPages, useMutation, usePaginatedQueryWithStatus } from "@rxferrix/react";
 import { api, type MessageView } from "../rxferrix";
 import type { ChannelInfo, Profile } from "../lib";
@@ -25,7 +25,10 @@ export function MessageList({ channel, me, onBack }: { channel: ChannelInfo; me:
   // added at the top without moving what's on screen. Load more while the sentinel at the top is near the viewport.
   const statusRef = useRef(status);
   const loadMoreRef = useRef(loadMore);
-  useEffect(() => {
+  // Before the browser can run the observer's callback: with a plain effect, a scroll right after a page arrived could
+  // reach the callback with the previous status ("LoadingMore") and be ignored, and the sentinel, still in view,
+  // fires no new event, so loading stopped there.
+  useLayoutEffect(() => {
     statusRef.current = status;
     loadMoreRef.current = loadMore;
   });

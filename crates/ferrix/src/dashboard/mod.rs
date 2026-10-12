@@ -1,4 +1,4 @@
-//! The admin dashboard's backend (PLAN.md §6): admin-only system functions, the `/api/admin/*` HTTP endpoints
+//! The admin dashboard's backend (docs/CONTRACT.md §4.1): admin-only system functions, the `/api/admin/*` HTTP endpoints
 //! ([`http`]) and the embedded single-page app at `/_/` ([`assets`], cargo feature `dashboard`).
 //!
 //! The functions below are ordinary system functions (paths `_system/dashboard:<name>`) defined with the normal

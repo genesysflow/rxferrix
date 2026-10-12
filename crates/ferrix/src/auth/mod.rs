@@ -1,4 +1,4 @@
-//! Authentication: users, sessions, tokens, email codes, OAuth and admins (PLAN.md §7.1, docs/PROTOCOL.md).
+//! Authentication: users, sessions, tokens, email codes, OAuth and admins (docs/CONTRACT.md §1.5, docs/PROTOCOL.md).
 //!
 //! - [`tables`]: the system tables (`_users`, `_credentials`, `_accounts`, `_sessions`, `_used_refresh_tokens`,
 //!   `_verification_codes`, `_admins`).

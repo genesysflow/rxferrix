@@ -1,6 +1,6 @@
 //! Live aggregates (`#[aggregate(name, group = [..], sum = [..])]`): per group of values, the number of documents and
 //! the sums of some fields, maintained inside every write's own transaction and read like an index point lookup.
-//! Design: PLAN.md §7.7; contract: docs/CONTRACT.md §1.12.
+//! Contract: docs/CONTRACT.md §1.12.
 //!
 //! **Storage.** `_aggregates (agg_id, table_number, name, definition)` describes them (ids from
 //! [`AGGREGATE_ID_BASE`] up, so they never meet index or search index ids) and `aggregate_values (agg_id, key, count,

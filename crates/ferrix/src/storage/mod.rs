@@ -1,4 +1,4 @@
-//! File storage (PLAN.md §7.2): blobs in a local directory or an S3-compatible bucket (via `object_store`), one
+//! File storage (docs/CONTRACT.md §1.6): blobs in a local directory or an S3-compatible bucket (via `object_store`), one
 //! `_storage` document per file, upload URLs, serving, and `ctx.storage`.
 //!
 //! **Upload flow**:

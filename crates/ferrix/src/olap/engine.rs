@@ -1,5 +1,5 @@
 //! The DuckDB copy (feature `olap`): open and lock down, rebuild tables from snapshots, apply journal batches, run
-//! sandboxed queries. See the module docs of `crate::olap` and PLAN.md §7.6.
+//! sandboxed queries. See the module docs of `crate::olap` and docs/CONTRACT.md §1.11.
 //!
 //! Tables in `olap.duckdb`: one per copied ferrix table, plus `_ferrix_meta` (`copy_id`, `applied_ts`: the copy
 //! reflects every commit up to it), `_ferrix_tables` (each table's fingerprint and applied ts) and `_ferrix_stage`

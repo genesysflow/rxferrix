@@ -15,7 +15,7 @@ directory.
 
 **Documentation: https://genesysflow.github.io/ferrix/**
 
-All planned phases (0–12) are built; [PLAN.md](PLAN.md) has the design, the roadmap (§10) and the open risks (§11).
+How it works inside, and why: [Design](docs/DESIGN.md).
 
 ## Quick start
 
@@ -164,7 +164,7 @@ command (backups, restores, migrations, export and import, …).
 | `packages/dashboard` | The admin dashboard (Svelte), embedded in the binary at `/_/`. |
 | `examples/` | The todo and chat apps. |
 | `deploy/` | systemd, Docker Compose and Kubernetes files. |
-| `docs/` | The documentation site (VitePress): guide, operations, [API contract](docs/CONTRACT.md), [protocol](docs/PROTOCOL.md). |
+| `docs/` | The documentation site (VitePress): guide, operations, [API contract](docs/CONTRACT.md), [protocol](docs/PROTOCOL.md), [design](docs/DESIGN.md). |
 
 ## Development
 

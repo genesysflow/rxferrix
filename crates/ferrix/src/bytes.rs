@@ -1,7 +1,7 @@
 //! [`Bytes`]: a binary value in documents, function args and results.
 //!
 //! JSON has no binary type, so bytes travel and are stored in a tagged form, `{"$bytes": "<base64>"}` (standard
-//! alphabet, padded), as PLAN.md §4.1 describes. The memcomparable key encoding recognizes that form and gives it
+//! alphabet, padded), as docs/CONTRACT.md §1.1 describes. The memcomparable key encoding recognizes that form and gives it
 //! its own type tag, ordered between strings and arrays (`crate::keys`), so `Bytes` fields can be indexed and
 //! compared byte-wise. In TypeScript it is `{ $bytes: string }`; `@ferrix/client` converts to and from `Uint8Array`
 //! with `bytesToJson` / `bytesFromJson`.

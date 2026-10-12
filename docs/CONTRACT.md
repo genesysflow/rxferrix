@@ -160,7 +160,7 @@ impl Bytes {
     pub fn from_json(v: &serde_json::Value) -> Option<Bytes>; // only an object whose single key is "$bytes"
 }
 ```
-**Bytes in indexes.** The key encoding (PLAN.md §4.3, `ferrix::keys`) recognizes the tagged form and gives it its own
+**Bytes in indexes.** The key encoding ([Design](DESIGN.md#storage), `ferrix::keys`) recognizes the tagged form and gives it its own
 type tag between strings and arrays, `Undefined < Null < Int64 < Float64 < Bool < String < Bytes < Array < Object`,
 with an order-preserving body (bytes compare byte-wise; a prefix sorts first), so `Bytes` fields work in `#[index]`,
 `with_index` ranges, search filter fields and the dashboard's index filters. Any other object, including one whose
@@ -1249,7 +1249,7 @@ impl<T> VectorFilter<T> {   // OR of ANDs of equalities on filter fields
 - Documents whose search field is missing, null or not a string are not indexed (never returned).
 - `with_search_index` after `with_index` or `order(Desc)` fails when run. Using a field other than the index's search
   field in `search`, a field that is not a filter field in `eq`, or `search` other than exactly once is an error.
-- Equality on filter fields compares the memcomparable encoding (§4.3 of PLAN.md), i.e. the same equality as index
+- Equality on filter fields compares the memcomparable encoding ([Design](DESIGN.md#storage)), i.e. the same equality as index
   keys: a missing field is not equal to `null`.
 
 **Pagination** (`SearchQuery::paginate`, `RawSearchQuery::paginate`; same `PaginationOpts` / `PaginationResult` and

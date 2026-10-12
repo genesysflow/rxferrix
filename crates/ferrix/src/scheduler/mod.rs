@@ -1,4 +1,4 @@
-//! The scheduler and crons (PLAN.md §7.3).
+//! The scheduler and crons (docs/CONTRACT.md §1.7).
 //!
 //! - [`Scheduler`] (`ctx.scheduler` in mutations and actions): `run_after`, `run_at`, `cancel`, `with_retries`, and
 //!   workpools: `pool(name)` (bounded parallelism per pool, [`Workpool`]), `on_complete::<F>(context)` (a mutation

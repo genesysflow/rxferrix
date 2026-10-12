@@ -3,7 +3,7 @@
 # rusqlite's bundled build defines SQLITE_ENABLE_MEMORY_MANAGEMENT, which makes every connection share ONE page cache
 # guarded by one global mutex, and leaves SQLITE_DEFAULT_MEMSTATUS on, which takes another global mutex on every
 # allocation. Together they serialize all reader connections: measured, N parallel readers ran no faster than one.
-# Without them reads scale with threads (see PLAN.md §4.5). Ferrix never uses sqlite3_release_memory or
+# Without them reads scale with threads (see docs/DESIGN.md, "Measurements"). Ferrix never uses sqlite3_release_memory or
 # sqlite3_soft_heap_limit, which is all ENABLE_MEMORY_MANAGEMENT is for. Apps built outside this workspace should set
 # the same variable (ferrix logs a warning at startup when it is missing).
 [env]

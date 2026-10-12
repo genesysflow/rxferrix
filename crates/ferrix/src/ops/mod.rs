@@ -1,4 +1,4 @@
-//! Operations (PLAN.md §8): backups and restore, export and import, Prometheus metrics, serving the app's frontend,
+//! Operations (docs/CONTRACT.md §4.4): backups and restore, export and import, Prometheus metrics, serving the app's frontend,
 //! TLS, and the data directory lock.
 //!
 //! - [`backup`]: consistent online snapshots (`VACUUM INTO`) packed as `.tar.zst` archives, backup targets (a

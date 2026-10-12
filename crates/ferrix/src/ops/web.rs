@@ -1,4 +1,4 @@
-//! Serving the app's own frontend and extra routes from the same binary (PLAN.md §2.1, §8).
+//! Serving the app's own frontend and extra routes from the same binary (docs/operations/deploying.md).
 //!
 //! ```ignore
 //! #[derive(ferrix::rust_embed::Embed)]

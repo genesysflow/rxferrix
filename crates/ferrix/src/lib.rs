@@ -1,4 +1,4 @@
-//! Ferrix: a single-binary reactive backend. See PLAN.md, docs/CONTRACT.md and docs/PROTOCOL.md.
+//! Ferrix: a single-binary reactive backend. See docs/DESIGN.md, docs/CONTRACT.md and docs/PROTOCOL.md.
 //!
 //! Module map:
 //! - [`id`], [`schema`], [`error`]: user-facing types (`Id`, `Doc`, `Table`, `Field`, `Index`, `UserError`, ...).

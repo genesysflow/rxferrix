@@ -1,5 +1,4 @@
-//! Data migrations: `#[migration]` functions that rewrite the documents of a table in batches (PLAN.md §4.2,
-//! docs/CONTRACT.md §1.9).
+//! Data migrations: `#[migration]` functions that rewrite the documents of a table in batches (docs/CONTRACT.md §1.9).
 //!
 //! ```ignore
 //! #[migration(table = Todo, batch = 100)]

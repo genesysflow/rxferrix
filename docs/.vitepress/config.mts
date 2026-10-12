@@ -21,6 +21,7 @@ export default defineConfig({
       { text: "Reference", items: [
         { text: "API contract", link: "/CONTRACT" },
         { text: "Protocol", link: "/PROTOCOL" },
+        { text: "Design", link: "/DESIGN" },
       ] },
     ],
     sidebar: [
@@ -63,6 +64,7 @@ export default defineConfig({
         items: [
           { text: "API contract", link: "/CONTRACT" },
           { text: "Protocol", link: "/PROTOCOL" },
+          { text: "Design", link: "/DESIGN" },
         ],
       },
     ],

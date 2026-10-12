@@ -15,7 +15,7 @@ directory.
 
 **Documentation: https://genesysflow.github.io/ferrix/**
 
-All planned phases (0–10) are built; [PLAN.md](PLAN.md) has the design and, in §10, what each part still lacks.
+All planned phases (0–12) are built; [PLAN.md](PLAN.md) has the design, the roadmap (§10) and the open risks (§11).
 
 ## Quick start
 
@@ -30,8 +30,8 @@ cd my-app/web && bun install && bun run dev   # web app, in a second terminal
 ```
 
 The new app is a Rust crate with a sample `tasks` table and functions in `src/tasks.rs`, and a web app in `web/`.
-While `serve --dev` runs, the TypeScript API in `web/src/ferrix` is regenerated whenever the functions change. The
-admin dashboard is at http://127.0.0.1:8090/_/: open the setup link the server prints on first start to create an
+`serve --dev` writes the TypeScript API to `web/src/ferrix` each time it starts, so restart it after you change the
+functions. The admin dashboard is at http://127.0.0.1:8090/_/: open the setup link the server prints on first start to create an
 administrator.
 
 A `ferrix` command installed from this checkout makes apps that use the checkout's crate and @ferrix packages;
@@ -42,6 +42,7 @@ A `ferrix` command installed from this checkout makes apps that use the checkout
 The backend: a table and the functions that use it.
 
 ```rust
+// src/todos.rs
 use ferrix::prelude::*;
 
 #[table(name = "todos")]
@@ -58,6 +59,8 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     ctx.db.insert(Todo { text, done: false }).await
 }
 
+// src/main.rs
+mod todos;
 fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 
@@ -114,7 +117,7 @@ A Ferrix app is one binary and one data directory (`--dir`, default `fx_data`). 
 [the operations docs](https://genesysflow.github.io/ferrix/operations/deploying).
 
 ```sh
-scripts/release.sh                                  # a static Linux binary of the todo example in dist/ (~20 MB)
+scripts/release.sh                                  # a static Linux binary of the todo example in dist/ (~25 MB)
 dist/todo-server serve --dir /var/lib/my-app        # listens on 127.0.0.1:8090 (--http to change)
 ```
 
@@ -171,7 +174,8 @@ cargo test --workspace                        # Rust tests: unit, property, reac
 bun run typecheck && bun run test             # TypeScript packages, dashboard included
 ```
 
-More test suites (all run in CI by [`.github/workflows/release.yml`](.github/workflows/release.yml)):
+More test suites ([`.github/workflows/release.yml`](.github/workflows/release.yml) runs them in CI, except the
+longer fuzzing and the three rollout scripts):
 
 ```sh
 cargo test -p ferrix --test it codegen_typechecks_with_tsc -- --ignored   # the generated TS type-checks
@@ -184,7 +188,7 @@ cd examples/todo/web && bun e2e/two-tabs.ts       # needs the backend and Vite r
 bun e2e/reconnect.ts ../../../target/debug/todo-server <data dir>   # Vite running, backend not
 bun scripts/takeover-e2e.ts                   # zero-downtime takeovers under load, after `cargo build -p todo-server`
 bun scripts/docker-rollout-e2e.ts             # the same with Docker Compose and Traefik (needs Docker and the image)
-bun scripts/k3s-rollout-e2e.ts                # the same on k3s in Docker
+bun scripts/k3s-rollout-e2e.ts                # the same on k3s in Docker (needs Docker and the image)
 ```
 
 Benchmarks: `cargo test --release -p ferrix --test it bench_ -- --ignored --nocapture`.
@@ -194,5 +198,5 @@ The dashboard's built files are committed, so `cargo build` needs no JavaScript 
 (`cargo test` fails while it is out of date). `cd packages/dashboard && bun run dev` serves it on :5174 for UI work.
 
 The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves it with live reload, and
-`bun run docs:build` builds it. Pushing to `master` publishes it to GitHub Pages
+`bun run docs:build` builds it. A push to `master` that changes `docs/` publishes it to GitHub Pages
 ([`.github/workflows/docs.yml`](.github/workflows/docs.yml)).

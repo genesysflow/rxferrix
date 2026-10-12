@@ -20,6 +20,6 @@ let id: Id<Workflow> = ctx.workflows.on_complete::<onboarded>(user).start::<onbo
 
 The body runs again from the start whenever a step finishes. Steps already in the journal return their recorded
 result at once, so the body must be deterministic: it touches the database and the outside world only through steps.
-A failed step is an `Err` the body can handle. Steps run in parallel with `try_join!`, and `ctx.workflows.cancel(id)`
-stops a workflow. Its status is its `_workflows` document, so a query can show progress live. The dashboard has a
-Workflows page. Details: [docs/CONTRACT.md](../CONTRACT.md) §1.7.1.
+A failed step is an `Err` the body can handle. Steps run in parallel with `try_join!` (pass each as
+`step.run_action::<f>(..).into_future()`), and `ctx.workflows.cancel(id)` stops a workflow. Its status is its
+`_workflows` document, so a query can show progress live. The dashboard has a Workflows page. Details: [docs/CONTRACT.md](../CONTRACT.md) §1.7.1.

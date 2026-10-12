@@ -4,6 +4,7 @@ Enable sign-in methods in `main`, then use `ctx.auth` in functions:
 
 ```rust
 use ferrix::auth::{AuthConfig, GitHub, User};
+use ferrix::prelude::*;
 
 fn main() -> ferrix::Result<()> {
     ferrix::Ferrix::new()
@@ -32,14 +33,16 @@ await auth.signIn({ email, password });           // or signUp, requestMagicLink
 await auth.handleRedirectCallback();              // on the page OAuth and email links return to
 ```
 
-Access tokens are 15-minute HS256 JWTs signed with a key from `<data dir>/auth_secret.key`; refresh tokens rotate
-on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a rotated refresh token
-ends the sockets of that session **at once** (`AuthError`, then the client continues signed out), not when the access
-token expires. Email goes through `--smtp-url` (printed to the log in `--dev`). With no admin yet, `serve` prints a
+Access tokens are HS256 JWTs (15 minutes by default) signed with a key derived from `<data dir>/auth_secret.key`;
+refresh tokens rotate on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a
+rotated refresh token (past a 10-second grace, `refresh_reuse_grace`) ends the sockets of that session **at once**
+(`AuthError`, then the client continues signed out), not when the access token expires. Email goes through
+`--smtp-url` (without it, printed to the log in `--dev`). With no admin yet, `serve` prints a
 one-time `/_/setup#token=…` link; `admin create <email>` works too.
 
 OAuth presets: `GitHub`, `Google`, `Discord` (only a Discord-verified email is used) and `Apple` (Sign in with Apple),
-plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`FERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …) and can also
+plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`FERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
+`Oidc::from_env(id)` also reads `FERRIX_AUTH_<ID>_ISSUER`) and can also
 be set up in the dashboard's Settings. For Apple, give the Services ID, team id, key id and the `.p8` private key
 (`FERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): ferrix signs and rotates the short-lived client secret
 itself, accepts Apple's `form_post` callback (register `https://<public url>/api/auth/oauth/apple/callback`; the

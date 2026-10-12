@@ -2,7 +2,7 @@
 
 ## Create an app
 
-You need Rust (the repository pins a version for [mise](https://mise.jdx.dev) in `mise.toml`) and
+You need Rust (the repository's `mise.toml` installs it with [mise](https://mise.jdx.dev)) and
 [bun](https://bun.sh). From a checkout of the repository:
 
 ```sh
@@ -28,8 +28,8 @@ crates.io and npm instead, and `--ferrix-path DIR` another checkout.
 | `src/main.rs` | Starts the server: `ferrix::Ferrix::new().run()`, plus auth, crons and other options. |
 | `src/tasks.rs` | A sample `tasks` table with a query and mutations. Add your own modules next to it. |
 | `web/` | The web app (React or Svelte). |
-| `web/src/ferrix` | The generated TypeScript API. `serve --dev` rewrites it whenever your functions change. |
-| `.cargo/config.toml` | Build flags that let SQLite run queries in parallel (see [Deploying](/operations/deploying)). |
+| `web/src/ferrix` | The generated TypeScript API. `serve --dev` rewrites it each time it starts, so restart it after you change your functions. |
+| `.cargo/config.toml` | Build flags that let SQLite run queries in parallel (see [Deploying](/operations/deploying)), and where `serve --dev` writes the TypeScript API. |
 
 ## Functions
 

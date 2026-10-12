@@ -9,8 +9,9 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 - **Function path** (`udfPath`): `"<module path>:<function name>"`. Example: `"todos:list"`. Nested modules are
   joined with `/`: `"admin/users:list"`. Functions in the crate root have no module part: `"list"`.
 - **Args**: always a JSON object, `{}` when the function takes no parameters.
-- **ts**: the global commit timestamp. It is a JSON number (u64 in Rust) and increases by 1 for every committed
-  mutation. A query result is "at ts T" when it was computed from the database state after commit T.
+- **ts**: the global commit timestamp. It is a JSON number (u64 in Rust) and increases by 1 for every commit that
+  writes something (a mutation's, or the server's own, e.g. auth or the scheduler); a mutation that writes nothing
+  reports the current ts. A query result is "at ts T" when it was computed from the database state after commit T.
 - **Query set version** (`querySet`): an integer the client increments on every `ModifyQuerySet`.
 - **Identity version** (`identity`): an integer the client increments on every `Authenticate`.
 - **StateVersion**: `{ "querySet": number, "identity": number, "ts": number }`. This is the client's view of the world.
@@ -103,8 +104,8 @@ process rather than being refused.
 5. **Errors in a query** produce `QueryFailed` and keep the subscription alive. If a later commit makes the query
    succeed, a `QueryUpdated` follows.
 6. A **user error** (`UserError` in Rust) puts `errorData = { "code": string, "data": any }` and
-   `errorMessage = message`. Any other error gives `errorData = null`. In `--dev` the message is the real error text;
-   otherwise it is `"Server Error"`. A mutation that exceeds the server's mutation timeout (default 5s) is rolled
+   `errorMessage = message`. Any other error gives `errorData = null`. Its message is the real error text for invalid
+   args and unknown functions, and for every error in `--dev`; otherwise it is `"Server Error"`. A mutation that exceeds the server's mutation timeout (default 5s) is rolled
    back and fails with such a server error.
 7. **Mutations are idempotent per `(sessionId, requestId)`.** The server records each mutation's response (the
    result and commit ts, or the error) in the same transaction as the mutation's writes, keyed by the socket's
@@ -197,8 +198,8 @@ So that no client can grow the server's memory without bound:
 - At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`.
 - At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server stops reading the socket
   until one finishes (they queue in the client and TCP rather than in the server).
-- A socket the client has sent nothing on for 45 seconds is closed with `FatalError` (`SILENCE_LIMIT`; the server
-  pings every 15 s and a client answers every `Ping` with `Pong`). A frame that takes over 30 s to send (a client that
+- A socket the client has sent nothing on for 45 seconds is closed with `FatalError` at the next ping tick
+  (`SILENCE_LIMIT`; the server pings every 15 s and a client answers every `Ping` with `Pong`). A frame that takes over 30 s to send (a client that
   stopped reading) closes the socket too.
 - A query running longer than the server's `query_timeout` (default 30 s) fails.
 
@@ -219,7 +220,8 @@ So that no client can grow the server's memory without bound:
 
 `POST /api/query`, `POST /api/mutation`, `POST /api/action` with body `{ "path": "todos:list", "args": {} }` and an
 optional `Authorization: Bearer <access token>`. Without the header the call is anonymous; with an invalid, expired
-or signed-out token it fails with 401 and `errorData.code = "invalid_token"` (never silently anonymous).
+or signed-out token it fails with 401 and `errorData.code = "invalid_token"` (never silently anonymous; in the auth
+endpoints' error shape, without `logLines`).
 
 - Response 200 (success): `{ "status": "success", "value": <result>, "logLines": [] }`.
 - Response 4xx/5xx (error): `{ "status": "error", "errorMessage": "…", "errorData": null | {code, data}, "logLines": [] }`.
@@ -264,7 +266,7 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | Endpoint | Body | Response / notes |
 |---|---|---|
 | `GET /api/auth/providers` | | `{ password, magicLink, signups, oauth: ["github", …] }` |
-| `POST /api/auth/signup` | `{ email, password, name? }` | `Tokens`, or `{ verificationRequired: true }`. 400 `email_in_use`, `weak_password` (< 8 chars), `invalid_email`; 403 `signups_disabled`. Sends a verification email when email is configured. |
+| `POST /api/auth/signup` | `{ email, password, name? }` | `Tokens`, or `{ verificationRequired: true }`. 400 `email_in_use`, `weak_password` (< 8 chars), `invalid_password` (> 256 chars), `invalid_email`; 403 `signups_disabled`. Sends a verification email when email is configured. |
 | `POST /api/auth/signin` | `{ email, password }` | `Tokens`. 401 `invalid_credentials` for both unknown emails and wrong passwords (same timing); 403 `email_not_verified` when verification is required. |
 | `POST /api/auth/refresh` | `{ refreshToken }` | `Tokens` (new refresh token). 401 `invalid_refresh_token`, `stale_refresh_token`, `refresh_token_reused` (session revoked), `session_expired`. |
 | `POST /api/auth/signout` | `{ refreshToken? }` and/or `Authorization: Bearer` | `{}` always. Deletes the session. |
@@ -274,9 +276,12 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens`. Ends all other sessions of the user and marks the email verified. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
 | `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
-| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `ferrix_oauth_state`, `SameSite=Lax`, or `SameSite=None; Secure` for Apple behind an https public URL). |
-| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, or `#ferrix_error=<code>&ferrix_error_description=…`. |
+| `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `ferrix_oauth_state`, `SameSite=Lax` (plus `Secure` over https), or `SameSite=None; Secure` for Apple behind an https public URL). |
+| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, or `#ferrix_error=<code>&ferrix_error_description=…`. A `state` that names no pending flow of the provider gets a plain-text 400 (there is no app URL to return to). |
 | `POST /api/auth/oauth/{provider}/callback` | form `code, state, user?` (from Apple) | Apple only (`response_mode=form_post`; 405 for other providers): as the `GET`, answered with 303. `user` (the name) comes on the first sign-in only. |
+| `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
+| `GET /api/auth/admin/setup` | | `{ needsSetup }` |
+| `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
 
 OAuth presets: `github`, `google`, `discord` (`identify email`; its email only if Discord verified it), `apple` (`name
 email`; the profile is the ID token, verified against Apple's JWKS with `iss`, `aud`, `exp` and the flow's `nonce`;
@@ -285,9 +290,6 @@ issuer. The state cookie must equal the callback's `state` (constant-time) and n
 (10 minutes, used once), whichever method the callback uses; Apple's cross-site `POST` is why its cookie is
 `SameSite=None` (it binds the flow, it doesn't authenticate anything, so a third party posting with it attached can't
 complete a sign-in: it doesn't know the value).
-| `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
-| `GET /api/auth/admin/setup` | | `{ needsSetup }` |
-| `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
 
 Codes are 6 digits (5 wrong attempts burn a code); link tokens are 256-bit. Both are stored as keyed hashes and work
 once. Verification codes last 24 hours, reset codes 30 minutes, sign-in codes 15 minutes.

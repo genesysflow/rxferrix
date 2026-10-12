@@ -66,7 +66,7 @@ use it when the query vector is already in the database or comes from the client
 a scan per rerun. `ctx.vector_search` in an action is for embeddings from an API and for large indexes (the graph),
 but is not reactive.
 
-Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.35 ms, a broad two-letter
-prefix matching every document 80 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
+Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.15 ms, a broad two-letter
+prefix matching almost every document 17 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
 HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
 `_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).

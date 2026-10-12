@@ -97,6 +97,8 @@ pub fn run(opts: &Options) -> Result<(), String> {
     if let (Source::Checkout(root), Some(packed)) = (&source, &packed) {
         let vendor = opts.dir.join("web/vendor");
         std::fs::create_dir_all(&vendor).map_err(|e| format!("{}: {e}", vendor.display()))?;
+        // Absolute: `bun pm pack` runs in the package's directory, where a relative path would point elsewhere.
+        let vendor = vendor.canonicalize().map_err(|e| format!("{}: {e}", vendor.display()))?;
         for package in &packed.packages {
             pack(&root.join("packages").join(&package.dir), &vendor, &package.tarball)?;
         }

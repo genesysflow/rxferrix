@@ -45,6 +45,7 @@ features:
 A table and two functions on the server:
 
 ```rust
+// src/todos.rs
 use ferrix::prelude::*;
 
 #[table(name = "todos")]
@@ -60,6 +61,8 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     ctx.db.insert(Todo { text, done: false }).await
 }
 
+// src/main.rs
+mod todos;
 fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 

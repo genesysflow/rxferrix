@@ -4,7 +4,8 @@ Files live in `<data dir>/storage/` by default, or in an S3-compatible bucket (`
 the standard `AWS_*` variables for credentials, region and endpoint, e.g. R2 or MinIO). Uploads take three steps:
 
 ```rust
-use ferrix::storage::StoredFile;
+use std::time::Duration;
+use ferrix::storage::{DownloadOptions, StoredFile};
 
 #[mutation]
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
@@ -16,7 +17,7 @@ pub async fn set_avatar(ctx: &MutationCtx, file: Id<StoredFile>) -> Result<()> {
 
 #[query]
 pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
-    ctx.storage.get_url(file).await                // "/api/storage/<id>", live: null once the file is deleted
+    ctx.storage.get_url(file).await                // ".../api/storage/<id>", live: null once the file is deleted
 }
 ```
 

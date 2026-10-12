@@ -24,12 +24,14 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
 fn main() -> ferrix::Result<()> { ferrix::Ferrix::new().run() }
 ```
 
-Functions call each other through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`.
+Actions call other functions through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`
+(also `run_query` and `run_action`). Queries and mutations have no `run_*`: they share code through plain Rust
+functions.
 
 **Indexes end in `_creationTime, _id`**: documents with equal indexed fields are in creation order, so
 `with_index(Message::by_channel, |q| q.eq(Message::channel, c)).order(Order::Desc)` is newest first, and the creation
 time can be bounded after the declared fields: `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
-`.count()` counts an index range without reading the documents.
+`.count()` counts an index range without reading the documents (unless the query has a `filter`).
 
 **Types that aren't tables** (a function's output "view" struct, an enum argument) use `#[object]`: it derives
 serde and ts-rs through ferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in

@@ -53,7 +53,8 @@ ferrix::Ferrix::new()
     .run()
 ```
 
-Unknown paths get `index.html` (client-side routing) except under `/api` and `/_`, which static files never shadow.
+Unknown paths get `index.html` (client-side routing) except under `/api` and `/_`, which static files never shadow,
+and a missing file with an extension (`/logo.png`) is a 404 unless the client asks for HTML.
 HTML is `no-cache`, hashed assets (`assets/*`, `name-<hash>.js`) are cached for a year, and `<file>.br` / `.gz`
 next to a file are served to clients that accept them. The todo example embeds `examples/todo/web/dist` when it
 exists.
@@ -61,7 +62,7 @@ exists.
 ## Release binary
 
 `scripts/release.sh` builds the web app and a static `x86_64-unknown-linux-musl` binary of
-`todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 20 MB). C code is
+`todo-server` into `dist/` (everything linked in: SQLite, FTS5, sqlite-vec, TLS, zstd; about 25 MB). C code is
 cross-compiled with `zig cc` through cargo-zigbuild, fetched with mise if not installed. For your app:
 `PACKAGE=my-server WEB=web scripts/release.sh`; `FEATURES=olap` adds the analytics copy (DuckDB; about 57 MB).
 
@@ -95,7 +96,7 @@ Either terminate TLS in a reverse proxy (pass `--public-url https://…`), or le
 port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port 80 to HTTPS. `--tls-cert cert.pem
 --tls-key key.pem` uses your own certificate, re-read every 30 s (`--tls-reload-every`): renewed files are picked up
 without a restart or dropped connections, and a bad pair keeps the current certificate (logged). Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
-(default `0.0.0.0:80` with `--https`; `off`).
+(default `0.0.0.0:80` with `--https`, none with `--tls-cert`; `off` turns it off).
 
 ## Durability
 

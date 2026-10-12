@@ -1,7 +1,7 @@
 # Things to know
 
 - **Limits per connection and per run.** A socket may have 1024 live queries and 64 running mutations/actions;
-  queries time out after 30 s (`--query-timeout`), mutations after 5 s; a client silent for 45 s (it answers pings)
+  queries time out after 30 s (`--query-timeout`), mutations after 5 s (`--mutation-timeout`); a client silent for 45 s (it answers pings)
   is disconnected. They bound the server's memory whatever a client does (docs/PROTOCOL.md, Limits).
 - **Query results are cached while nothing they read changes.** Every subscriber of a query shares one result; after
   the last one leaves it stays cached (up to 30 minutes, 64 MiB in all: `--query-cache-ttl`, `--query-cache-size`)
@@ -9,7 +9,7 @@
   Repeated HTTP queries are cached too. A query that reads `ctx.now()` is never cached. The Overview page and
   `/metrics` show the hit rate.
 
-- **Optimistic updates are replayed** on top of every server change until the mutation's result arrives. Create ids
+- **Optimistic updates are replayed** on top of every server change until the client has seen the mutation's writes (or it failed). Create ids
   and timestamps outside the update closure (once per call), not inside it:
   ```ts
   const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();

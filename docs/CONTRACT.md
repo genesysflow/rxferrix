@@ -15,7 +15,7 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 ```rust
 use ferrix::prelude::*;
 // prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
-//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, DocChange,
+//           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, Aggregate, DocChange,
 //           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
 //           workflow, WorkflowCtx, json!, Ferrix
 use ferrix::log;   // logging is a separate, explicit import (§1.4): log::info!(...), log::warn!(...)
@@ -79,7 +79,7 @@ Rules:
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type Error = anyhow::Error;                     // re-export anyhow::Error
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserError { pub code: String, pub message: String, pub data: serde_json::Value }
 impl UserError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self;
@@ -92,7 +92,7 @@ impl std::error::Error for UserError {}   // + Display = message. Detected at th
 pub struct Id<T> { /* raw: [u8; 16], PhantomData<fn() -> T> */ }
 // Copy, Clone, Eq, Ord, Hash, Debug, Display (the string form), FromStr (validates format, not table),
 // Serialize/Deserialize as string, ts_rs::TS => `Id<"<table name>">` (requires T: Table).
-impl<T> Id<T> { pub fn table_number(&self) -> u32; pub fn as_str(&self) -> String; }
+impl<T> Id<T> { pub fn table_number(&self) -> u32; pub fn as_str(&self) -> String; pub fn as_bytes(&self) -> &[u8; 16]; }
 
 /// A stored document: system fields + the user's struct, flattened.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,7 +101,7 @@ pub struct Doc<T> {
     #[serde(rename = "_creationTime")] pub creation_time: f64,   // ms since unix epoch
     #[serde(flatten)] pub value: T,
 }
-impl<T> Deref for Doc<T> { type Target = T; }
+impl<T> Deref for Doc<T> { type Target = T; }   // + DerefMut; PartialEq when T: PartialEq
 // ts_rs::TS for Doc<T> => `Doc<"<table name>">` (requires T: Table). Codegen emits the Doc/Id TS helpers.
 
 pub trait Table: Serialize + DeserializeOwned + ts_rs::TS + Clone + Send + Sync + 'static {
@@ -117,15 +117,19 @@ pub struct TableDef {
     /// Ok iff a stored document (system fields included) deserializes as `Doc<Self>`; Err = the serde error.
     /// Used by the startup schema check (§1.4). Emitted as `__private::validate_doc::<Self>`.
     pub validate: fn(&serde_json::Value) -> Result<(), String>,
-    /// The fields' JSON shape (`ferrix::shape::Shape`, §3 "Shapes"): the analytics copy's columns (§1.11).
+    /// The fields' JSON shape (`ferrix::shape::Shape`, §3.1 "Shapes"): the analytics copy's columns (§1.11).
     pub shape: fn() -> ferrix::shape::Shape,
     /// `#[aggregate]`s (§1.12): `AggregateDef { name, group_fields, sum_fields }`, JSON names. Compared by PartialEq.
     pub aggregates: Vec<AggregateDef>,
-}   // PartialEq compares name, all index definitions and the rendered `ts()`, never the fn pointers
+}   // PartialEq compares name, all index and aggregate definitions and the rendered `ts()`, never the fn pointers
 pub struct IndexDef { pub name: &'static str, pub fields: Vec<&'static str> }   // JSON field names
-pub struct SearchIndexDef { pub name: &'static str, pub search_field: &'static str, pub filter_fields: Vec<&'static str> }
+pub struct SearchIndexDef {
+    pub name: &'static str, pub search_field: &'static str, pub filter_fields: Vec<&'static str>,
+    pub tokenizer: Tokenizer,   // { kind: TokenizerKind, language: Option<&'static str>, remove_diacritics: bool } (§1.8)
+}
 pub struct VectorIndexDef {
     pub name: &'static str, pub vector_field: &'static str, pub dimensions: usize, pub filter_fields: Vec<&'static str>,
+    pub kind: VectorIndexKind, pub hnsw: HnswParams,   // Exact (default) | Hnsw; HnswParams::DEFAULT for exact (§1.8)
 }
 
 /// Typed handle for a field (JSON name). V is the Rust value type.
@@ -161,10 +165,9 @@ type tag between strings and arrays, `Undefined < Null < Int64 < Float64 < Bool 
 with an order-preserving body (bytes compare byte-wise; a prefix sorts first), so `Bytes` fields work in `#[index]`,
 `with_index` ranges, search filter fields and the dashboard's index filters. Any other object, including one whose
 `$bytes` is not canonical base64, stays an Object. Adding the tag renumbered Array and Object, so the key encoding
-has a version in `_meta` (`key_encoding`, now 2; absent = 1): opening a database written with an older version
+has a version in `_meta` (`key_encoding`, now 3, see §1.2; absent = 1): opening a database written with v1
 rebuilds every index (ordinary, search and vector) before anything else. Pagination cursors from before such an
-upgrade may then fail with `paginate: cursor does not belong to this query` if their range bounds held arrays or
-objects.
+upgrade then fail with `paginate: cursor does not belong to this query` (the version is part of their fingerprint).
 
 ### 1.2 Contexts and database API
 
@@ -384,8 +387,8 @@ pub trait SchedulableFunction: FunctionRef {}
 
 **Function log lines.** `ferrix::log` re-exports the `tracing` macros `trace!`, `debug!`, `info!`, `warn!`,
 `error!`. Write `use ferrix::log;` and then `log::info!(...)` (plain `tracing::info!` is the same thing). Events
-emitted while a function runs, at DEBUG and above, are captured per execution as `"[LEVEL] message key=value ..."`
-(at most 256 lines of 4KB each). A nested `ctx.run_*` call's lines are also appended to its caller's. Events from
+emitted while a function runs, at DEBUG and above (WARN and above for a few chatty crates: hyper, h2, reqwest, rustls,
+tokio, tower, ...), are captured per execution as `"[LEVEL] message key=value ..."` (at most 256 lines of 4KB each). A nested `ctx.run_*` call's lines are also appended to its caller's. Events from
 tasks the function spawns are not captured. Lines are always stored in the execution log and sent to clients as
 `logLines` only in `--dev`. The events still reach the normal subscriber: `ferrix serve` prints them to stdout,
 filtered by `RUST_LOG`.
@@ -413,7 +416,7 @@ pub struct AppOptions {
     pub storage: ferrix::storage::StorageConfig, // file storage backend and limits (see §1.6)
     pub ops: ferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
     pub query_cache: ferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
-    pub fsync_commits: bool,          // false: commits wait for the disk (SQLite synchronous = FULL); `--fsync-commits`
+    pub fsync_commits: bool,          // default false (synchronous = NORMAL); true (`--fsync-commits`): commits wait for the disk (FULL)
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
     pub olap: ferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
 }
@@ -497,6 +500,7 @@ impl Logs {
 #[derive(Default, Serialize, Deserialize)] #[serde(rename_all = "camelCase", default)]
 pub struct LogFilter {
     pub path_prefix: Option<String>,      // e.g. "todos:" or "todos:list"
+    pub path: Option<String>,             // exact path
     pub kind: Option<FunctionKind>,       // JSON: "query" | "mutation" | "action"
     pub outcome: Option<LogOutcome>,
     pub since: Option<i64>,               // ms since the epoch, inclusive
@@ -521,7 +525,7 @@ pub struct LogEntry {
     pub args: String,                 // JSON, cut to at most 2048 bytes (then possibly not valid JSON)
     pub args_truncated: bool,
 }
-pub enum LogOutcome { Success, UserError /* UserError, invalid args */, ServerError /* bugs, panics, timeouts */ }
+pub enum LogOutcome { Success, UserError /* UserError, invalid args, not found */, ServerError /* bugs, panics, timeouts */ }
 
 #[derive(Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct FunctionStats {
@@ -590,7 +594,7 @@ CLI flags / env vars add to it: `--public-url` (`FERRIX_PUBLIC_URL`), `--auth-re
 `TestApp::create_user(email, password: Option<&str>) -> Result<Id<User>>` (a verified `_users` row, plus a password
 credential when given; no auth method needs to be enabled and no email is sent; `email_in_use` if taken) and
 `TestApp::as_user(id) -> TestUser` (`query` / `mutation` / `action` as `Identity::user(id, None)`, and `identity()`).
-`TestApp::query_run::<F>(args) -> QueryRun` runs a query (internal ones too) and returns the result with its read
+`TestApp::query_run::<F>(args) -> Result<QueryRun>` runs a query (internal ones too) and returns the result with its read
 set, so a test can check which commits invalidate it: `run.read_set.overlaps(&commit)`, with the commit from
 `app.db().write_log().entries_between(ts - 1, ts)` and `ts` from `TestApp::mutation_ts`.
 
@@ -750,8 +754,8 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   the bucket stays private. It carries signed `response-content-type` (the file's), `response-content-disposition`
   (`inline` for the types ferrix serves inline, else `attachment`; always `attachment` with `.attachment()`; with
   the file name) and `response-cache-control` (`private, max-age=<lifetime>`). S3 can't add `nosniff` or the CSP
-  ferrix sends; unsafe types are attachments, on the bucket's origin, not the app's. `ttl` is 1 s to 7 days (S3's
-  limit, `MAX_DIRECT_URL_TTL`), else `invalid_ttl`; lifetime exactly `ttl` in mutations and actions, `ttl` to
+  ferrix sends; unsafe types are attachments, on the bucket's origin, not the app's. `ttl` is 1 s to
+  `max_signed_url_ttl`, and at most 7 days (S3's limit, `MAX_DIRECT_URL_TTL`), else `invalid_ttl`; lifetime exactly `ttl` in mutations and actions, `ttl` to
   `2·ttl` (at most 7 days) in queries, where the URL also changes with every run (it embeds the signing time).
   `?thumb=` can't be appended (the signature covers the whole URL): thumbnails use signed URLs of ferrix. Once the
   file is deleted its blob goes after the commit and the URL fails (404), except with `keep_deleted`, where the blob
@@ -870,8 +874,8 @@ impl ActionCtx {
 - **In a mutation** the job row is written in the mutation's transaction: it exists only if the mutation commits.
   `run_after` counts from `ctx.now()`. `cancel` is just as atomic.
 - **In an action** scheduling and canceling take effect immediately: they run the internal system mutations
-  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin }` and `_system/scheduler:cancel { id,
-  reason? }`.
+  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin, pool?, onComplete?, backoff? }`,
+  `_system/scheduler:cancel { id, reason? }` and `_system/scheduler:cancel_pool { pool, reason }`.
 - Args are serialized when scheduling (at most 1 MiB of JSON). `run_at` in the past means "as soon as possible".
 - `cancel`: a pending job, or an action in progress, becomes `canceled` with `completedAt` and the reason in `error`
   (`"Canceled by <path>"`, the `cancel_with_reason` text, or `"Canceled from the dashboard by admin:<id>"`; `" (while
@@ -909,9 +913,11 @@ error `ActionAborted` ("canceled: the action was aborted 5s after its job was ca
   running`. With `with_retries(n)`, an action that *returns an error* goes back to `pending` up to `n` times, after
   `retry_backoff` (1s) doubled per retry (at most 1h); an interrupted one is never retried.
 - **Ordering:** due jobs start in `(runAt, scheduledAt)` order (`scheduledAt` is the job's strictly increasing
-  `_creationTime`), so jobs due at the same time run in scheduling order. Mutation jobs run one at a time, in that
-  order (they serialize on the single writer anyway); actions run concurrently.
-- **Concurrency:** at most `SchedulerOptions::concurrency` (10) jobs run at once.
+  `_creationTime`) within mutations and within each pool, so jobs due at the same time run in scheduling order. Each
+  dispatch round runs the due mutation jobs first, one at a time, in that order (they serialize on the single writer
+  anyway), then starts each pool's due actions; actions run concurrently.
+- **Concurrency:** at most `SchedulerOptions::concurrency` (10) actions of the default pool run at once; workpools
+  have their own slots and mutations need none (see Workpools below).
 - **Waking:** the background loop sleeps until the next job or cron is due (at most 60s) and wakes as soon as a commit
   in the write log touches `_scheduled_jobs`.
 
@@ -919,7 +925,8 @@ error `ActionAborted` ("canceled: the action was aborted 5s after its job was ca
 `Ferrix::interval::<F>(name, every, args)` (or the same methods on `SchedulerOptions`; `CronSpec::cron` /
 `CronSpec::cron_tz` / `CronSpec::interval`, and `CronSpec::timezone(tz)`). Expressions have 6 fields with seconds
 (`sec min hour day-of-month month day-of-week`, an optional 7th is the year; `cron` crate syntax), evaluated in UTC or
-in the given IANA zone (`chrono-tz`); an interval runs first `every` after startup. `App::open` fails on an invalid
+in the given IANA zone (`chrono-tz`); an interval runs first `every` after it is first declared (or changed), then
+on schedule across restarts (an unchanged `_crons` row keeps its next run). `App::open` fails on an invalid
 expression (or one with 5 fields), an unknown zone, a zone on an interval, a duplicate or empty name, a name starting
 with `_` (reserved for system crons), a zero interval, or args that don't serialize.
 - **Time zones and DST.** Matching local times are mapped to instants: one in a **spring-forward gap** runs later by
@@ -929,7 +936,7 @@ with `_` (reserved for system crons), a zero interval, or args that don't serial
   `"UTC"` is normalized to `null`).
 - **System crons** are declared by ferrix itself, named with a leading `_`: today `_storage_sweep` (§1.6). They are
   ordinary `_crons` rows and jobs (origin `cron:_storage_sweep`); the dashboard's `crons` lists them last with
-  `system: true`. Their row is inserted by the startup reconcile, so a fresh app has already committed once (ts 1)
+  `system: true`. Their row is inserted by the startup reconcile, so a fresh app has already committed once
   before any function runs; don't assume a new `TestApp` starts at ts 0 (`app.db().write_log().latest()` is the
   starting ts).
 - At startup the declared crons are **reconciled** into `_crons`: new ones are inserted with their next run, changed
@@ -949,7 +956,7 @@ after they finished, by a built-in cleanup that runs at startup and every `clean
 
 ```rust
 #[derive(Debug, Clone)]
-pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::scheduler(opts) keeps declared crons
+pub struct SchedulerOptions {          // AppOptions::scheduler; Ferrix::scheduler(opts) keeps declared crons and workpools
     pub concurrency: usize,            // 10
     pub retention: Option<Duration>,   // Some(7 days)
     pub cleanup_interval: Duration,    // 1 hour
@@ -1007,8 +1014,8 @@ impl ScheduleWith<'_> {
   slot** (they run one at a time in the dispatcher anyway, first in each round), whatever their pool.
 - **Defaults.** An action in a pool gets the pool's `retries` and `backoff` unless the call sets its own. Backoff:
   wait `initial`, then `base` times longer before each further retry, at most an hour (default: `retry_backoff`,
-  doubling). Pools are declared at startup (unknown name: an error when scheduling; duplicate names, empty names or
-  `max_parallelism: 0` fail `App::open`). Pending actions naming a pool the app no longer declares still run, in a
+  doubling). Pools are declared at startup (unknown name: an error when scheduling; duplicate names, empty names,
+  names over 64 characters, `max_parallelism: 0`, a backoff `base` below 1 or a negative `initial` fail `App::open`). Pending actions naming a pool the app no longer declares still run, in a
   pool of the default size (with a warning at startup).
 - **`on_complete`.** When the job reaches its final state (success; failed once no retries are left, including
   "server restarted while running"; canceled, also while running), the transaction that records it also schedules
@@ -1163,7 +1170,7 @@ impl<T> VectorSearchOpts<T> {
     pub fn new(limit: usize) -> Self; pub fn filter(self, f: VectorFilter<T>) -> Self; pub fn exact(self) -> Self;
     pub fn ef(self, ef: usize) -> Self;     // 1..=4096 (HnswParams::EF_SEARCH_RANGE), checked when the search runs
 }
-impl QueryDb {   // queries and mutations: always exact (vec0) at the snapshot / in the transaction; `exact`, `ef` ignored
+impl QueryDb {   // queries and mutations: always exact (vec0) at the snapshot / in the transaction; `exact`, `ef` ignored (`ef` still range-checked)
     pub async fn vector_search<T: Table>(&self, index: VectorIndex<T>, vector: impl AsRef<[f32]>,
                                          opts: VectorSearchOpts<T>) -> Result<Vec<(Id<T>, f32)>>;
 }
@@ -1271,7 +1278,7 @@ client behaviour as §1.2.1, so `usePaginatedQuery` works unchanged).
 **Vector search semantics.** Two entry points with the same options and results: `(id, score)` with `score` the
 cosine similarity (higher = more similar), best first.
 - **`ctx.db.vector_search` (`QueryDb`: queries, and mutations through `MutationDb`)**: always the **exact** `vec0`
-  scan, also on HNSW indexes (`exact` and `ef` are ignored), at the query's snapshot (a mutation sees its own
+  scan, also on HNSW indexes (`exact` and `ef` have no effect, though `ef` is still range-checked), at the query's snapshot (a mutation sees its own
   writes). Deterministic: the same snapshot gives the same results, ties broken by document id. Reactive: see
   "Reactivity" below. Use it when the query vector is already known to the query (stored on a document, sent by the
   client); it costs a full scan of the matching entries per run and per rerun (about 18 ms per k=10 search over
@@ -1300,15 +1307,15 @@ returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struc
   - *Consistency*: every write changing an HNSW entry adds `(index id, doc id)` to its commit entry; the graph is
     updated after commit from the write log (a background thread follows commits, and every search first catches
     the graph up to its own snapshot), so a search sees every commit up to its snapshot (or later). If the log no
-    longer covers the gap (5 min / 100k commits), the whole `vec0` table is diffed instead. Rolled-back writes never
+    longer covers the gap (it keeps 60 s / 100k commits / 32 MiB), the whole `vec0` table is diffed instead. Rolled-back writes never
     reach the log.
   - *Deletes*: a deleted or changed document's node becomes a tombstone (still routing, never returned); when
     tombstones exceed 25% of the nodes (and 256) the graph is rebuilt from the live nodes on all cores in the
     background, with changes made meanwhile journaled and replayed before the swap.
   - *Filters*: post-filtering with oversampling. Each node keeps its filter values and each `(field, value)` has a
     posting set; if at most 4096 live documents match the filter, their distances are computed exactly; otherwise
-    the graph is asked for `k' = k · live / matching · 1.25` candidates, filtered, and retried with `4k'` (up to
-    three times, then the exact computation) if fewer than `k` remain.
+    the graph is asked for `k' = k · live / matching · 1.25` candidates, filtered, and retried with `4k'`, then `16k'` (three graph
+    searches at most, then the exact computation) if fewer than `k` remain.
   - *Parameters*: `#[vector_index(.., kind = "hnsw", m = N, ef_construction = N, ef_search = N)]` (`HnswParams`:
     `m` in 4..=64, links per node, layer 0 allows 2m; `ef_construction` in 16..=2048; `ef_search` in 1..=4096, the
     default search width), checked by the macro and at startup (parameters on an exact index are an error). Per
@@ -1415,7 +1422,8 @@ pub struct RunOptions {
 impl App {
     pub async fn run_migration<M: MigrationRef>(&self, opts: RunOptions) -> Result<MigrationReport>;
     pub async fn run_migration_named(&self, name: &str, opts: RunOptions) -> Result<MigrationReport>; // dependencies_not_done
-    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // run order; stops at a failure
+    pub async fn run_pending_migrations(&self, opts: RunOptions) -> Result<Vec<MigrationReport>>; // run order; stops at
+                                    // the first failed, canceled, stopped or blocked one (dry runs go on and report each)
     pub async fn migration_summaries(&self) -> Result<Vec<MigrationSummary>>;                    // what `list` returns
 }
 pub struct MigrationReport {   // camelCase JSON
@@ -1423,7 +1431,8 @@ pub struct MigrationReport {   // camelCase JSON
     pub outcome: RunOutcome,   // completed | blocked | failed | canceled | alreadyDone | alreadyRunning | stopped | dryRun
     pub batches: u64, pub processed: u64, pub changed: u64,   // this run only
     pub error: Option<String>, pub failed_document: Option<String>,
-    pub schema_check: Option<String>,   // "passed" or "failed: <report>" when it ended the table's migrating state
+    pub schema_check: Option<String>,   // "passed" or "failed: <report>" when it was the last pending migration of a
+                                        // migrating table (on "failed" the table stays migrating)
     pub examples: Vec<ChangeExample>,   // dry runs: up to 5 { id, before, after (null = deleted) }
 }
 // ferrix::migrations::registry(): every #[migration] by name (validated once: unique names of 1..=128 characters out
@@ -1470,11 +1479,11 @@ pub struct MigrationReport {   // camelCase JSON
   step, and app writes to not-yet-migrated documents still work); inserts, and writes to documents that match, are
   validated strictly. So the number of invalid documents can only go down. Typed reads of not-yet-migrated documents
   fail (`document does not match table`) unless the table has `on_read` migrations, so run the migrations promptly
-  (`serve --migrate` runs them right after startup) or keep the type backward compatible. While the table's **last**
-  pending migration runs, every document it processes must come out matching the type (else the run fails on that
-  document, `failedDocument`); a run that did so from its first batch (`validated` in `list`) finishes without
-  scanning the table: documents written meanwhile were validated when written (inserts always; updates of migrated
-  documents, which matched). Otherwise, in the transaction where the last migration finishes, every document of the
+  (`serve --migrate` runs them right after startup) or keep the type backward compatible. A run that starts (at its
+  first batch) as the table's **last** pending migration (`validated` in `list`) checks every document it processes
+  against the type (else the run fails on that document, `failedDocument`) and finishes without scanning the table:
+  documents written meanwhile were validated when written (inserts always; updates of migrated documents, which
+  matched). Otherwise, in the transaction where the last migration finishes, every document of the
   table is validated. Either way, if all match, the fingerprint is recorded and the table leaves the migrating state
   (`schemaCheck: "passed"`); otherwise the report is stored in `schemaCheck` and logged as an error, the table stays
   migrating until the process stops, and the next start refuses to open (unless a new migration for the table is
@@ -1491,8 +1500,9 @@ pub struct MigrationReport {   // camelCase JSON
   rewrites it.
 - **Running.** `ferrix migrate [--name NAME] [--dry-run] [--restart --name NAME] [--force --name NAME] [--dir DIR]`
   runs every migration that isn't done (or one) and prints a report per migration (exit code 1 if one failed or was
-  blocked); `ferrix migrate status` lists them in run order with their state, progress and dependencies. Run the CLI while the server is stopped (it is a separate process: a
-  running server would not see its writes in its subscriptions); for a running server use the dashboard functions
+  blocked); `ferrix migrate status` lists them in run order with their state, progress and dependencies. Both refuse
+  while a server holds the data directory (its lock; opening the app writes, and a running server would not see the
+  writes in its subscriptions): stop the server first. For a running server use the dashboard functions
   (§4.1.3) or start it with `serve --migrate` (`FERRIX_MIGRATE`), which runs pending migrations in the background
   after startup. Without `--migrate`, `serve` logs a warning listing the migrations that aren't done.
 
@@ -1501,7 +1511,7 @@ pub struct MigrationReport {   // camelCase JSON
 ### 1.10 Semantics to keep in mind
 
 - **Optimistic updates are replayed.** The client re-runs an optimistic update on top of every new server result until
-  its mutation's result has arrived. The update must be a pure function of the local store and the
+  the query results include its mutation's writes (or the mutation fails). The update must be a pure function of the local store and the
   args: create ids, timestamps and random values **outside** the closure (once per call), not inside it, or each
   replay inserts a different item:
   ```ts
@@ -1536,7 +1546,7 @@ pub struct MigrationReport {   // camelCase JSON
   so a caller always sees its own writes; it is never shared across identities a query's auth reads tell apart; and a
   query that reads the time (`ctx.now()`, or a signed storage URL) is never cached (its result depends on more than
   the data). Cached answers are not executions: they don't appear in the execution log. Args are compared as
-  canonical JSON: typed calls leave `None` args out (§3), so they match clients that omit them, but a client sending
+  canonical JSON: typed calls leave `None` args out (§3.2), so they match clients that omit them, but a client sending
   `{"done": null}` and one sending `{}` get separate entries.
 - **Invalidation is by index range, so writes are coarse.** Any write to a document (even one that leaves it
   unchanged) invalidates every query that read it through any index, and an insert invalidates every query whose
@@ -1557,7 +1567,7 @@ with read-only SQL. Without the feature the API below still compiles and `--olap
 pub struct DayStats { pub day: String, pub added: i64, pub completed: i64 }
 
 #[action]
-pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
+pub async fn stats_by_day(ctx: &ActionCtx, since: f64) -> Result<Vec<DayStats>> {
     ctx.olap.query_as::<DayStats>(
         "SELECT strftime(to_timestamp(_creationTime / 1000), '%Y-%m-%d') AS day,
                 count(*) AS added, count(*) FILTER (WHERE done) AS completed
@@ -1575,7 +1585,8 @@ impl Olap {
 }
 pub struct OlapResult { pub columns: Vec<OlapColumn>, pub rows: Vec<Map<String, Value>>, pub as_of_ts: u64 }
 pub struct OlapColumn { pub name: String, pub type_name: String }
-// OlapParams: (), tuples of up to 8 `Into<OlapValue>` (bool, integers, floats, strings, Id<T>, Bytes, Option<_>),
+// OlapParams: (), tuples of up to 8 `Into<OlapValue>` (bool, i8..i64, u8..u32, f32, f64, strings, Id<T>, Bytes,
+// Vec<u8>, Option<_>; no u64/usize),
 // Vec<OlapValue>. Positional `?` placeholders.
 ```
 - **Actions only**, not queries or mutations: the copy lags the data (a few hundred milliseconds) and is not
@@ -1586,25 +1597,28 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
   token hashes, settings) or admin-only history (`_audit_log`) and are never copied. Columns: `_id` VARCHAR,
   `_creationTime` DOUBLE (ms), `_ts` BIGINT (the document's commit ts), then the fields in declaration order, typed
   from the table's shape (§3.1 "Shapes"): Bool → BOOLEAN, Int → BIGINT, UInt → UBIGINT, Float → DOUBLE, Text →
-  VARCHAR, Bytes → BLOB, List → `T[]`, a closed Struct → `STRUCT(...)` (fields in order), Json and open structs →
-  JSON; Optional is the inner type, nullable. A table whose shape is open also gets `_extra` JSON with the keys that
-  have no column. Values are converted by DuckDB (`TRY_CAST`, `json_transform`): one that doesn't fit its column
-  reads as NULL. Unit enums of system tables (`state`, `kind`) are VARCHAR.
-- **Results**: one object per row keyed by column name; lists and structs as arrays and objects; JSON columns
-  parsed; DATE / TIMESTAMP / TIME as ISO 8601 strings; BLOB as `{"$bytes": "<base64>"}`; HUGEINT and DECIMAL as
-  numbers (a float past 2^53); NaN as null.
+  VARCHAR, Bytes → BLOB (JSON when nested), List → `T[]`, a closed non-empty Struct → `STRUCT(...)` (fields in
+  order), Json, open or empty structs → JSON; Optional is the inner type, nullable. Fields starting with `_` and
+  repeated names are skipped. A table whose shape is open also gets `_extra` JSON with the keys that have no column.
+  Values are converted by DuckDB (`TRY_CAST`, `json_transform`): one that doesn't fit its column reads as NULL.
+  Unit-only enums (`#[object]` ones, and `state` / `kind` of system tables) are VARCHAR; other enums are JSON.
+- **Results**: one object per row keyed by column name; lists and structs as arrays and objects; top-level JSON
+  columns parsed (JSON nested in a list or struct comes back as JSON text); DATE / TIMESTAMP / TIME as ISO 8601
+  strings; BLOB as `{"$bytes": "<base64>"}`; HUGEINT as an integer (a float beyond 64 bits), DECIMAL as a float;
+  NaN and infinities as null.
 - **The sandbox**: exactly one SELECT per call (`WITH ... SELECT` included; checked with DuckDB's own parser,
   `json_serialize_sql`), run in a transaction that is rolled back, on a database with `enable_external_access =
   false` (no files, no network: `read_csv`, `glob`, `COPY`, `ATTACH` fail), extension installing and autoloading off,
   and the configuration locked. At most `max_result_rows` rows (100k; more is an error asking for a LIMIT), at most
   `max_concurrent_queries` at once (4), interrupted after `query_timeout` (30s).
 - **Errors** are user errors: `olap_unavailable` (off, not built with the feature, or the copy is being built),
-  `olap_query_failed` (not one SELECT, or DuckDB's message), `olap_timeout` (interrupted, or `at_least` waited too
+  `olap_query_failed` (not one SELECT, DuckDB's message, more than `max_result_rows` rows, or a row `query_as` can't
+  deserialize), `olap_timeout` (interrupted, or `at_least` waited too
   long).
 - **How the copy follows the data.** It reads the change journal (§4.4, consumer `olap`) every `apply_every`
   (250ms) and applies each batch (the final state of every document written) in one DuckDB transaction. A journal
-  row is deleted once every active consumer (replication, the copy) has applied or shipped it; journaling is on while
-  either is. A table is **rebuilt** from one snapshot when there is no copy yet, after a restore (`journal::scrub`
+  row is deleted once every active consumer (replication, the copy, a takeover in progress) has applied or shipped it;
+  journaling is on while any is. A table is **rebuilt** from one snapshot when there is no copy yet, after a restore (`journal::scrub`
   removes the copy's id), when the journal can't continue the copy (commits made without `--olap` or replication),
   when more than `max_lag_bytes` (512 MiB) of journal wait to be applied, or alone when its shape changed (a
   fingerprint per table). Queries during a rebuild fail with `olap_unavailable`. The copy is derived data: backups
@@ -1617,10 +1631,10 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
 - **Exports**: `OlapService::export(sql, params, OlapExportFormat::Csv | Parquet, path) -> OlapExport { rows,
   columns, as_of_ts }` writes a whole result (the dashboard's downloads, `POST /api/admin/olap/query`).
 - **Operations**: `GET /api/admin/olap` (`{ enabled: false }` or the status: `state` building / ready / failed,
-  `detail`, `appliedTs`, `latestTs`, `lagMs`, tables with row counts and columns, `sizeBytes`, `rowsApplied`,
+  `detail`, `appliedTs`, `appliedTime`, `latestTs`, `lagMs`, tables with row counts and columns, `sizeBytes`, `rowsApplied`,
   `rebuilds`), `POST /api/admin/olap/rebuild` (202; rebuilds every table in the background; audited),
   `POST /api/admin/olap/query` (SQL as an administrator, JSON or a CSV / Parquet download; audited), the
-  `ferrix_olap_*` metrics (§4.4), `olap` in `/api/admin/stats`, the dashboard Overview and its Analytics page, and
+  `ferrix_olap_*` metrics (§4.2, `GET /metrics`), `olap` in `/api/admin/stats`, the dashboard Overview and its Analytics page, and
   each table's analytics columns in `_system/dashboard:tables` (`analytics`, `columns: [{ name, sqlType }]`).
 - **Tests**: `TestApp::with_options(AppOptions { olap: OlapOptions { enabled: true, background: false, .. }, .. })`
   and `t.olap_sync().await?` before querying.
@@ -1636,12 +1650,12 @@ Reactive: a write reruns only the queries that read a group it changed.
 #[aggregate(by_customer_day, group = [customer, day], sum = [amount])]
 #[aggregate(total, sum = [amount])]          // no group fields: one group for the whole table
 #[aggregate(count_only)]                       // no sums: just the number of documents
-pub struct Order { pub customer: String, pub day: String, pub amount: f64, pub quantity: Option<i64> }
+pub struct Sale { pub customer: String, pub day: String, pub amount: f64, pub quantity: Option<i64> }
 
 #[query]
 pub async fn customer_total(ctx: &QueryCtx, customer: String) -> Result<f64> {
-    let a = ctx.db.aggregate(Order::by_customer).get(|g| g.eq(Order::customer, customer)).await?;
-    Ok(a.sum(Order::amount))
+    let a = ctx.db.aggregate(Sale::by_customer).get(|g| g.eq(Sale::customer, customer)).await?;
+    Ok(a.sum(Sale::amount))
 }
 
 impl QueryDb { pub fn aggregate<T: Table>(&self, a: Aggregate<T>) -> AggregateQuery<'_, T>; }   // MutationDb too
@@ -1660,12 +1674,13 @@ pub struct AggregateValue { pub count: u64, pub sums: Vec<AggregateSum>, .. }
 impl AggregateValue {
     pub fn sum<T, V>(&self, field: Field<T, V>) -> f64;              // 0.0 for a field that isn't summed
     pub fn sum_i64<T, V>(&self, field: Field<T, V>) -> Option<i64>;   // exact while every contribution was an integer
-    pub fn average<T, V>(&self, field: Field<T, V>) -> Option<f64>;   // None without documents
+    pub fn average<T, V>(&self, field: Field<T, V>) -> Option<f64>;   // sum / count (count includes documents
+                                                                      // without the field); None without documents
 }
 pub enum AggregateSum { Int(i64), Float(f64) }
 ```
 - **Group and sum fields**: any fields for the group (values compare like index keys; a missing field is its own
-  group value, before `null`); numeric fields or `Option`s of them for the sums (checked at compile time). A null,
+  group value, before `null`, and reads as `null` in `AggregateGroup::group`); numeric fields or `Option`s of them for the sums (checked at compile time). A null,
   missing or non-numeric value adds nothing to a sum; `count` counts documents.
 - **Maintenance**: inside the write (insert, replace, patch, delete; migrations, imports and point-in-time replays
   included, since they all write through the same path), in its transaction: a failed mutation leaves its aggregates
@@ -1679,7 +1694,7 @@ pub enum AggregateSum { Int(i64), Float(f64) }
   keep ranges narrow, when there are many groups.
 - **Definitions** are reconciled at startup: a new aggregate, or one whose fields changed, is built from the
   documents (like an index backfill); a removed one is deleted. `Database::verify_indexes` (backups, restores)
-  recomputes them and reports differences. Storage: `_aggregates` (definitions; ids from `0xC000_0000`, above index
+  recomputes them and reports differences. Storage: `_aggregates` (definitions; ids above `0xC000_0000`, above index
   and search index ids) and `aggregate_values (agg_id, key, count, sums)`, one row per non-empty group.
 - The dashboard's schema view lists them (`aggregates: [{ name, groupFields, sumFields }]` in
   `_system/dashboard:tables`).
@@ -1744,6 +1759,8 @@ pub struct FunctionDef {
 
 /// "todo_server::todos" + "list" → "todos:list"; "todo_server" + "list" → "list"; "a::b::c" + "f" → "b/c:f".
 pub fn function_path(module_path: &str, name: &str) -> String;
+/// True for paths of ferrix's own functions (first segment `_system`, §4).
+pub fn is_system_path(path: &str) -> bool;
 
 /// Deserialize args; on failure returns an error whose message starts with "Invalid args for <name>: ".
 pub fn decode_args<A: DeserializeOwned>(name: &str, args: serde_json::Value) -> Result<A>;
@@ -1767,7 +1784,9 @@ pub struct MigrationDef {
     pub batch_size: usize,
     pub after: &'static [&'static str],   // #[migration(after = [...])]: names of migrations to run first
     pub handler: MigrationHandler,
+    pub on_read: Option<OnReadFn>,    // #[migration(on_read)] (§3.3)
 }
+pub type OnReadFn = fn(&serde_json::Value) -> Result<DocChange>;
 impl MigrationDef { pub fn name(&self) -> String; }   // `name`, else function_path(module_path, fn_name)
 /// Deserialize the document for the migration's parameter type (identity for `Value`).
 pub fn decode_migration_doc<T: DeserializeOwned>(doc: serde_json::Value) -> Result<T>;
@@ -1777,6 +1796,8 @@ pub trait SearchFieldType {}   // String, Option<String>
 pub trait VectorFieldType {}   // Vec<f32>, Option<Vec<f32>>
 pub const fn assert_search_field<T: SearchFieldType + ?Sized>();
 pub const fn assert_vector_field<T: VectorFieldType + ?Sized>();
+pub trait SumFieldType {}      // integers, f32, f64 and Options of them (#[aggregate(sum = [...])])
+pub const fn assert_sum_field<T: SumFieldType + ?Sized>();
 ```
 
 ---
@@ -2011,7 +2032,6 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
     table: <Todo as ::ferrix::Table>::NAME,                  // `table = "todos"` → "todos"
     batch_size: 100usize,
     after: &[],                                              // `after = ["a", "b"]` → &["a", "b"]
-    on_read: ::core::option::Option::None,                  // `on_read`: Some(fn) calling the (sync) fn, see below
     handler: {
         fn __ferrix_migrate<'a>(__ferrix_ctx: &'a ::ferrix::MutationCtx, __ferrix_doc: ::ferrix::__private::serde_json::Value)
             -> ::ferrix::__private::BoxFuture<'a, ::ferrix::Result<::ferrix::migrations::DocChange>> {
@@ -2023,6 +2043,7 @@ static __FERRIX_MIGRATION_add_priority: ::ferrix::__private::MigrationDef = ::fe
         }
         __ferrix_migrate
     },
+    on_read: ::core::option::Option::None,                  // `on_read`: Some(fn) calling the (sync) fn, see below
 };
 ```
 - Arguments: `table` (required; a type path, checked to implement `Table`, or a string literal), `batch` (an integer
@@ -2122,7 +2143,7 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 
 | Path `_system/dashboard:…` | Kind | Args → result |
 |---|---|---|
-| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions, tokenizer: "unicode61" \| "porter" \| "trigram" \| null, removeDiacritics, method: "exact" \| "hnsw" \| null }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly" }`, app tables first. Reruns on any write (it counts every table). |
+| `tables` | query | `{}` → `TableSummary[]`: `{ name, number, system, defined, documents, indexes: [{ name, fields, builtin, usable }], searchIndexes: [{ name, kind: "search" \| "vector", field, filterFields, dimensions, tokenizer: "unicode61" \| "porter" \| "trigram" \| "snowball" \| null, language, removeDiacritics, method: "exact" \| "hnsw" \| null, hnsw: { m, efConstruction, efSearch } \| null }], ts, secretFields, access: "readWrite" \| "limited" \| "readOnly", analytics, columns: [{ name, sqlType }], aggregates: [{ name, groupFields, sumFields }] }`, app tables first. Reruns on any write (it counts every table). |
 | `documents` | query | `{ table, index?, filters?: [{ field, op: "eq"\|"gt"\|"gte"\|"lt"\|"lte", value }], order?: "asc"\|"desc", paginationOpts }` → `PaginationResult<object>`. Untyped `query_table(..).with_index(..).paginate(..)`: same cursors and read sets as typed queries, so pages update live (`usePaginatedQuery` works). Filters follow the `with_index` rules. Errors: `unknown_table`, `invalid_query`, `index_not_allowed`. |
 | `search_documents` | query | `{ table, index, text, filters?: [{ field, value }], paginationOpts }` → `PaginationResult<object>`, most relevant first: untyped `search_table(table, index).search(<its search field>, text).eq(field, value)….paginate(..)` (§1.8: same matching, cursors and per-filter-value read sets, so pages update live and `usePaginatedQuery` works). For the Data page's search box; `tables` lists each table's `searchIndexes` (`kind: "search"`, `field`, `filterFields`, `tokenizer`, `removeDiacritics`). Errors: `unknown_table`, `invalid_query` (no such search index, a vector index, a field that is not a filter field, a bad cursor), `index_not_allowed` (an index over a secret field). |
 | `document` | query | `{ id }` → `{ table, document } \| null` (any table; the table number is in the id). `invalid_id`. |
@@ -2131,12 +2152,12 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 | `replace_document` | mutation | `{ id, document }` → `null`. System fields are ignored (`_id`, if given, must match). |
 | `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
 | `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
-| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
+| `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The function and the user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
 | `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
 | `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, impersonatedBy }]` (no token hashes; `impersonatedBy` is the admin id of an impersonation session, else null). |
 | `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens; its sockets get `AuthError` at once (live revocation). |
 | `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
-| `me` | query | `{}` → `{ _id, email }` of the signed-in admin. |
+| `me` | query | `{}` → `{ _id, email } \| null` of the signed-in admin. |
 
 Write errors (schema validation, unknown table, missing document) are user errors with codes `invalid_document` /
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
@@ -2168,7 +2189,7 @@ field: `read_only_field`; `image` must be an http(s) URL). Users and sessions ar
 | `file` | query | `{ id }` → `FileSummary \| null`. `invalid_id` for a malformed id. |
 | `delete_file` | mutation | `{ id }` → `null` (`ctx.storage.delete`). `not_found` if missing. |
 | `generate_upload_url` | mutation | `{}` → an upload URL (the dashboard's upload button; `createdBy` = the admin). |
-| `sweep_orphans` | internal action | `{}` → `{ scanned, deleted, thumbnails }`: the orphan sweep, run by the system cron `_storage_sweep` (run it now with `_system/scheduler:run_cron_now { name: "_storage_sweep" }`). |
+| `sweep_orphans` | internal action | `{}` → `{ scanned, deleted, thumbnails, kept }`: the orphan sweep, run by the system cron `_storage_sweep` (run it now with `_system/scheduler:run_cron_now { name: "_storage_sweep" }`). |
 
 Thumbnails for previews: `<url>?thumb=WxH&fit=cover` (or `&thumb=…` on a signed URL), see docs/PROTOCOL.md.
 ### 4.1.2 Scheduler tables and system functions
@@ -2237,12 +2258,14 @@ Defined in `crates/ferrix/src/migrations` with the normal macros (§1.9).
 **`_migrations`** (`MigrationRecord`), one row per migration that has run at least once (a declared migration without
 a row is pending): `{ name, table, state: "pending" | "running" | "done" | "failed" | "canceled", cursor: string |
 null (a pagination cursor over the table's by_creation_time index), processed, changed, startedAt, finishedAt, error
-(cut to 4 KiB), failedDocument, schemaCheck: string | null ("passed" or "failed: <report>") }`, index `by_name`.
+(cut to 4 KiB), failedDocument, schemaCheck: string | null ("passed" or "failed: <report>"), validated: boolean |
+null (the run checks every document it processes, so finishing needs no scan; null before its first batch) }`, index
+`by_name`.
 Read-only through the dashboard's generic writes; codegen leaves it out.
 
 | Path `_system/migrations:…` | Kind | Args → result |
 |---|---|---|
-| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in run order (dependencies first, then name order), then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, after: string[] (its dependencies; [] when not declared), state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating }`. Live (reruns with each batch and each write to the migrated tables). |
+| `list` | query (admin) | `{}` → `MigrationSummary[]`: every declared migration in run order (dependencies first, then name order), then rows of migrations no longer declared. `MigrationSummary` = `{ name, table, declared, batchSize: number \| null, after: string[] (its dependencies; [] when not declared), state, processed, changed, documents (the table's current count, for a progress bar), startedAt, finishedAt, error, failedDocument, schemaCheck, tableMigrating, onRead (an `on_read` migration), validated }`. Live (reruns with each batch and each write to the migrated tables). |
 | `status` | query (admin) | `{ name }` → `MigrationSummary \| null`. |
 | `run` | action (admin) | `{ name?, dryRun?, restart?, force? }` → `{ started: string[], reports: MigrationReport[] }`. Without `name`: every migration that isn't done, in run order (a `blocked` one stops the background run). With `name`: `dependencies_not_done` if a migration it runs after isn't done, unless `force`. Real runs continue in the background (`started`; follow them with `list`); `reports` then holds the ones that didn't start (`alreadyDone`, `alreadyRunning`). Dry runs run to the end and return a report each (`outcome: "dryRun"` or `"failed"`, counts, up to 5 `examples` `{ id, before, after }`). `not_found` for an unknown name. |
 | `cancel` | mutation (admin) | `{ name }` → `"canceled"` (it stops after its current batch; the next run resumes) or `"notRunning"`. |
@@ -2259,9 +2282,9 @@ need the server's configuration and keys), so the dashboard calls them with `use
 (references: `settings` in `packages/dashboard/src/lib/api.ts`; the form logic is `lib/settings.ts`).
 
 **`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
-per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`. `value`
-holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, or the
-SMTP password), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
+per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`
+(§4.4). `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
+SMTP password, or the backups' S3 secret access key), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
 from `auth_secret.key` (BLAKE3 KDF, context `ferrix settings v1 …`), a random 192-bit nonce per write, and the row's
 key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
 A row that can't be decrypted (another `auth_secret.key`) is ignored with an error in the log: its providers are off
@@ -2283,9 +2306,12 @@ type SettingsView = {
   smtp: { url: string /* no password */; from: string; password: "••••" | null } | null;
   redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
   sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
+  backups: object | null;  // the stored backups setting (§4.4), secretAccessKey masked
   locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
+                         // | "backups.schedule" | "backups.destination"
   effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
-               oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */ };
+               oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */;
+               backups: object /* §4.4 */ };
 };
 type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
                             clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
@@ -2297,7 +2323,8 @@ type SmtpInput = { url: string /* a password in the URL is moved out of it */; f
 
 Precedence: §1.5 ("Runtime settings and precedence"); `locked` and `effective` show its result. Secrets are only ever
 accepted, never returned, and never logged: the execution log stores system functions' arguments with every
-`password` / `secret` / `token` field and every URL password replaced by `"••••"` (`settings::redact_args`).
+field whose name contains `password`, `secret` or `token` (case-insensitive) and every URL password replaced by
+`"••••"` (`settings::redact_args`).
 
 ### 4.1.5 Audit log (`_audit_log`, `_system/audit:list`)
 
@@ -2308,8 +2335,11 @@ action, targetTable, targetId, before, after, details, at }` with indexes `by_at
 for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
 `details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
 `open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1), `restore_stage` / `restore_cancel` /
-`restore_restart` (staged restores, §4.2; `details`: the backup, its ts, `secretIgnored`, `pointInTime`, or the exit
-code), `replication_snapshot` (`details`: the snapshot's name and ts). Secrets are masked by the §4.1 rule.
+`restore_restart` (staged restores, §4.2; `details`: the backup's `source`, its `ts`, `secretIgnored`, `pointInTime`;
+the canceled `source`; or the `exitCode`), `replication_snapshot` (`details`: the snapshot's name and ts),
+`olap_rebuild`, `olap_query`, `olap_export` (§4.2; `details`: the SQL and row count), `env_create` / `env_update` /
+`env_delete` (§4.1.6). Secrets are masked by the §4.1 rule. The operations entries (`restore_*`, `replication_snapshot`,
+`olap_*`) are written right after the action, best effort.
 
 Each entry is written in the same transaction as the write it describes. The table is a system table, so the
 dashboard's generic writes refuse it, and no function edits or deletes entries; the only deletion is retention:
@@ -2326,7 +2356,8 @@ updatedBy: string | null }`, index `by_name`. `valueEncrypted` is sealed like `_
 Poly1305 under the settings key derived from `auth_secret.key`), with `env:<name>` as associated data. The data
 browser shows it as `"••••"`; generic writes are refused (`read_only_table`). The execution log masks the `value`
 argument of `_system/env:*` (also inside `run_function`'s `args`). Audit actions `env_create`, `env_update`,
-`env_delete`: target the `_env` row, `details: { name }`, never the value. Setting a variable to the value it already
+`env_delete`: target `_env` (with the row's id for updates and deletes; none for creates), `details: { name }`,
+never the value. Setting a variable to the value it already
 has writes nothing.
 
 | Path | Kind | Args → result |
@@ -2351,7 +2382,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `ferrix-….tar.zst`. |
 | `DELETE /api/admin/backups/{name}` | `{ deleted: true }`; 404 `not_found`; 400 `invalid_name`. |
 | `POST /api/admin/backups/{name}/restore` | Stage that backup of the target for a restore at the next start (§4.4 "Staged restores") → `{ pendingRestore, restart }` once it passed every check. 400 `invalid_backup` with the reason (nothing is staged); 409 `restore_pending` if one is staged already; 404 `not_found`; 400 `invalid_name`. Audited (`restore_stage`). |
-| `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
+| `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, else 413 `too_large`; spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
 | `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error, pointInTime }`; `pointInTime` (null for an archive) = `PointInTimeInfo` `{ generation, snapshot, snapshotTs, requestedTs, requestedTime, ts, time, replayed, segments, reached }` (`reached: false`: the point asked for is beyond the newest replicated commit, which was restored instead); `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
 | `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
 | `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
@@ -2364,10 +2395,10 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
 | `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/ferrix/src/ops/metrics.rs`. |
-| `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 for malformed ones. |
+| `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 `invalid_request` for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
-| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user, 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
-| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, metricsEnabled } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns. `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
+| `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#ferrix_access_token=…&ferrix_refresh_token=…&ferrix_expires_in=…&ferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
+| `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], olap: OlapStatus \| null, overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, cachedQueries, cacheBytes, cacheHits, cacheMisses, metricsEnabled } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns; `cachedQueries` / `cacheBytes` / `cacheHits` / `cacheMisses` describe the cache of unwatched query results. `olap` is as for `GET /api/admin/olap` (null without `--olap`). `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
 | `GET /api/admin/stats/timeseries?path=&bucket=&since=&until=` | `{ path, bucket, since, until, points: TimePoint[] }`: the executions of `path` (every app function, system ones excluded, without it) that started in `[since, until)`, in buckets of `bucket` (ms, or `30s` / `1m` / `15m` / `1h` / `1d`; default `1m`), oldest first, only buckets with executions. `TimePoint` = `{ t (bucket start), calls, errors, userErrors, serverErrors, p50Us, p95Us, maxUs }` (nearest-rank percentiles). `since` is rounded down to a multiple of `bucket` (the returned `since`); defaults: `until` now, `since` an hour before. At most 1500 buckets, else 400 `invalid_request` (also for a malformed bucket or `until <= since`). From the execution log (`Logs::timeseries`), so only as far back as its retention. For the Functions page's charts. |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
@@ -2387,8 +2418,8 @@ stores them in that browser's app storage, replacing whoever was signed in there
 ### 4.3 The embedded dashboard
 
 With the cargo feature `dashboard` (default), `GET /_/` and `/_/{*path}` serve the SPA from
-`crates/ferrix/dashboard-dist` (embedded with `rust-embed`): existing files as is (`assets/*` cached immutably),
-everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<id>` and `/_/setup#token=…`), with a
+`crates/ferrix/dashboard-dist` (embedded with `rust-embed`): existing files as is (`assets/*` cached immutably; an unknown
+`assets/*` file is a 404), everything else as `index.html` (client-side routes such as `/_/data/todos?doc=<id>` and `/_/setup#token=…`), with a
 restrictive Content-Security-Policy and `X-Frame-Options: DENY`. Without the feature, only a minimal `/_/setup` page
 is served; the system functions and `/api/admin/*` exist either way.
 
@@ -2438,7 +2469,8 @@ health [url]` (default `http://127.0.0.1:8090/api/health`) exits 0 if the URL an
 snapshot ts in the name is what `GET /api/admin/backups` reports as `ts`, `null` for older names without it): a zstd-compressed
 tar of `data.db` (a `VACUUM INTO` snapshot: one read transaction, so a consistent copy at one commit ts that never
 blocks the writer; the copy's replication journal and state are removed, below), optionally `aux.db` (same),
-`storage/<storage id>` for the blob of every `_storage` document of the snapshot (local storage only),
+`storage/<storage id>` for the blob of every `_storage` document of the snapshot (with `includeFiles` /
+`--with-files`; local storage only),
 `auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`: `{ format: "ferrix-backup", version: 1,
 createdAt, ferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
 "remote", missingBlobs, files: [{ path, bytes, sha256 }] }`.
@@ -2467,7 +2499,7 @@ scheduled ones beyond `keep`; manual archives are never rotated.
 `import`, so it refuses while a server runs), extracts next to the data, checks entries against the manifest
 (unexpected, missing or altered entries are refused), runs `PRAGMA integrity_check`, opens the database with the
 binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
-`data.db`(`-wal`, `-shm`), `aux.db`, persisted HNSW indexes (`vector_index_<id>.hnsw`) and, if restored,
+`data.db`(`-wal`, `-shm`), `aux.db` (when the archive has one), persisted HNSW indexes (`vector_index_<id>.hnsw`) and, if restored,
 `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the restored files put in place; blobs are added to the
 storage directory. A database with a trigger or a view (ferrix creates neither) is refused. While a restore is staged
 (below), `restore` refuses (`restore --cancel` cancels the staged one, offline).
@@ -2578,7 +2610,8 @@ enclosing one, with their fields). `RUST_LOG` filters every format; function log
 ```rust
 // crate::ops (selected)
 pub struct OpsOptions { pub metrics: MetricsOptions /* enabled, token */, pub backup_target: Option<String>,
-                        pub restart: restore::RestartHandle /* --restart-exit-code */ }        // AppOptions::ops
+                        pub restart: restore::RestartHandle /* --restart-exit-code */,
+                        pub replication: Option<replicate::ReplicationOptions> /* --replicate-to */ }   // AppOptions::ops
 backup::create(&app, &BackupSpec { include_aux, include_files, include_secret }, &BackupTarget, scheduled) -> Result<BackupInfo>;
 backup::restore(archive: &Path, dir: &Path, &RestoreOptions { storage_dir, skip_verify }) -> Result<RestoreReport>;
 backup::prepare(archive, staging, skip_verify) -> Result<Manifest>;   // extract + check, no data dir touched

@@ -28,12 +28,13 @@ Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see
 **exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
 interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
 them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
-finished jobs are deleted after 7 days. In a time zone, a run in the hour skipped by a spring-forward change runs an
-hour later, and a time of day in the repeated fall-back hour runs once. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
+finished jobs are deleted after 7 days. In a time zone, a run in the hour skipped by a spring-forward change runs
+later by the length of the gap (usually an hour), and a time of day in the repeated fall-back hour runs once. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
 deterministically. Details: [docs/CONTRACT.md](../CONTRACT.md) §1.7.
 
 **Workpools** limit how many actions of one kind run at once, with default retries, and **`on_complete`** runs a
-mutation with the outcome once a job has finished (exactly once, in the transaction that records the outcome):
+mutation with the outcome once a job has finished (exactly once: the transaction that records the outcome schedules
+it, and it runs in its own transaction):
 
 ```rust
 ferrix::Ferrix::new().workpool(Workpool::new("emails").max_parallelism(5).retries(3))

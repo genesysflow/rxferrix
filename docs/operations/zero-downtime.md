@@ -21,8 +21,8 @@ A mutation that a reconnecting client sends again still runs only once. The prev
 Say a field's type changed and existing documents don't fit, with no migration for it. The new version notices in
 step 2, prints which documents don't fit, and exits. The old server keeps serving and never notices.
 
-To find out before deploying, run `my-app check --dir <data dir>`. It does steps 2 and 3 on a copy while the server
-runs, and is handy in CI.
+To find out before deploying, run `my-app check --dir <data dir>`. It does step 2 on a copy while the server runs,
+and is handy in CI.
 :::
 
 ## On a server with systemd
@@ -49,7 +49,7 @@ Docker image is set up for that.
 
    ```sh
    docker build -t my-app .
-   docker compose -f deploy/docker/compose.yaml up -d
+   IMAGE=my-app:latest docker compose -f deploy/docker/compose.yaml up -d
    ```
 
 2. To deploy, build the new image and run
@@ -111,8 +111,8 @@ The files above get these details right. If you write your own, keep to them:
 
 ## How it's tested
 
-Every case above runs under write load: `bun scripts/takeover-e2e.ts` (same host, separate containers, another
-network namespace), `bun scripts/docker-rollout-e2e.ts` (Docker Compose with Traefik) and
+Every case above runs under write load: `bun scripts/takeover-e2e.ts` (same host and port; two ports behind a
+retrying proxy, as with containers; another network namespace), `bun scripts/docker-rollout-e2e.ts` (Docker Compose with Traefik) and
 `bun scripts/k3s-rollout-e2e.ts` (a k3s cluster in Docker). Each checks that no request fails and every
-acknowledged write is kept, including when the new version is broken. The protocol is specified in the
+acknowledged write is kept; the Docker and k3s tests also deploy a broken version. The protocol is specified in the
 [API contract](../CONTRACT.md) (§4.3.1).

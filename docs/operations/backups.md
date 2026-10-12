@@ -42,7 +42,7 @@ todo-server restore --from s3://bucket/replica --to-time 2026-10-09T12:00:00Z  #
 Every commit writes its document changes to a journal table in `data.db` *in the same SQLite transaction* (so the
 journal never misses a commit nor holds a rolled-back one); every `--replicate-every` the new entries are shipped as a
 checksummed, compressed segment named by its ts range, then deleted locally. A snapshot (an ordinary backup archive)
-is taken when replication starts and every `--snapshot-every`; snapshots and segments older than `--replicate-keep`
+is taken when a generation starts and every `--snapshot-every`; snapshots and segments older than `--replicate-keep`
 are deleted, except what the oldest restorable point still needs. A restore takes the newest snapshot before the
 point and replays the journal up to it through the normal write path (indexes, search and vector indexes are
 rebuilt), then checks it like any restore. From the dashboard (Backups, "Restore to this point") it is staged and

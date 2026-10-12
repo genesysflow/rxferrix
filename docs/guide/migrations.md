@@ -27,6 +27,8 @@ todo-server migrate --dry-run          # what would change (with examples); writ
 todo-server migrate                    # run every migration that isn't done: dependencies first, then name order
 todo-server migrate status             # state and progress of each
 todo-server serve --migrate            # or: start, then run them in the background
+# `migrate` and `migrate status` refuse while a server holds the data directory: use `serve --migrate`
+# or the dashboard's Migrations page then
 ```
 
 While a migration for a table is pending, the server starts even though the table's documents don't match yet: the
@@ -46,7 +48,7 @@ fn tags_from_tag(doc: &serde_json::Value) -> Result<Option<serde_json::Value>> {
 
 **A schema change with no downtime**, then: change the type, write the migration (`on_read` if it doesn't need the
 database), check it (`todo-server check` and `migrate --dry-run` on a copy, or in CI), deploy with `serve --takeover
---migrate` (the old version keeps serving until the new one is ready, see [OPERATIONS.md](../operations/zero-downtime.md)), and the migration runs in the
+--migrate` (the old version keeps serving until the new one is ready, see [Deploys with no downtime](../operations/zero-downtime.md)), and the migration runs in the
 background while reads already see the new shape. Index ranges and search filters on a migrated field see the old
 stored values until the migration has reached those documents. The last migration of a table checks every document
 it processes, so finishing it needs no scan of the table and holds up no writes; one it leaves invalid fails the run,

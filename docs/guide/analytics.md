@@ -21,9 +21,9 @@ pub async fn stats_by_day(ctx: &ActionCtx) -> Result<Vec<DayStats>> {
 ```
 
 - Tables are named like yours, with `_id`, `_creationTime` (ms) and `_ts` (commit ts) first, then the fields with
-  types from the Rust struct: numbers, booleans, strings, `Vec<T>` as lists, nested `#[object]` structs as STRUCTs
+  types from the Rust struct: numbers, booleans, strings, `Bytes` as BLOBs, `Vec<T>` as lists, nested `#[object]` structs as STRUCTs
   (`address.city`), anything else as JSON. `_users`, `_storage`, `_scheduled_jobs` and a few other system tables are
-  there too; tables holding secrets (credentials, sessions, settings) never are.
+  there too; tables holding secrets (credentials, sessions, settings, environment variables) and the audit log never are.
 - Actions only, one SELECT per call, `?` parameters. No files, network, extensions or settings; at most 100k rows;
   interrupted after `--olap-timeout` (30s). Errors are user errors: `olap_unavailable`, `olap_query_failed`,
   `olap_timeout`.

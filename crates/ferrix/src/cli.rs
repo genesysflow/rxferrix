@@ -242,7 +242,8 @@ struct ServeArgs {
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
-    /// Run the migrations that aren't done (`#[migration]`, in name order) in the background after starting.
+    /// Run the migrations that aren't done (`#[migration]`, dependencies first, then in name order) in the background
+    /// after starting.
     #[arg(long, env = "FERRIX_MIGRATE")]
     migrate: bool,
     /// Take over from the server running on this data directory with no downtime: copy the database, open the copy
@@ -538,10 +539,15 @@ fn migrate(
         Some(MigrateCommand::Status { dir }) => dir.clone(),
         None => args.dir.clone(),
     };
-    // Running migrations is offline: refuse while a server holds the data directory (`crate::ops::lock`).
-    let _lock = match &args.command {
-        Some(MigrateCommand::Status { .. }) => None,
-        None => Some(crate::ops::DirLock::acquire(&dir)?),
+    // Offline: refuse while a server holds the data directory (`crate::ops::lock`). Opening the app writes (a
+    // migration left `running` becomes `pending`, the catalog is reconciled), which would disturb a running server;
+    // its dashboard shows the live state instead.
+    let _lock = match crate::ops::DirLock::acquire(&dir) {
+        Ok(lock) => lock,
+        Err(e) if matches!(args.command, Some(MigrateCommand::Status { .. })) => anyhow::bail!(
+            "{e}\n(while the server runs, its dashboard's Migrations page shows the migrations' live state)"
+        ),
+        Err(e) => return Err(e),
     };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {

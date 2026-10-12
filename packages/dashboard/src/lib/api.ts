@@ -762,7 +762,7 @@ export interface BackupInfo {
   name: string;
   bytes: number;
   createdAt: number;
-  /** A `ferrix-auto-*` archive from `--backup-every` (only those are rotated). */
+  /** A `rxferrix-auto-*` archive from `--backup-every` (only those are rotated). */
   scheduled: boolean;
   ts: number | null;
 }
@@ -776,7 +776,7 @@ export interface PendingRestore {
   backupCreatedAt: number;
   /** Commit ts of the backup's snapshot. */
   ts: number;
-  ferrixVersion: string;
+  rxferrixVersion: string;
   includesAux: boolean;
   blobs: number;
   bytes: number;

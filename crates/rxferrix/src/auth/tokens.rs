@@ -13,7 +13,7 @@
 //! Deleting the file signs everyone out: every access token and every stored token hash becomes invalid.
 //!
 //! **Access tokens** are compact JWTs with header `{"alg":"HS256","typ":"JWT"}` and claims
-//! `{ iss: "ferrix", typ: "access", sub, sid, adm?, iat, exp }`. Verification accepts exactly that header (no
+//! `{ iss: "rxferrix", typ: "access", sub, sid, adm?, iat, exp }`. Verification accepts exactly that header (no
 //! algorithm negotiation, so no `alg: none` / key-confusion attacks) and compares the MAC in constant time.
 
 use std::path::Path;
@@ -28,7 +28,7 @@ use subtle::ConstantTimeEq;
 /// File name of the server secret inside the data directory.
 pub const SECRET_FILE: &str = "auth_secret.key";
 
-const ISSUER: &str = "ferrix";
+const ISSUER: &str = "rxferrix";
 const ACCESS_TYPE: &str = "access";
 const JWT_HEADER: &str = r#"{"alg":"HS256","typ":"JWT"}"#;
 
@@ -69,10 +69,10 @@ impl Keys {
 
     pub fn from_secret(secret: &[u8]) -> Keys {
         Keys {
-            jwt: blake3::derive_key("ferrix auth v1 access token HS256 key", secret),
-            hash: blake3::derive_key("ferrix auth v1 stored token hash key", secret),
-            storage: blake3::derive_key("ferrix storage v1 upload url HMAC key", secret),
-            settings: blake3::derive_key("ferrix settings v1 XChaCha20-Poly1305 secret encryption key", secret),
+            jwt: blake3::derive_key("rxferrix auth v1 access token HS256 key", secret),
+            hash: blake3::derive_key("rxferrix auth v1 stored token hash key", secret),
+            storage: blake3::derive_key("rxferrix storage v1 upload url HMAC key", secret),
+            settings: blake3::derive_key("rxferrix settings v1 XChaCha20-Poly1305 secret encryption key", secret),
         }
     }
 

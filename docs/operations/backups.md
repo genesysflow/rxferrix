@@ -7,7 +7,7 @@ snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a 
 the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
 can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
 in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
-schedule (the cron `ferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones. The same schedule
+schedule (the cron `rxferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones. The same schedule
 and destination can be set on the dashboard instead (Backups, Configure…; stored in `_settings`, the S3 secret key
 encrypted like the other settings secrets): it takes effect without a restart, and a command-line flag wins over it
 (`--backup-every` for the schedule, `--backup-to` for the destination). Admins can list,

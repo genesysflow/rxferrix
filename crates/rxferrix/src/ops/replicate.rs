@@ -12,7 +12,7 @@
 //!   first start, a restored database (restores remove the replication state, `journal::scrub`), commits made without
 //!   journaling (e.g. `rxferrix import` offline), a target that already holds more than this database (a copy of
 //!   `data.db` put in place by hand), or a journal dropped because the target was unreachable for too long.
-//! - **Snapshots**: `generations/<g>/snapshots/ferrix-auto-<time>-ts<N>.tar.zst`, ordinary backup archives
+//! - **Snapshots**: `generations/<g>/snapshots/rxferrix-auto-<time>-ts<N>.tar.zst`, ordinary backup archives
 //!   (`super::backup`, without `aux.db` and blobs) taken when a generation starts and then every `--snapshot-every`.
 //! - **Segments**: every `--replicate-every`, the unshipped journal rows are packed into
 //!   `generations/<g>/journal/<from ts>-<to ts>.zst` (ts zero-padded to 20 digits; at most
@@ -60,7 +60,7 @@ use crate::runtime::{App, WeakApp};
 /// The directory of generations in a replication target.
 pub const GENERATIONS: &str = "generations";
 /// `SegmentHeader::format`.
-pub const SEGMENT_FORMAT: &str = "ferrix-journal";
+pub const SEGMENT_FORMAT: &str = "rxferrix-journal";
 /// `SegmentHeader::version`.
 pub const SEGMENT_VERSION: u32 = 1;
 const SEGMENT_EXTENSION: &str = ".zst";
@@ -274,9 +274,9 @@ pub async fn list_generations(target: &BackupTarget) -> crate::Result<Vec<Genera
     Ok(out)
 }
 
-/// The time in a snapshot name (`ferrix-auto-<time>-ts<N>.tar.zst`).
+/// The time in a snapshot name (`rxferrix-auto-<time>-ts<N>.tar.zst`).
 fn snapshot_time(name: &str) -> Option<f64> {
-    let rest = name.strip_prefix("ferrix-auto-").or_else(|| name.strip_prefix(backup::NAME_PREFIX))?;
+    let rest = name.strip_prefix("rxferrix-auto-").or_else(|| name.strip_prefix(backup::NAME_PREFIX))?;
     super::parse_file_timestamp(rest.get(..20)?)
 }
 
@@ -1400,7 +1400,7 @@ pub async fn restore_point_in_time(
     options: &backup::RestoreOptions,
 ) -> crate::Result<(backup::RestoreReport, PointInTimeInfo)> {
     let _lock = super::DirLock::acquire(dir)?;
-    let scratch = tempfile::Builder::new().prefix(".ferrix-pitr-").tempdir_in(dir)?;
+    let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
     let staging = scratch.path().join("staged");
     std::fs::create_dir_all(&staging)?;
     let (manifest, info) = prepare_point_in_time(target, scratch.path(), &staging, point).await?;

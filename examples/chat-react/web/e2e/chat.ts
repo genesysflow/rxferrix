@@ -149,7 +149,7 @@ async function callAs(page: Page, kind: "query" | "mutation" | "action", path: s
   const token = await page.evaluate(() => {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)!;
-      if (key.startsWith("ferrix.auth:")) return JSON.parse(localStorage.getItem(key)!).accessToken as string;
+      if (key.startsWith("rxferrix.auth:")) return JSON.parse(localStorage.getItem(key)!).accessToken as string;
     }
     return null;
   });

@@ -69,7 +69,7 @@ pub struct PendingRestore {
     #[ts(type = "number")]
     pub ts: u64,
     /// The rxferrix version that wrote the backup.
-    pub ferrix_version: String,
+    pub rxferrix_version: String,
     /// The backup has the execution log (`aux.db`).
     pub includes_aux: bool,
     /// Stored file blobs in the backup.
@@ -183,7 +183,7 @@ pub async fn stage_point_in_time(
     point: &super::replicate::PointInTime,
     staged_by: Option<String>,
 ) -> crate::Result<PendingRestore> {
-    let scratch = tempfile::Builder::new().prefix(".ferrix-pitr-").tempdir_in(dir)?;
+    let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
     let (target, point, scratch_path) = (target.clone(), point.clone(), scratch.path().to_path_buf());
     let marker = stage_with(dir, "point in time", staged_by, |work| async move {
         let (manifest, info) = super::replicate::prepare_point_in_time(&target, &scratch_path, &work, &point)
@@ -214,7 +214,7 @@ where
     if pending(dir)?.is_some() {
         return Err(user_error("restore_pending", "A restore is staged already; cancel it first"));
     }
-    let work = tempfile::Builder::new().prefix(".ferrix-restore-staging-").tempdir_in(dir)?;
+    let work = tempfile::Builder::new().prefix(".rxferrix-restore-staging-").tempdir_in(dir)?;
     let (manifest, point_in_time) = prepare(work.path().to_path_buf()).await?;
     let source = match &point_in_time {
         Some(p) => format!("point in time: ts {} of generation {}", p.ts, p.generation),
@@ -242,7 +242,7 @@ where
         staged_by,
         backup_created_at: manifest.created_at,
         ts: manifest.ts,
-        ferrix_version: manifest.ferrix_version.clone(),
+        rxferrix_version: manifest.rxferrix_version.clone(),
         includes_aux: staged_files.iter().any(|f| f.path == "aux.db"),
         blobs: manifest.files.iter().filter(|f| f.path.starts_with("storage/")).count() as u64,
         bytes: staged_files.iter().map(|f| f.bytes).sum::<u64>() + blob_bytes,

@@ -14,7 +14,7 @@
 //! - [`web`]: the app's own frontend (`RxFerrix::static_dir`, `RxFerrix::embed_static`) and extra routes
 //!   (`RxFerrix::routes`).
 //! - [`tls`]: `--https <domain>` (Let's Encrypt via `rustls-acme`), `--tls-cert/--tls-key`, the HTTP→HTTPS redirect.
-//! - [`lock`]: `<dir>/ferrix.lock`, held by `serve` (and `import`), so `restore` can refuse to run under a server.
+//! - [`lock`]: `<dir>/rxferrix.lock`, held by `serve` (and `import`), so `restore` can refuse to run under a server.
 //! - [`cli`]: the `backup`, `restore`, `export` and `import` commands and the operations flags of `serve`.
 
 pub mod backup;

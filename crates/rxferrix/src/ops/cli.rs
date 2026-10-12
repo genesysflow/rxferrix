@@ -24,7 +24,7 @@ pub struct OpsServeArgs {
     #[arg(long, env = "RXFERRIX_METRICS_TOKEN", value_name = "TOKEN", hide_env_values = true)]
     pub metrics_token: Option<String>,
 
-    /// Take a backup this often, e.g. `6h`, `1d`, `30m` (runs as the cron `ferrix-backup`).
+    /// Take a backup this often, e.g. `6h`, `1d`, `30m` (runs as the cron `rxferrix-backup`).
     #[arg(long, value_name = "DURATION", value_parser = super::parse_duration)]
     pub backup_every: Option<Duration>,
     /// With --backup-every: how many scheduled backups to keep.
@@ -222,7 +222,7 @@ pub struct BackupArgs {
     /// Data directory.
     #[arg(long, default_value = "fx_data")]
     pub dir: PathBuf,
-    /// Write the archive to this file. Default: <dir>/backups/ferrix-<time>.tar.zst (or --to).
+    /// Write the archive to this file. Default: <dir>/backups/rxferrix-<time>.tar.zst (or --to).
     #[arg(long, value_name = "FILE", conflicts_with = "to")]
     pub out: Option<PathBuf>,
     /// Store the archive in a directory, file:///dir or s3://bucket/prefix instead.
@@ -264,7 +264,7 @@ pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()>
                 Some(t) => BackupTarget::parse(t, &args.dir)?,
                 None => BackupTarget::default_for(&args.dir)?,
             };
-            let work = tempfile::Builder::new().prefix(".ferrix-backup-").tempdir_in(&args.dir)?;
+            let work = tempfile::Builder::new().prefix(".rxferrix-backup-").tempdir_in(&args.dir)?;
             let local = work.path().join(&name);
             let manifest = backup::write_archive(&source, &spec, &local, now)?;
             let bytes = std::fs::metadata(&local)?.len();
@@ -280,7 +280,7 @@ pub fn run_backup(args: BackupArgs, storage: StorageConfig) -> crate::Result<()>
 /// target (offline).
 #[derive(Args, Debug, Clone)]
 pub struct RestoreArgs {
-    /// The archive: a file, or s3://bucket/path/to/ferrix-….tar.zst.
+    /// The archive: a file, or s3://bucket/path/to/rxferrix-….tar.zst.
     #[arg(required_unless_present_any = ["cancel", "from"])]
     pub backup: Option<String>,
     /// Cancel the restore staged from the dashboard (it would otherwise be applied at the next start).
@@ -340,10 +340,10 @@ pub fn run_restore(args: RestoreArgs, storage: StorageConfig) -> crate::Result<(
     let given = args.backup.clone().context("which backup to restore?")?;
     runtime()?.block_on(async {
         std::fs::create_dir_all(&args.dir)?;
-        let work = tempfile::Builder::new().prefix(".ferrix-download-").tempdir_in(&args.dir)?;
+        let work = tempfile::Builder::new().prefix(".rxferrix-download-").tempdir_in(&args.dir)?;
         let archive = match given.strip_prefix("s3://") {
             Some(rest) => {
-                let (location, name) = rest.rsplit_once('/').context("expected s3://bucket/path/ferrix-….tar.zst")?;
+                let (location, name) = rest.rsplit_once('/').context("expected s3://bucket/path/rxferrix-….tar.zst")?;
                 let target = BackupTarget::parse(&format!("s3://{location}"), &args.dir)?;
                 let local = work.path().join(name);
                 target.download(name, &local).await?;

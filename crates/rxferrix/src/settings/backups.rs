@@ -3,7 +3,7 @@
 //! S3-compatible bucket with its own credentials). The dashboard's Backups page edits it through
 //! `_system/settings:update { backups }`; `test_backup_destination` checks a destination before it is saved.
 //!
-//! **Applying.** At startup and after every change ([`apply`]), the `ferrix-backup` cron is declared, changed or
+//! **Applying.** At startup and after every change ([`apply`]), the `rxferrix-backup` cron is declared, changed or
 //! withdrawn at runtime (`App::set_runtime_cron`), and the destination is swapped in for scheduled backups, the
 //! dashboard's manual backups, listings, downloads and restores (`crate::ops::backup::BackupTarget::for_app`).
 //!
@@ -313,7 +313,7 @@ pub(crate) fn effective(app: &App) -> BackupsEffective {
     BackupsEffective { target, every_secs, keep, include_aux, include_files, s3_available: cfg!(feature = "s3") }
 }
 
-/// Make the app use `stored` (at startup and after every change): the destination, and the `ferrix-backup` cron
+/// Make the app use `stored` (at startup and after every change): the destination, and the `rxferrix-backup` cron
 /// unless the command line declares it.
 pub(crate) async fn apply(app: &App, stored: Option<&StoredBackups>) -> Result<()> {
     app.set_backup_settings(stored.cloned());

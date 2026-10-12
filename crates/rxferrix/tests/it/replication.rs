@@ -688,7 +688,7 @@ async fn point_in_time_restores_match_a_model_at_random_points() {
 fn snap(ts: u64, at_h: f64) -> SnapshotInfo {
     let at = 1_760_000_000_000.0 + at_h * 3_600_000.0;
     SnapshotInfo {
-        name: format!("ferrix-auto-{}-ts{ts}.tar.zst", rxferrix::ops::file_timestamp(at)),
+        name: format!("rxferrix-auto-{}-ts{ts}.tar.zst", rxferrix::ops::file_timestamp(at)),
         ts,
         created_at: at,
         bytes: 1,

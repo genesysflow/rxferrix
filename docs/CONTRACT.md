@@ -736,9 +736,9 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   `get_url` deterministic inside queries. In private mode `get_url` fails with the user error `storage_private`.
   Upload URLs are `<base>/api/storage/upload?token=<token>`, token = `base64url(json {n: nonce, e: exp_s, b?:
   created_by}) "." base64url(HMAC-SHA256)`, keyed by a key derived from `auth_secret.key` (BLAKE3 KDF, context
-  `"ferrix storage v1 upload url HMAC key"`), so restarting keeps URLs valid and deleting the secret voids them.
+  `"rxferrix storage v1 upload url HMAC key"`), so restarting keeps URLs valid and deleting the secret voids them.
 - **Signed URLs** (`get_signed_url(id, ttl)`): `<base>/api/storage/<id>?exp=<unix seconds>&sig=<base64url
-  HMAC-SHA256(id "\n" exp)>`, keyed by `blake3::derive_key("ferrix storage v1 signed file url HMAC key", storage
+  HMAC-SHA256(id "\n" exp)>`, keyed by `blake3::derive_key("rxferrix storage v1 signed file url HMAC key", storage
   key)`. The server checks them in constant time against its clock (`Database::clock`); `thumb`, `fit` and
   `download` may be appended (the signature covers the file and the expiry, not the variant). `ttl` is 1 s to
   `max_signed_url_ttl` (7 days), else the user error `invalid_ttl`; `None` if the file doesn't exist.
@@ -2294,7 +2294,7 @@ until the secret is entered again.
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
 | `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
-| `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.ferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
+| `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.rxferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
 ```ts
@@ -2377,13 +2377,13 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 
 | Endpoint | Response |
 |---|---|
-| `GET /api/admin/backups` | `{ target, backups: BackupInfo[], pendingRestore: PendingRestore \| null, restart: { available, exitCode }, replication: ReplicationStatus \| null }`, newest first (`replication` as for `GET /api/admin/replication`, null without `--replicate-to`) (`pendingRestore` and `restart` as for `GET /api/admin/restore`). `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `ferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
+| `GET /api/admin/backups` | `{ target, backups: BackupInfo[], pendingRestore: PendingRestore \| null, restart: { available, exitCode }, replication: ReplicationStatus \| null }`, newest first (`replication` as for `GET /api/admin/replication`, null without `--replicate-to`) (`pendingRestore` and `restart` as for `GET /api/admin/restore`). `target` is where backups are kept (`--backup-to`, default `<data dir>/backups`). `BackupInfo` = `{ name, bytes, createdAt (ms), scheduled (a `rxferrix-auto-*` archive from `--backup-every`; only those are rotated), ts (commit ts of the snapshot, or null when unknown) }`. |
 | `POST /api/admin/backups` | Body (optional) `{ includeAux?, includeFiles? }` → 201 `BackupInfo` once the archive is stored. Runs while the server serves (writes are not blocked); one backup at a time per process (a second request waits). `includeSecret: true` → 400 `invalid_request` (`auth_secret.key` is only ever included by the CLI). 500 `server_error` with the reason (e.g. S3 credentials) on failure. |
-| `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `ferrix-….tar.zst`. |
+| `GET /api/admin/backups/{name}` | The archive, streamed: `Content-Type: application/zstd`, `Content-Length`, `Content-Disposition: attachment; filename="<name>"`. 404 `not_found`; 400 `invalid_name` for a name that isn't `rxferrix-….tar.zst`. |
 | `DELETE /api/admin/backups/{name}` | `{ deleted: true }`; 404 `not_found`; 400 `invalid_name`. |
 | `POST /api/admin/backups/{name}/restore` | Stage that backup of the target for a restore at the next start (§4.4 "Staged restores") → `{ pendingRestore, restart }` once it passed every check. 400 `invalid_backup` with the reason (nothing is staged); 409 `restore_pending` if one is staged already; 404 `not_found`; 400 `invalid_name`. Audited (`restore_stage`). |
 | `POST /api/admin/restore?name=<file name>` | The same with the archive as the body (any content type; ≤ 64 GiB, else 413 `too_large`; spooled to the data directory). `name` (sanitized to `[A-Za-z0-9._-]`) is only a label. 400 `invalid_request` for an empty body. |
-| `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, ferrixVersion, includesAux, blobs, bytes, secretIgnored, error, pointInTime }`; `pointInTime` (null for an archive) = `PointInTimeInfo` `{ generation, snapshot, snapshotTs, requestedTs, requestedTime, ts, time, replayed, segments, reached }` (`reached: false`: the point asked for is beyond the newest replicated commit, which was restored instead); `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
+| `GET /api/admin/restore` | `{ pendingRestore: PendingRestore \| null, restart: { available: boolean, exitCode: number \| null } }`. `PendingRestore` = `{ source, stagedAt, stagedBy (admin id), backupCreatedAt, ts, rxferrixVersion, includesAux, blobs, bytes, secretIgnored, error, pointInTime }`; `pointInTime` (null for an archive) = `PointInTimeInfo` `{ generation, snapshot, snapshotTs, requestedTs, requestedTime, ts, time, replayed, segments, reached }` (`reached: false`: the point asked for is beyond the newest replicated commit, which was restored instead); `error` is set when the last start found the staged files changed and didn't apply them. `restart.available`: the server runs with `--restart-exit-code`. |
 | `POST /api/admin/restore/point-in-time` | Body `{ toTs?, toTime? (RFC 3339 string or ms), generation? }` (all optional: the newest point) → `{ pendingRestore, restart }`: ships what is unshipped (best effort), rebuilds the point from the replication target (§4.4 "Continuous replication"), checks it like an archive and stages it. 404 `replication_off` without `--replicate-to`; 400 `invalid_point_in_time` (before the oldest snapshot, an unknown generation, both `toTs` and `toTime`), 400 `invalid_backup` when the rebuilt point fails the checks, 400 `invalid_request` for a malformed body; 409 `restore_pending`. Audited (`restore_stage`, with `pointInTime`). |
 | `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
 | `POST /api/admin/olap/rebuild` | 202 `{ rebuilding: true }`: every table of the analytics copy is rebuilt from a snapshot in the background (audited `olap_rebuild`); 404 `olap_off` without `--olap`. |
@@ -2425,7 +2425,7 @@ is served; the system functions and `/api/admin/*` exist either way.
 
 ### 4.3.1 Takeover (`serve --takeover`, `crate::ops::takeover`)
 
-Every `serve` listens on `<dir>/ferrix.control` (Unix socket, 0600). `serve --takeover` connects and sends
+Every `serve` listens on `<dir>/rxferrix.control` (Unix socket, 0600). `serve --takeover` connects and sends
 `{"op":"prepare"}`; the running server enables its change journal for a `Takeover` consumer (`_meta.takeover_ts`; rows
 after it are kept) and answers `{ok, ts, pid, roles}`. The new process copies `data.db` with `VACUUM INTO` to
 `<dir>/takeover/data.db`, opens it with its tables (`Database::open_with_migrations`: catalog reconcile with every
@@ -2437,7 +2437,7 @@ listening sockets with `SCM_RIGHTS` (roles `main`, `redirect`) and, under system
 `MAINPID=<pid>`. The running server stops accepting (`RunningServer::pauser`), sets `Connection: close` on responses
 for 100 ms (`App::begin_drain`), closes WebSockets with 1012 and ends admin log streams (`App::begin_close`), stops
 gracefully (up to 10 s for open requests), flushes the execution log, seals its database (`Database::seal`: no write
-transaction can begin) and exits. The new process waits for the socket to close, takes `ferrix.lock`, replays the last
+transaction can begin) and exits. The new process waits for the socket to close, takes `rxferrix.lock`, replays the last
 rows, checks that the copy's ts equals the database's, copies `_mutation_dedup` rows, the replication and analytics
 `_meta` positions and `_journal` (trimmed to what those consumers still need), raises `last_creation_time` if needed,
 then swaps: `<dir>/takeover/swapping` marks it, `data.db*` moves to `takeover/previous/`, the copy moves in, the
@@ -2465,14 +2465,14 @@ health [url]` (default `http://127.0.0.1:8090/api/health`) exits 0 if the URL an
 
 ### 4.4 Operations: backups, export and import (`crate::ops`)
 
-**Backup archives** (`ferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `ferrix-auto-…`; the
+**Backup archives** (`rxferrix-<UTC yyyymmddThhmmss.mmmZ>-ts<commit ts>.tar.zst`; scheduled ones `rxferrix-auto-…`; the
 snapshot ts in the name is what `GET /api/admin/backups` reports as `ts`, `null` for older names without it): a zstd-compressed
 tar of `data.db` (a `VACUUM INTO` snapshot: one read transaction, so a consistent copy at one commit ts that never
 blocks the writer; the copy's replication journal and state are removed, below), optionally `aux.db` (same),
 `storage/<storage id>` for the blob of every `_storage` document of the snapshot (with `includeFiles` /
 `--with-files`; local storage only),
-`auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`: `{ format: "ferrix-backup", version: 1,
-createdAt, ferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
+`auth_secret.key` (CLI `--include-secret` only), and last `manifest.json`: `{ format: "rxferrix-backup", version: 1,
+createdAt, rxferrixVersion, ts, commitTime (ms of that commit; 0 in older archives), storage: "included" | "excluded" |
 "remote", missingBlobs, files: [{ path, bytes, sha256 }] }`.
 
 **Backups from the dashboard** (`_settings` key `backups`, `crates/rxferrix/src/settings/backups.rs`): `update { backups:
@@ -2481,7 +2481,7 @@ destination, secretAccessKey? } }` where `destination` is `{ kind: "default" }` 
 "local", path }` (absolute) or `{ kind: "s3", bucket, prefix?, region?, endpoint?, accessKeyId? }` (without
 `accessKeyId`, the server's `AWS_*` environment; with it, `secretAccessKey` is required the first time and kept when
 omitted or `"••••"`; stored as the row's encrypted part, never in the cron's arguments). `clear: ["backups"]` removes
-it. Applied at startup and after every change: the `ferrix-backup` cron is declared, rescheduled or withdrawn at
+it. Applied at startup and after every change: the `rxferrix-backup` cron is declared, rescheduled or withdrawn at
 runtime (`_crons` updated at once; it then runs with `{ schedule: { to: null, keep, includeAux, includeFiles } }`
 and reads the destination from the app), and the destination is used for scheduled and manual backups, the listing,
 downloads and restores. The command line wins part by part: `--backup-every` fixes the schedule, `--backup-to` the
@@ -2490,12 +2490,12 @@ stored, and `effective.backups` (`{ target, everySecs, keep, includeAux, include
 Replication (`--replicate-to`) stays a command-line setting.
 
 **Scheduled backups**: `serve --backup-every 6h --backup-keep 7 [--backup-to LOCATION] [--backup-with-aux]
-[--backup-with-files]` declares the interval cron `ferrix-backup` running the internal system action
+[--backup-with-files]` declares the interval cron `rxferrix-backup` running the internal system action
 `_system/ops/backup:run_scheduled` with args `{ schedule: { to, keep, includeAux, includeFiles } }` (it shows on the
-Scheduler page like any cron; "run now" works). Each run stores a `ferrix-auto-*` archive and deletes the oldest
+Scheduler page like any cron; "run now" works). Each run stores a `rxferrix-auto-*` archive and deletes the oldest
 scheduled ones beyond `keep`; manual archives are never rotated.
 
-**Restore** (`rxferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/ferrix.lock` (held by `serve` and
+**Restore** (`rxferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/rxferrix.lock` (held by `serve` and
 `import`, so it refuses while a server runs), extracts next to the data, checks entries against the manifest
 (unexpected, missing or altered entries are refused), runs `PRAGMA integrity_check`, opens the database with the
 binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
@@ -2512,7 +2512,7 @@ never `--skip-verify`); a failing archive is refused with the reason and leaves 
 renamed to `<dir>/restore-staged/`, the SHA-256 of its databases recorded, and `<dir>/pending-restore.json` (the
 `PendingRestore` of §4.2 plus those checksums) written last, atomically. `auth_secret.key` is never staged, even when
 the archive has it. One restore can be staged at a time. *Applying*, when `serve` starts next, after it takes
-`ferrix.lock` and before it opens the database: the staged databases are checked against the recorded checksums
+`rxferrix.lock` and before it opens the database: the staged databases are checked against the recorded checksums
 (a file already moved by an interrupted run is checked where it is); then the current `data.db` (with `-wal`, `-shm`),
 `aux.db` (when the backup has one) and persisted HNSW indexes go to `<dir>/pre-restore-<staged time>/`, the staged
 files take their place and blobs are added to local storage; the marker is removed, then the staging directory.
@@ -2533,9 +2533,9 @@ written (user and system tables; a document created and deleted by the same tran
 commit journals `[]`). Index entries, full-text and vector tables and HNSW files are not journaled. So the journal
 holds every committed ts exactly once (consecutive), and nothing rolled back; whether a transaction journals is decided
 at `BEGIN` under the writer lock, and the switch only flips under that lock. *Layout* in the target:
-`generations/<UTC time>-<8 hex>/snapshots/ferrix-auto-<time>-ts<N>.tar.zst` (backup archives without `aux.db` and
+`generations/<UTC time>-<8 hex>/snapshots/rxferrix-auto-<time>-ts<N>.tar.zst` (backup archives without `aux.db` and
 blobs) and `generations/<g>/journal/<from ts>-<to ts>.zst` (ts zero-padded to 20 digits): zstd of a JSON header line
-`{ format: "ferrix-journal", version: 1, generation, from, to, fromTime, toTime, entries, bytes, sha256 }` (the size
+`{ format: "rxferrix-journal", version: 1, generation, from, to, fromTime, toTime, entries, bytes, sha256 }` (the size
 and SHA-256 of the body) and one `<ts>\t<time>\t<changes>` line per commit (at most 10 000 commits or ~16 MiB per
 segment). *Shipping*: every `--replicate-every` the rows after the shipped ts are read on a reader snapshot, uploaded
 as a segment, and only then released, with `_meta.replication_shipped_ts` (and `_generation`, `_shipped_time`)
@@ -2560,7 +2560,7 @@ build, 5000 sequential insert/patch mutations of a small indexed document, media
 without replication, 6747/s journaling (-4.5%), 6708/s journaling and shipping every second (-5.1%).
 
 **Point-in-time restore** (`rxferrix restore --from <target> [--to-ts N | --to-time <RFC 3339>] [--generation G]
-[--storage-dir]`, offline under `ferrix.lock`; `--list` prints the generations and their restorable ranges; or staged
+[--storage-dir]`, offline under `rxferrix.lock`; `--list` prints the generations and their restorable ranges; or staged
 with `POST /api/admin/restore/point-in-time`). The generation is `--generation`, else with `--to-time` the newest one
 created at or before that time, else the newest; the base is its newest snapshot at or before the ts (taken at or
 before the time). The snapshot is extracted and checked like an archive (`backup::prepare`), tables created after it
@@ -2578,7 +2578,7 @@ they are rebuilt from the restored database at startup.
 
 **Export directories** (`rxferrix export`): `<table>.jsonl` or `<table>.csv` per table (all app tables by default;
 `--tables` may name system tables), `files/<storage id>` for exported `_storage` documents, and `manifest.json`:
-`{ format: "ferrix-export", version: 1, documentFormat, exportedAt, ts, ferrixVersion, tables: [{ name, number,
+`{ format: "rxferrix-export", version: 1, documentFormat, exportedAt, ts, rxferrixVersion, tables: [{ name, number,
 documents, file }], catalog: { <table>: <number> }, files, missingFiles }`. **Import** (`rxferrix import`, offline;
 or the HTTP endpoint above) reads JSONL or CSV: an export directory (its `documentFormat`; ids of tables whose number
 differs in the target are rewritten everywhere in the imported documents using `catalog`, and `files/` are stored), a
@@ -2636,7 +2636,7 @@ RestartHandle::{new(exit_code), exit_code(), request() -> bool, requested().awai
 BackupTarget::{parse(location, data_dir), for_app(&app), list(), open(name), download(name, dest), delete(name), rotate(keep)};
 export::export_to_dir(data_dir, Option<BlobStore>, out, &ExportOptions { tables, format, include_files }) -> Result<ExportManifest>;
 export::import_path(&app, path, table: Option<&str>, &ImportOptions { mode, batch_size, allow_system_tables, format }) -> Result<ImportReport>;
-DirLock::acquire(dir) -> Result<DirLock>;     // <dir>/ferrix.lock
+DirLock::acquire(dir) -> Result<DirLock>;     // <dir>/rxferrix.lock
 web::router(app, &WebOptions { static_files, routes }) -> axum::Router;   // what `serve` serves
 tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertFiles { https, redirect, cert, key, reload_every }}) -> Result<RunningServer>;
 ```

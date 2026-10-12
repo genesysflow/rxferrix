@@ -192,7 +192,7 @@ describe("Backups page", () => {
     maxPendingBytes: 1 << 30,
     journaling: true,
     lastSegment: { name: "x.zst", from: 110, to: 117, entries: 8, bytes: 900, shippedAt: Date.now() - 1000 },
-    lastSnapshot: { name: "ferrix-auto-20261010T120000.000Z-ts100.tar.zst", ts: 100, createdAt: Date.now() - 60_000, bytes: 2048 },
+    lastSnapshot: { name: "rxferrix-auto-20261010T120000.000Z-ts100.tar.zst", ts: 100, createdAt: Date.now() - 60_000, bytes: 2048 },
     nextSnapshotAt: Date.now() + 3_600_000,
     segmentsShipped: 4,
     snapshotsTaken: 1,
@@ -230,7 +230,7 @@ describe("Backups page", () => {
       stagedBy: null,
       backupCreatedAt: 1,
       ts: 110,
-      ferrixVersion: "0.1.0",
+      rxferrixVersion: "0.1.0",
       includesAux: false,
       blobs: 0,
       bytes: 4096,
@@ -523,7 +523,7 @@ describe("Analytics page", () => {
     expect(results.querySelector("thead")?.textContent).toContain("BIGINT");
     expect([...results.querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["30", '["a"]', "null"]);
     expect(target.querySelector("[data-testid=olap-summary]")?.textContent).toContain("1 rows · as of commit 9");
-    expect(localStorage.getItem("ferrix.analytics.sql")).toBe("SELECT count(*) AS n FROM orders");
+    expect(localStorage.getItem("rxferrix.analytics.sql")).toBe("SELECT count(*) AS n FROM orders");
 
     type(editor, "DELETE FROM orders");
     button("Run").click();

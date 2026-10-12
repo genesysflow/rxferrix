@@ -178,7 +178,7 @@ fn fingerprint(index_id: IndexId, order: Order, range: &KeyRange) -> [u8; FINGER
 /// [`fingerprint`] for a key encoding version; `None` is how cursors were fingerprinted up to v2 (no version).
 fn fingerprint_for(version: Option<u64>, index_id: IndexId, order: Order, range: &KeyRange) -> [u8; FINGERPRINT_LEN] {
     let mut h = blake3::Hasher::new();
-    h.update(b"ferrix-cursor");
+    h.update(b"rxferrix-cursor");
     // Keys of another layout would name wrong positions within an unchanged range.
     if let Some(version) = version {
         h.update(&version.to_be_bytes());

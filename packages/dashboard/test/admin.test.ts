@@ -44,7 +44,7 @@ afterEach(() => {
 describe("filenameFromDisposition", () => {
   it("reads quoted, plain and RFC 5987 names, never a path", () => {
     expect(filenameFromDisposition('attachment; filename="todos.jsonl"', "x")).toBe("todos.jsonl");
-    expect(filenameFromDisposition("attachment; filename=ferrix-1.tar.zst", "x")).toBe("ferrix-1.tar.zst");
+    expect(filenameFromDisposition("attachment; filename=rxferrix-1.tar.zst", "x")).toBe("rxferrix-1.tar.zst");
     expect(filenameFromDisposition(`attachment; filename="a.txt"; filename*=UTF-8''r%C3%A9sum%C3%A9.txt`, "x")).toBe("résumé.txt");
     expect(filenameFromDisposition('attachment; filename="../../etc/passwd"', "x")).toBe(".._.._etc_passwd");
     expect(filenameFromDisposition(null, "fallback.csv")).toBe("fallback.csv");
@@ -129,15 +129,15 @@ describe("other admin endpoints", () => {
   });
 
   it("stages, uploads, cancels and restarts restores", async () => {
-    const state = { pendingRestore: { source: "ferrix-1.tar.zst" }, restart: { available: true, exitCode: 75 } };
+    const state = { pendingRestore: { source: "rxferrix-1.tar.zst" }, restart: { available: true, exitCode: 75 } };
     const fetch = mockFetch(
       new Response(JSON.stringify(state)),
       new Response(JSON.stringify(state)),
       new Response(JSON.stringify({ canceled: true })),
       new Response(JSON.stringify({ restarting: true, exitCode: 75 }), { status: 202 }),
     );
-    expect(await stageRestore(fakeAuth(), "ferrix-1.tar.zst")).toEqual(state);
-    expect(fetch.mock.calls[0]![0]).toBe("/api/admin/backups/ferrix-1.tar.zst/restore");
+    expect(await stageRestore(fakeAuth(), "rxferrix-1.tar.zst")).toEqual(state);
+    expect(fetch.mock.calls[0]![0]).toBe("/api/admin/backups/rxferrix-1.tar.zst/restore");
     expect(fetch.mock.calls[0]![1]?.method).toBe("POST");
     const file = new Blob([new Uint8Array([0x28, 0xb5, 0x2f, 0xfd])]);
     await uploadRestore(fakeAuth(), file, "my backup.tar.zst");
@@ -153,7 +153,7 @@ describe("other admin endpoints", () => {
   it("reports a refused restore with the server's reason", async () => {
     const body = { status: "error", errorMessage: "This backup can't be restored: corrupt", errorData: { code: "invalid_backup" } };
     mockFetch(new Response(JSON.stringify(body), { status: 400 }));
-    await expect(stageRestore(fakeAuth(), "ferrix-1.tar.zst")).rejects.toThrow("This backup can't be restored: corrupt");
+    await expect(stageRestore(fakeAuth(), "rxferrix-1.tar.zst")).rejects.toThrow("This backup can't be restored: corrupt");
   });
 
   it("lists backups with the restore state (defaults for older servers)", async () => {
@@ -173,7 +173,7 @@ describe("other admin endpoints", () => {
     const fetch = mockFetch(
       new Response(JSON.stringify({ enabled: false })),
       new Response(JSON.stringify({ enabled: true, ...status })),
-      new Response(JSON.stringify({ name: "ferrix-auto-x-ts9.tar.zst", ts: 9, createdAt: 1, bytes: 2 }), { status: 201 }),
+      new Response(JSON.stringify({ name: "rxferrix-auto-x-ts9.tar.zst", ts: 9, createdAt: 1, bytes: 2 }), { status: 201 }),
       new Response(JSON.stringify(state)),
     );
     expect(await getReplication(fakeAuth())).toBeNull();
@@ -205,9 +205,9 @@ describe("other admin endpoints", () => {
   });
 
   it("creates backups with the options", async () => {
-    const fetch = mockFetch(new Response(JSON.stringify({ name: "ferrix-1.tar.zst", bytes: 10, createdAt: 1, scheduled: false, ts: 3 })));
+    const fetch = mockFetch(new Response(JSON.stringify({ name: "rxferrix-1.tar.zst", bytes: 10, createdAt: 1, scheduled: false, ts: 3 })));
     const b = await createBackup(fakeAuth(), { includeAux: true, includeFiles: false });
-    expect(b.name).toBe("ferrix-1.tar.zst");
+    expect(b.name).toBe("rxferrix-1.tar.zst");
     expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual({ includeAux: true, includeFiles: false });
   });
 

@@ -43,7 +43,7 @@ export class MemoryAuthStorage implements AuthStorage {
 export interface RxFerrixAuthOptions {
   /** Token storage. Defaults to `localStorage` when available, else memory. */
   storage?: AuthStorage;
-  /** Storage key. Defaults to `"ferrix.auth:" + client.url`. */
+  /** Storage key. Defaults to `"rxferrix.auth:" + client.url`. */
   storageKey?: string;
   /** `fetch` implementation (defaults to the global one). */
   fetch?: typeof fetch;
@@ -136,7 +136,7 @@ function defaultStorage(): AuthStorage {
     const ls = (globalThis as { localStorage?: AuthStorage }).localStorage;
     if (ls) {
       // Accessing it can throw (disabled storage, sandboxed iframes).
-      ls.getItem("ferrix.auth:probe");
+      ls.getItem("rxferrix.auth:probe");
       return ls;
     }
   } catch {
@@ -206,7 +206,7 @@ export class RxFerrixAuth {
   constructor(client: RxFerrixClient, options: RxFerrixAuthOptions = {}) {
     this.client = client;
     this.storage = options.storage ?? defaultStorage();
-    this.storageKey = options.storageKey ?? `ferrix.auth:${client.url}`;
+    this.storageKey = options.storageKey ?? `rxferrix.auth:${client.url}`;
     const f = options.fetch ?? (globalThis as { fetch?: typeof fetch }).fetch;
     if (!f) throw new Error("RxFerrixAuth: no global fetch available; pass the `fetch` option");
     // Called as a plain function: browsers throw "Illegal invocation" when `window.fetch` is called as a method of

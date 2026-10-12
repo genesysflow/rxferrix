@@ -43,7 +43,7 @@
   const ctx = dashboardContext();
   const crons = useQuery(scheduler.crons, () => ({}));
   const runCronNow = useMutation(scheduler.runCronNow);
-  const schedule = $derived(crons.data?.find((c) => c.name === "ferrix-backup") ?? null);
+  const schedule = $derived(crons.data?.find((c) => c.name === "rxferrix-backup") ?? null);
   const scheduleArgs = $derived.by(() => {
     const a = schedule?.args as { schedule?: { to?: string | null; keep?: number; includeAux?: boolean; includeFiles?: boolean } } | null;
     return a?.schedule ?? null;
@@ -168,7 +168,7 @@
 
   async function runScheduledNow() {
     try {
-      await runCronNow({ name: "ferrix-backup" });
+      await runCronNow({ name: "rxferrix-backup" });
       ctx.toast("Scheduled backup started");
     } catch (e) {
       ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
@@ -382,7 +382,7 @@
             · next {schedule.nextRun ? formatRelative(schedule.nextRun, now) : "—"}
             {#if schedule.lastJobState}· last run <span class="badge">{schedule.lastJobState}</span>{/if}
             · <button class="small" onclick={runScheduledNow}>Run now</button>
-            · <a href={href("scheduler")} onclick={link}>cron <code>ferrix-backup</code></a>
+            · <a href={href("scheduler")} onclick={link}>cron <code>rxferrix-backup</code></a>
           {:else}
             <span class="muted">No scheduled backups. Turn them on with <strong>Configure…</strong> (or start the server with <code>--backup-every 6h</code>).</span>
           {/if}

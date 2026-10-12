@@ -170,7 +170,7 @@ try {
   if (imported.exitCode !== 0) throw new Error(`user import failed: ${imported.stderr.toString()}`);
   // The redirect allowlist comes from the command line, so the Settings page shows it locked (`/api/health` stands
   // in for an app page "open app as user" can land on: the server has no web app); the backup schedule declares the
-  // `ferrix-backup` cron.
+  // `rxferrix-backup` cron.
   const server = await step("start todo-server", () =>
     startServer(dir, (b) => ["--auth-redirect-url", `${b}/,${b}/api/health`, "--backup-every", "1h", "--backup-keep", "3"]),
   );
@@ -425,7 +425,7 @@ try {
     await crons.getByText("System crons").waitFor();
     const names = await crons.locator("tbody tr td:first-child strong").allTextContents();
     const sweep = names.indexOf("_storage_sweep");
-    if (sweep === -1 || sweep < names.indexOf("purge-completed") || sweep < names.indexOf("ferrix-backup")) {
+    if (sweep === -1 || sweep < names.indexOf("purge-completed") || sweep < names.indexOf("rxferrix-backup")) {
       throw new Error(`system crons are not last: ${names.join(", ")}`);
     }
     await cronRow.getByRole("button", { name: /Run now/ }).click();
@@ -913,7 +913,7 @@ try {
     // A corrupt archive from this computer: refused with the reason, nothing staged.
     expectedHttpErrors++;
     await p.getByLabel("Restore an archive from this computer:").setInputFiles({
-      name: "ferrix-broken.tar.zst",
+      name: "rxferrix-broken.tar.zst",
       mimeType: "application/zstd",
       buffer: Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3, 4, 5]),
     });
@@ -992,7 +992,7 @@ try {
     await card.getByTestId("replication-target").getByText(replica).waitFor();
     await card.getByTestId("replication-health").getByText("healthy").waitFor({ timeout: 10_000 });
     await card.getByTestId("replication-lag").getByText(/caught up/).waitFor({ timeout: 10_000 });
-    await card.getByTestId("replication-last-snapshot").getByText(/ferrix-auto-/).waitFor();
+    await card.getByTestId("replication-last-snapshot").getByText(/rxferrix-auto-/).waitFor();
     await card.getByTestId("replication-last-segment").getByText(/shipped/).waitFor();
     await card.getByTestId("replication-generations").getByText("current").waitFor();
     await shot(p, "replication");

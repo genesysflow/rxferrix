@@ -270,7 +270,7 @@ async fn stage_backup(State(app): State<App>, headers: HeaderMap, Path(name): Pa
     };
     try_or!(backup::validate_name(&name));
     let target = try_or!(BackupTarget::for_app(&app));
-    let work = try_or!(tempfile::Builder::new().prefix(".ferrix-download-").tempdir_in(app.dir()));
+    let work = try_or!(tempfile::Builder::new().prefix(".rxferrix-download-").tempdir_in(app.dir()));
     let local = work.path().join(&name);
     if try_or!(target.open(&name).await).is_none() {
         return not_found(format!("Backup {name} does not exist"));
@@ -307,7 +307,7 @@ async fn stage_upload(
             crate::UserError::new("restore_pending", "A restore is staged already; cancel it first").into(),
         );
     }
-    let spool = try_or!(tempfile::Builder::new().prefix(".ferrix-upload-").tempfile_in(app.dir()));
+    let spool = try_or!(tempfile::Builder::new().prefix(".rxferrix-upload-").tempfile_in(app.dir()));
     let mut file = try_or!(tokio::fs::File::create(spool.path()).await);
     let mut stream = body.into_data_stream();
     let mut size = 0u64;
@@ -691,7 +691,7 @@ async fn import_table(
         return not_found(format!("Table `{table}` does not exist"));
     }
     // Spool the body to a file (the import reads it twice: validation, then writes).
-    let spool = try_or!(tempfile::Builder::new().prefix(".ferrix-import-").tempfile_in(app.dir()));
+    let spool = try_or!(tempfile::Builder::new().prefix(".rxferrix-import-").tempfile_in(app.dir()));
     let mut file = try_or!(tokio::fs::File::create(spool.path()).await);
     let mut stream = body.into_data_stream();
     let mut size = 0u64;

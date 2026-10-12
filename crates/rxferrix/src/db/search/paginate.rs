@@ -74,7 +74,7 @@ enum Position {
 
 fn fingerprint(plan: &SearchPlan, expression: &str) -> [u8; FINGERPRINT_LEN] {
     let mut h = blake3::Hasher::new();
-    h.update(b"ferrix-search-cursor");
+    h.update(b"rxferrix-search-cursor");
     h.update(&plan.index.id.to_be_bytes());
     h.update(&(expression.len() as u64).to_be_bytes());
     h.update(expression.as_bytes());

@@ -1,4 +1,4 @@
-//! The data directory lock: `<dir>/ferrix.lock`, an exclusive advisory lock (`flock` on Unix, `LockFileEx` on
+//! The data directory lock: `<dir>/rxferrix.lock`, an exclusive advisory lock (`flock` on Unix, `LockFileEx` on
 //! Windows) held for as long as `rxferrix serve` (or `rxferrix import`) runs. `rxferrix restore` takes it too, so it refuses
 //! to swap the database under a running server. The operating system releases the lock when the process exits, even
 //! on a crash, so a leftover file never blocks anything. The file holds the pid of the process that last locked it
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 /// Name of the lock file in the data directory.
-pub const LOCK_FILE: &str = "ferrix.lock";
+pub const LOCK_FILE: &str = "rxferrix.lock";
 
 /// A held lock on a data directory. Released when dropped.
 #[derive(Debug)]

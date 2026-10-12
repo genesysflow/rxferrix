@@ -584,7 +584,7 @@ impl App {
         crate::storage::service::ensure_schema(&app).await?;
         crate::migrations::startup(&app).await?;
         crate::auth::start(&app).await?;
-        // The `backups` setting: its destination, and the `ferrix-backup` cron unless the command line declares it.
+        // The `backups` setting: its destination, and the `rxferrix-backup` cron unless the command line declares it.
         let stored = crate::settings::load(&app).await?;
         crate::settings::backups::apply(&app, stored.backups.as_ref()).await?;
         // Last, so the replicator's first snapshot is taken after the startup commits above (system crons, migration and

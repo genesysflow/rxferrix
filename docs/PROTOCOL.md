@@ -239,7 +239,7 @@ endpoints' error shape, without `logLines`).
 
 ### Tokens
 
-- **Access token**: a JWT, `{"alg":"HS256","typ":"JWT"}`, claims `{ iss: "ferrix", typ: "access", sub, sid, adm?, iat,
+- **Access token**: a JWT, `{"alg":"HS256","typ":"JWT"}`, claims `{ iss: "rxferrix", typ: "access", sub, sid, adm?, iat,
   exp }`. `sub` is the `Id<User>` (or the `Id<Admin>` when `adm: true`), `sid` the `Id<Session>`. Lifetime 15 minutes
   by default. Signed with a key derived from `<data dir>/auth_secret.key` (created on first start, mode 0600; deleting
   it signs everyone out). Validation checks the header, the signature (constant time), `iss`, `typ`, `exp`, and that

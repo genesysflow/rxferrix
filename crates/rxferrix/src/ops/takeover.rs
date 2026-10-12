@@ -3,7 +3,7 @@
 //! the data (a document that doesn't match a changed type and no migration for it, a failing index build), it gives
 //! up before touching anything and the running server never notices.
 //!
-//! **Control socket.** Every `serve` listens on `<dir>/ferrix.control` (a Unix socket, mode 0600) for a takeover.
+//! **Control socket.** Every `serve` listens on `<dir>/rxferrix.control` (a Unix socket, mode 0600) for a takeover.
 //! The protocol is newline-delimited JSON:
 //!
 //! 1. `{"op":"prepare"}` → `{"ok":true,"ts":<ts>,"pid":<pid>,"roles":["main",…]}`: the running server turns its change
@@ -18,7 +18,7 @@
 //! 4. `{"op":"handover"}` → the reply carries the listening sockets (`SCM_RIGHTS`). The running server stops
 //!    accepting (the sockets stay open in the new process, so connections queue instead of being refused), closes
 //!    WebSockets with code 1012 ("service restart": clients reconnect at once), lets requests finish, seals its
-//!    database (no write may begin after that), and exits, releasing `<dir>/ferrix.lock`.
+//!    database (no write may begin after that), and exits, releasing `<dir>/rxferrix.lock`.
 //! 5. The new process takes the lock, replays the last journal rows, copies what isn't journaled (the mutation dedup
 //!    table, so a retried mutation still runs once; replication and analytics positions; the journal itself for
 //!    replication), checks that the copy is at the old database's ts, and swaps it in: the old `data.db` moves to
@@ -44,7 +44,7 @@ use crate::ops::DirLock;
 use crate::runtime::App;
 
 /// The control socket in the data directory.
-pub const CONTROL_SOCKET: &str = "ferrix.control";
+pub const CONTROL_SOCKET: &str = "rxferrix.control";
 /// Where the new process prepares its copy.
 pub const STAGING_DIR: &str = "takeover";
 /// Present in the staging directory while the copy is being swapped in.
@@ -110,7 +110,7 @@ fn netns() -> Option<String> {
     std::fs::read_link("/proc/self/ns/net").ok().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Whether a server answers on `<dir>/ferrix.control` (`serve --takeover=auto` takes over only then). A socket file
+/// Whether a server answers on `<dir>/rxferrix.control` (`serve --takeover=auto` takes over only then). A socket file
 /// left by a crashed server doesn't answer.
 #[cfg(unix)]
 pub async fn server_running(dir: &Path) -> bool {
@@ -147,7 +147,7 @@ pub struct Control {
 
 #[cfg(unix)]
 impl Control {
-    /// Listen on `<dir>/ferrix.control`, offering `listeners` (role, fd) at `addrs` (role, address) to a new process.
+    /// Listen on `<dir>/rxferrix.control`, offering `listeners` (role, fd) at `addrs` (role, address) to a new process.
     pub async fn start(
         app: App,
         dir: &Path,

@@ -8,7 +8,7 @@
 
   /** SQL over the analytics copy (`--olap`): the same sandbox as `ctx.olap` (one SELECT, read-only), audited. */
   const ctx = dashboardContext();
-  const STORE = "ferrix.analytics.sql";
+  const STORE = "rxferrix.analytics.sql";
 
   let status = $state<OlapStatus | null | undefined>(undefined);
   let loadError = $state<string | null>(null);

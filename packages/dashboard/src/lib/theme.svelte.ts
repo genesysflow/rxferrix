@@ -1,7 +1,7 @@
 /** Light / dark / system theme, stored per browser. Applied as `data-theme` on <html> (see app.css). */
 export type Theme = "light" | "dark" | "system";
 
-const KEY = "ferrix.dashboard.theme";
+const KEY = "rxferrix.dashboard.theme";
 
 function load(): Theme {
   try {

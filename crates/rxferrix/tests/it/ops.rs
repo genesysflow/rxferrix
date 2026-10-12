@@ -237,10 +237,10 @@ async fn restore_is_refused_while_locked_and_validates_before_swapping() {
     let mut bytes = std::fs::read(&archive).unwrap();
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0xff;
-    let corrupt = target_dir.path().join("ferrix-corrupt.tar.zst");
+    let corrupt = target_dir.path().join("rxferrix-corrupt.tar.zst");
     std::fs::write(&corrupt, &bytes).unwrap();
     assert!(backup::restore(&corrupt, dest.path(), &RestoreOptions::default()).await.is_err());
-    let not_a_backup = target_dir.path().join("ferrix-junk.tar.zst");
+    let not_a_backup = target_dir.path().join("rxferrix-junk.tar.zst");
     std::fs::write(&not_a_backup, b"junk").unwrap();
     assert!(backup::restore(&not_a_backup, dest.path(), &RestoreOptions::default()).await.is_err());
     {
@@ -1003,11 +1003,11 @@ async fn ops_admin_endpoints_are_admin_only() {
     let endpoints = [
         (Method::GET, "/api/admin/backups"),
         (Method::POST, "/api/admin/backups"),
-        (Method::GET, "/api/admin/backups/ferrix-x.tar.zst"),
-        (Method::DELETE, "/api/admin/backups/ferrix-x.tar.zst"),
+        (Method::GET, "/api/admin/backups/rxferrix-x.tar.zst"),
+        (Method::DELETE, "/api/admin/backups/rxferrix-x.tar.zst"),
         (Method::GET, "/api/admin/export/ops_docs"),
         (Method::POST, "/api/admin/import/ops_docs"),
-        (Method::POST, "/api/admin/backups/ferrix-x.tar.zst/restore"),
+        (Method::POST, "/api/admin/backups/rxferrix-x.tar.zst/restore"),
         (Method::GET, "/api/admin/restore"),
         (Method::POST, "/api/admin/restore"),
         (Method::DELETE, "/api/admin/restore"),
@@ -1054,7 +1054,7 @@ async fn ops_admin_backup_export_and_import_flows() {
     assert_eq!(r.status(), 201);
     let info: Value = r.json().await.unwrap();
     let name = info["name"].as_str().unwrap().to_string();
-    assert!(name.starts_with("ferrix-") && name.ends_with(".tar.zst") && info["ts"].as_u64().unwrap() > 0, "{info}");
+    assert!(name.starts_with("rxferrix-") && name.ends_with(".tar.zst") && info["ts"].as_u64().unwrap() > 0, "{info}");
     let r = a
         .req(Method::POST, "/api/admin/backups", Some(&a.admin))
         .json(&json!({ "includeSecret": true }))
@@ -1282,7 +1282,7 @@ async fn staged_restores_cancel_and_refuse_bad_archives() {
     let mut bytes = std::fs::read(&archive).unwrap();
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0xff;
-    let corrupt = target.path().join("ferrix-corrupt.tar.zst");
+    let corrupt = target.path().join("rxferrix-corrupt.tar.zst");
     std::fs::write(&corrupt, &bytes).unwrap();
     let err = restore::stage(dest.path(), &corrupt, "corrupt", None).await.unwrap_err();
     let user = err.chain().find_map(|c| c.downcast_ref::<rxferrix::UserError>()).expect("a user error");
@@ -1291,7 +1291,7 @@ async fn staged_restores_cancel_and_refuse_bad_archives() {
     let leftovers: Vec<String> = std::fs::read_dir(dest.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(".ferrix-") || n.starts_with(".pending-restore"))
+        .filter(|n| n.starts_with(".rxferrix-") || n.starts_with(".pending-restore"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 
@@ -1326,7 +1326,8 @@ async fn staged_restore_over_http() {
     // Restart needs a staged restore; unknown backups are 404.
     let r = a.req(Method::POST, "/api/admin/restore/restart", Some(&a.admin)).send().await.unwrap();
     assert_eq!(r.status(), 409);
-    let r = a.req(Method::POST, "/api/admin/backups/ferrix-nope.tar.zst/restore", Some(&a.admin)).send().await.unwrap();
+    let r =
+        a.req(Method::POST, "/api/admin/backups/rxferrix-nope.tar.zst/restore", Some(&a.admin)).send().await.unwrap();
     assert_eq!(r.status(), 404);
 
     // Stage a backup of the target: validated, pending, shown in the listing; the server keeps serving its data.

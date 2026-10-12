@@ -3,7 +3,7 @@ import { RxFerrixAuth, RxFerrixClient, RxFerrixError, MemoryAuthStorage, getAuth
 import { FakeServer } from "../src/testing.js";
 
 const URL_BASE = "http://localhost:3210";
-const KEY = `ferrix.auth:${URL_BASE}`;
+const KEY = `rxferrix.auth:${URL_BASE}`;
 
 /** A JWT-shaped token whose payload carries `exp` (the client schedules refreshes from it). */
 function jwt(name: string, expSeconds: number): string {

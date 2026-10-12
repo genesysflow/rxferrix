@@ -35,7 +35,7 @@ const DDL: &str =
 /// uses (recursively, so a change inside a nested struct or enum counts too), and its indexes.
 pub fn fingerprint(def: &TableDef) -> String {
     let mut h = blake3::Hasher::new();
-    h.update(b"ferrix-schema-v1\n");
+    h.update(b"rxferrix-schema-v1\n");
     match crate::codegen::with_session(def.ts) {
         Ok((ts, decls)) => {
             h.update(ts.as_bytes());

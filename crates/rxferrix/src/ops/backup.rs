@@ -5,7 +5,7 @@
 //! committing while it runs; only WAL checkpoints wait for it). The copy is compact and self-contained (no `-wal`).
 //! `aux.db` (the execution log) is copied the same way when asked for.
 //!
-//! **Archive** (`ferrix-<UTC time>.tar.zst`, `ferrix-auto-<UTC time>.tar.zst` for scheduled ones): a zstd-compressed
+//! **Archive** (`rxferrix-<UTC time>.tar.zst`, `rxferrix-auto-<UTC time>.tar.zst` for scheduled ones): a zstd-compressed
 //! tar with
 //!
 //! | Entry | When |
@@ -49,16 +49,16 @@ use crate::runtime::App;
 use crate::storage::{StorageBackend, StorageConfig};
 
 /// `manifest.json`'s `format`.
-pub const MANIFEST_FORMAT: &str = "ferrix-backup";
+pub const MANIFEST_FORMAT: &str = "rxferrix-backup";
 /// `manifest.json`'s `version`.
 pub const MANIFEST_VERSION: u32 = 1;
 /// Name prefix of every backup archive; scheduled ones continue with `auto-`.
-pub const NAME_PREFIX: &str = "ferrix-";
-const AUTO_PREFIX: &str = "ferrix-auto-";
+pub const NAME_PREFIX: &str = "rxferrix-";
+const AUTO_PREFIX: &str = "rxferrix-auto-";
 /// File extension of backup archives.
 pub const EXTENSION: &str = ".tar.zst";
 /// Name of the cron that runs scheduled backups.
-pub const CRON_NAME: &str = "ferrix-backup";
+pub const CRON_NAME: &str = "rxferrix-backup";
 const SECRET_FILE: &str = "auth_secret.key";
 
 /// What a backup contains besides `data.db`.
@@ -79,13 +79,13 @@ pub struct BackupSpec {
 #[serde(rename_all = "camelCase")]
 #[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
 pub struct BackupInfo {
-    /// The archive's file name, e.g. `ferrix-20261009T120000.000Z.tar.zst`.
+    /// The archive's file name, e.g. `rxferrix-20261009T120000.000Z.tar.zst`.
     pub name: String,
     #[ts(type = "number")]
     pub bytes: u64,
     /// When it was written (ms since the epoch).
     pub created_at: f64,
-    /// Written by a scheduled backup (`ferrix-auto-*`; only those are rotated).
+    /// Written by a scheduled backup (`rxferrix-auto-*`; only those are rotated).
     pub scheduled: bool,
     /// The commit ts of the snapshot. Embedded in the archive name, so listings report it too; `None` for archives
     /// named before that (or renamed by hand).
@@ -110,7 +110,7 @@ pub struct Manifest {
     pub version: u32,
     /// ms since the epoch.
     pub created_at: f64,
-    pub ferrix_version: String,
+    pub rxferrix_version: String,
     /// The commit ts of the `data.db` snapshot.
     pub ts: u64,
     /// The wall-clock ms of that commit (`_meta.time`; 0 in archives written before it was recorded).
@@ -244,7 +244,7 @@ fn prepare_copy(db: &Path) -> crate::Result<(u64, f64)> {
 pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now_ms: f64) -> crate::Result<Manifest> {
     let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let work = tempfile::Builder::new().prefix(".ferrix-backup-").tempdir_in(&source.dir)?;
+    let work = tempfile::Builder::new().prefix(".rxferrix-backup-").tempdir_in(&source.dir)?;
     let data = work.path().join("data.db");
     snapshot_db(&source.dir.join("data.db"), &data)?;
     let (ts, commit_time) = prepare_copy(&data)?;
@@ -257,7 +257,7 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
         None
     };
 
-    let partial = tempfile::Builder::new().prefix(".ferrix-backup-").suffix(".partial").tempfile_in(parent)?;
+    let partial = tempfile::Builder::new().prefix(".rxferrix-backup-").suffix(".partial").tempfile_in(parent)?;
     let mtime = (now_ms / 1000.0) as u64;
     let encoder = zstd::Encoder::new(partial.as_file(), 3)?;
     let mut tar = tar::Builder::new(encoder);
@@ -300,7 +300,7 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
         format: MANIFEST_FORMAT.into(),
         version: MANIFEST_VERSION,
         created_at: now_ms,
-        ferrix_version: env!("CARGO_PKG_VERSION").into(),
+        rxferrix_version: env!("CARGO_PKG_VERSION").into(),
         ts,
         commit_time,
         storage: storage.into(),
@@ -370,7 +370,7 @@ impl BackupTarget {
 
     /// Check that archives can be stored here: write a small object, find it in a listing, delete it.
     pub async fn probe(&self) -> crate::Result<()> {
-        let name = format!(".ferrix-probe-{}", rand::random::<u64>());
+        let name = format!(".rxferrix-probe-{}", rand::random::<u64>());
         let path = self.path(&name);
         self.store.put(&path, b"rxferrix backup destination check".to_vec().into()).await.context("writing")?;
         let head = self.store.head(&path).await.context("reading it back");
@@ -502,7 +502,7 @@ impl BackupTarget {
         Ok(true)
     }
 
-    /// Keep the newest `keep` scheduled archives (`ferrix-auto-*`) and delete the rest. Returns the deleted names.
+    /// Keep the newest `keep` scheduled archives (`rxferrix-auto-*`) and delete the rest. Returns the deleted names.
     pub async fn rotate(&self, keep: usize) -> crate::Result<Vec<String>> {
         let scheduled: Vec<BackupInfo> = self.list().await?.into_iter().filter(|b| b.scheduled).collect();
         let mut deleted = Vec::new();
@@ -514,7 +514,7 @@ impl BackupTarget {
     }
 }
 
-/// Archive names are `ferrix-<letters, digits, '.', '-', '_'>.tar.zst`: never a path.
+/// Archive names are `rxferrix-<letters, digits, '.', '-', '_'>.tar.zst`: never a path.
 pub fn validate_name(name: &str) -> crate::Result<()> {
     let ok = name.starts_with(NAME_PREFIX)
         && name.ends_with(EXTENSION)
@@ -522,7 +522,9 @@ pub fn validate_name(name: &str) -> crate::Result<()> {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         && !name.contains("..");
     if !ok {
-        return Err(UserError::new("invalid_name", format!("`{name}` is not a backup name (ferrix-….tar.zst)")).into());
+        return Err(
+            UserError::new("invalid_name", format!("`{name}` is not a backup name (rxferrix-….tar.zst)")).into()
+        );
     }
     Ok(())
 }
@@ -533,7 +535,7 @@ pub fn archive_name(now_ms: f64, scheduled: bool) -> String {
     format!("{prefix}{}{EXTENSION}", super::file_timestamp(now_ms))
 }
 
-/// The stored name of a backup made at `now_ms` whose snapshot is at commit `ts`: `ferrix-<time>-ts<ts>.tar.zst`. The
+/// The stored name of a backup made at `now_ms` whose snapshot is at commit `ts`: `rxferrix-<time>-ts<ts>.tar.zst`. The
 /// ts in the name lets [`BackupTarget::list`] report it without opening archives (cheap on S3 too); names still sort
 /// chronologically since the time comes first.
 pub fn archive_name_with_ts(now_ms: f64, scheduled: bool, ts: u64) -> String {
@@ -571,7 +573,7 @@ pub(crate) async fn create_with_manifest(
     let now = app.db().clock().now_ms();
     let name = archive_name(now, scheduled);
     let source = SnapshotSource::of_app(app);
-    let work = tempfile::Builder::new().prefix(".ferrix-backup-").tempdir_in(app.dir())?;
+    let work = tempfile::Builder::new().prefix(".rxferrix-backup-").tempdir_in(app.dir())?;
     let local = work.path().join(&name);
     let (spec2, local2, source2) = (*spec, local.clone(), source.clone());
     let manifest = tokio::task::spawn_blocking(move || write_archive(&source2, &spec2, &local2, now)).await??;
@@ -864,7 +866,7 @@ pub fn apply_staged(
 /// Restore `archive` into the data directory `dir` (offline). See the module docs.
 pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> crate::Result<RestoreReport> {
     let _lock = super::DirLock::acquire(dir)?;
-    let staging = tempfile::Builder::new().prefix(".ferrix-restore-").tempdir_in(dir)?;
+    let staging = tempfile::Builder::new().prefix(".rxferrix-restore-").tempdir_in(dir)?;
     let manifest = prepare(archive, staging.path(), options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
     apply_staged(staging.path(), dir, manifest, options.storage_dir.clone(), &previous)
@@ -877,18 +879,20 @@ mod tests {
     #[test]
     fn names() {
         let n = archive_name(1_760_011_200_123.0, false);
-        assert_eq!(n, "ferrix-20251009T120000.123Z.tar.zst");
+        assert_eq!(n, "rxferrix-20251009T120000.123Z.tar.zst");
         assert!(validate_name(&n).is_ok());
-        assert!(archive_name(0.0, true).starts_with("ferrix-auto-"));
+        assert!(archive_name(0.0, true).starts_with("rxferrix-auto-"));
         let with_ts = archive_name_with_ts(1_760_011_200_123.0, true, 4321);
         assert!(
             validate_name(&with_ts).is_ok()
-                && with_ts.starts_with("ferrix-auto-")
+                && with_ts.starts_with("rxferrix-auto-")
                 && with_ts.ends_with("-ts4321.tar.zst")
         );
         assert_eq!(ts_from_name(&with_ts), Some(4321));
         assert_eq!(ts_from_name(&n), None, "older names have no ts");
-        for bad in ["../ferrix-x.tar.zst", "ferrix-a/b.tar.zst", "x.tar.zst", "ferrix-x.tar", "ferrix-..tar.zst"] {
+        for bad in
+            ["../rxferrix-x.tar.zst", "rxferrix-a/b.tar.zst", "x.tar.zst", "rxferrix-x.tar", "rxferrix-..tar.zst"]
+        {
             assert!(validate_name(bad).is_err(), "{bad}");
         }
         assert_eq!(entry_kind("storage/../data.db"), None);
@@ -909,7 +913,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let archive = work.path().join("ferrix-x.tar.zst");
+        let archive = work.path().join("rxferrix-x.tar.zst");
         {
             let out = std::fs::File::create(&archive).unwrap();
             let mut tar = tar::Builder::new(zstd::Encoder::new(out, 3).unwrap());
@@ -918,7 +922,7 @@ mod tests {
                 format: MANIFEST_FORMAT.into(),
                 version: MANIFEST_VERSION,
                 created_at: 0.0,
-                ferrix_version: "test".into(),
+                rxferrix_version: "test".into(),
                 ts: 0,
                 commit_time: 0.0,
                 storage: "excluded".into(),

@@ -1,5 +1,5 @@
 //! Backups configured from the dashboard (`_settings` row `backups`, `rxferrix::settings::backups`): the schedule
-//! becomes the `ferrix-backup` cron at runtime (changed, kept across restarts, withdrawn), the destination is used by
+//! becomes the `rxferrix-backup` cron at runtime (changed, kept across restarts, withdrawn), the destination is used by
 //! scheduled and manual backups, an S3 destination uses its own credentials (encrypted, masked, never logged), and
 //! the command line wins.
 
@@ -33,7 +33,7 @@ async fn update(http: &Http, admin: &str, args: Value) -> (u16, Value) {
     http.call("action", "_system/settings:update", args, Some(admin)).await
 }
 
-/// The `ferrix-backup` row on the Scheduler page, if any.
+/// The `rxferrix-backup` row on the Scheduler page, if any.
 async fn backup_cron(http: &Http, admin: &str) -> Option<Value> {
     let crons = http.ok("query", "_system/scheduler:crons", json!({}), admin).await;
     crons.as_array().unwrap().iter().find(|c| c["name"] == CRON_NAME).cloned()
@@ -162,7 +162,7 @@ async fn an_s3_destination_uses_its_own_credentials_encrypted_and_never_shown() 
     t.advance_time(Duration::from_secs(3601)).await.unwrap();
     let keys: Vec<String> = fake.objects.lock().unwrap().keys().cloned().collect();
     assert_eq!(keys.len(), 2, "the manual backup and the newest scheduled one: {keys:?}");
-    assert!(keys.iter().all(|k| k.starts_with("/backups-bucket/prod/db/ferrix-")), "{keys:?}");
+    assert!(keys.iter().all(|k| k.starts_with("/backups-bucket/prod/db/rxferrix-")), "{keys:?}");
     let list = listing(&http, &admin).await;
     assert_eq!((list["target"].as_str().unwrap(), scheduled(&list)), ("s3://backups-bucket/prod/db", 1), "{list}");
     let name = made["name"].as_str().unwrap();

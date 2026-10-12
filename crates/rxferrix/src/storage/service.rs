@@ -214,7 +214,7 @@ impl StorageService {
             .or(public_url)
             .map(|u| u.trim_end_matches('/').to_string())
             .unwrap_or_default();
-        let file_url_key = blake3::derive_key("ferrix storage v1 signed file url HMAC key", &key);
+        let file_url_key = blake3::derive_key("rxferrix storage v1 signed file url HMAC key", &key);
         let thumbnail_permits = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
         Ok(StorageService {
             config,

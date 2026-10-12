@@ -8,7 +8,7 @@
 //! | `<table>.jsonl` | one document per line, exactly as stored (with `_id` and `_creationTime`) |
 //! | `<table>.csv` | with `--format csv`: a header (`_id`, `_creationTime`, then every other top-level field, sorted) and one row per document; strings as is, `null` and missing fields empty, other values as JSON |
 //! | `files/<storage id>` | the blobs of exported `_storage` documents (unless `--no-files`) |
-//! | `manifest.json` | `{ format: "ferrix-export", version, documentFormat, exportedAt, ts, ferrixVersion, tables: [{ name, number, documents, file }], catalog: { <table>: <number> }, files, missingFiles }` |
+//! | `manifest.json` | `{ format: "rxferrix-export", version, documentFormat, exportedAt, ts, rxferrixVersion, tables: [{ name, number, documents, file }], catalog: { <table>: <number> }, files, missingFiles }` |
 //!
 //! By default every app table is exported (not the `_`-prefixed system tables, which `--tables` can name).
 //!
@@ -49,7 +49,7 @@ use crate::runtime::App;
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD};
 
 /// `manifest.json`'s `format`.
-pub const EXPORT_FORMAT: &str = "ferrix-export";
+pub const EXPORT_FORMAT: &str = "rxferrix-export";
 pub const EXPORT_VERSION: u32 = 1;
 /// The default number of documents per import transaction.
 pub const DEFAULT_BATCH_SIZE: usize = 500;
@@ -289,7 +289,7 @@ pub struct ExportManifest {
     pub document_format: ExportFormat,
     pub exported_at: f64,
     pub ts: u64,
-    pub ferrix_version: String,
+    pub rxferrix_version: String,
     pub tables: Vec<ExportedTable>,
     /// Every table of the source database with its number (to rewrite ids on import when numbers differ).
     pub catalog: std::collections::BTreeMap<String, u32>,
@@ -357,7 +357,7 @@ pub async fn export_to_dir(
             document_format: opts.format,
             exported_at: crate::db::wall_clock_ms(),
             ts: txn.ts()?,
-            ferrix_version: env!("CARGO_PKG_VERSION").into(),
+            rxferrix_version: env!("CARGO_PKG_VERSION").into(),
             tables,
             catalog: all.into_iter().map(|t| (t.name, t.number)).collect(),
             files: 0,

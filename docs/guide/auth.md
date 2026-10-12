@@ -31,6 +31,7 @@ and `useCurrentUser()`:
 const auth = getAuth(client);
 await auth.signIn({ email, password });           // or signUp, requestMagicLink + verifyCode, signInWithOAuth("github")
 await auth.handleRedirectCallback();              // on the page OAuth and email links return to
+await auth.changePassword(current, newPassword);   // signed in; ends the user's other sessions
 ```
 
 Access tokens are HS256 JWTs (15 minutes by default) signed with a key derived from `<data dir>/auth_secret.key`;

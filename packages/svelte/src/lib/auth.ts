@@ -28,6 +28,7 @@ export interface UseAuthResult extends AuthState {
   handleRedirectCallback: RxFerrixAuth["handleRedirectCallback"];
   requestPasswordReset: RxFerrixAuth["requestPasswordReset"];
   resetPassword: RxFerrixAuth["resetPassword"];
+  changePassword: RxFerrixAuth["changePassword"];
   requestMagicLink: RxFerrixAuth["requestMagicLink"];
   verifyCode: RxFerrixAuth["verifyCode"];
   verifyMagicLink: RxFerrixAuth["verifyMagicLink"];
@@ -68,6 +69,7 @@ export function useAuth(options: { client?: RxFerrixClient } = {}): UseAuthResul
     handleRedirectCallback: auth.handleRedirectCallback.bind(auth),
     requestPasswordReset: auth.requestPasswordReset.bind(auth),
     resetPassword: auth.resetPassword.bind(auth),
+    changePassword: auth.changePassword.bind(auth),
     requestMagicLink: auth.requestMagicLink.bind(auth),
     verifyCode: auth.verifyCode.bind(auth),
     verifyMagicLink: auth.verifyMagicLink.bind(auth),

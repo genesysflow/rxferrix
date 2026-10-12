@@ -116,6 +116,16 @@ pub(crate) async fn upgrade_password_hash(
 
 /// Set (or add) a user's password and end all their sessions.
 pub(crate) async fn set_password(app: &App, user: Id<User>, password_hash: String) -> crate::Result<()> {
+    set_password_keeping(app, user, password_hash, None).await
+}
+
+/// Set (or add) a user's password and end their sessions, except `keep` (the session making the change).
+pub(crate) async fn set_password_keeping(
+    app: &App,
+    user: Id<User>,
+    password_hash: String,
+    keep: Option<Id<Session>>,
+) -> crate::Result<()> {
     write(app, |db| async move {
         match credential_of(&db, user).await? {
             Some(c) => db.replace(c.id, Credential { user, password_hash }).await?,
@@ -125,12 +135,17 @@ pub(crate) async fn set_password(app: &App, user: Id<User>, password_hash: Strin
         }
         let sessions =
             db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(user))).collect().await?;
-        for s in sessions {
+        for s in sessions.into_iter().filter(|s| Some(s.id) != keep) {
             delete_session_in(&db, s.id).await?;
         }
         Ok(())
     })
     .await
+}
+
+/// A user's password hash, if they have a password.
+pub(crate) async fn password_hash_of(app: &App, user: Id<User>) -> crate::Result<Option<String>> {
+    read(app, |db| async move { Ok(credential_of(&db, user).await?.map(|c| c.value.password_hash)) }).await
 }
 
 pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Result<()> {

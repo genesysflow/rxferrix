@@ -681,6 +681,34 @@ impl AuthService {
         self.start_session(app, Principal::User(user), client, Some(SignInMethod::PasswordReset)).await
     }
 
+    /// Change the password of the user signed in with `access_token`, who proves it's them with `current`. The user's
+    /// other sessions end; the one making the change stays signed in. A user without a password (OAuth only) sets one
+    /// through a password reset instead.
+    pub async fn change_password(
+        &self,
+        app: &App,
+        access_token: &str,
+        current: String,
+        new_password: String,
+    ) -> AuthResult<()> {
+        self.require_password()?;
+        let identity = self.authenticate(app, access_token).await.map_err(super::http::token_failure)?.identity;
+        let user = identity.user_id.as_deref().and_then(|u| u.parse::<Id<User>>().ok());
+        let Some(user) = user else {
+            return Err(AuthFailure::new(403, "forbidden", "Only a signed-in user can change their password here"));
+        };
+        let session = identity.session_id.as_deref().and_then(|s| s.parse::<Id<Session>>().ok());
+        password::check_password_policy(&new_password)?;
+        // Always runs the hash check (against a dummy for users without a password), like sign-in.
+        let stored = store::password_hash_of(app, user).await?;
+        if !password::verify(current, stored).await {
+            return Err(AuthFailure::new(400, "invalid_current_password", "The current password is not correct"));
+        }
+        let hash = password::hash(new_password).await?;
+        store::set_password_keeping(app, user, hash, session).await?;
+        Ok(())
+    }
+
     /// Send a magic link + one-time code. Always succeeds (no enumeration): unknown emails get one too when
     /// sign-ups are allowed, and nothing otherwise.
     pub async fn request_magic_link(&self, app: &App, email: &str, redirect_to: Option<&str>) -> AuthResult<()> {

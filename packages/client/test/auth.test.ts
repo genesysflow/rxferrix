@@ -245,6 +245,7 @@ describe("RxFerrixAuth", () => {
       "/api/auth/magic/request": ok,
       "/api/auth/magic/verify": () => ({ status: 200, body: t }),
       "/api/auth/verify-email/confirm": ok,
+      "/api/auth/password/change": ok,
     });
     const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     await openAndDrain();
@@ -255,6 +256,9 @@ describe("RxFerrixAuth", () => {
     await auth.requestMagicLink({ email: "a@b.co" });
     await auth.verifyCode({ email: "a@b.co", code: "654321" });
     await auth.verifyEmail({ token: "vt" });
+    await auth.changePassword("new password", "newer password");
+    const changeInit = (fetch as unknown as { mock: { calls: [unknown, RequestInit][] } }).mock.calls.at(-1)![1];
+    expect((changeInit.headers as Record<string, string>).Authorization).toBe(`Bearer ${t.accessToken}`);
     expect(calls.map((c) => [c.path, c.body])).toEqual([
       ["/api/auth/signup", { email: "a@b.co", password: "long enough" }],
       ["/api/auth/reset/request", { email: "a@b.co", redirectTo: "http://app.test/reset" }],
@@ -262,6 +266,7 @@ describe("RxFerrixAuth", () => {
       ["/api/auth/magic/request", { email: "a@b.co" }],
       ["/api/auth/magic/verify", { email: "a@b.co", code: "654321" }],
       ["/api/auth/verify-email/confirm", { token: "vt" }],
+      ["/api/auth/password/change", { currentPassword: "new password", newPassword: "newer password" }],
     ]);
     expect(JSON.parse(storage.getItem(KEY)!).accessToken).toBe(t.accessToken);
   });

@@ -28,6 +28,7 @@ export type AuthActions = Pick<
   | "handleRedirectCallback"
   | "requestPasswordReset"
   | "resetPassword"
+  | "changePassword"
   | "requestMagicLink"
   | "verifyCode"
   | "verifyMagicLink"
@@ -50,6 +51,7 @@ export function useAuthActions(): AuthActions {
       handleRedirectCallback: auth.handleRedirectCallback.bind(auth),
       requestPasswordReset: auth.requestPasswordReset.bind(auth),
       resetPassword: auth.resetPassword.bind(auth),
+      changePassword: auth.changePassword.bind(auth),
       requestMagicLink: auth.requestMagicLink.bind(auth),
       verifyCode: auth.verifyCode.bind(auth),
       verifyMagicLink: auth.verifyMagicLink.bind(auth),

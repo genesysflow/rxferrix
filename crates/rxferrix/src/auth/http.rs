@@ -40,6 +40,7 @@ pub fn routes() -> Router<App> {
         .route("/api/auth/verify-email/confirm", post(verify_email_confirm))
         .route("/api/auth/reset/request", post(reset_request))
         .route("/api/auth/reset/confirm", post(reset_confirm))
+        .route("/api/auth/password/change", post(change_password))
         .route("/api/auth/magic/request", post(magic_request))
         .route("/api/auth/magic/verify", post(magic_verify))
         .route("/api/auth/oauth/{provider}", get(oauth_start))
@@ -281,6 +282,24 @@ async fn verify_email_confirm(State(app): State<App>, caller: Caller, body: Byte
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let b: CodeBody = parse(&body)?;
         app.auth().confirm_email_verification(&app, b.proof()?).await?;
+        Ok(json!({}))
+    }
+    .await;
+    reply(result)
+}
+
+async fn change_password(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        current_password: String,
+        new_password: String,
+    }
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: Body = parse(&body)?;
+        let token = bearer_token(&headers).ok_or_else(|| AuthFailure::new(401, "unauthenticated", "Sign in first"))?;
+        app.auth().change_password(&app, token, b.current_password, b.new_password).await?;
         Ok(json!({}))
     }
     .await;

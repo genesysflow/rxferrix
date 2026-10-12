@@ -523,6 +523,16 @@ export class RxFerrixAuth {
   }
 
   /** Set a new password with the reset link token or code; ends other sessions and signs in. */
+  /**
+   * Change the signed-in user's password; `currentPassword` proves it's them. Their other sessions end, this one stays
+   * signed in. Fails with an `RxFerrixError` code such as `invalid_current_password` or `weak_password`.
+   */
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    const token = await this.getAccessToken();
+    if (!token) throw new RxFerrixError("Sign in first", { code: "unauthenticated" });
+    await this.post("password/change", { currentPassword, newPassword }, token);
+  }
+
   async resetPassword(proof: CodeProof, password: string): Promise<void> {
     await this.signedIn(await this.post<AuthTokens>("reset/confirm", { ...proof, password }));
   }

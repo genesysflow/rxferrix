@@ -38,6 +38,44 @@ pub struct AuthTokens {
     pub admin_id: Option<String>,
 }
 
+/// A successful user sign-in, as [`super::AuthConfig::on_sign_in`] sees it.
+#[derive(Debug, Clone)]
+pub struct SignIn {
+    pub user: Id<User>,
+    /// The session it started.
+    pub session: Id<Session>,
+    pub method: SignInMethod,
+    /// User agent and IP address of the client.
+    pub client: ClientInfo,
+}
+
+/// How a user signed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignInMethod {
+    Password,
+    /// A sign-up that signed the new user in.
+    SignUp,
+    /// Setting a new password with a reset code signs the user in.
+    PasswordReset,
+    /// A magic link or a one-time code.
+    MagicLink,
+    /// The OAuth provider's id (`google`, `github`, ...).
+    OAuth(String),
+}
+
+impl std::fmt::Display for SignInMethod {
+    /// `password`, `sign_up`, `password_reset`, `magic_link`, `oauth:<provider>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignInMethod::Password => f.write_str("password"),
+            SignInMethod::SignUp => f.write_str("sign_up"),
+            SignInMethod::PasswordReset => f.write_str("password_reset"),
+            SignInMethod::MagicLink => f.write_str("magic_link"),
+            SignInMethod::OAuth(provider) => write!(f, "oauth:{provider}"),
+        }
+    }
+}
+
 /// An access token that passed validation.
 #[derive(Debug, Clone)]
 pub struct Authenticated {
@@ -341,15 +379,26 @@ impl AuthService {
         AuthTokens { access_token, refresh_token: refresh, expires_in: ttl, user_id, admin_id }
     }
 
-    async fn start_session(&self, app: &App, principal: Principal, client: ClientInfo) -> AuthResult<AuthTokens> {
+    /// Start a session. A user sign-in (`method`) then runs the `on_sign_in` hook.
+    async fn start_session(
+        &self,
+        app: &App,
+        principal: Principal,
+        client: ClientInfo,
+        method: Option<SignInMethod>,
+    ) -> AuthResult<AuthTokens> {
         let (now, ttl) = (now_ms(), self.session_ttl_ms());
-        let (session, refresh) = store::create_session(app, &self.keys, principal, client, now, ttl).await?;
-        Ok(self.issue(session, principal, refresh, now + ttl))
+        let (session, refresh) = store::create_session(app, &self.keys, principal, client.clone(), now, ttl).await?;
+        let tokens = self.issue(session, principal, refresh, now + ttl);
+        if let (Some(method), Principal::User(user), Some(hook)) = (method, principal, &self.config.on_sign_in) {
+            hook(app.clone(), SignIn { user, session, method, client }).await;
+        }
+        Ok(tokens)
     }
 
     /// Mint tokens for `user` without credentials, e.g. from a test or an admin tool.
     pub async fn sign_in_as(&self, app: &App, user: Id<User>) -> crate::Result<AuthTokens> {
-        self.start_session(app, Principal::User(user), ClientInfo::default())
+        self.start_session(app, Principal::User(user), ClientInfo::default(), None)
             .await
             .map_err(|f| anyhow::anyhow!(f.error))
     }
@@ -406,7 +455,9 @@ impl AuthService {
         if self.config.require_email_verification {
             return Ok(SignUpResult::VerificationRequired);
         }
-        Ok(SignUpResult::SignedIn(self.start_session(app, Principal::User(user), client).await?))
+        Ok(SignUpResult::SignedIn(
+            self.start_session(app, Principal::User(user), client, Some(SignInMethod::SignUp)).await?,
+        ))
     }
 
     pub async fn sign_in(
@@ -441,7 +492,7 @@ impl AuthService {
         if self.config.require_email_verification && !user.email_verified {
             return Err(AuthFailure::new(403, "email_not_verified", "Verify your email address before signing in"));
         }
-        self.start_session(app, Principal::User(user.id), client).await
+        self.start_session(app, Principal::User(user.id), client, Some(SignInMethod::Password)).await
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -627,7 +678,35 @@ impl AuthService {
         let hash = password::hash(new_password).await?;
         store::set_password(app, user, hash).await?;
         store::mark_email_verified(app, user).await?;
-        self.start_session(app, Principal::User(user), client).await
+        self.start_session(app, Principal::User(user), client, Some(SignInMethod::PasswordReset)).await
+    }
+
+    /// Change the password of the user signed in with `access_token`, who proves it's them with `current`. The user's
+    /// other sessions end; the one making the change stays signed in. A user without a password (OAuth only) sets one
+    /// through a password reset instead.
+    pub async fn change_password(
+        &self,
+        app: &App,
+        access_token: &str,
+        current: String,
+        new_password: String,
+    ) -> AuthResult<()> {
+        self.require_password()?;
+        let identity = self.authenticate(app, access_token).await.map_err(super::http::token_failure)?.identity;
+        let user = identity.user_id.as_deref().and_then(|u| u.parse::<Id<User>>().ok());
+        let Some(user) = user else {
+            return Err(AuthFailure::new(403, "forbidden", "Only a signed-in user can change their password here"));
+        };
+        let session = identity.session_id.as_deref().and_then(|s| s.parse::<Id<Session>>().ok());
+        password::check_password_policy(&new_password)?;
+        // Always runs the hash check (against a dummy for users without a password), like sign-in.
+        let stored = store::password_hash_of(app, user).await?;
+        if !password::verify(current, stored).await {
+            return Err(AuthFailure::new(400, "invalid_current_password", "The current password is not correct"));
+        }
+        let hash = password::hash(new_password).await?;
+        store::set_password_keeping(app, user, hash, session).await?;
+        Ok(())
     }
 
     /// Send a magic link + one-time code. Always succeeds (no enumeration): unknown emails get one too when
@@ -660,7 +739,7 @@ impl AuthService {
         }
         let row = self.consume(app, Purpose::SignIn, proof).await?;
         let user = store::passwordless_user(app, row.email, self.current().signups).await??;
-        self.start_session(app, Principal::User(user), client).await
+        self.start_session(app, Principal::User(user), client, Some(SignInMethod::MagicLink)).await
     }
 
     /// Finish an OAuth sign-in for a provider profile.
@@ -672,7 +751,7 @@ impl AuthService {
         client: ClientInfo,
     ) -> AuthResult<AuthTokens> {
         let user = store::oauth_user(app, provider.to_string(), profile, self.current().signups).await??;
-        self.start_session(app, Principal::User(user), client).await
+        self.start_session(app, Principal::User(user), client, Some(SignInMethod::OAuth(provider.to_string()))).await
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -692,7 +771,7 @@ impl AuthService {
             return Err(AuthFailure::invalid_credentials());
         }
         let admin = admin.expect("verified against a real hash");
-        self.start_session(app, Principal::Admin(admin.id), client).await
+        self.start_session(app, Principal::Admin(admin.id), client, None).await
     }
 
     /// Create an admin (CLI `admin create`).
@@ -748,7 +827,7 @@ impl AuthService {
         let hash = password::hash(password).await?;
         let admin = store::create_admin(app, email, hash, true).await??;
         *self.setup_token_hash.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.start_session(app, Principal::Admin(admin), client).await
+        self.start_session(app, Principal::Admin(admin), client, None).await
     }
 }
 

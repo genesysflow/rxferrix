@@ -984,3 +984,64 @@ async fn imported_bcrypt_password_signs_in_and_becomes_argon2() {
     assert_eq!(http.sign_in("ana@example.com", "correct horse").await.0, 200);
     assert_eq!(http.post("/api/auth/refresh", json!({ "refreshToken": other_refresh })).await.0, 200);
 }
+
+#[tokio::test]
+async fn on_sign_in_runs_after_each_user_sign_in() {
+    use rxferrix::auth::{SignIn, SignInMethod};
+    let mailer = MemoryMailer::new();
+    let seen: Arc<Mutex<Vec<SignIn>>> = Arc::default();
+    let hook_seen = seen.clone();
+    let config = config(&mailer).on_sign_in(move |_app, sign_in| {
+        let seen = hook_seen.clone();
+        async move { seen.lock().unwrap().push(sign_in) }
+    });
+    let t = TestApp::with_auth(config).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+
+    let up = http.sign_up("ana@example.com", "correct horse").await;
+    assert_eq!(http.sign_in("ana@example.com", "wrong horse").await.0, 401);
+    let (s, signed_in) = http.sign_in("ana@example.com", "correct horse").await;
+    assert_eq!(s, 200);
+    // Neither a refresh nor a credential-less session (`sign_in_as`) is a sign-in.
+    assert_eq!(
+        http.post("/api/auth/refresh", json!({ "refreshToken": token(&signed_in, "refreshToken") })).await.0,
+        200
+    );
+    let user = token(&up, "userId").parse().unwrap();
+    t.app().auth().sign_in_as(t.app(), user).await.unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    let methods: Vec<_> = seen.iter().map(|s| s.method.clone()).collect();
+    assert_eq!(methods, [SignInMethod::SignUp, SignInMethod::Password]);
+    assert!(seen.iter().all(|s| s.user.to_string() == token(&up, "userId")));
+    assert_ne!(seen[0].session, seen[1].session, "each sign-in starts its own session");
+    assert_eq!(SignInMethod::OAuth("google".into()).to_string(), "oauth:google");
+}
+
+#[tokio::test]
+async fn change_password_keeps_this_session_and_ends_the_others() {
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    let here = http.sign_up("ana@example.com", "correct horse").await;
+    let (_, elsewhere) = http.sign_in("ana@example.com", "correct horse").await;
+    let access = token(&here, "accessToken");
+    let change = |current: &str, new: &str| json!({ "currentPassword": current, "newPassword": new });
+
+    let (s, b) =
+        http.post_with("/api/auth/password/change", Some(&access), change("wrong horse", "brand new pass")).await;
+    assert_eq!((s, code_of(&b)), (400, "invalid_current_password"));
+    let (s, b) = http.post_with("/api/auth/password/change", Some(&access), change("correct horse", "short")).await;
+    assert_eq!((s, code_of(&b)), (400, "weak_password"));
+    let (s, b) = http.post("/api/auth/password/change", change("correct horse", "brand new pass")).await;
+    assert_eq!((s, code_of(&b)), (401, "unauthenticated"), "needs a session");
+
+    let (s, b) =
+        http.post_with("/api/auth/password/change", Some(&access), change("correct horse", "brand new pass")).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(http.sign_in("ana@example.com", "correct horse").await.0, 401);
+    assert_eq!(http.sign_in("ana@example.com", "brand new pass").await.0, 200);
+    let refresh = |v: &Value| json!({ "refreshToken": token(v, "refreshToken") });
+    assert_eq!(http.post("/api/auth/refresh", refresh(&here)).await.0, 200, "this session stays");
+    assert_eq!(http.post("/api/auth/refresh", refresh(&elsewhere)).await.0, 401, "the others end");
+}

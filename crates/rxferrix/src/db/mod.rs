@@ -49,8 +49,29 @@ use crate::keys;
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD, TableDef};
 use crate::writelog::{CommitEntry, WriteLog};
 
-/// Default number of reader connections.
-pub const DEFAULT_READERS: usize = 6;
+/// Default number of reader connections: one and a half per core (as `std::thread::available_parallelism`, which
+/// follows container CPU limits, counts them; `rxferrix serve`'s runtime has a worker thread per core).
+///
+/// A query holds a reader for its whole run, so with as many slow queries running as there are readers, every other
+/// query waits; and the SQLite calls run on the runtime's worker threads, so with far more readers than threads, a
+/// saturated CPU leaves slow queries crawling (each `.await` puts them behind every runnable fast one). Measured with
+/// `bench_readers` (integration tests, 2026-10-15) on 2, 4, 8 and 16 threads, half as many slow queries (tens of ms)
+/// as threads running next to fast ones: 1.5 readers per thread kept both going (8 threads: 109k fast queries/s at
+/// p50 0.3 ms and 148 slow/s), one per thread starved the fast ones once the slow ones took every reader (2.5k/s at
+/// p50 13 ms with 6 readers on 8 threads, the fixed default before), and two per thread the slow ones (4/s). It also
+/// matches what the subscription manager asks for (`sync::subscriptions`: a fast-lane runner per thread, plus half
+/// as many slow-lane ones). Readers are opened when first needed.
+pub fn default_readers() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (cores + cores / 2).max(2)
+}
+/// Default [`OpenOptions::writer_cache_size`]: the page cache of the connection all writes go through (SQLite's own
+/// default is 2 MB). Measured with `bench_indexes` and `bench_writes` (integration tests, 2026-10-15), 32 MiB made
+/// inserts into a table with 32 indexes 48% faster, patches of all their fields 56%, and 10-insert mutations 10%,
+/// and halved the p99 of read-then-insert mutations; one-insert mutations didn't change. 64 MiB gained nothing more,
+/// and made inserts at random places of a 200k-document table 8% slower (32 MiB: 3%). Pages are only allocated as
+/// they are used. Only the writer gets it: a reader's cache starts over whenever another connection has committed.
+pub const DEFAULT_WRITER_CACHE_SIZE: u64 = 32 << 20;
 
 /// Group commit: the most mutations one batch takes before it commits, even with more waiting.
 pub const MAX_BATCH: usize = 64;
@@ -63,6 +84,11 @@ pub const SLOW_WRITE: Duration = Duration::from_micros(500);
 /// A mutation holding the writer this long is logged as a warning (at most once a minute per path): every other write
 /// waited for it.
 pub const WARN_WRITE: Duration = Duration::from_millis(100);
+/// An index key longer than this is logged as a warning (at most once an hour per index, and when an index is
+/// backfilled): with the index id, the document id and the record header, its `index_entries` row nears the most of
+/// a row a 4 KiB B-tree page holds (1002 bytes, SQLite's `maxLocal`), past which the rest goes to an overflow page of
+/// its own. In `bench_index_key_length` (integration tests), that made scans of 100 entries 10x slower and lookups 2x.
+pub const WARN_KEY_BYTES: usize = 960;
 
 /// Fields drop in order: the HNSW thread is stopped (and its connection closed) first, the writer closes last, so
 /// the read-write connection is the last one and checkpoints the WAL when the database is dropped.
@@ -93,6 +119,8 @@ pub struct OpenOptions {
     /// default: a process crash loses nothing, a power loss may lose the last commits). With group commit this is one
     /// fsync per batch of mutations.
     pub fsync_commits: bool,
+    /// The most memory, in bytes, the writer connection's page cache may use ([`DEFAULT_WRITER_CACHE_SIZE`]).
+    pub writer_cache_size: u64,
     /// The schema check already ran on this database file (a takeover checked its copy before swapping it in,
     /// `crate::ops::takeover`): skip it, and open these tables as *migrating*.
     pub prechecked: Option<Vec<String>>,
@@ -101,10 +129,11 @@ pub struct OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         OpenOptions {
-            readers: DEFAULT_READERS,
+            readers: default_readers(),
             skip_schema_check: false,
             journal: false,
             fsync_commits: false,
+            writer_cache_size: DEFAULT_WRITER_CACHE_SIZE,
             prechecked: None,
         }
     }
@@ -139,6 +168,12 @@ impl Database {
         if options.fsync_commits {
             writer.pragma_update(None, "synchronous", "FULL")?;
         }
+        // A negative cache_size is in KiB.
+        writer.pragma_update(
+            None,
+            "cache_size",
+            -i64::try_from(options.writer_cache_size >> 10).unwrap_or(i64::MAX),
+        )?;
         dedup::ensure_schema(&writer)?;
         writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
@@ -1030,6 +1065,7 @@ impl WriteState {
                     storage::delete_index_entry(&self.conn, index.id, k)?;
                 }
                 if let Some(k) = &new_key {
+                    self.catalog.check_key_len(&table.name, index, k);
                     storage::insert_index_entry(&self.conn, index.id, k, &id.0)?;
                 }
             }
@@ -1330,6 +1366,17 @@ mod tests {
             let level = |c: &Connection| Ok(c.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?);
             let level = db.with_writer(level).await.unwrap();
             assert_eq!(level, expected, "fsync_commits = {fsync}");
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_cache_size_sets_the_writers_cache() {
+        for (size, expected_kib) in [(DEFAULT_WRITER_CACHE_SIZE, 32 << 10), (100 << 20, 100 << 10)] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = OpenOptions { writer_cache_size: size, ..Default::default() };
+            let db = Database::open_with(dir.path(), &[], &options).unwrap();
+            let cache = |c: &Connection| Ok(c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0))?);
+            assert_eq!(db.with_writer(cache).await.unwrap(), -expected_kib);
         }
     }
 }

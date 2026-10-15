@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures::FutureExt;
@@ -235,7 +235,8 @@ pub fn registered_tables() -> Vec<TableDef> {
 pub struct AppOptions {
     /// Show real error messages to clients instead of "Server Error", and send functions' log lines to clients.
     pub dev: bool,
-    /// Number of read-only connections.
+    /// Number of read-only connections: how many queries (and other reads) can run at once. Default: one and a half
+    /// per core ([`crate::db::default_readers`], which has the measurements).
     pub readers: usize,
     /// Sign-in methods, token lifetimes, email and OAuth settings (`crate::auth`).
     pub auth: crate::auth::AuthConfig,
@@ -266,6 +267,10 @@ pub struct AppOptions {
     /// in WAL mode): a process crash loses nothing, but a power loss or OS crash may lose the last commits. With group
     /// commit, one fsync covers a whole batch of mutations.
     pub fsync_commits: bool,
+    /// The most memory, in bytes, the page cache of the connection all writes go through may use. Default: 32 MiB
+    /// ([`crate::db::DEFAULT_WRITER_CACHE_SIZE`], which has the measurements); pages are only allocated as they are
+    /// used.
+    pub writer_cache_size: u64,
     /// Dev aid: now and then (at most once per this interval per query) run a query a second time in the same snapshot,
     /// and warn if the result differs (in the server log, and as a log line of the run, so in the execution log and,
     /// in dev mode, the client's console). Such a query depends on more than its arguments and the data it reads
@@ -307,7 +312,7 @@ impl Default for AppOptions {
     fn default() -> Self {
         AppOptions {
             dev: false,
-            readers: crate::db::DEFAULT_READERS,
+            readers: crate::db::default_readers(),
             auth: Default::default(),
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             query_timeout: DEFAULT_QUERY_TIMEOUT,
@@ -319,6 +324,7 @@ impl Default for AppOptions {
             ops: Default::default(),
             query_cache: QueryCacheOptions::default(),
             fsync_commits: false,
+            writer_cache_size: crate::db::DEFAULT_WRITER_CACHE_SIZE,
             determinism_check: None,
             olap: Default::default(),
         }
@@ -391,6 +397,8 @@ struct AppInner {
     determinism: Option<crate::determinism::DeterminismCheck>,
     /// The analytics copy, with `AppOptions::olap.enabled` (`crate::olap`).
     olap: OnceLock<Arc<crate::olap::OlapService>>,
+    /// The slow lane of one-off queries ([`crate::read_lanes`]).
+    read_lanes: crate::read_lanes::ReadLanes,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -545,6 +553,7 @@ impl App {
             // (`crate::ops::replicate`, `crate::olap`).
             journal: options.ops.replication.is_some() || options.olap.enabled,
             fsync_commits: options.fsync_commits,
+            writer_cache_size: options.writer_cache_size,
             prechecked: options.prechecked_schema.clone(),
         };
         let retention = options.log_retention.clone();
@@ -577,6 +586,7 @@ impl App {
             db.shared_clock(),
         )?;
         let storage = Arc::new(storage);
+        let readers = db.readers();
         let app = App {
             inner: Arc::new(AppInner {
                 db,
@@ -596,6 +606,7 @@ impl App {
                 draining: std::sync::atomic::AtomicBool::new(false),
                 determinism,
                 olap: OnceLock::new(),
+                read_lanes: crate::read_lanes::ReadLanes::new(readers),
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
@@ -851,6 +862,11 @@ impl App {
         Ok(serde_json::from_value(out)?)
     }
 
+    /// The slow lane of reads ([`crate::read_lanes`]).
+    pub(crate) fn read_lanes(&self) -> &crate::read_lanes::ReadLanes {
+        &self.inner.read_lanes
+    }
+
     pub(crate) async fn call_query(
         &self,
         path: &str,
@@ -858,11 +874,18 @@ impl App {
         identity: &Identity,
         allow_internal: bool,
     ) -> QueryRun {
+        let lanes = &self.inner.read_lanes;
+        let _slow = lanes.enter(path).await;
         let snapshot = match self.db().snapshot().await {
             Ok(s) => s,
             Err(e) => return QueryRun::not_run(e, 0),
         };
-        self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await
+        let started = Instant::now();
+        let run = self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await;
+        if self.lookup(path, FunctionKind::Query, allow_internal).is_ok() {
+            lanes.record(path, started.elapsed());
+        }
+        run
     }
 
     /// Run a query in an existing snapshot. Several of these may run concurrently on the same snapshot.

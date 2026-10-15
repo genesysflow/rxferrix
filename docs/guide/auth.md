@@ -31,6 +31,7 @@ and `useCurrentUser()`:
 const auth = getAuth(client);
 await auth.signIn({ email, password });           // or signUp, requestMagicLink + verifyCode, signInWithOAuth("github")
 await auth.handleRedirectCallback();              // on the page OAuth and email links return to
+await auth.changePassword(current, newPassword);   // signed in; ends the user's other sessions
 ```
 
 Access tokens are HS256 JWTs (15 minutes by default) signed with a key derived from `<data dir>/auth_secret.key`;
@@ -90,3 +91,18 @@ pub async fn send_confirmation(ctx: &ActionCtx, to: String, text: String, html: 
 
 From a mutation, schedule the action (`ctx.scheduler.run_after::<send_confirmation>(Duration::ZERO, ..)`), so the
 email goes out only if the mutation commits; a workpool adds retries.
+
+**Reacting to sign-ins.** `AuthConfig::on_sign_in` runs after each successful user sign-in that starts a session
+(password, sign-up, password reset, magic link, OAuth), e.g. to keep a login history:
+
+```rust
+AuthConfig::password().on_sign_in(|app, sign_in| async move {
+    // sign_in.user, sign_in.session, sign_in.method ("password", "oauth:google", ...), sign_in.client (ip, user agent)
+    if let Err(e) = app.mutation::<audit::record_sign_in>((sign_in.user, sign_in.method.to_string())).await {
+        tracing::warn!("recording a sign-in failed: {e:#}");
+    }
+})
+```
+
+The user is already signed in when it runs, and the response waits for it: keep it short.
+

@@ -79,6 +79,8 @@ pub struct Catalog {
     /// to them are validated leniently (see [`Catalog::is_migrating`]) until their last migration has run and the
     /// table passed the schema check again.
     migrating: std::sync::RwLock<std::collections::BTreeSet<String>>,
+    /// When a key longer than [`super::WARN_KEY_BYTES`] was last reported, per index ([`Catalog::check_key_len`]).
+    long_keys: std::sync::Mutex<HashMap<IndexId, std::time::Instant>>,
 }
 
 impl Catalog {
@@ -101,6 +103,28 @@ impl Catalog {
         } else {
             set.remove(table);
         }
+    }
+
+    /// Log a warning if `key`, just written to `index` of `table`, is longer than [`super::WARN_KEY_BYTES`] (at most
+    /// once an hour per index).
+    pub(crate) fn check_key_len(&self, table: &str, index: &IndexInfo, key: &[u8]) {
+        if key.len() <= super::WARN_KEY_BYTES {
+            return;
+        }
+        let mut warned = self.long_keys.lock().unwrap_or_else(|e| e.into_inner());
+        if warned.get(&index.id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3600)) {
+            return;
+        }
+        warned.insert(index.id, std::time::Instant::now());
+        tracing::warn!(
+            table,
+            index = %index.name,
+            key_bytes = key.len(),
+            "a {}-byte key (over {}) was written to the index `{table}.{}`. {LONG_KEY_ADVICE}",
+            key.len(),
+            super::WARN_KEY_BYTES,
+            index.name
+        );
     }
 
     pub fn table(&self, name: &str) -> anyhow::Result<&Arc<TableInfo>> {
@@ -254,7 +278,7 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
             if let Some(id) = rebuild_id
                 && name != BY_ID
             {
-                backfill(&tx, number, id, &keys::index_key_fields(fields))?;
+                backfill(&tx, (def.name, number), (name, id), &keys::index_key_fields(fields))?;
             }
         }
 
@@ -301,16 +325,19 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
             "index key encoding changed; rebuilding every index"
         );
         conn.execute("DELETE FROM index_entries", [])?;
-        let indexes: Vec<(IndexId, u32, String, String)> = conn
-            .prepare("SELECT index_id, table_number, name, fields FROM _indexes ORDER BY index_id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        let indexes: Vec<(IndexId, u32, String, String, String)> = conn
+            .prepare(
+                "SELECT i.index_id, i.table_number, t.name, i.name, i.fields FROM _indexes i
+                 JOIN _tables t ON t.table_number = i.table_number ORDER BY i.index_id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
             .collect::<Result<_, _>>()?;
-        for (id, table_number, name, fields) in indexes {
+        for (id, table_number, table, name, fields) in indexes {
             if name != BY_ID {
                 backfill(
                     conn,
-                    table_number,
-                    id,
+                    (&table, table_number),
+                    (&name, id),
                     &keys::index_key_fields(&serde_json::from_str::<Vec<String>>(&fields)?),
                 )?;
             }
@@ -334,17 +361,44 @@ fn upgrade_key_encoding(conn: &Connection) -> anyhow::Result<()> {
     storage::write_meta(conn, META_KEY_ENCODING, (keys::KEY_ENCODING_VERSION as i64).into())
 }
 
-/// Write the entries of one index; `key_fields` as in [`IndexInfo::key_fields`].
-fn backfill(conn: &Connection, table_number: u32, index_id: IndexId, key_fields: &[String]) -> anyhow::Result<()> {
+/// What the long-key warnings recommend (measured by `bench_index_key_length` in the integration tests).
+const LONG_KEY_ADVICE: &str = "Entries with keys that long don't fit in a page of the index's B-tree: each one \
+                               spills into an overflow page, which makes reading a range of the index about 10x slower \
+                               and lookups about 2x. Index a shorter value instead (a prefix of the long one, or a hash \
+                               of it when only equality matters).";
+
+/// Write the entries of the index `index` (id `index_id`) of `table`; `key_fields` as in [`IndexInfo::key_fields`].
+fn backfill(
+    conn: &Connection,
+    (table, table_number): (&str, u32),
+    (index, index_id): (&str, IndexId),
+    key_fields: &[String],
+) -> anyhow::Result<()> {
     let docs = storage::table_documents(conn, table_number)?;
     if !docs.is_empty() {
-        tracing::info!(table_number, index_id, docs = docs.len(), "backfilling index");
+        tracing::info!(table, index, docs = docs.len(), "backfilling index");
     }
+    let (mut long, mut longest) = (0, 0);
     for (id, json) in docs {
         let doc: Value = serde_json::from_str(&json)?;
         let obj = doc.as_object().context("stored document is not an object")?;
         let key = keys::index_key(obj, key_fields, &id);
+        if key.len() > super::WARN_KEY_BYTES {
+            long += 1;
+            longest = longest.max(key.len());
+        }
         storage::insert_index_entry(conn, index_id, &key, &id)?;
+    }
+    if long > 0 {
+        tracing::warn!(
+            table,
+            index,
+            long_keys = long,
+            longest_key_bytes = longest,
+            "the index `{table}.{index}` has {long} keys longer than {} bytes (the longest: {longest}). \
+             {LONG_KEY_ADVICE}",
+            super::WARN_KEY_BYTES
+        );
     }
     Ok(())
 }

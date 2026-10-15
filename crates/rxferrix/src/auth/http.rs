@@ -40,6 +40,7 @@ pub fn routes() -> Router<App> {
         .route("/api/auth/verify-email/confirm", post(verify_email_confirm))
         .route("/api/auth/reset/request", post(reset_request))
         .route("/api/auth/reset/confirm", post(reset_confirm))
+        .route("/api/auth/password/change", post(change_password))
         .route("/api/auth/magic/request", post(magic_request))
         .route("/api/auth/magic/verify", post(magic_verify))
         .route("/api/auth/oauth/{provider}", get(oauth_start))
@@ -96,14 +97,24 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> AuthResult<T> {
         .map_err(|e| AuthFailure::new(400, "invalid_request", format!("Invalid request body: {e}")))
 }
 
-/// The caller's IP and user agent.
-pub(crate) struct Caller {
+/// The caller's IP address and user agent, as RxFerrix records them on sessions: the last `X-Forwarded-For` entry
+/// when the server trusts its proxy (`AuthConfig::trust_proxy`, `--trust-proxy`), else the peer address. An axum
+/// extractor for the app's own routes (`RxFerrix::app_routes`), so an allowlist or a rate limit sees the same address
+/// RxFerrix does:
+///
+/// ```ignore
+/// async fn webhook(State(app): State<App>, caller: Caller, body: Bytes) -> StatusCode { /* caller.ip */ }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Caller {
+    /// `unknown` when the connection's address isn't available.
     pub ip: String,
     pub user_agent: Option<String>,
 }
 
 impl Caller {
-    fn client(&self) -> ClientInfo {
+    /// As recorded on a session.
+    pub fn client(&self) -> ClientInfo {
         ClientInfo { user_agent: self.user_agent.clone(), ip: Some(self.ip.clone()) }
     }
 }
@@ -271,6 +282,24 @@ async fn verify_email_confirm(State(app): State<App>, caller: Caller, body: Byte
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let b: CodeBody = parse(&body)?;
         app.auth().confirm_email_verification(&app, b.proof()?).await?;
+        Ok(json!({}))
+    }
+    .await;
+    reply(result)
+}
+
+async fn change_password(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        current_password: String,
+        new_password: String,
+    }
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: Body = parse(&body)?;
+        let token = bearer_token(&headers).ok_or_else(|| AuthFailure::new(401, "unauthenticated", "Sign in first"))?;
+        app.auth().change_password(&app, token, b.current_password, b.new_password).await?;
         Ok(json!({}))
     }
     .await;

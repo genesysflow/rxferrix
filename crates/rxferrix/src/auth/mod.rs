@@ -32,10 +32,11 @@ pub mod tokens;
 
 pub use config::{Apple, AuthConfig, Discord, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
+pub use http::Caller;
 pub use identity::{Auth, FORBIDDEN, Identity, UNAUTHENTICATED};
 pub use jwt::{JwtAlgorithm, JwtProvider};
 pub use revocation::{Revocations, SessionWatch};
-pub use service::{AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignUpResult};
+pub use service::{AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignIn, SignInMethod, SignUpResult};
 pub use store::{ClientInfo, normalize_email};
 pub use tables::{Account, Admin, Session, User, VerificationCode};
 

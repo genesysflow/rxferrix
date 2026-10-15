@@ -875,7 +875,8 @@ export interface BackupListing {
 }
 
 export interface ImportReport {
-  tables: { table: string; documents: number; replaced: number; deleted: number }[];
+  /** `droppedFields`: fields the documents had that the table doesn't define (left out), by path. */
+  tables: { table: string; documents: number; replaced: number; deleted: number; droppedFields: string[] }[];
   files: number;
   missingFiles: number;
   remappedIds: boolean;

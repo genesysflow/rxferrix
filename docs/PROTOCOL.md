@@ -277,6 +277,7 @@ sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, ex
 | `POST /api/auth/verify-email/confirm` | `{ token }` or `{ email, code }` | `{}`. 400 `invalid_code`. |
 | `POST /api/auth/reset/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). |
 | `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens`. Ends all other sessions of the user and marks the email verified. |
+| `POST /api/auth/password/change` | `{ currentPassword, newPassword }`, with the user's `Authorization: Bearer` access token | `{}`. Ends the user's other sessions; this one stays. `invalid_current_password` (400), `weak_password` (400), `unauthenticated` / `invalid_token` (401), `forbidden` (403, admin tokens). A user without a password sets one through a reset. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
 | `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
 | `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `rxferrix_oauth_state`, `SameSite=Lax` (plus `Secure` over https), or `SameSite=None; Secure` for Apple behind an https public URL). |

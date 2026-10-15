@@ -408,7 +408,7 @@ before opening the `App`.
 ```rust
 pub struct AppOptions {
     pub dev: bool,                    // real error messages and logLines to clients
-    pub readers: usize,
+    pub readers: usize,               // default 1.5 per core (`--readers`): reads that can run at once; a query holds one for its run
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
     pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with rxferrix::QueryTimeout
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below
@@ -419,6 +419,7 @@ pub struct AppOptions {
     pub ops: rxferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
     pub query_cache: rxferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
     pub fsync_commits: bool,          // default false (synchronous = NORMAL); true (`--fsync-commits`): commits wait for the disk (FULL)
+    pub writer_cache_size: u64,       // default 32 MiB (`--writer-cache-size`): the writer connection's page cache, taken as used
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
     pub olap: rxferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
 }
@@ -585,7 +586,10 @@ log lines; `Email { to, subject, body, html: Option<String> }`, built with `Emai
 an HTML version is sent as `multipart/alternative`; apps send their own email through the same mailer with
 `ActionCtx::send_email`), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
-`impersonation(bool)` (`POST /api/admin/impersonate`, default true).
+`impersonation(bool)` (`POST /api/admin/impersonate`, default true), `on_sign_in(|app: App, sign_in: SignIn| async
+{ .. })` (after each successful user sign-in that starts a session, awaited before the response; `SignIn { user,
+session, method, client }`, `SignInMethod::{Password, SignUp, PasswordReset, MagicLink, OAuth(provider)}`; not for
+`sign_in_as`, impersonation, admins, refreshes or external JWTs).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
@@ -2397,7 +2401,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
 | `POST /api/admin/restore/restart` | 202 `{ restarting: true, exitCode }`, then a graceful shutdown and exit with `--restart-exit-code`, for the supervisor (systemd, Docker) to start the server again, which applies the restore. 400 `restart_unavailable` without `--restart-exit-code`; 409 `no_pending_restore`; 400 `invalid_backup` when the staged restore has an `error`. Audited (`restore_restart`). |
 | `GET /api/admin/export/{table}?format=jsonl\|csv` | The table, streamed from one read transaction (a consistent snapshot; never blocks writes), in id order. JSONL (`application/x-ndjson`): one stored document per line. CSV (`text/csv`): header `_id,_creationTime,<other top-level fields, sorted>`, RFC 4180 quoting, CRLF line ends; strings as is, `null`/missing empty, other values as JSON. `Content-Disposition: attachment; filename="<table>.<format>"`. In system tables, secret fields are masked as in §4.1. 404 `not_found` for an unknown table, 400 `invalid_request` for another format. |
-| `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. |
+| `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted, droppedFields }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. Fields the table doesn't define (also inside nested structs, not in open ones or JSON fields) are left out and listed in `droppedFields` by path (`notes`, `address.zip`, `items[].extra`). |
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/rxferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`. 400 `invalid_request` for malformed ones. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
@@ -2649,7 +2653,8 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 `#[derive(rxferrix::rust_embed::Embed)] #[crate_path = "rxferrix::rust_embed"]`), `RxFerrix::routes(axum::Router)` and
 `RxFerrix::app_routes(axum::Router<App>)` (handlers take `State<App>`: typed `app.query/mutation/action::<F>` calls,
 internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
-with `.with_state(())`).
+with `.with_state(())`). In app routes, the extractor `rxferrix::auth::Caller { ip, user_agent }` gives the client
+address as RxFerrix records it (the last `X-Forwarded-For` entry with `--trust-proxy`, else the peer).
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

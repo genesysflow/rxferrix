@@ -239,6 +239,16 @@ struct ServeArgs {
     /// loses nothing, but a power loss or OS crash may lose the last commits. One fsync covers a batch of mutations.
     #[arg(long, env = "RXFERRIX_FSYNC_COMMITS")]
     fsync_commits: bool,
+    /// Memory for the page cache of the database connection all writes go through, e.g. `32MB`, `128MB`. Taken as
+    /// it is used. Writes that change many index entries (many indexes, or several documents per mutation) are the
+    /// ones it speeds up.
+    #[arg(long, env = "RXFERRIX_WRITER_CACHE_SIZE", value_name = "SIZE", default_value = "32MB")]
+    #[arg(value_parser = parse_size)]
+    writer_cache_size: u64,
+    /// How many queries (and other reads) can run at once: the number of read-only database connections. Default:
+    /// one and a half per core. A query holds one for its whole run.
+    #[arg(long, env = "RXFERRIX_READERS", value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    readers: Option<u16>,
     /// Start even if existing documents may not match changed table types (they are not validated).
     #[arg(long)]
     skip_schema_check: bool,
@@ -835,6 +845,8 @@ fn serve(
                 max_bytes: usize::try_from(args.query_cache_size).unwrap_or(usize::MAX),
             },
             fsync_commits: args.fsync_commits,
+            writer_cache_size: args.writer_cache_size,
+            readers: args.readers.map_or_else(crate::db::default_readers, usize::from),
             determinism_check: args.dev.then_some(crate::runtime::DEV_DETERMINISM_CHECK),
             auth,
             storage,
@@ -1192,6 +1204,14 @@ mod tests {
         assert!(!a.fsync_commits);
         let Some(Command::Serve(a)) = parse(&["serve", "--fsync-commits"]).unwrap().command else { panic!("serve") };
         assert!(a.fsync_commits);
+        assert_eq!(a.writer_cache_size, crate::db::DEFAULT_WRITER_CACHE_SIZE);
+        let args = ["serve", "--writer-cache-size", "128MB"];
+        let Some(Command::Serve(a)) = parse(&args).unwrap().command else { panic!("serve") };
+        assert_eq!(a.writer_cache_size, 128 << 20);
+        assert_eq!(a.readers, None);
+        let Some(Command::Serve(a)) = parse(&["serve", "--readers", "24"]).unwrap().command else { panic!("serve") };
+        assert_eq!(a.readers, Some(24));
+        assert!(parse(&["serve", "--readers", "0"]).is_err());
     }
 
     #[test]

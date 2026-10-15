@@ -715,14 +715,21 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     let hook = axum::Router::new()
         .route("/hooks/echo", axum::routing::post(|body: String| async move { format!("hook:{body}") }));
     // A route that reaches the app (`RxFerrix::app_routes`): writes through a mutation, reads through a query.
-    let app_hook = axum::Router::new().route(
-        "/hooks/pair",
-        axum::routing::post(|axum::extract::State(app): axum::extract::State<App>, body: String| async move {
-            app.mutation::<app::add_pair>((41, body)).await.unwrap();
-            let pairs = app.query::<app::all_pairs>(()).await.unwrap();
-            pairs.iter().filter(|p| p.group == 41).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
-        }),
-    );
+    let app_hook = axum::Router::new()
+        .route(
+            "/hooks/pair",
+            axum::routing::post(|axum::extract::State(app): axum::extract::State<App>, body: String| async move {
+                app.mutation::<app::add_pair>((41, body)).await.unwrap();
+                let pairs = app.query::<app::all_pairs>(()).await.unwrap();
+                pairs.iter().filter(|p| p.group == 41).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
+            }),
+        )
+        .route(
+            "/hooks/caller",
+            axum::routing::get(|caller: rxferrix::auth::Caller| async move {
+                format!("{} {}", caller.ip, caller.user_agent.unwrap_or_default())
+            }),
+        );
     let options = WebOptions {
         static_files: Some(StaticFiles::Dir(root.to_path_buf())),
         routes: Some(hook.with_state(()).merge(app_hook)),
@@ -791,6 +798,9 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     assert_eq!(r.text().await.unwrap(), "hook:ping");
     let r = client.post(format!("http://{addr}/hooks/pair")).body("from a route").send().await.unwrap();
     assert_eq!(r.text().await.unwrap(), "from a route a|from a route b");
+    // The caller's address as RxFerrix sees it (no trusted proxy here: the peer, not the forwarded header).
+    let r = get("/hooks/caller").header("user-agent", "probe").header("x-forwarded-for", "203.0.113.9").send().await;
+    assert_eq!(r.unwrap().text().await.unwrap(), "127.0.0.1 probe");
     let r = client.head(format!("http://{addr}/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
 
@@ -808,6 +818,31 @@ async fn static_files_spa_fallback_caching_and_precompressed() {
     let r =
         client.get(format!("http://{addr}/assets/app-1a2b3c4d.js")).header("if-none-match", etag).send().await.unwrap();
     assert_eq!(r.status(), 304);
+}
+
+#[tokio::test]
+async fn import_leaves_out_fields_the_table_does_not_define() {
+    let t = TestApp::new().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // As a converter from another backend might write them: system fields of the old one ride along.
+    let lines = [
+        json!({ "title": "a", "rank": 1, "tags": [], "collectionName": "docs", "legacyId": "pb1" }),
+        json!({ "title": "b", "rank": 2, "tags": ["x"], "legacyId": "pb2" }),
+    ];
+    let file = dir.path().join("ops_docs.jsonl");
+    std::fs::write(&file, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 1, allow_system_tables: false, format: None };
+    let report = export::import_path(t.app(), &file, None, &import).await.unwrap();
+    assert_eq!(report.tables[0].documents, 2);
+    assert_eq!(report.tables[0].dropped_fields, ["collectionName", "legacyId"]);
+
+    let options =
+        ExportOptions { tables: Some(vec!["ops_docs".into()]), format: ExportFormat::Jsonl, include_files: false };
+    let out = tempfile::tempdir().unwrap();
+    export::export_to_dir(t.dir(), None, out.path(), &options).await.unwrap();
+    let stored = std::fs::read_to_string(out.path().join("ops_docs.jsonl")).unwrap();
+    assert!(!stored.contains("legacyId") && !stored.contains("collectionName"), "{stored}");
+    assert_eq!(stored.lines().count(), 2);
 }
 
 #[tokio::test]

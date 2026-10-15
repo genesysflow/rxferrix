@@ -92,6 +92,45 @@ impl Shape {
     pub fn fingerprint(&self) -> String {
         format!("{self:?}")
     }
+
+    /// Remove the keys this shape doesn't define from `value`'s objects: its own and those of the structs nested in
+    /// it (through optionals and lists). Each removed key's path (`notes`, `address.zip`, `items[].extra`) goes into
+    /// `dropped`. Open structs and [`Shape::Json`] are left as they are, and so is a value that doesn't match the
+    /// shape (validation reports it).
+    pub fn drop_unknown_fields(&self, value: &mut serde_json::Value, dropped: &mut BTreeSet<String>) {
+        self.drop_unknown_at(value, "", dropped);
+    }
+
+    fn drop_unknown_at(&self, value: &mut serde_json::Value, path: &str, dropped: &mut BTreeSet<String>) {
+        use serde_json::Value;
+        let join = |key: &str| if path.is_empty() { key.to_string() } else { format!("{path}.{key}") };
+        match (self, value) {
+            (Shape::Optional(inner), value) => inner.drop_unknown_at(value, path, dropped),
+            (Shape::List(inner), Value::Array(items)) => {
+                let path = format!("{path}[]");
+                for item in items {
+                    inner.drop_unknown_at(item, &path, dropped);
+                }
+            }
+            (Shape::Struct(shape), Value::Object(object)) => {
+                if !shape.open {
+                    object.retain(|key, _| {
+                        let known = shape.fields.iter().any(|(name, _)| name == key);
+                        if !known {
+                            dropped.insert(join(key));
+                        }
+                        known
+                    });
+                }
+                for (name, field) in &shape.fields {
+                    if let Some(value) = object.get_mut(name) {
+                        field.drop_unknown_at(value, &join(name), dropped);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Types whose JSON form is known.
@@ -296,6 +335,51 @@ mod tests {
         assert_eq!(s.fields[2], ("a".into(), Shape::Optional(Box::new(Shape::Int))));
         s.flatten(Shape::Json);
         assert!(s.open);
+    }
+
+    #[test]
+    fn drop_unknown_fields_keeps_only_what_the_shape_defines() {
+        let mut address = StructShape::default();
+        address.field("city", Shape::Text);
+        let mut item = StructShape::default();
+        item.field("name", Shape::Text);
+        let mut extras = StructShape::default();
+        extras.open();
+        let mut doc = StructShape::default();
+        doc.field("title", Shape::Text);
+        doc.field("address", Shape::Struct(address).optional());
+        doc.field("items", Shape::List(Box::new(Shape::Struct(item))));
+        doc.field("extras", Shape::Struct(extras));
+        doc.field("raw", Shape::Json);
+        let shape = Shape::Struct(doc);
+
+        let mut value = serde_json::json!({
+            "title": "t", "stale": 1,
+            "address": { "city": "Craiova", "zip": "200000" },
+            "items": [{ "name": "a", "note": "x" }, { "name": "b" }],
+            "extras": { "anything": true },
+            "raw": { "kept": [1, 2] },
+        });
+        let mut dropped = BTreeSet::new();
+        shape.drop_unknown_fields(&mut value, &mut dropped);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "title": "t",
+                "address": { "city": "Craiova" },
+                "items": [{ "name": "a" }, { "name": "b" }],
+                "extras": { "anything": true },
+                "raw": { "kept": [1, 2] },
+            })
+        );
+        assert_eq!(dropped.into_iter().collect::<Vec<_>>(), ["address.zip", "items[].note", "stale"]);
+
+        // A missing optional, and values that don't match the shape, are left for validation.
+        let mut value = serde_json::json!({ "title": 5, "address": null, "items": "not a list" });
+        let mut dropped = BTreeSet::new();
+        shape.drop_unknown_fields(&mut value, &mut dropped);
+        assert_eq!(value, serde_json::json!({ "title": 5, "address": null, "items": "not a list" }));
+        assert!(dropped.is_empty());
     }
 
     #[test]

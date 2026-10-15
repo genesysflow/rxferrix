@@ -122,6 +122,17 @@ when writes come one at a time. WAL checkpoints run on a background thread, not 
 SSD (btrfs, encrypted), one-insert mutations: 8.9k/s with 1 writer, 16.2k/s with 16 and 18.7k/s with 64 by default
 (p99 0.2 / 3.5 / 11 ms); 1.1k/s, 7.3k/s and 12.5k/s with `--fsync-commits`.
 
+All writes go through one SQLite connection, whose page cache `--writer-cache-size` sets (default 32 MB, taken as it
+is used). Writes that change many index entries at once gain most from it: 32 MB made inserts into a table with 32
+indexes about 50% faster than SQLite's default 2 MB. A larger cache measured no faster.
+
+Reads go through a pool of read-only connections, one and a half per core by default (`--readers`, counting the
+cores the container may use). A query holds one for its whole run. Queries that take 5 ms or more on average (live
+or not) run in a slow lane that may hold only half the readers (at least 2), so slow queries never take every reader
+from the fast ones: with 6 readers on 8 cores, 8 queries of tens of milliseconds used to take fast lookups from
+0.2 ms to 13 ms; with the lane they stay at 0.4 ms. The price is that slow queries get half the readers when the
+server is busy. Far more readers than cores starves the slow queries when the CPU is saturated.
+
 ## CI
 
 [`.github/workflows/release.yml`](https://github.com/genesysflow/rxferrix/blob/master/.github/workflows/release.yml) runs every gate of [Tests](https://github.com/genesysflow/rxferrix/blob/master/README.md#development) (end-to-end

@@ -51,6 +51,13 @@ use crate::writelog::{CommitEntry, WriteLog};
 
 /// Default number of reader connections.
 pub const DEFAULT_READERS: usize = 6;
+/// Default [`OpenOptions::writer_cache_size`]: the page cache of the connection all writes go through (SQLite's own
+/// default is 2 MB). Measured with `bench_indexes` and `bench_writes` (integration tests, 2026-10-15), 32 MiB made
+/// inserts into a table with 32 indexes 48% faster, patches of all their fields 56%, and 10-insert mutations 10%,
+/// and halved the p99 of read-then-insert mutations; one-insert mutations didn't change. 64 MiB gained nothing more,
+/// and made inserts at random places of a 200k-document table 8% slower (32 MiB: 3%). Pages are only allocated as
+/// they are used. Only the writer gets it: a reader's cache starts over whenever another connection has committed.
+pub const DEFAULT_WRITER_CACHE_SIZE: u64 = 32 << 20;
 
 /// Group commit: the most mutations one batch takes before it commits, even with more waiting.
 pub const MAX_BATCH: usize = 64;
@@ -98,6 +105,8 @@ pub struct OpenOptions {
     /// default: a process crash loses nothing, a power loss may lose the last commits). With group commit this is one
     /// fsync per batch of mutations.
     pub fsync_commits: bool,
+    /// The most memory, in bytes, the writer connection's page cache may use ([`DEFAULT_WRITER_CACHE_SIZE`]).
+    pub writer_cache_size: u64,
     /// The schema check already ran on this database file (a takeover checked its copy before swapping it in,
     /// `crate::ops::takeover`): skip it, and open these tables as *migrating*.
     pub prechecked: Option<Vec<String>>,
@@ -110,6 +119,7 @@ impl Default for OpenOptions {
             skip_schema_check: false,
             journal: false,
             fsync_commits: false,
+            writer_cache_size: DEFAULT_WRITER_CACHE_SIZE,
             prechecked: None,
         }
     }
@@ -144,6 +154,12 @@ impl Database {
         if options.fsync_commits {
             writer.pragma_update(None, "synchronous", "FULL")?;
         }
+        // A negative cache_size is in KiB.
+        writer.pragma_update(
+            None,
+            "cache_size",
+            -i64::try_from(options.writer_cache_size >> 10).unwrap_or(i64::MAX),
+        )?;
         dedup::ensure_schema(&writer)?;
         writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
@@ -1336,6 +1352,17 @@ mod tests {
             let level = |c: &Connection| Ok(c.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?);
             let level = db.with_writer(level).await.unwrap();
             assert_eq!(level, expected, "fsync_commits = {fsync}");
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_cache_size_sets_the_writers_cache() {
+        for (size, expected_kib) in [(DEFAULT_WRITER_CACHE_SIZE, 32 << 10), (100 << 20, 100 << 10)] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = OpenOptions { writer_cache_size: size, ..Default::default() };
+            let db = Database::open_with(dir.path(), &[], &options).unwrap();
+            let cache = |c: &Connection| Ok(c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0))?);
+            assert_eq!(db.with_writer(cache).await.unwrap(), -expected_kib);
         }
     }
 }

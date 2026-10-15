@@ -6,6 +6,8 @@
 //!
 //! `bench_indexes_per_table`: one-document inserts and patches (16 writers, `BENCH_SECS` each) into tables with 1, 8
 //! and 32 indexes; the patches change one indexed field, or all 32.
+//! `bench_indexes_large_table`: the same writes into a table with 8 indexes already holding `BENCH_FILL` documents
+//! (default 200k; far more than the writer's page cache), the patches at random places, with the process's memory.
 //! `bench_indexes_shared_table`: lookups on a small table's index, before and after another table's 32 indexes fill
 //! `index_entries` with millions of entries (`BENCH_FILL` documents, default 100k): through a query function, and as
 //! the bare SQL range read (no function overhead), with the depth of the B-tree.
@@ -287,6 +289,51 @@ async fn bench_indexes_per_table() {
             println!("{indexes:>2} indexes, {label}: {rate:>8.0}/s, p50 {p50:>9.1?}, p99 {p99:>9.1?}");
         }
     }
+}
+
+/// The process's resident memory, from `/proc/self/status` (Linux; "?" elsewhere).
+fn rss() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb =
+        status.lines().find_map(|l| l.strip_prefix("VmRSS:")).map(|v| v.trim().trim_end_matches(" kB").to_string());
+    kb.and_then(|kb| kb.parse::<u64>().ok()).map_or("?".into(), |kb| format!("{} MiB", kb / 1024))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_indexes_large_table() {
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    let fill = env("BENCH_FILL", 200_000);
+    let (ids, rate) = load(&t, "bench_idx_8", (0..fill).map(wide_doc), 500).await;
+    let (entries, pages, _, levels, page_size) = index_tree(&t);
+    println!(
+        "loaded {fill} documents with 8 indexes: {rate:.0} documents/s; index_entries {entries} entries, {} MiB, \
+         {levels} levels; RSS {}",
+        (pages * page_size) >> 20,
+        rss()
+    );
+    let (rate, p50, p99) = hammer(t.app(), 16, move |app, w, n| async move {
+        let doc = wide_doc((1 << 40) | ((w as u64) << 32) | n);
+        app.mutation::<fns::insert_docs>(("bench_idx_8".to_string(), vec![doc])).await.unwrap();
+    })
+    .await;
+    println!("insert into it          : {rate:>8.0}/s, p50 {p50:>9.1?}, p99 {p99:>9.1?}");
+    let ids = std::sync::Arc::new(ids);
+    for (label, all) in [("patch one field ", false), ("patch 32 fields ", true)] {
+        let ids = ids.clone();
+        let (rate, p50, p99) = hammer(t.app(), 16, move |app, w, n| {
+            let ids = ids.clone();
+            async move {
+                // Documents all over the table; each writer its own (`w` modulo 16).
+                let i = (((n * 16 + w as u64).wrapping_mul(2654435761) % (ids.len() as u64 / 16)) * 16) as usize + w;
+                let patch = if all { wide_doc((2 << 40) | ((w as u64) << 32) | n) } else { json!({ "f00": n as i64 }) };
+                app.mutation::<fns::patch_doc>((ids[i].clone(), patch)).await.unwrap();
+            }
+        })
+        .await;
+        println!("{label}at random: {rate:>8.0}/s, p50 {p50:>9.1?}, p99 {p99:>9.1?}");
+    }
+    println!("RSS {}", rss());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

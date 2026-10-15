@@ -122,6 +122,10 @@ when writes come one at a time. WAL checkpoints run on a background thread, not 
 SSD (btrfs, encrypted), one-insert mutations: 8.9k/s with 1 writer, 16.2k/s with 16 and 18.7k/s with 64 by default
 (p99 0.2 / 3.5 / 11 ms); 1.1k/s, 7.3k/s and 12.5k/s with `--fsync-commits`.
 
+All writes go through one SQLite connection, whose page cache `--writer-cache-size` sets (default 32 MB, taken as it
+is used). Writes that change many index entries at once gain most from it: 32 MB made inserts into a table with 32
+indexes about 50% faster than SQLite's default 2 MB. A larger cache measured no faster.
+
 ## CI
 
 [`.github/workflows/release.yml`](https://github.com/genesysflow/rxferrix/blob/master/.github/workflows/release.yml) runs every gate of [Tests](https://github.com/genesysflow/rxferrix/blob/master/README.md#development) (end-to-end

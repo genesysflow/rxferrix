@@ -266,6 +266,10 @@ pub struct AppOptions {
     /// in WAL mode): a process crash loses nothing, but a power loss or OS crash may lose the last commits. With group
     /// commit, one fsync covers a whole batch of mutations.
     pub fsync_commits: bool,
+    /// The most memory, in bytes, the page cache of the connection all writes go through may use. Default: 32 MiB
+    /// ([`crate::db::DEFAULT_WRITER_CACHE_SIZE`], which has the measurements); pages are only allocated as they are
+    /// used.
+    pub writer_cache_size: u64,
     /// Dev aid: now and then (at most once per this interval per query) run a query a second time in the same snapshot,
     /// and warn if the result differs (in the server log, and as a log line of the run, so in the execution log and,
     /// in dev mode, the client's console). Such a query depends on more than its arguments and the data it reads
@@ -319,6 +323,7 @@ impl Default for AppOptions {
             ops: Default::default(),
             query_cache: QueryCacheOptions::default(),
             fsync_commits: false,
+            writer_cache_size: crate::db::DEFAULT_WRITER_CACHE_SIZE,
             determinism_check: None,
             olap: Default::default(),
         }
@@ -545,6 +550,7 @@ impl App {
             // (`crate::ops::replicate`, `crate::olap`).
             journal: options.ops.replication.is_some() || options.olap.enabled,
             fsync_commits: options.fsync_commits,
+            writer_cache_size: options.writer_cache_size,
             prechecked: options.prechecked_schema.clone(),
         };
         let retention = options.log_retention.clone();

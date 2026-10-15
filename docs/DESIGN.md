@@ -139,7 +139,8 @@ Release builds on one machine, from development (dates are when they were taken)
   other indexes took a lookup on a small table's index from 22.5 to 25.3 µs (the SQLite read alone stayed at 2.5 µs;
   the B-tree gained one level). Each index costs writes: 16 writers inserted 22k documents/s with 1 index, 12k with
   8, 3.6k with 32. Keys over about 980 bytes spill into overflow pages: scanning 100 entries went from 151 µs to
-  1.5 ms (hence the warning past 960 bytes).
+  1.5 ms (hence the warning past 960 bytes). The writer's page cache, 2 MB → 32 MiB: inserts with 32 indexes
+  3.6k → 5.3k/s, patches of all 32 fields 2.1k → 3.2k/s, 10-insert mutations +10%; one-insert mutations unchanged.
 - **Fan-out (2026-10-10):** 100 clients watching the same 10 queries cost one execution per commit instead of 100,
   with about 0.23 ms from commit to client. Serializing each result once cut the server's CPU for 100 subscribers by
   10x; diffs cut a new post at the top of a 20-post list from 5.5 KB to about 250 bytes.

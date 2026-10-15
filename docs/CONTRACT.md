@@ -419,6 +419,7 @@ pub struct AppOptions {
     pub ops: rxferrix::ops::OpsOptions, // `/metrics` (enabled, token) and the backup target (see §4.4)
     pub query_cache: rxferrix::QueryCacheOptions, // { idle_ttl: 30 min, max_bytes: 64 MiB } (see §1.10, Query cache)
     pub fsync_commits: bool,          // default false (synchronous = NORMAL); true (`--fsync-commits`): commits wait for the disk (FULL)
+    pub writer_cache_size: u64,       // default 32 MiB (`--writer-cache-size`): the writer connection's page cache, taken as used
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
     pub olap: rxferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
 }

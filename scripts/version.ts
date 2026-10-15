@@ -1,10 +1,11 @@
 // The version of RxFerrix: the crates and the npm packages share one, which a release tag (`v0.2.0`) publishes.
 //
 //   bun scripts/version.ts          # prints it; fails if any of the places below disagree
-//   bun scripts/version.ts 0.2.0    # sets it everywhere, then updates Cargo.lock and bun.lock
+//   bun scripts/version.ts 0.2.0    # sets it everywhere, updates Cargo.lock and bun.lock, rebuilds the dashboard
 //
 // The places: the workspace's `version` (Cargo.toml, every crate), the `rxferrix-macros` requirement of `rxferrix`,
-// the package.json of each package in packages/, and the client's `CLIENT_VERSION` (sent in `Connect`).
+// the package.json of each package in packages/, and the client's `CLIENT_VERSION` (sent in `Connect`). The committed
+// dashboard build (crates/rxferrix/dashboard-dist) bundles the client, so it is rebuilt.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -55,6 +56,8 @@ try {
     }
     run(["cargo", "update", "--workspace"]);
     run(["bun", "install"]);
+    run(["bun", "run", "build"]);
+    run(["bun", "run", "build:dashboard"]);
   }
   console.log(check());
 } catch (e) {

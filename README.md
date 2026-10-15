@@ -208,7 +208,7 @@ The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves i
 The three crates and the three npm packages share one version. Set it, commit, and push a tag:
 
 ```sh
-bun scripts/version.ts 0.2.0          # Cargo.toml, the package.json files, CLIENT_VERSION, both lockfiles
+bun scripts/version.ts 0.2.0          # Cargo.toml, package.json files, CLIENT_VERSION, lockfiles, dashboard build
 git commit -am "Version 0.2.0" && git tag v0.2.0 && git push origin master v0.2.0
 ```
 

@@ -202,3 +202,25 @@ The dashboard's built files are committed, so `cargo build` needs no JavaScript 
 The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves it with live reload, and
 `bun run docs:build` builds it. A push to `master` that changes `docs/` publishes it to GitHub Pages
 ([`.github/workflows/docs.yml`](.github/workflows/docs.yml)).
+
+### Releasing
+
+The three crates and the three npm packages share one version. Set it, commit, and push a tag:
+
+```sh
+bun scripts/version.ts 0.2.0          # Cargo.toml, the package.json files, CLIENT_VERSION, both lockfiles
+git commit -am "Version 0.2.0" && git tag v0.2.0 && git push origin master v0.2.0
+```
+
+Once the tag's CI run passes its gates, it publishes the crates to crates.io and the packages to npm (with
+provenance), creates the GitHub release with the static binaries, and pushes the Docker image. A version with a
+suffix (`0.2.0-rc.1`) goes to npm under the `next` tag. A version already published is skipped, so a run that
+failed halfway can be rerun.
+
+Publishing uses trusted publishing: no registry token is stored in the repository. Each crate and package names
+this repository's `release.yml` as its trusted publisher, once:
+
+- crates.io: for `rxferrix-macros`, `rxferrix` and `rxferrix-cli`, Settings → Trusted Publishing → Add: GitHub,
+  owner `genesysflow`, repository `rxferrix`, workflow `release.yml`, no environment.
+- npm: for `@rxferrix/client`, `@rxferrix/react` and `@rxferrix/svelte`, Settings → Trusted Publisher → GitHub
+  Actions: organization or user `genesysflow`, repository `rxferrix`, workflow file `release.yml`, no environment.

@@ -7,7 +7,7 @@ import {
   type ConnectionState,
   type Id,
 } from "../src/index.js";
-import type { ClientMessage } from "../src/protocol.js";
+import { CLIENT_VERSION, type ClientMessage } from "../src/protocol.js";
 import { FakeServer, flushMicrotasks } from "../src/testing.js";
 
 type Todo = { _id: Id<"todos">; text: string };
@@ -77,7 +77,7 @@ describe("connection", () => {
         sessionId: client.sessionId,
         connectionCount: 0,
         lastCloseReason: null,
-        clientVersion: "0.1.0",
+        clientVersion: CLIENT_VERSION,
         features: ["diffs"],
       },
       {
@@ -603,7 +603,7 @@ describe("reconnect", () => {
         sessionId: client.sessionId,
         connectionCount: 1,
         lastCloseReason: "1006: network",
-        clientVersion: "0.1.0",
+        clientVersion: CLIENT_VERSION,
         features: ["diffs"],
       },
       {

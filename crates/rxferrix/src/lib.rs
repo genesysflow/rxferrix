@@ -40,6 +40,7 @@ pub mod log;
 pub mod migrations;
 pub mod olap;
 pub mod ops;
+mod read_lanes;
 pub mod runtime;
 pub mod scheduler;
 pub mod schema;

@@ -35,6 +35,7 @@ mod ops;
 mod pagination;
 mod query_cache;
 mod query_engine;
+mod read_lanes;
 mod readsets;
 mod replication;
 mod revocation;

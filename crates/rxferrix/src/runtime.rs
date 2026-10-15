@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures::FutureExt;
@@ -397,6 +397,8 @@ struct AppInner {
     determinism: Option<crate::determinism::DeterminismCheck>,
     /// The analytics copy, with `AppOptions::olap.enabled` (`crate::olap`).
     olap: OnceLock<Arc<crate::olap::OlapService>>,
+    /// The slow lane of one-off queries ([`crate::read_lanes`]).
+    read_lanes: crate::read_lanes::ReadLanes,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -584,6 +586,7 @@ impl App {
             db.shared_clock(),
         )?;
         let storage = Arc::new(storage);
+        let readers = db.readers();
         let app = App {
             inner: Arc::new(AppInner {
                 db,
@@ -603,6 +606,7 @@ impl App {
                 draining: std::sync::atomic::AtomicBool::new(false),
                 determinism,
                 olap: OnceLock::new(),
+                read_lanes: crate::read_lanes::ReadLanes::new(readers),
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
@@ -858,6 +862,11 @@ impl App {
         Ok(serde_json::from_value(out)?)
     }
 
+    /// The slow lane of reads ([`crate::read_lanes`]).
+    pub(crate) fn read_lanes(&self) -> &crate::read_lanes::ReadLanes {
+        &self.inner.read_lanes
+    }
+
     pub(crate) async fn call_query(
         &self,
         path: &str,
@@ -865,11 +874,18 @@ impl App {
         identity: &Identity,
         allow_internal: bool,
     ) -> QueryRun {
+        let lanes = &self.inner.read_lanes;
+        let _slow = lanes.enter(path).await;
         let snapshot = match self.db().snapshot().await {
             Ok(s) => s,
             Err(e) => return QueryRun::not_run(e, 0),
         };
-        self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await
+        let started = Instant::now();
+        let run = self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await;
+        if self.lookup(path, FunctionKind::Query, allow_internal).is_ok() {
+            lanes.record(path, started.elapsed());
+        }
+        run
     }
 
     /// Run a query in an existing snapshot. Several of these may run concurrently on the same snapshot.

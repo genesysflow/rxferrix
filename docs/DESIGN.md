@@ -145,7 +145,11 @@ Release builds on one machine, from development (dates are when they were taken)
   half as many slow ones as cores. One reader per core or fewer: the slow queries take every reader and the fast ones
   wait (8 cores, 6 readers: 2.5k fast queries/s at p50 13 ms); two per core: on a saturated CPU the slow ones crawl
   (4/s); 1.5 per core, the default, kept both going (12 readers: 109k/s at p50 0.3 ms, and 148 slow/s). Fast queries
-  alone: 151k/s with 6 readers, 285k/s with 16 (16 cores).
+  alone: 151k/s with 6 readers, 285k/s with 16 (16 cores). The slow lane (queries averaging 5 ms or more share
+  half the readers, one-off and live alike) then stopped slow queries from starving fast ones at any reader count:
+  as many slow queries as readers took fast ones from 2.4k/s at p50 4 ms to 57k/s at 0.3 ms (4 cores), and at the
+  default 12 readers on 8 cores, fast queries ran 45% faster (153k/s) while slow ones ran half as often (78/s).
+  Sharing the lane with live queries cut fast subscribers' worst update latency next to slow ones from 19 to 0.8 ms.
 - **Fan-out (2026-10-10):** 100 clients watching the same 10 queries cost one execution per commit instead of 100,
   with about 0.23 ms from commit to client. Serializing each result once cut the server's CPU for 100 subscribers by
   10x; diffs cut a new post at the top of a 20-post list from 5.5 KB to about 250 bytes.

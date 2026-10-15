@@ -36,7 +36,7 @@
 //!    from idle readers while their ts is still `S.ts`) take queued jobs and run them at `S.ts`.
 //!
 //! The queue has two lanes: queries whose runs take `SLOW_RUN_US` (5 ms) or more on average wait in the slow lane,
-//! which has runners of its own. A new generation starts as soon as commits wait and the fast lane is empty: it waits neither for
+//! which has runners of its own, each holding a slow permit shared with one-off queries ([`crate::read_lanes`]). A new generation starts as soon as commits wait and the fast lane is empty: it waits neither for
 //! queries that are still running nor for slow ones, so a slow query holds up neither the next generation nor the
 //! connections that don't watch it. Commits that land while the fast lane is not empty are coalesced into one
 //! generation, and queries invalidated together run at the same ts. Jobs still queued when a generation starts run at
@@ -111,7 +111,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 
 use crate::auth::identity::AuthDeps;
 use crate::db::Snapshot;
@@ -140,8 +140,7 @@ const PER_SNAPSHOT_MIN: usize = 4;
 /// A shared query keeps at most this many versions unless a connection watching it may still need older ones.
 const VERSIONS_KEPT: usize = 8;
 
-/// A query whose runs take this long (moving average, µs) is queued in the slow lane.
-const SLOW_RUN_US: u64 = 5_000;
+use crate::read_lanes::SLOW_RUN_US;
 
 /// Job lanes: queries known to be slow wait in a lane of their own, so they never hold up the others (see
 /// `Manager::pump`).
@@ -723,6 +722,8 @@ enum Event {
     RunnerDone { generation: u64, lane: usize },
     /// A snapshot asked for when every reader was busy.
     Snapshot(anyhow::Result<Arc<Snapshot>>),
+    /// A slow permit asked for when none was free.
+    SlowPermit(Option<OwnedSemaphorePermit>),
 }
 
 /// Queries waiting for a runner, per lane, as `(query, job sequence number, job)`. Runners only take jobs while
@@ -792,6 +793,9 @@ struct Manager {
     /// A snapshot from `request_snapshot`.
     spare: Option<Arc<Snapshot>>,
     requesting: bool,
+    /// A slow permit that arrived as an event, and whether one is being waited for ([`Manager::take_slow_permit`]).
+    spare_permit: Option<OwnedSemaphorePermit>,
+    requesting_permit: bool,
     /// Jobs queued or running: sequence number -> the frontier when it was queued (ascending with the sequence).
     in_flight: BTreeMap<u64, u64>,
     next_job: u64,
@@ -870,6 +874,8 @@ impl Manager {
             gen_snapshot: None,
             spare: None,
             requesting: false,
+            spare_permit: None,
+            requesting_permit: false,
             in_flight: BTreeMap::new(),
             next_job: 0,
             cache,
@@ -1404,6 +1410,10 @@ impl Manager {
                     self.runners[lane] -= 1;
                 }
             }
+            Event::SlowPermit(permit) => {
+                self.requesting_permit = false;
+                self.spare_permit = permit;
+            }
             Event::Snapshot(result) => {
                 self.requesting = false;
                 match result {
@@ -1468,6 +1478,14 @@ impl Manager {
                     _ => self.max_slow.min(queued),
                 };
                 while self.runners[lane] < wanted.max(1) {
+                    // A slow-lane runner holds a slow permit while it runs.
+                    let permit = match lane {
+                        SLOW => match self.take_slow_permit(app) {
+                            Some(p) => Some(p),
+                            None => break,
+                        },
+                        _ => None,
+                    };
                     // The fast lane's first runner uses the generation's snapshot; other runners an idle reader's.
                     let shared = if lane == FAST && self.runners[FAST] == 0 { self.gen_snapshot.clone() } else { None };
                     let may_advance = lane == FAST && self.runners[FAST] * 2 <= wanted && !advanced;
@@ -1502,12 +1520,30 @@ impl Manager {
                     if self.gen_snapshot.is_none() {
                         self.gen_snapshot = Some(snapshot.clone());
                     }
-                    self.spawn_runner(app, snapshot, lane);
+                    self.spawn_runner(app, snapshot, lane, permit);
                 }
             }
             break;
         }
         self.spare = None;
+        self.spare_permit = None;
+    }
+
+    /// A spare slow permit, else a free one. If none is free, `None`, and one is requested (it arrives as an event).
+    fn take_slow_permit(&mut self, app: &App) -> Option<OwnedSemaphorePermit> {
+        if let Some(p) = self.spare_permit.take().or_else(|| app.read_lanes().try_slow_permit()) {
+            return Some(p);
+        }
+        if !self.requesting_permit {
+            self.requesting_permit = true;
+            let (app, tx) = (app.downgrade(), self.events_tx.clone());
+            tokio::spawn(async move {
+                let Some(app) = app.upgrade() else { return };
+                let permit = app.read_lanes().slow_permit().await;
+                let _ = tx.send(Event::SlowPermit(permit));
+            });
+        }
+        None
     }
 
     /// A spare snapshot if it is not behind the frontier, else an idle reader's. If every reader is busy, `None`, and
@@ -1539,7 +1575,7 @@ impl Manager {
         }
     }
 
-    fn spawn_runner(&mut self, app: &App, snapshot: Arc<Snapshot>, lane: usize) {
+    fn spawn_runner(&mut self, app: &App, snapshot: Arc<Snapshot>, lane: usize, permit: Option<OwnedSemaphorePermit>) {
         debug_assert_eq!(snapshot.ts, self.ts);
         self.runners[lane] += 1;
         let (generation, queue, tx, app) =
@@ -1566,8 +1602,9 @@ impl Manager {
                 // needs nor keeps results from being applied as they come.
                 tokio::task::yield_now().await;
             }
-            // Release the reader before reporting the end.
+            // Release the reader (and the slow permit) before reporting the end.
             drop(snapshot);
+            drop(permit);
             drop(guard);
         });
     }
@@ -1855,8 +1892,9 @@ impl Manager {
     fn check_invariants(&self) {
         for lane in [FAST, SLOW] {
             let queued = self.queued(lane);
+            let waiting_for_permit = lane == SLOW && self.requesting_permit;
             assert!(
-                queued == 0 || self.runners[lane] > 0 || self.requesting || self.retry,
+                queued == 0 || self.runners[lane] > 0 || self.requesting || self.retry || waiting_for_permit,
                 "{queued} jobs queued in lane {lane} without a runner"
             );
         }

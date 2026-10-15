@@ -126,6 +126,11 @@ All writes go through one SQLite connection, whose page cache `--writer-cache-si
 is used). Writes that change many index entries at once gain most from it: 32 MB made inserts into a table with 32
 indexes about 50% faster than SQLite's default 2 MB. A larger cache measured no faster.
 
+Reads go through a pool of read-only connections, one and a half per core by default (`--readers`, counting the
+cores the container may use). A query holds one for its whole run, so slow queries that take every reader make the
+fast ones wait: with 6 readers on 8 cores, 8 queries of tens of milliseconds took fast lookups from 0.2 ms to
+13 ms. Far more readers than cores starves the slow queries instead when the CPU is saturated.
+
 ## CI
 
 [`.github/workflows/release.yml`](https://github.com/genesysflow/rxferrix/blob/master/.github/workflows/release.yml) runs every gate of [Tests](https://github.com/genesysflow/rxferrix/blob/master/README.md#development) (end-to-end

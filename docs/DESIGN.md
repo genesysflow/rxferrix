@@ -141,6 +141,11 @@ Release builds on one machine, from development (dates are when they were taken)
   8, 3.6k with 32. Keys over about 980 bytes spill into overflow pages: scanning 100 entries went from 151 µs to
   1.5 ms (hence the warning past 960 bytes). The writer's page cache, 2 MB → 32 MiB: inserts with 32 indexes
   3.6k → 5.3k/s, patches of all 32 fields 2.1k → 3.2k/s, 10-insert mutations +10%; one-insert mutations unchanged.
+- **Readers (2026-10-15, `bench_readers`):** fast queries (10 documents by index) next to slow ones (20k documents),
+  half as many slow ones as cores. One reader per core or fewer: the slow queries take every reader and the fast ones
+  wait (8 cores, 6 readers: 2.5k fast queries/s at p50 13 ms); two per core: on a saturated CPU the slow ones crawl
+  (4/s); 1.5 per core, the default, kept both going (12 readers: 109k/s at p50 0.3 ms, and 148 slow/s). Fast queries
+  alone: 151k/s with 6 readers, 285k/s with 16 (16 cores).
 - **Fan-out (2026-10-10):** 100 clients watching the same 10 queries cost one execution per commit instead of 100,
   with about 0.23 ms from commit to client. Serializing each result once cut the server's CPU for 100 subscribers by
   10x; diffs cut a new post at the top of a 20-post list from 5.5 KB to about 250 bytes.

@@ -408,7 +408,7 @@ before opening the `App`.
 ```rust
 pub struct AppOptions {
     pub dev: bool,                    // real error messages and logLines to clients
-    pub readers: usize,
+    pub readers: usize,               // default 1.5 per core (`--readers`): reads that can run at once; a query holds one for its run
     pub mutation_timeout: Duration,   // default 5s (`--mutation-timeout 5s`); see below
     pub query_timeout: Duration,      // default 30s (`--query-timeout 30s`): fails with rxferrix::QueryTimeout
     pub skip_schema_check: bool,      // `--skip-schema-check`; see below

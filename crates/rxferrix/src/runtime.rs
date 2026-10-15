@@ -235,7 +235,8 @@ pub fn registered_tables() -> Vec<TableDef> {
 pub struct AppOptions {
     /// Show real error messages to clients instead of "Server Error", and send functions' log lines to clients.
     pub dev: bool,
-    /// Number of read-only connections.
+    /// Number of read-only connections: how many queries (and other reads) can run at once. Default: one and a half
+    /// per core ([`crate::db::default_readers`], which has the measurements).
     pub readers: usize,
     /// Sign-in methods, token lifetimes, email and OAuth settings (`crate::auth`).
     pub auth: crate::auth::AuthConfig,
@@ -311,7 +312,7 @@ impl Default for AppOptions {
     fn default() -> Self {
         AppOptions {
             dev: false,
-            readers: crate::db::DEFAULT_READERS,
+            readers: crate::db::default_readers(),
             auth: Default::default(),
             mutation_timeout: DEFAULT_MUTATION_TIMEOUT,
             query_timeout: DEFAULT_QUERY_TIMEOUT,

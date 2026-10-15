@@ -49,8 +49,22 @@ use crate::keys;
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD, TableDef};
 use crate::writelog::{CommitEntry, WriteLog};
 
-/// Default number of reader connections.
-pub const DEFAULT_READERS: usize = 6;
+/// Default number of reader connections: one and a half per core (as `std::thread::available_parallelism`, which
+/// follows container CPU limits, counts them; `rxferrix serve`'s runtime has a worker thread per core).
+///
+/// A query holds a reader for its whole run, so with as many slow queries running as there are readers, every other
+/// query waits; and the SQLite calls run on the runtime's worker threads, so with far more readers than threads, a
+/// saturated CPU leaves slow queries crawling (each `.await` puts them behind every runnable fast one). Measured with
+/// `bench_readers` (integration tests, 2026-10-15) on 2, 4, 8 and 16 threads, half as many slow queries (tens of ms)
+/// as threads running next to fast ones: 1.5 readers per thread kept both going (8 threads: 109k fast queries/s at
+/// p50 0.3 ms and 148 slow/s), one per thread starved the fast ones once the slow ones took every reader (2.5k/s at
+/// p50 13 ms with 6 readers on 8 threads, the fixed default before), and two per thread the slow ones (4/s). It also
+/// matches what the subscription manager asks for (`sync::subscriptions`: a fast-lane runner per thread, plus half
+/// as many slow-lane ones). Readers are opened when first needed.
+pub fn default_readers() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (cores + cores / 2).max(2)
+}
 /// Default [`OpenOptions::writer_cache_size`]: the page cache of the connection all writes go through (SQLite's own
 /// default is 2 MB). Measured with `bench_indexes` and `bench_writes` (integration tests, 2026-10-15), 32 MiB made
 /// inserts into a table with 32 indexes 48% faster, patches of all their fields 56%, and 10-insert mutations 10%,
@@ -115,7 +129,7 @@ pub struct OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         OpenOptions {
-            readers: DEFAULT_READERS,
+            readers: default_readers(),
             skip_schema_check: false,
             journal: false,
             fsync_commits: false,

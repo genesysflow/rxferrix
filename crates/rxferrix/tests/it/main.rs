@@ -10,6 +10,7 @@ mod backup_settings;
 mod bench;
 mod bench_features;
 mod bench_indexes;
+mod bench_readers;
 mod bytes;
 mod catalog;
 mod codegen;

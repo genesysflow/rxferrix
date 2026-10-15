@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "chat-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rxferrix",
  "tokio",
@@ -3353,7 +3353,7 @@ dependencies = [
 
 [[package]]
 name = "rxferrix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "rxferrix-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -3417,7 +3417,7 @@ dependencies = [
 
 [[package]]
 name = "rxferrix-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "rxferrix-mock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3973,7 +3973,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "todo-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rxferrix",
 ]

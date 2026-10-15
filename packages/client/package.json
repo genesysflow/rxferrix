@@ -1,6 +1,6 @@
 {
   "name": "@rxferrix/client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic reactive sync client for RxFerrix",
   "license": "MIT",
   "homepage": "https://genesysflow.github.io/rxferrix/",

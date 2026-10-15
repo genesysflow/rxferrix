@@ -135,6 +135,11 @@ Release builds on one machine, from development (dates are when they were taken)
 - **Writes (2026-10-10, NVMe SSD, encrypted btrfs):** one-insert mutations at 8.9k/s with 1 writer, 16.2k/s with 16
   and 18.7k/s with 64 (p99 0.2 / 3.5 / 11 ms); with `--fsync-commits` 1.1k, 7.3k and 12.5k/s. Moving checkpoints off
   the writer raised these from 5.8k, 9.7k and 11.6k/s.
+- **Indexes (2026-10-15, `bench_indexes`):** all indexes share `index_entries`. Filling it with 3.3M entries of
+  other indexes took a lookup on a small table's index from 22.5 to 25.3 µs (the SQLite read alone stayed at 2.5 µs;
+  the B-tree gained one level). Each index costs writes: 16 writers inserted 22k documents/s with 1 index, 12k with
+  8, 3.6k with 32. Keys over about 980 bytes spill into overflow pages: scanning 100 entries went from 151 µs to
+  1.5 ms (hence the warning past 960 bytes).
 - **Fan-out (2026-10-10):** 100 clients watching the same 10 queries cost one execution per commit instead of 100,
   with about 0.23 ms from commit to client. Serializing each result once cut the server's CPU for 100 subscribers by
   10x; diffs cut a new post at the top of a 20-post list from 5.5 KB to about 250 bytes.

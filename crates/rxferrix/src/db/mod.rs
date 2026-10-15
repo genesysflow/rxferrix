@@ -63,6 +63,11 @@ pub const SLOW_WRITE: Duration = Duration::from_micros(500);
 /// A mutation holding the writer this long is logged as a warning (at most once a minute per path): every other write
 /// waited for it.
 pub const WARN_WRITE: Duration = Duration::from_millis(100);
+/// An index key longer than this is logged as a warning (at most once an hour per index, and when an index is
+/// backfilled): with the index id, the document id and the record header, its `index_entries` row nears the most of
+/// a row a 4 KiB B-tree page holds (1002 bytes, SQLite's `maxLocal`), past which the rest goes to an overflow page of
+/// its own. In `bench_index_key_length` (integration tests), that made scans of 100 entries 10x slower and lookups 2x.
+pub const WARN_KEY_BYTES: usize = 960;
 
 /// Fields drop in order: the HNSW thread is stopped (and its connection closed) first, the writer closes last, so
 /// the read-write connection is the last one and checkpoints the WAL when the database is dropped.
@@ -1030,6 +1035,7 @@ impl WriteState {
                     storage::delete_index_entry(&self.conn, index.id, k)?;
                 }
                 if let Some(k) = &new_key {
+                    self.catalog.check_key_len(&table.name, index, k);
                     storage::insert_index_entry(&self.conn, index.id, k, &id.0)?;
                 }
             }

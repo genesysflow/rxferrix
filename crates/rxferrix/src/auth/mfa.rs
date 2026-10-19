@@ -17,7 +17,7 @@
 //! (`super::secretbox`) and the owner's id as associated data, and recovery codes are stored as keyed hashes, so
 //! the database alone reveals neither.
 //!
-//! **Lost device**: a recovery code disables the factor or sign the user in; without one, an administrator removes
+//! **Lost device**: a recovery code disables the factor or signs the user in; without one, an administrator removes
 //! the factor from the dashboard (`_system/dashboard:reset_mfa`), and `admin disable-2fa <email>` does it for an
 //! administrator.
 

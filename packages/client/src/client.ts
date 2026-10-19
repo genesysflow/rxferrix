@@ -136,7 +136,25 @@ function jwtExpiry(token: string): number | null {
 
 /** Refresh this long before a JWT's `exp`. */
 const TOKEN_REFRESH_LEEWAY_MS = 30_000;
+/** Never refresh more often than this, even for a token that expires within the leeway (its session may be ending). */
+const MIN_TOKEN_REFRESH_DELAY_MS = 5_000;
+/** A token getter that threw (the server unreachable at page load, ...) is retried with this backoff. */
+const TOKEN_FETCH_RETRY_BASE_MS = 2_000;
+const TOKEN_FETCH_RETRY_MAX_MS = 60_000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
+/** The server's limit of live queries per socket; past it, a `ModifyQuerySet` is a fatal error (docs/PROTOCOL.md). */
+export const MAX_LIVE_QUERIES = 1024;
+
+/** The error for function args that can't be encoded as JSON (a cycle, a BigInt, ...), or null. */
+function unserializable(args: Record<string, unknown>): RxFerrixError | null {
+  try {
+    JSON.stringify(args);
+    return null;
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return new RxFerrixError(`Arguments can't be serialized as JSON: ${detail}`, { code: "invalid_args", cause: e });
+  }
+}
 
 interface AuthState {
   fetchToken: AuthTokenFetcher;
@@ -192,6 +210,11 @@ export class RxFerrixClient {
   private isAuthenticated = false;
   private authGeneration = 0;
   private authRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Token fetches in flight: the last one to finish lets held-back sends through again. */
+  private tokenFetchesInFlight = 0;
+  private tokenFetchFailures = 0;
+  /** Rejecters of `query()` calls still waiting for their first result (settled on `close()`). */
+  private readonly oneShotQueries = new Set<(e: RxFerrixError) => void>();
 
   private readonly removeUnloadListener: () => void;
 
@@ -256,15 +279,20 @@ export class RxFerrixClient {
     return new Promise<OutputOf<Q>>((resolve, reject) => {
       let unsubscribe: (() => void) | null = null;
       let done = false;
-      const check = () => {
+      const finish = (settle: () => void) => {
         if (done) return;
+        done = true;
+        this.oneShotQueries.delete(closed);
+        if (unsubscribe) unsubscribe();
+        settle();
+      };
+      const closed = (e: RxFerrixError) => finish(() => reject(e));
+      const check = () => {
         const state = watch.localQueryState();
         if (state.status === "loading") return;
-        done = true;
-        if (unsubscribe) unsubscribe();
-        if (state.status === "success") resolve(state.value);
-        else reject(state.error);
+        finish(() => (state.status === "success" ? resolve(state.value) : reject(state.error)));
       };
+      this.oneShotQueries.add(closed);
       unsubscribe = watch.onUpdate(check);
       check();
     });
@@ -294,6 +322,13 @@ export class RxFerrixClient {
     callback: () => void,
   ): () => void {
     if (this.closed) return () => {};
+    if (!this.localQueries.get(token) && this.localQueries.size >= MAX_LIVE_QUERIES) {
+      // The server would answer the subscription with a fatal error and every reconnect would repeat it.
+      throw new RxFerrixError(
+        `Too many live queries: at most ${MAX_LIVE_QUERIES} distinct queries can be watched at once`,
+        { code: "too_many_queries" },
+      );
+    }
     let set = this.listeners.get(token);
     if (!set) {
       set = new Set();
@@ -349,6 +384,10 @@ export class RxFerrixClient {
     if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const args = normalizeArgs(argsAndOptions[0]);
     const options = argsAndOptions[1] as MutationOptions<ArgsOf<M>> | undefined;
+    // Checked before it is queued: a message that can't be encoded would otherwise be retried on every socket and
+    // block every later request behind it.
+    const invalid = unserializable(args);
+    if (invalid) return Promise.reject(invalid);
     const requestId = this.requests.allocateRequestId();
     const message: MutationMessage = { type: "Mutation", requestId, udfPath: ref._path, args };
     const promise = this.requests.trackMutation(message) as Promise<OutputOf<M>>;
@@ -366,8 +405,11 @@ export class RxFerrixClient {
   /** Runs an action. Rejects with a "connection lost" error if the socket drops while it is in flight. */
   action<A extends FunctionReference<"action">>(ref: A, ...args: OptionalArgs<A>): Promise<OutputOf<A>> {
     if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    const normalized = normalizeArgs(args[0]);
+    const invalid = unserializable(normalized);
+    if (invalid) return Promise.reject(invalid);
     const requestId = this.requests.allocateRequestId();
-    const message: ActionMessage = { type: "Action", requestId, udfPath: ref._path, args: normalizeArgs(args[0]) };
+    const message: ActionMessage = { type: "Action", requestId, udfPath: ref._path, args: normalized };
     const promise = this.requests.trackAction(message) as Promise<OutputOf<A>>;
     this.sendUnsentRequests();
     this.notifyConnectionState();
@@ -414,18 +456,44 @@ export class RxFerrixClient {
     if (!auth) return;
     const generation = ++this.authGeneration;
     if (pause) this.ws.pause();
-    let token: string | null = null;
+    this.tokenFetchesInFlight++;
     try {
-      token = (await auth.fetchToken({ forceRefresh })) ?? null;
-    } catch (e) {
-      this.logger.error("fetchToken threw; continuing unauthenticated", e);
-      token = null;
+      let token: string | null;
+      try {
+        token = (await auth.fetchToken({ forceRefresh })) ?? null;
+      } catch (e) {
+        if (generation !== this.authGeneration || this.auth !== auth || this.closed) return;
+        // The getter failed (the server unreachable at page load, a refresh that timed out): the session it would
+        // have returned may well be valid, so the token in hand (if any) is kept and the fetch is retried with
+        // backoff instead of treating the user as signed out.
+        this.tokenFetchFailures++;
+        const delay = Math.min(
+          TOKEN_FETCH_RETRY_MAX_MS,
+          TOKEN_FETCH_RETRY_BASE_MS * 2 ** Math.min(this.tokenFetchFailures - 1, 10),
+        );
+        this.logger.warn(`fetchToken failed; retrying in ${delay}ms`, e);
+        this.scheduleTokenFetch(delay, forceRefresh);
+        return;
+      }
+      if (generation !== this.authGeneration || this.auth !== auth || this.closed) return;
+      this.tokenFetchFailures = 0;
+      this.applyToken(token);
+      if (token === null) this.setAuthenticated(false, auth.onChange);
+      this.scheduleTokenRefresh(token);
+    } finally {
+      this.tokenFetchesInFlight--;
+      // Whichever fetch finishes last lets sends through again: a superseded fetch (a newer `setAuth` or
+      // `clearAuth`) must not leave the socket paused for good.
+      if (this.tokenFetchesInFlight === 0 && this.ws.isPaused && !this.closed) this.ws.resume();
     }
-    if (generation !== this.authGeneration || this.auth !== auth || this.closed) return;
-    this.applyToken(token);
-    if (token === null) this.setAuthenticated(false, auth.onChange);
-    this.scheduleTokenRefresh(token);
-    if (pause) this.ws.resume();
+  }
+
+  private scheduleTokenFetch(delay: number, forceRefresh: boolean): void {
+    this.clearAuthRefreshTimer();
+    this.authRefreshTimer = setTimeout(() => {
+      this.authRefreshTimer = null;
+      void this.fetchAndApplyToken(forceRefresh, false);
+    }, delay);
   }
 
   /** Records the desired token and sends `Authenticate` when the server's token differs. */
@@ -449,11 +517,13 @@ export class RxFerrixClient {
     if (!token) return;
     const exp = jwtExpiry(token);
     if (exp === null) return;
-    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, exp * 1000 - Date.now() - TOKEN_REFRESH_LEEWAY_MS));
-    this.authRefreshTimer = setTimeout(() => {
-      this.authRefreshTimer = null;
-      void this.fetchAndApplyToken(true, false);
-    }, delay);
+    // Floored: a token that already expires within the leeway (its session is about to end) would otherwise be
+    // refreshed again the moment the refreshed one arrives, in a tight loop.
+    const delay = Math.min(
+      MAX_TIMEOUT_MS,
+      Math.max(MIN_TOKEN_REFRESH_DELAY_MS, exp * 1000 - Date.now() - TOKEN_REFRESH_LEEWAY_MS),
+    );
+    this.scheduleTokenFetch(delay, true);
   }
 
   private clearAuthRefreshTimer(): void {
@@ -706,7 +776,11 @@ export class RxFerrixClient {
     this.clearAuthRefreshTimer();
     this.ws.stop();
     this.removeUnloadListener();
-    this.requests.rejectAll(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
+    const closed = new RxFerrixError("Client is closed", { code: CLIENT_CLOSED });
+    this.requests.rejectAll(closed);
+    // One-shot queries still waiting for a first result would never settle once the listeners are gone.
+    for (const reject of [...this.oneShotQueries]) reject(closed);
+    this.oneShotQueries.clear();
     this.listeners.clear();
     this.notifyConnectionState();
   }

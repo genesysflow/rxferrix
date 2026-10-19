@@ -22,6 +22,8 @@ export interface UseAuthResult extends AuthState {
   signUp: RxFerrixAuth["signUp"];
   signIn: RxFerrixAuth["signIn"];
   signInAsAdmin: RxFerrixAuth["signInAsAdmin"];
+  /** The second step of a sign-in that resolved `mfaRequired`. */
+  verifyMfa: RxFerrixAuth["verifyMfa"];
   setupAdmin: RxFerrixAuth["setupAdmin"];
   signOut: RxFerrixAuth["signOut"];
   signInWithOAuth: RxFerrixAuth["signInWithOAuth"];
@@ -37,6 +39,12 @@ export interface UseAuthResult extends AuthState {
   /** The sign-in methods the server offers (`GET /api/auth/providers`), e.g. to show an OAuth button. */
   providers: RxFerrixAuth["providers"];
   getAccessToken: RxFerrixAuth["getAccessToken"];
+  /** Two-factor authentication of the signed-in account. */
+  getMfaStatus: RxFerrixAuth["getMfaStatus"];
+  setupTotp: RxFerrixAuth["setupTotp"];
+  confirmTotp: RxFerrixAuth["confirmTotp"];
+  disableMfa: RxFerrixAuth["disableMfa"];
+  regenerateRecoveryCodes: RxFerrixAuth["regenerateRecoveryCodes"];
 }
 
 export function useAuth(options: { client?: RxFerrixClient } = {}): UseAuthResult {
@@ -63,6 +71,7 @@ export function useAuth(options: { client?: RxFerrixClient } = {}): UseAuthResul
     signUp: auth.signUp.bind(auth),
     signIn: auth.signIn.bind(auth),
     signInAsAdmin: auth.signInAsAdmin.bind(auth),
+    verifyMfa: auth.verifyMfa.bind(auth),
     setupAdmin: auth.setupAdmin.bind(auth),
     signOut: auth.signOut.bind(auth),
     signInWithOAuth: auth.signInWithOAuth.bind(auth),
@@ -77,6 +86,11 @@ export function useAuth(options: { client?: RxFerrixClient } = {}): UseAuthResul
     verifyEmail: auth.verifyEmail.bind(auth),
     providers: auth.providers.bind(auth),
     getAccessToken: auth.getAccessToken.bind(auth),
+    getMfaStatus: auth.getMfaStatus.bind(auth),
+    setupTotp: auth.setupTotp.bind(auth),
+    confirmTotp: auth.confirmTotp.bind(auth),
+    disableMfa: auth.disableMfa.bind(auth),
+    regenerateRecoveryCodes: auth.regenerateRecoveryCodes.bind(auth),
   };
 }
 

@@ -7,7 +7,9 @@ import {
   type ConnectionState,
   type Id,
 } from "../src/index.js";
+import { MAX_LIVE_QUERIES } from "../src/client.js";
 import { CLIENT_VERSION, type ClientMessage } from "../src/protocol.js";
+import { CONNECT_TIMEOUT_MS } from "../src/web_socket_manager.js";
 import { FakeServer, flushMicrotasks } from "../src/testing.js";
 
 type Todo = { _id: Id<"todos">; text: string };
@@ -147,6 +149,19 @@ describe("connection", () => {
     server.close(1012, "service restart");
     vi.advanceTimersByTime(250);
     expect(server.sockets).toHaveLength(6);
+  });
+
+  it("drops a socket that never opens and retries", async () => {
+    // The client is constructed in beforeEach; its socket sits in "connecting" (a black-holed connect).
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1);
+    expect(server.sockets).toHaveLength(1);
+    expect(server.sockets[0]!.closedByClient).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(server.sockets[0]!.closedByClient).toBe(true);
+    vi.advanceTimersByTime(20_000); // backoff
+    expect(server.sockets).toHaveLength(2);
+    const sent = await openAndDrain();
+    expect(sent[0]).toMatchObject({ type: "Connect", connectionCount: 1, lastCloseReason: "ConnectTimeout" });
   });
 
   it("notifies connection state subscribers", async () => {
@@ -522,6 +537,27 @@ describe("mutations", () => {
     expect(watch.localQueryResult()).toEqual([{ _id: "a1", text: "a" }]);
   });
 
+  it("rejects arguments that can't be serialized without touching the socket", async () => {
+    await setup();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    await expect(client.mutation(api.todos.add, { text: cyclic as unknown as string })).rejects.toMatchObject({
+      code: "invalid_args",
+    });
+    await expect(client.action(api.ai.summarize, { text: 1n as unknown as string })).rejects.toMatchObject({
+      code: "invalid_args",
+    });
+    expect(server.drain()).toEqual([]);
+    expect(server.sockets).toHaveLength(1);
+    // Later mutations are not stuck behind the bad one.
+    const p = client.mutation(api.todos.add, { text: "fine" });
+    await flushMicrotasks();
+    expect(server.drain()).toMatchObject([{ type: "Mutation", requestId: 0, udfPath: "todos:add" }]);
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "t1", ts: 4 });
+    server.transition({ querySet: 1, ts: 4 });
+    await expect(p).resolves.toBe("t1");
+  });
+
   it("getAllQueries lists every query of a function", async () => {
     await openAndDrain();
     client.watchQuery(api.todos.get, { id: "1" }).onUpdate(() => {});
@@ -812,6 +848,85 @@ describe("auth", () => {
     server.transition({ identity: 1, ts: 1 });
     expect(onChange).toHaveBeenCalledWith(true);
   });
+
+  it("retries a failed token fetch with backoff instead of signing the user out", async () => {
+    // The server is unreachable at page load: the stored session is likely still valid.
+    let reachable = false;
+    const fetchToken = vi.fn(async () => {
+      if (!reachable) throw new RxFerrixError("offline", { code: "network_error" });
+      return "tok";
+    });
+    const onChange = vi.fn();
+    client.setAuth(fetchToken, onChange);
+    client.watchQuery(api.todos.count).onUpdate(() => {});
+    await flushMicrotasks();
+    expect(onChange).not.toHaveBeenCalled();
+    // Sends go through meanwhile (anonymously), so the app isn't frozen while offline.
+    const sent = await openAndDrain();
+    expect(sent.map((m) => m.type)).toEqual(["Connect", "ModifyQuerySet"]);
+    expect(fetchToken).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(2_000);
+    await flushMicrotasks();
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(4_000);
+    await flushMicrotasks();
+    expect(fetchToken).toHaveBeenCalledTimes(3);
+    expect(onChange).not.toHaveBeenCalled();
+
+    reachable = true;
+    vi.advanceTimersByTime(8_000);
+    await flushMicrotasks();
+    expect(fetchToken).toHaveBeenCalledTimes(4);
+    expect(server.drain()).toEqual([{ type: "Authenticate", baseVersion: 0, token: "tok" }]);
+    server.transition({ identity: 1, ts: 1 });
+    expect(onChange).toHaveBeenCalledWith(true);
+  });
+
+  it("does not leave sends paused when a superseded token fetch settles last", async () => {
+    let releaseFirst!: (t: string) => void;
+    let releaseSecond!: (t: string) => void;
+    client.setAuth(() => new Promise<string>((r) => (releaseFirst = r)));
+    client.setAuth(() => new Promise<string>((r) => (releaseSecond = r)));
+    client.watchQuery(api.todos.count).onUpdate(() => {});
+    server.open();
+    await flushMicrotasks();
+    expect(server.drain().map((m) => m.type)).toEqual(["Connect"]);
+
+    releaseSecond("second");
+    await flushMicrotasks();
+    releaseFirst("first"); // lost the race: ignored, but it must not keep the socket paused
+    await flushMicrotasks();
+    expect(server.drain()).toMatchObject([
+      { type: "Authenticate", baseVersion: 0, token: "second" },
+      { type: "ModifyQuerySet", modifications: [{ type: "Add", queryId: 0 }] },
+    ]);
+    const p = client.mutation(api.todos.add, { text: "x" });
+    await flushMicrotasks();
+    expect(server.drain()).toMatchObject([{ type: "Mutation", requestId: 0 }]);
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "t1", ts: 1 });
+    server.transition({ querySet: 1, identity: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: 1 }]);
+    await expect(p).resolves.toBe("t1");
+  });
+
+  it("refreshes a token that is already within the expiry leeway after a short delay, not in a loop", async () => {
+    const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const getToken = vi.fn(async () => {
+      const exp = Math.floor(Date.now() / 1000) + 10; // expires within the 30s leeway
+      return `${b64({ alg: "HS256" })}.${b64({ sub: "u", exp })}.sig`;
+    });
+    client.setAuth(getToken);
+    await flushMicrotasks();
+    await openAndDrain();
+    expect(getToken).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(4_999);
+    await flushMicrotasks();
+    expect(getToken).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    await flushMicrotasks();
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(getToken).toHaveBeenLastCalledWith({ forceRefresh: true });
+  });
 });
 
 describe("one-shot query", () => {
@@ -836,5 +951,26 @@ describe("close", () => {
     client.close();
     await expect(p).rejects.toMatchObject({ code: "ClientClosed" });
     expect(server.socket.closedByClient).toBe(true);
+  });
+
+  it("settles one-shot queries still waiting for a result", async () => {
+    await openAndDrain();
+    const p = client.query(api.todos.count);
+    await flushMicrotasks();
+    client.close();
+    await expect(p).rejects.toMatchObject({ code: "ClientClosed" });
+    await expect(client.query(api.todos.count)).rejects.toMatchObject({ code: "ClientClosed" });
+  });
+});
+
+describe("limits", () => {
+  it("refuses to watch more distinct queries than the server accepts", async () => {
+    await openAndDrain();
+    for (let i = 0; i < MAX_LIVE_QUERIES; i++) client.watchQuery(api.todos.get, { id: String(i) }).onUpdate(() => {});
+    expect(() => client.watchQuery(api.todos.get, { id: "one too many" }).onUpdate(() => {})).toThrow(
+      expect.objectContaining({ code: "too_many_queries" }),
+    );
+    // The same query again is not a new subscription.
+    expect(() => client.watchQuery(api.todos.get, { id: "0" }).onUpdate(() => {})).not.toThrow();
   });
 });

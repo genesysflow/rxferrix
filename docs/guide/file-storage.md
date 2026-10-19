@@ -32,7 +32,7 @@ headers that keep uploads from running script on your origin. In `--dev`, file a
 (`/api/storage/...`) unless a public URL is set explicitly (`--public-url`), so they go through a dev server's
 `/api` proxy (Vite) like every other request. Add `?thumb=200x200` (and `&fit=cover`) to an image's
 URL for a thumbnail (JPEG, PNG, WebP, GIF; generated once and cached; oversized images are refused from their header,
-before decoding). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
+before decoding; new sizes are rate limited per client, cached ones aren't). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
 and `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability
 URLs: anyone with the URL can read the file. For private files, use expiring signed URLs and turn on private mode
 (`StorageConfig::private(true)` or `--storage-private`), which refuses unsigned URLs:

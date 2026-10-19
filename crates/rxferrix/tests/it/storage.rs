@@ -796,6 +796,23 @@ async fn uploads_are_rate_limited() {
 }
 
 #[tokio::test]
+async fn thumbnail_generation_is_rate_limited_per_address() {
+    let s = server_with(StorageConfig::default().thumbnail_rate_limit(Some((2, 1)))).await;
+    let id = s.upload(&png_bytes(400, 300, false), "image/png", None).await;
+    let thumb = |q: &str| format!("{}/api/storage/{id}?{q}", s.base);
+    assert_eq!(s.get_url(&thumb("thumb=10x10"), &[]).await.status(), 200);
+    assert_eq!(s.get_url(&thumb("thumb=20x20"), &[]).await.status(), 200);
+    // A third new size within the budget is refused...
+    let res = s.get_url(&thumb("thumb=30x30"), &[]).await;
+    assert_eq!(res.status(), 429);
+    assert!(res.headers().contains_key("retry-after"));
+    assert_eq!(code_of(&res.json::<Value>().await.unwrap()), "rate_limited");
+    // ...while sizes already generated are served from the cache, and the original is not a thumbnail.
+    assert_eq!(s.get_url(&thumb("thumb=10x10"), &[]).await.status(), 200);
+    assert_eq!(s.get(id, &[]).await.status(), 200);
+}
+
+#[tokio::test]
 async fn public_url_makes_absolute_urls() {
     let t = TestApp::with_options(AppOptions {
         dev: true,

@@ -99,7 +99,7 @@ Each one is explained, with examples, in the [guide](https://genesysflow.github.
 | Feature | In short |
 |---|---|
 | [Tables and indexes](docs/guide/functions.md) | Rust structs as tables, typed index queries, pagination, `#[object]` types for results. |
-| [Auth](docs/guide/auth.md) | Passwords, magic links, OAuth (GitHub, Google, Discord, Apple, OIDC), or JWTs from Clerk, Auth0, Supabase. |
+| [Auth](docs/guide/auth.md) | Passwords, magic links, OAuth (GitHub, Google, Discord, Apple, OIDC), or JWTs from Clerk, Auth0, Supabase; two-factor authentication with an authenticator app. |
 | [File storage](docs/guide/file-storage.md) | Uploads to disk or S3, thumbnails, signed and presigned URLs. |
 | [Scheduler and crons](docs/guide/scheduler.md) | Run functions later or on a schedule (time zones included), with workpools and retries. |
 | [Workflows](docs/guide/workflows.md) | Durable multi-step functions that survive restarts, sleep for days and wait for events. |

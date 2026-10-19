@@ -41,14 +41,34 @@ rotated refresh token (past a 10-second grace, `refresh_reuse_grace`) ends the s
 `--smtp-url` (without it, printed to the log in `--dev`). With no admin yet, `serve` prints a
 one-time `/_/setup#token=…` link; `admin create <email>` works too.
 
-OAuth presets: `GitHub`, `Google`, `Discord` (only a Discord-verified email is used) and `Apple` (Sign in with Apple),
-plus `Oidc` for any OpenID Connect issuer; each has `from_env()` (`RXFERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
+OAuth presets: `GitHub`, `Google`, `Discord` and `Apple` (Sign in with Apple), plus `Oidc` for any OpenID Connect
+issuer; an email the provider hasn't verified is never stored or used to link accounts; each has `from_env()` (`RXFERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
 `Oidc::from_env(id)` also reads `RXFERRIX_AUTH_<ID>_ISSUER`) and can also
 be set up in the dashboard's Settings. For Apple, give the Services ID, team id, key id and the `.p8` private key
 (`RXFERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): rxferrix signs and rotates the short-lived client secret
 itself, accepts Apple's `form_post` callback (register `https://<public url>/api/auth/oauth/apple/callback`; the
 public URL must be https), verifies the ID token against Apple's keys, and keeps the name Apple sends on the first
 sign-in only. The key is a secret: keep it out of source control (the dashboard stores it encrypted).
+
+**Two-factor authentication.** Any user (and any administrator) can add an authenticator app (TOTP: Google
+Authenticator, 1Password, Authy, …) to their account; from then on every sign-in method stops at a second step until
+a code (or one of the 8 recovery codes shown at setup) is entered. Nothing to configure on the server (optionally
+`.totp_issuer("My App")`, the name the authenticator shows; the public URL's host by default):
+
+```ts
+// Enrolling (signed in; accounts with a password confirm it):
+const { qrSvg, secret } = await auth.setupTotp({ password });   // show the QR code (an <svg>) or the secret
+const { recoveryCodes } = await auth.confirmTotp(firstCode);     // show the codes once; auth.getMfaStatus() from then on
+// Signing in:
+const r = await auth.signIn({ email, password });                 // also verifyCode, resetPassword, handleRedirectCallback
+if (r.mfaRequired) await auth.verifyMfa(r.mfaToken, codeFromApp); // or a recovery code
+// Later: auth.disableMfa(code), auth.regenerateRecoveryCodes(code)
+```
+
+Five wrong codes lock the factor for five minutes, a code works once, and the secret is stored encrypted with the
+server's key. A user who lost both the app and the recovery codes is rescued from the dashboard's Users page
+("Reset 2FA"); an administrator with `admin disable-2fa <email>`. Administrators turn on their own second factor on
+the dashboard's Account page.
 
 **Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): rxferrix verifies their JWTs
 against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
@@ -61,7 +81,8 @@ subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in 
 ```
 
 ```ts
-// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError.
+// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError. A getter that
+// throws (offline at page load) is retried with backoff; the user stays signed in meanwhile.
 client.setAuth(({ forceRefresh }) => clerk.session!.getToken({ skipCache: forceRefresh }));
 ```
 

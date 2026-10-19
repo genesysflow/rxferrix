@@ -754,3 +754,14 @@ pub(crate) fn check_upload_rate(service: &StorageService, ip: &str) -> Result<()
         None => Ok(()),
     }
 }
+
+/// The thumbnail generation rate limit check for `ip` (`StorageConfig::thumbnail_rate_limit`): `Err(retry_after)`
+/// when exhausted. Called for cache misses only.
+pub(crate) fn check_thumbnail_rate(service: &StorageService, ip: &str) -> Result<(), Duration> {
+    match service.config.thumbnail_rate_limit {
+        Some((burst, per_minute)) => {
+            service.limiter.check("storage_thumbnail", ip, crate::auth::rate_limit::Rule { burst, per_minute })
+        }
+        None => Ok(()),
+    }
+}

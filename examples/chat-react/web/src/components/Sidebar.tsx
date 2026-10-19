@@ -3,6 +3,7 @@ import { useAuthActions, useMutation, useQuery } from "@rxferrix/react";
 import { api, type Id } from "../rxferrix";
 import { errorMessage, initials, type ChannelSummary, type Profile } from "../lib";
 import { ConnectionStatus } from "./ConnectionStatus";
+import { SecurityPanel } from "./SecurityPanel";
 
 interface Props {
   me: Profile;
@@ -26,6 +27,7 @@ export function Sidebar({ me, channels, activeId, insights, onSelect, onInsights
   const browse = channels.filter((c) => !c.isMember);
   const { signOut } = useAuthActions();
   const [creating, setCreating] = useState(false);
+  const [security, setSecurity] = useState(false);
 
   return (
     <aside className="sidebar">
@@ -112,9 +114,13 @@ export function Sidebar({ me, channels, activeId, insights, onSelect, onInsights
         <span className="me-name" data-testid="me">
           {me.name}
         </span>
+        <button className="link light" onClick={() => setSecurity(true)} data-testid="open-security">
+          Security
+        </button>
         <button className="link light" onClick={() => void signOut()}>
           Sign out
         </button>
+        {security && <SecurityPanel onClose={() => setSecurity(false)} />}
       </div>
     </aside>
   );

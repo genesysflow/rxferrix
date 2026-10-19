@@ -16,6 +16,7 @@
   let open = $state<string | null>(null);
   const users = usePaginatedQuery(dashboard.users, () => ({ search: search || null }), { initialNumItems: 50 });
   const deleteUser = useMutation(dashboard.deleteUser);
+  const resetMfa = useMutation(dashboard.resetMfa);
   const getSettings = useAction(settings.get);
 
   // "Open app as user": a short-lived impersonation session, opened in a new tab.
@@ -76,6 +77,17 @@
     timer = setTimeout(() => (search = value.trim()), 250);
   }
 
+  async function resetTwoFactor(u: UserSummary) {
+    const who = u.email ?? u._id;
+    if (!confirm(`Remove the second factor of ${who}? Their next sign-in needs the password only, until they set it up again.`)) return;
+    try {
+      await resetMfa({ user: u._id });
+      ctx.toast(`Two-factor authentication reset for ${who}`);
+    } catch (e) {
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
+    }
+  }
+
   async function remove(u: UserSummary) {
     if (!confirm(`Delete ${u.email ?? u._id} with their sessions, accounts and password? This can't be undone.`)) return;
     try {
@@ -124,6 +136,7 @@
               <td>
                 {#if u.hasPassword}<span class="badge">password</span>{/if}
                 {#each u.providers as p (p)}<span class="badge">{p}</span>{/each}
+                {#if u.mfaEnabled}<span class="badge success" title="Two-factor authentication is on">2FA</span>{/if}
               </td>
               <td>{u.sessions}</td>
               <td class="faint">{formatTime(u._creationTime)}</td>
@@ -132,6 +145,11 @@
                   >Open app as user</button
                 >
                 <a href={href("data", ["_users"], { doc: u._id })} onclick={link}>Document</a>
+                {#if u.mfaEnabled}
+                  <button class="small" onclick={() => resetTwoFactor(u)} title="Remove the user's second factor (lost authenticator)"
+                    >Reset 2FA</button
+                  >
+                {/if}
                 <button class="small danger" onclick={() => remove(u)}>Delete</button>
               </td>
             </tr>

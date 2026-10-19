@@ -43,6 +43,8 @@ rust-stemmers = "1.2.0"
 # through storage bit-exactly; the default fast float parser can be off by one ULP.
 serde_json = { version = "1.0.151", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.11.0"
+# TOTP second factors (RFC 6238, HMAC-SHA1).
+sha1 = "0.11.0"
 subtle = "2.6.1"
 tokio = { version = "1.53.2", features = ["full"] }
 tower-http = { version = "0.7.1", features = ["cors"] }
@@ -62,7 +64,7 @@ tar = "0.4.46"
 zstd = { version = "0.14.1", default-features = false }
 mime_guess = "2.0.5"
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "webpki-roots", "axum"] }
 
 # DuckDB, compiled from its bundled C++ sources (feature `olap`).
@@ -71,6 +73,8 @@ duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = tru
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
 # Verifying imported bcrypt password hashes (`auth::password`).
 bcrypt = "0.19.3"
+# The QR code (as SVG) of a TOTP enrollment (`auth::totp`); no dependencies of its own.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 [features]
 default = ["dashboard", "s3"]

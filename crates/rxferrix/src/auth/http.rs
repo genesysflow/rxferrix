@@ -23,7 +23,7 @@ use serde_json::json;
 
 use super::identity::Identity;
 use super::oauth::{CallbackExtras, STATE_COOKIE, STATE_TTL, with_fragment};
-use super::service::{AuthFailure, AuthResult, CodeProof, Limit, SignUpResult};
+use super::service::{AuthFailure, AuthResult, CodeProof, Limit, SignInOutcome, SignUpResult};
 use super::store::ClientInfo;
 use super::tokens::{TokenError, ct_eq};
 use crate::runtime::App;
@@ -47,6 +47,12 @@ pub fn routes() -> Router<App> {
         .route("/api/auth/oauth/{provider}/callback", get(oauth_callback).post(oauth_callback_post))
         .route("/api/auth/admin/signin", post(admin_sign_in))
         .route("/api/auth/admin/setup", get(admin_setup_status).post(admin_setup))
+        .route("/api/auth/mfa", get(mfa_status))
+        .route("/api/auth/mfa/verify", post(mfa_verify))
+        .route("/api/auth/mfa/totp/setup", post(mfa_totp_setup))
+        .route("/api/auth/mfa/totp/confirm", post(mfa_totp_confirm))
+        .route("/api/auth/mfa/disable", post(mfa_disable))
+        .route("/api/auth/mfa/recovery-codes", post(mfa_recovery_codes))
 }
 
 /// `/_/setup` for builds without the dashboard SPA.
@@ -159,6 +165,11 @@ pub(crate) fn token_failure(e: TokenError) -> AuthFailure {
     AuthFailure::new(401, "invalid_token", e.to_string())
 }
 
+/// The bearer token an endpoint that acts on the signed-in account requires.
+fn require_bearer(headers: &HeaderMap) -> AuthResult<&str> {
+    bearer_token(headers).ok_or_else(|| AuthFailure::new(401, "unauthenticated", "Sign in first"))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeBody {
@@ -251,13 +262,15 @@ async fn refresh(State(app): State<App>, caller: Caller, body: Bytes) -> Respons
     reply(result)
 }
 
-async fn sign_out(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+async fn sign_out(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
     #[derive(Deserialize, Default)]
     #[serde(rename_all = "camelCase")]
     struct Body {
         refresh_token: Option<String>,
     }
     let result = async {
+        // Unauthenticated and it can end in a write: budgeted like refreshes.
+        app.auth().limit(Limit::Refresh, &caller.ip)?;
         let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
         app.auth().sign_out(&app, b.refresh_token.as_deref(), bearer_token(&headers)).await?;
         Ok(json!({}))
@@ -298,7 +311,7 @@ async fn change_password(State(app): State<App>, caller: Caller, headers: Header
     let result = async {
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let b: Body = parse(&body)?;
-        let token = bearer_token(&headers).ok_or_else(|| AuthFailure::new(401, "unauthenticated", "Sign in first"))?;
+        let token = require_bearer(&headers)?;
         app.auth().change_password(&app, token, b.current_password, b.new_password).await?;
         Ok(json!({}))
     }
@@ -380,6 +393,85 @@ async fn admin_setup(State(app): State<App>, caller: Caller, body: Bytes) -> Res
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let b: Body = parse(&body)?;
         app.auth().complete_setup(&app, &b.token, &b.email, b.password, caller.client()).await
+    }
+    .await;
+    reply(result)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Two-factor authentication (`super::mfa`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct MfaCode {
+    code: String,
+}
+
+async fn mfa_status(State(app): State<App>, headers: HeaderMap) -> Response {
+    let result = async { app.auth().mfa_status(&app, require_bearer(&headers)?).await }.await;
+    reply(result)
+}
+
+async fn mfa_verify(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        mfa_token: String,
+        code: String,
+    }
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: Body = parse(&body)?;
+        app.auth().mfa_verify(&app, &b.mfa_token, &b.code, caller.client()).await
+    }
+    .await;
+    reply(result)
+}
+
+async fn mfa_totp_setup(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    #[derive(Deserialize, Default)]
+    struct Body {
+        password: Option<String>,
+    }
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
+        app.auth().mfa_setup(&app, require_bearer(&headers)?, b.password).await
+    }
+    .await;
+    reply(result)
+}
+
+async fn mfa_totp_confirm(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: MfaCode = parse(&body)?;
+        app.auth().mfa_confirm(&app, require_bearer(&headers)?, &b.code).await
+    }
+    .await;
+    reply(result)
+}
+
+async fn mfa_disable(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    #[derive(Deserialize, Default)]
+    struct Body {
+        code: Option<String>,
+    }
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
+        app.auth().mfa_disable(&app, require_bearer(&headers)?, b.code.as_deref()).await?;
+        Ok(json!({}))
+    }
+    .await;
+    reply(result)
+}
+
+async fn mfa_recovery_codes(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    let result = async {
+        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        let b: MfaCode = parse(&body)?;
+        app.auth().mfa_regenerate_recovery_codes(&app, require_bearer(&headers)?, &b.code).await
     }
     .await;
     reply(result)
@@ -525,21 +617,22 @@ async fn oauth_complete(
         r
     };
     // Without a valid pending flow there is no trusted app URL to go back to: answer with a plain error.
-    let Some(pending) = q.state.as_deref().and_then(|s| auth.oauth.take(s)).filter(|p| p.provider == provider_id)
-    else {
+    let state = q.state.as_deref().unwrap_or_default();
+    let Some(redirect_to) = auth.oauth.redirect_of(state) else {
         let body = "Sign-in failed: this sign-in link is invalid or has expired. Please start again.";
         return (StatusCode::BAD_REQUEST, no_store(), body).into_response();
     };
     let fail = |code: &str, message: &str| {
-        redirect(&with_fragment(
-            &pending.redirect_to,
-            &[("rxferrix_error", code), ("rxferrix_error_description", message)],
-        ))
+        redirect(&with_fragment(&redirect_to, &[("rxferrix_error", code), ("rxferrix_error_description", message)]))
     };
-    let state = q.state.as_deref().unwrap_or_default();
+    // The cookie must name this flow, checked before the flow is consumed: a callback replayed into another browser
+    // (no cookie, or another flow's) doesn't burn the pending sign-in of the browser that started it.
     if !cookie_value(&headers, STATE_COOKIE).is_some_and(|c| ct_eq(c, state)) {
         return fail("state_mismatch", "The sign-in was started in another browser or has expired");
     }
+    let Some(pending) = auth.oauth.take(state).filter(|p| p.provider == provider_id) else {
+        return fail("oauth_failed", "This sign-in link is invalid or has expired");
+    };
     if let Some(error) = q.error.as_deref() {
         let code = if matches!(error, "access_denied" | "user_cancelled_authorize") {
             "access_denied"
@@ -558,7 +651,11 @@ async fn oauth_complete(
     }
     .await;
     match result {
-        Ok(tokens) => {
+        // The account has two-factor authentication: the app gets the second-factor token to finish with a code.
+        Ok(SignInOutcome::MfaRequired { mfa_token, .. }) => {
+            redirect(&with_fragment(&pending.redirect_to, &[("rxferrix_mfa_token", mfa_token.as_str())]))
+        }
+        Ok(SignInOutcome::Tokens(tokens)) => {
             let expires_in = tokens.expires_in.to_string();
             let mut pairs = vec![
                 ("rxferrix_access_token", tokens.access_token.as_str()),

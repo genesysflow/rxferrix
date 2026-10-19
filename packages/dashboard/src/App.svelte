@@ -20,6 +20,7 @@
   import Scheduler from "./pages/Scheduler.svelte";
   import Workflows from "./pages/Workflows.svelte";
   import Settings from "./pages/Settings.svelte";
+  import Account from "./pages/Account.svelte";
   import Environment from "./pages/Environment.svelte";
   import Setup from "./pages/Setup.svelte";
   import Users from "./pages/Users.svelte";
@@ -94,6 +95,7 @@
         { page: "environment", label: "Environment", icon: "$", keywords: "env variables secrets api keys config" },
         { page: "settings", label: "Settings", icon: "✱", keywords: "smtp oauth cors redirect signups tokens" },
         { page: "audit", label: "Audit log", icon: "✎", keywords: "history changes" },
+        { page: "account", label: "Account", icon: "⚿", keywords: "two-factor 2fa mfa authenticator totp recovery codes security" },
       ],
     },
   ];
@@ -209,7 +211,9 @@
         <div class="conn" title={live ? "Connected: views update live" : "Reconnecting…"}>
           <span class="dot" class:on={live}></span>{live ? "live" : "offline"}
         </div>
-        <div class="who mono" title="Signed in administrator">{me.data?.email ?? ""}</div>
+        <a class="who mono" href={href("account")} onclick={link} title="Signed in administrator: your account">
+          {me.data?.email ?? ""}{#if me.data?.mfaEnabled}<span class="mfa" title="Two-factor authentication is on" aria-label="two-factor authentication on"> ⚿</span>{/if}
+        </a>
         <div class="row">
           <button class="small" onclick={() => theme.cycle()} title="Theme: light, dark or system">
             {theme.current === "system" ? "◐ system" : theme.current === "dark" ? "☾ dark" : "☀ light"}
@@ -245,6 +249,8 @@
         <Settings />
       {:else if route.page === "audit"}
         <Audit {route} />
+      {:else if route.page === "account"}
+        <Account />
       {:else}
         <Overview />
       {/if}
@@ -391,6 +397,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-decoration: none;
+  }
+  .who:hover {
+    color: var(--text);
+  }
+  .who .mfa {
+    color: var(--ok);
   }
   .topbar,
   .scrim {

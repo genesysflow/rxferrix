@@ -385,6 +385,8 @@ async fn test_users() {
         .auth()
         .sign_in(t.app(), "carol@example.com", "correct horse battery".into(), Default::default())
         .await
-        .unwrap();
+        .unwrap()
+        .tokens()
+        .expect("no second factor: a session");
     assert!(tokens.user_id.is_some());
 }

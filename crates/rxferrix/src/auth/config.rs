@@ -58,6 +58,8 @@ pub struct AuthConfig {
     pub(crate) impersonation: bool,
     /// Runs after each successful user sign-in ([`AuthConfig::on_sign_in`]).
     pub(crate) on_sign_in: Option<SignInHook>,
+    /// The name authenticator apps show for this server's TOTP second factors ([`AuthConfig::totp_issuer`]).
+    pub(crate) totp_issuer: Option<String>,
     /// Which defaults were set explicitly in code (they then win over `_settings`).
     pub(crate) explicit: Explicit,
 }
@@ -92,6 +94,7 @@ impl Default for AuthConfig {
             audit_retention: Duration::from_secs(90 * 24 * 3600),
             impersonation: true,
             on_sign_in: None,
+            totp_issuer: None,
             explicit: Explicit::default(),
         }
     }
@@ -119,6 +122,7 @@ impl fmt::Debug for AuthConfig {
             .field("audit_retention", &self.audit_retention)
             .field("impersonation", &self.impersonation)
             .field("on_sign_in", &self.on_sign_in.as_ref().map(|_| "<hook>"))
+            .field("totp_issuer", &self.totp_issuer)
             .finish()
     }
 }
@@ -278,6 +282,13 @@ impl AuthConfig {
     /// Take the client IP from the last `X-Forwarded-For` entry (set this only behind a reverse proxy).
     pub fn trust_proxy(mut self, trust: bool) -> Self {
         self.trust_proxy = trust;
+        self
+    }
+
+    /// The name shown in authenticator apps next to accounts enrolled in two-factor authentication here (the
+    /// `issuer` of the `otpauth://` URI). Default: the host of the public URL, else `RxFerrix`.
+    pub fn totp_issuer(mut self, name: impl Into<String>) -> Self {
+        self.totp_issuer = Some(name.into());
         self
     }
 }

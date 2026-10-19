@@ -80,10 +80,12 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 // open (guarantee 10). error is one of "malformed access token", "invalid access token signature", "access token
 // expired", "session has ended", and for external tokens "unknown token issuer", "unknown token signing key",
 // "invalid access token claims", "access token not yet valid". The server closes the socket; the client fetches a
-// fresh token (forceRefresh) and reconnects with it, or, when that fails, continues anonymously.
+// fresh token (forceRefresh) and reconnects with it, or, when the getter returns nothing, continues anonymously. (A
+// getter that throws, at page load or on a refresh, is retried with backoff instead: the session it holds is kept.)
 { "type": "AuthError", "error": "…" }
 
-// Sent every 15s. If the client hears nothing for 30s it assumes the socket is dead and reconnects.
+// Sent every 15s. If the client hears nothing for 30s it assumes the socket is dead and reconnects (a socket that
+// hasn't opened after 30s is dropped and retried the same way). Any frame from the server resets the backoff.
 { "type": "Ping" }
 ```
 
@@ -195,7 +197,8 @@ Nothing here changes the messages or the guarantees above; it describes how the 
 
 So that no client can grow the server's memory without bound:
 
-- At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`.
+- At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`. The client
+  refuses the 1025th distinct query up front (`too_many_queries`) rather than having every reconnect repeat the error.
 - At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server holds the next one and
   stops reading the socket until one finishes (later messages queue in the client and TCP rather than in the server,
   and keep their order). Meanwhile it goes on sending Transitions and Pings and ending the socket on token expiry or
@@ -264,28 +267,45 @@ endpoints' error shape, without `logLines`).
 JSON bodies with camelCase keys. Success: the JSON object below. Failure: `{ "status": "error", "errorMessage",
 "errorData": { "code", "data": null } }` with an HTTP status. Responses carry `Cache-Control: no-store`. Endpoints
 that check credentials or send email are rate limited per client IP (429 `rate_limited` with `Retry-After`); email
-sending is also limited per address. `Tokens` = `{ accessToken, refreshToken, expiresIn, userId? | adminId? }`.
+sending is also limited per address, and password sign-ins (users and administrators) per account, so a guess rate
+spread over many addresses still meets the same budget. Sign-out shares the refresh budget. `Tokens` = `{ accessToken, refreshToken, expiresIn, userId? | adminId? }`.
 
 | Endpoint | Body | Response / notes |
 |---|---|---|
 | `GET /api/auth/providers` | | `{ password, magicLink, signups, oauth: ["github", …] }` |
 | `POST /api/auth/signup` | `{ email, password, name? }` | `Tokens`, or `{ verificationRequired: true }`. 400 `email_in_use`, `weak_password` (< 8 chars), `invalid_password` (> 256 chars), `invalid_email`; 403 `signups_disabled`. Sends a verification email when email is configured. |
-| `POST /api/auth/signin` | `{ email, password }` | `Tokens`. 401 `invalid_credentials` for both unknown emails and wrong passwords (same timing); 403 `email_not_verified` when verification is required. |
+| `POST /api/auth/signin` | `{ email, password }` | `Tokens`, or `MfaRequired` (below) when the user has two-factor authentication. 401 `invalid_credentials` for both unknown emails and wrong passwords (same timing); 403 `email_not_verified` when verification is required. |
 | `POST /api/auth/refresh` | `{ refreshToken }` | `Tokens` (new refresh token). 401 `invalid_refresh_token`, `stale_refresh_token`, `refresh_token_reused` (session revoked), `session_expired`. |
-| `POST /api/auth/signout` | `{ refreshToken? }` and/or `Authorization: Bearer` | `{}` always. Deletes the session. |
+| `POST /api/auth/signout` | `{ refreshToken? }` and/or `Authorization: Bearer` | `{}` always. Deletes the session (an unknown token is looked up without a write). Rate limited with refreshes. |
 | `POST /api/auth/verify-email/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). Emails unverified users. |
 | `POST /api/auth/verify-email/confirm` | `{ token }` or `{ email, code }` | `{}`. 400 `invalid_code`. |
 | `POST /api/auth/reset/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). |
-| `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens`. Ends all other sessions of the user and marks the email verified. |
+| `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens` or `MfaRequired`. Ends all other sessions of the user and marks the email verified. |
 | `POST /api/auth/password/change` | `{ currentPassword, newPassword }`, with the user's `Authorization: Bearer` access token | `{}`. Ends the user's other sessions; this one stays. `invalid_current_password` (400), `weak_password` (400), `unauthenticated` / `invalid_token` (401), `forbidden` (403, admin tokens). A user without a password sets one through a reset. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
-| `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
+| `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens` or `MfaRequired`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
 | `GET /api/auth/oauth/{provider}?redirect_to=<app url>` | | 302 to the provider (PKCE S256 + `state`, plus `nonce` and `response_mode=form_post` for Apple; sets the HttpOnly cookie `rxferrix_oauth_state`, `SameSite=Lax` (plus `Secure` over https), or `SameSite=None; Secure` for Apple behind an https public URL). |
-| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, or `#rxferrix_error=<code>&rxferrix_error_description=…`. A `state` that names no pending flow of the provider gets a plain-text 400 (there is no app URL to return to). |
+| `GET /api/auth/oauth/{provider}/callback` | (from the provider) | 302 to the app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, `#rxferrix_mfa_token=…` (the user has two-factor authentication: finish with `POST /api/auth/mfa/verify`), or `#rxferrix_error=<code>&rxferrix_error_description=…`. A `state` that names no pending flow of the provider gets a plain-text 400 (there is no app URL to return to). The cookie is checked before the flow is consumed: a callback replayed without it (`state_mismatch`) doesn't use up the flow of the browser that started it. |
 | `POST /api/auth/oauth/{provider}/callback` | form `code, state, user?` (from Apple) | Apple only (`response_mode=form_post`; 405 for other providers): as the `GET`, answered with 303. `user` (the name) comes on the first sign-in only. |
-| `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim). |
+| `POST /api/auth/admin/signin` | `{ email, password }` | `Tokens` with `adminId` (`adm` claim), or `MfaRequired` when the administrator has two-factor authentication. |
 | `GET /api/auth/admin/setup` | | `{ needsSetup }` |
 | `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
+| `POST /api/auth/mfa/verify` | `{ mfaToken, code }` | `Tokens`: the second step of a sign-in. `code` is a TOTP code from the authenticator app, or a recovery code (case, spaces and dashes are ignored). 400 `invalid_mfa_code` (wrong, or a TOTP code already used), 429 `mfa_locked` with `Retry-After` (5 wrong codes in a row lock the factor for 5 minutes), 401 `invalid_mfa_token` (expired after 5 minutes, malformed, or the factor was removed meanwhile: sign in again). |
+| `GET /api/auth/mfa` | `Authorization: Bearer` (user or admin) | `{ enabled, pending, recoveryCodesLeft, methods: ["totp"] }`. |
+| `POST /api/auth/mfa/totp/setup` | `{ password? }`, with `Authorization: Bearer` | `{ secret (base32), uri (otpauth://), qrSvg (<svg>) }`: starts (or restarts) an unconfirmed TOTP enrollment. Accounts with a password must give it: 400 `password_required` / `invalid_current_password`; 400 `mfa_already_enabled`. |
+| `POST /api/auth/mfa/totp/confirm` | `{ code }`, with `Authorization: Bearer` | `{ recoveryCodes: [8 × "xxxxx-xxxxx"] }`: the authenticator's first code confirms the factor; from then on sign-ins need a code. The recovery codes are shown only here. 400 `invalid_mfa_code`, `mfa_not_pending`. |
+| `POST /api/auth/mfa/disable` | `{ code? }`, with `Authorization: Bearer` | `{}`. A confirmed factor needs a current TOTP or recovery code; a pending setup is dropped without one. 400 `invalid_mfa_code`, `mfa_not_enabled`. |
+| `POST /api/auth/mfa/recovery-codes` | `{ code }`, with `Authorization: Bearer` | `{ recoveryCodes }`: new codes (the old ones stop working). |
+
+`MfaRequired` = `{ mfaRequired: true, mfaToken, methods: ["totp"] }`: the first step succeeded for an account that has
+two-factor authentication; no session exists until `POST /api/auth/mfa/verify`. The second-factor token is a JWT like
+the access token (`typ: "mfa"`, `sub`, `adm?`, `mth`: the sign-in method, 5 minutes) that grants nothing by itself:
+it is refused wherever an access token is expected. Factors are per user or admin (`_mfa_factors`): the TOTP secret
+(RFC 6238, SHA1, 6 digits, 30-second steps, one step of drift accepted) is stored sealed with the server's settings
+key, recovery codes as keyed hashes; a TOTP code is accepted once (the step of the last accepted code is kept). The
+`mfa/*` endpoints that take a bearer token refuse impersonation sessions and external JWTs (403 `forbidden`).
+Impersonation, `sign_in_as` and external JWTs don't go through the second factor. Administrators reset a user's
+factor with `_system/dashboard:reset_mfa` (audited); `admin disable-2fa <email>` does it for an administrator.
 
 OAuth presets: `github`, `google`, `discord` (`identify email`; its email only if Discord verified it), `apple` (`name
 email`; the profile is the ID token, verified against Apple's JWKS with `iss`, `aud`, `exp` and the flow's `nonce`;
@@ -294,6 +314,12 @@ issuer. The state cookie must equal the callback's `state` (constant-time) and n
 (10 minutes, used once), whichever method the callback uses; Apple's cross-site `POST` is why its cookie is
 `SameSite=None` (it binds the flow, it doesn't authenticate anything, so a third party posting with it attached can't
 complete a sign-in: it doesn't know the value).
+
+An email the provider didn't verify is never trusted: it can't claim an existing account (`email_in_use`), and a user
+created from such a profile starts without an email (whatever the provider; GitHub's unverified primary address
+included). A verified provider email that matches a user whose address was never verified (a password sign-up that
+may be someone else's) takes the account over: its password, sessions and provider links are removed. Confirming the
+address through the verification link removes stale provider links the same way.
 
 Codes are 6 digits (5 wrong attempts burn a code); link tokens are 256-bit. Both are stored as keyed hashes and work
 once. Verification codes last 24 hours, reset codes 30 minutes, sign-in codes 15 minutes.
@@ -412,6 +438,9 @@ same caching and security headers. Generated once, then cached on the server; de
 - **415** `unsupported_image`: not one of the four types (by content type, then by the bytes).
 - **422** `image_too_large`: more than 40 megapixels (refused from the image header, before decoding: decompression
   bombs cost nothing), or a file over 32 MiB; `invalid_image`: the bytes can't be decoded.
+- **429** `rate_limited` with `Retry-After`: variants not yet cached are limited per client IP (default burst 30, 60
+  per minute; `StorageConfig::thumbnail_rate_limit`), so a loop over sizes can't spend the server's CPU and disk.
+  Cached variants are served regardless.
 
 **Content-Disposition and active content.** Images (png, jpeg, gif, webp, avif, bmp, ico), audio, video,
 `text/plain`, `text/csv`, `application/json` and `application/pdf` are `inline`; everything else, in particular

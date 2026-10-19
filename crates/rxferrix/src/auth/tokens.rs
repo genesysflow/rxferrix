@@ -15,6 +15,8 @@
 //! **Access tokens** are compact JWTs with header `{"alg":"HS256","typ":"JWT"}` and claims
 //! `{ iss: "rxferrix", typ: "access", sub, sid, adm?, iat, exp }`. Verification accepts exactly that header (no
 //! algorithm negotiation, so no `alg: none` / key-confusion attacks) and compares the MAC in constant time.
+//! **Second-factor tokens** ([`MfaClaims`], `typ: "mfa"`) are signed the same way with the same key; the `typ`
+//! check keeps the two apart.
 
 use std::path::Path;
 
@@ -30,6 +32,7 @@ pub const SECRET_FILE: &str = "auth_secret.key";
 
 const ISSUER: &str = "rxferrix";
 const ACCESS_TYPE: &str = "access";
+const MFA_TYPE: &str = "mfa";
 const JWT_HEADER: &str = r#"{"alg":"HS256","typ":"JWT"}"#;
 
 /// Keys derived from the server secret.
@@ -93,6 +96,40 @@ impl Keys {
 
     /// Sign access token claims.
     pub fn sign(&self, claims: &AccessClaims) -> String {
+        self.sign_claims(claims)
+    }
+
+    /// Verify an access token's header, signature, issuer, type and expiry (`now_s`: seconds since the epoch).
+    pub fn verify(&self, token: &str, now_s: u64) -> Result<AccessClaims, TokenError> {
+        let claims: AccessClaims = self.verify_claims(token)?;
+        if claims.iss != ISSUER || claims.typ != ACCESS_TYPE {
+            return Err(TokenError::Malformed);
+        }
+        if claims.exp <= now_s {
+            return Err(TokenError::Expired);
+        }
+        Ok(claims)
+    }
+
+    /// Sign the claims of a second-factor token (`typ: "mfa"`, see [`MfaClaims`]).
+    pub fn sign_mfa(&self, claims: &MfaClaims) -> String {
+        self.sign_claims(claims)
+    }
+
+    /// Verify a second-factor token (same checks as [`Keys::verify`], for `typ: "mfa"`). An access token is never
+    /// accepted here, nor the other way round: the two types are checked exactly.
+    pub fn verify_mfa(&self, token: &str, now_s: u64) -> Result<MfaClaims, TokenError> {
+        let claims: MfaClaims = self.verify_claims(token)?;
+        if claims.iss != ISSUER || claims.typ != MFA_TYPE {
+            return Err(TokenError::Malformed);
+        }
+        if claims.exp <= now_s {
+            return Err(TokenError::Expired);
+        }
+        Ok(claims)
+    }
+
+    fn sign_claims<T: Serialize>(&self, claims: &T) -> String {
         let header = BASE64URL_NOPAD.encode(JWT_HEADER.as_bytes());
         let payload = BASE64URL_NOPAD.encode(&serde_json::to_vec(claims).expect("claims serialize"));
         let signing_input = format!("{header}.{payload}");
@@ -100,8 +137,8 @@ impl Keys {
         format!("{signing_input}.{}", BASE64URL_NOPAD.encode(&sig))
     }
 
-    /// Verify an access token's header, signature, issuer, type and expiry (`now_s`: seconds since the epoch).
-    pub fn verify(&self, token: &str, now_s: u64) -> Result<AccessClaims, TokenError> {
+    /// The header, signature and payload checks shared by every token type (the claims' own checks follow).
+    fn verify_claims<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T, TokenError> {
         let mut parts = token.split('.');
         let (Some(header), Some(payload), Some(sig), None) = (parts.next(), parts.next(), parts.next(), parts.next())
         else {
@@ -118,14 +155,7 @@ impl Keys {
         // `verify_slice` compares in constant time.
         self.mac(&token.as_bytes()[..signing_input_len]).verify_slice(&sig).map_err(|_| TokenError::BadSignature)?;
         let payload = BASE64URL_NOPAD.decode(payload.as_bytes()).map_err(|_| TokenError::Malformed)?;
-        let claims: AccessClaims = serde_json::from_slice(&payload).map_err(|_| TokenError::Malformed)?;
-        if claims.iss != ISSUER || claims.typ != ACCESS_TYPE {
-            return Err(TokenError::Malformed);
-        }
-        if claims.exp <= now_s {
-            return Err(TokenError::Expired);
-        }
-        Ok(claims)
+        serde_json::from_slice(&payload).map_err(|_| TokenError::Malformed)
     }
 
     fn mac(&self, data: &[u8]) -> Hmac<Sha256> {
@@ -162,6 +192,32 @@ pub struct AccessClaims {
 impl AccessClaims {
     pub fn new(sub: String, sid: String, adm: bool, now_s: u64, ttl_s: u64) -> Self {
         AccessClaims { iss: ISSUER.into(), typ: ACCESS_TYPE.into(), sub, sid, adm, iat: now_s, exp: now_s + ttl_s }
+    }
+}
+
+/// Claims of a second-factor token: the first step of a sign-in (password, magic link, OAuth, ...) succeeded for
+/// an account that has two-factor authentication, and the session starts once a code is presented with it
+/// (`POST /api/auth/mfa/verify`). Short-lived; it grants nothing by itself. `{ iss: "rxferrix", typ: "mfa", sub,
+/// adm?, mth, iat, exp }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MfaClaims {
+    pub iss: String,
+    pub typ: String,
+    /// `Id<User>`, or `Id<Admin>` when `adm` is true.
+    pub sub: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adm: bool,
+    /// How the first step was passed (`SignInMethod`'s string form, e.g. `password`, `oauth:github`), for the
+    /// `on_sign_in` hook of the session it ends up starting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mth: Option<String>,
+    pub iat: u64,
+    pub exp: u64,
+}
+
+impl MfaClaims {
+    pub fn new(sub: String, adm: bool, mth: Option<String>, now_s: u64, ttl_s: u64) -> Self {
+        MfaClaims { iss: ISSUER.into(), typ: MFA_TYPE.into(), sub, adm, mth, iat: now_s, exp: now_s + ttl_s }
     }
 }
 
@@ -266,6 +322,19 @@ fn check_permissions(_: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mfa_tokens_are_their_own_type() {
+        let keys = Keys::from_secret(&[7u8; 64]);
+        let mfa = keys.sign_mfa(&MfaClaims::new("u1".into(), false, Some("password".into()), 1000, 300));
+        let claims = keys.verify_mfa(&mfa, 1200).unwrap();
+        assert_eq!((claims.sub.as_str(), claims.adm, claims.mth.as_deref()), ("u1", false, Some("password")));
+        assert_eq!(keys.verify_mfa(&mfa, 1300), Err(TokenError::Expired));
+        assert_eq!(keys.verify(&mfa, 1200), Err(TokenError::Malformed), "not an access token");
+        let access = keys.sign(&AccessClaims::new("u1".into(), "s1".into(), false, 1000, 900));
+        assert_eq!(keys.verify_mfa(&access, 1200), Err(TokenError::Malformed), "not a second-factor token");
+        assert!(Keys::from_secret(&[8u8; 64]).verify_mfa(&mfa, 1200).is_err(), "another server's key");
+    }
 
     #[test]
     fn sign_and_verify() {

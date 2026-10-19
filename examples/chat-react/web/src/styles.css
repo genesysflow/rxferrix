@@ -1214,3 +1214,50 @@ mark {
     transform: translateY(-6px);
   }
 }
+
+/* ---------------------------------------------------------------- security panel */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(20 15 50 / 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+}
+.modal {
+  background: var(--bg);
+  color: var(--text);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 24px;
+  width: min(420px, 92vw);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.modal-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.modal .qr {
+  width: 200px;
+  margin: 0 auto;
+}
+.modal .secret {
+  display: block;
+  text-align: center;
+  word-break: break-all;
+  font-size: 13px;
+}
+.modal .codes {
+  background: var(--bg-soft);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 14px;
+}

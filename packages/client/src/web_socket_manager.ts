@@ -5,6 +5,11 @@ import type { Logger } from "./logging.js";
 export const SERVER_INACTIVITY_TIMEOUT_MS = 30_000;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 16_000;
+/**
+ * A socket that hasn't opened after this long is dropped and retried (a black-holed connect would otherwise hang
+ * forever). As long as the silence threshold: a server that takes longer than that to accept is as good as down.
+ */
+export const CONNECT_TIMEOUT_MS = 30_000;
 /** The close code a server sends when it restarts or hands over to a new process (RFC 6455 "Service Restart"). */
 const SERVICE_RESTART = 1012;
 /** Spread of the immediate reconnects after a restart, so every client doesn't arrive in the same millisecond. */
@@ -62,6 +67,7 @@ export class WebSocketManager {
   private retries = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly removeEnvListeners: () => void;
 
   constructor(options: WebSocketManagerOptions, callbacks: WebSocketManagerCallbacks) {
@@ -157,9 +163,18 @@ export class WebSocketManager {
   private rawSend(message: ClientMessage): boolean {
     const ws = this.ws;
     if (!ws) return false;
+    let data: string;
+    try {
+      data = JSON.stringify(message);
+    } catch (e) {
+      // Not a transport failure: reconnecting wouldn't help, and queueing the message would block every later one
+      // behind it. (Mutation and action args are checked before they are queued; this is the last line of defense.)
+      this.logger.error("message can't be serialized and was dropped", e);
+      return true;
+    }
     try {
       this.logger.debug("->", message);
-      ws.send(JSON.stringify(message));
+      ws.send(data);
       return true;
     } catch (e) {
       this.logger.warn("WebSocket send failed", e);
@@ -185,9 +200,15 @@ export class WebSocketManager {
     this.initialized = false;
     this._connectionCount += 1;
     this.callbacks.onStateChange();
+    this.clearConnectTimer();
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      if (this.ws === ws && this._state === "connecting") this.reconnect("ConnectTimeout");
+    }, CONNECT_TIMEOUT_MS);
 
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.clearConnectTimer();
       this._state = "ready";
       this._hasEverConnected = true;
       this.resetWatchdog();
@@ -208,6 +229,8 @@ export class WebSocketManager {
     ws.onmessage = (event: MessageEvent) => {
       if (this.ws !== ws) return;
       this.resetWatchdog();
+      // The server talks on this socket: it is up, so the next reconnect (if any) starts from a short delay.
+      this.retries = 0;
       let message: ServerMessage;
       try {
         message = JSON.parse(typeof event.data === "string" ? event.data : String(event.data)) as ServerMessage;
@@ -238,6 +261,7 @@ export class WebSocketManager {
   /** Detaches and closes the current socket (if any), reporting `onClose` once. */
   private closeCurrent(reason: string): void {
     this.clearWatchdog();
+    this.clearConnectTimer();
     const ws = this.ws;
     if (!ws) return;
     const wasOpen = this._state === "ready";
@@ -289,6 +313,13 @@ export class WebSocketManager {
       this.watchdogTimer = null;
       this.reconnect("ServerInactivity");
     }, SERVER_INACTIVITY_TIMEOUT_MS);
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
   }
 
   private clearWatchdog(): void {

@@ -76,6 +76,45 @@ impl std::fmt::Display for SignInMethod {
     }
 }
 
+impl SignInMethod {
+    /// The inverse of `Display` (for the method carried by a second-factor token).
+    pub(crate) fn parse(s: &str) -> Option<SignInMethod> {
+        Some(match s {
+            "password" => SignInMethod::Password,
+            "sign_up" => SignInMethod::SignUp,
+            "password_reset" => SignInMethod::PasswordReset,
+            "magic_link" => SignInMethod::MagicLink,
+            _ => SignInMethod::OAuth(s.strip_prefix("oauth:")?.to_string()),
+        })
+    }
+}
+
+/// How a sign-in ended: with a session, or, for an account with two-factor authentication, with a short-lived
+/// token to present together with a code (`POST /api/auth/mfa/verify`), which then starts the session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum SignInOutcome {
+    Tokens(AuthTokens),
+    #[serde(rename_all = "camelCase")]
+    MfaRequired {
+        /// Always `true` (so clients can tell the two apart).
+        mfa_required: bool,
+        mfa_token: String,
+        /// The factors that can complete it (`"totp"`; a recovery code is accepted wherever a code is).
+        methods: Vec<&'static str>,
+    },
+}
+
+impl SignInOutcome {
+    /// The tokens, if the sign-in started a session (tests and callers that don't support a second factor).
+    pub fn tokens(self) -> Option<AuthTokens> {
+        match self {
+            SignInOutcome::Tokens(t) => Some(t),
+            SignInOutcome::MfaRequired { .. } => None,
+        }
+    }
+}
+
 /// An access token that passed validation.
 #[derive(Debug, Clone)]
 pub struct Authenticated {
@@ -135,9 +174,13 @@ pub type AuthResult<T> = Result<T, AuthFailure>;
 /// Endpoint groups for rate limiting.
 #[derive(Debug, Clone, Copy)]
 pub enum Limit {
+    /// Credential checks, per client IP.
     Credentials,
     Email,
     Refresh,
+    /// Password checks per account (keyed by the email), so a distributed attacker gets no steady guess rate
+    /// against one account either. Same budget as `Credentials`.
+    Account,
 }
 
 /// Auth state of an [`App`]. Get it with `app.auth()`.
@@ -165,7 +208,7 @@ pub(crate) fn now_ms() -> f64 {
     crate::db::wall_clock_ms()
 }
 
-fn now_s() -> u64 {
+pub(crate) fn now_s() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -271,6 +314,9 @@ impl AuthService {
             }
             Limit::Email => ("email", Rule { burst: limits.email_burst, per_minute: limits.email_per_minute }),
             Limit::Refresh => ("refresh", Rule { burst: limits.refresh_burst, per_minute: limits.refresh_per_minute }),
+            Limit::Account => {
+                ("account", Rule { burst: limits.credential_burst, per_minute: limits.credential_per_minute })
+            }
         };
         self.limiter.check(name, key, rule).map_err(|retry| AuthFailure {
             status: 429,
@@ -396,6 +442,47 @@ impl AuthService {
         Ok(tokens)
     }
 
+    /// The second step of a sign-in: a session right away, unless the account has a confirmed second factor, in
+    /// which case a short-lived second-factor token is issued and [`AuthService::mfa_verify`] starts the session.
+    async fn finish_sign_in(
+        &self,
+        app: &App,
+        principal: Principal,
+        client: ClientInfo,
+        method: Option<SignInMethod>,
+    ) -> AuthResult<SignInOutcome> {
+        if super::mfa::has_confirmed_factor(app, principal).await? {
+            let (sub, adm) = match principal {
+                Principal::User(u) => (u.to_string(), false),
+                Principal::Admin(a) => (a.to_string(), true),
+            };
+            let claims = super::tokens::MfaClaims::new(
+                sub,
+                adm,
+                method.map(|m| m.to_string()),
+                now_s(),
+                super::mfa::MFA_TOKEN_TTL.as_secs(),
+            );
+            return Ok(SignInOutcome::MfaRequired {
+                mfa_required: true,
+                mfa_token: self.keys.sign_mfa(&claims),
+                methods: vec!["totp"],
+            });
+        }
+        Ok(SignInOutcome::Tokens(self.start_session(app, principal, client, method).await?))
+    }
+
+    /// Start the session a second-factor token stands for, once its code was accepted (`super::mfa`).
+    pub(crate) async fn start_session_after_mfa(
+        &self,
+        app: &App,
+        principal: Principal,
+        client: ClientInfo,
+        method: Option<SignInMethod>,
+    ) -> AuthResult<AuthTokens> {
+        self.start_session(app, principal, client, method).await
+    }
+
     /// Mint tokens for `user` without credentials, e.g. from a test or an admin tool.
     pub async fn sign_in_as(&self, app: &App, user: Id<User>) -> crate::Result<AuthTokens> {
         self.start_session(app, Principal::User(user), ClientInfo::default(), None)
@@ -460,16 +547,19 @@ impl AuthService {
         ))
     }
 
+    /// Password sign-in. The outcome is a session, or a second-factor token when the user has two-factor
+    /// authentication.
     pub async fn sign_in(
         &self,
         app: &App,
         email: &str,
         password: String,
         client: ClientInfo,
-    ) -> AuthResult<AuthTokens> {
+    ) -> AuthResult<SignInOutcome> {
         self.require_password()?;
         // An invalid email gets the same answer as a wrong password (no enumeration through validation either).
         let email = store::normalize_email(email).map_err(|_| AuthFailure::invalid_credentials())?;
+        self.limit(Limit::Account, &email)?;
         let found = store::password_login(app, email).await?;
         let (user, stored) = match found {
             Some((u, h)) => (Some(u), Some(h)),
@@ -492,7 +582,7 @@ impl AuthService {
         if self.config.require_email_verification && !user.email_verified {
             return Err(AuthFailure::new(403, "email_not_verified", "Verify your email address before signing in"));
         }
-        self.start_session(app, Principal::User(user.id), client, Some(SignInMethod::Password)).await
+        self.finish_sign_in(app, Principal::User(user.id), client, Some(SignInMethod::Password)).await
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -663,14 +753,14 @@ impl AuthService {
     }
 
     /// Set a new password with a reset code. Ends every other session, marks the email verified (the user proved
-    /// they read it) and signs in.
+    /// they read it) and signs in (through the second factor, if the user has one: a reset email doesn't bypass it).
     pub async fn confirm_password_reset(
         &self,
         app: &App,
         proof: CodeProof,
         new_password: String,
         client: ClientInfo,
-    ) -> AuthResult<AuthTokens> {
+    ) -> AuthResult<SignInOutcome> {
         self.require_password()?;
         password::check_password_policy(&new_password)?;
         let row = self.consume(app, Purpose::ResetPassword, proof).await?;
@@ -678,7 +768,7 @@ impl AuthService {
         let hash = password::hash(new_password).await?;
         store::set_password(app, user, hash).await?;
         store::mark_email_verified(app, user).await?;
-        self.start_session(app, Principal::User(user), client, Some(SignInMethod::PasswordReset)).await
+        self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::PasswordReset)).await
     }
 
     /// Change the password of the user signed in with `access_token`, who proves it's them with `current`. The user's
@@ -733,13 +823,18 @@ impl AuthService {
         self.send_code(app, email, Purpose::SignIn, None, redirect).await
     }
 
-    pub async fn verify_magic_link(&self, app: &App, proof: CodeProof, client: ClientInfo) -> AuthResult<AuthTokens> {
+    pub async fn verify_magic_link(
+        &self,
+        app: &App,
+        proof: CodeProof,
+        client: ClientInfo,
+    ) -> AuthResult<SignInOutcome> {
         if !self.config.magic_link {
             return Err(AuthFailure::not_found("Magic link sign-in"));
         }
         let row = self.consume(app, Purpose::SignIn, proof).await?;
         let user = store::passwordless_user(app, row.email, self.current().signups).await??;
-        self.start_session(app, Principal::User(user), client, Some(SignInMethod::MagicLink)).await
+        self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::MagicLink)).await
     }
 
     /// Finish an OAuth sign-in for a provider profile.
@@ -749,29 +844,31 @@ impl AuthService {
         provider: &str,
         profile: store::ExternalProfile,
         client: ClientInfo,
-    ) -> AuthResult<AuthTokens> {
+    ) -> AuthResult<SignInOutcome> {
         let user = store::oauth_user(app, provider.to_string(), profile, self.current().signups).await??;
-        self.start_session(app, Principal::User(user), client, Some(SignInMethod::OAuth(provider.to_string()))).await
+        self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::OAuth(provider.to_string()))).await
     }
 
     // -----------------------------------------------------------------------------------------------------------------
     // Admins
 
+    /// Administrator sign-in: a session, or a second-factor token when the admin has two-factor authentication.
     pub async fn admin_sign_in(
         &self,
         app: &App,
         email: &str,
         password: String,
         client: ClientInfo,
-    ) -> AuthResult<AuthTokens> {
+    ) -> AuthResult<SignInOutcome> {
         let email = store::normalize_email(email).map_err(|_| AuthFailure::invalid_credentials())?;
+        self.limit(Limit::Account, &email)?;
         let admin = store::admin_by_email(app, email).await?;
         let stored = admin.as_ref().map(|a| a.password_hash.clone());
         if !password::verify(password, stored).await {
             return Err(AuthFailure::invalid_credentials());
         }
         let admin = admin.expect("verified against a real hash");
-        self.start_session(app, Principal::Admin(admin.id), client, None).await
+        self.finish_sign_in(app, Principal::Admin(admin.id), client, None).await
     }
 
     /// Create an admin (CLI `admin create`).
@@ -791,6 +888,15 @@ impl AuthService {
             anyhow::bail!("no administrator with email {email}");
         }
         Ok(())
+    }
+
+    /// Remove an admin's second factor (CLI `admin disable-2fa`): for an administrator who lost their
+    /// authenticator and recovery codes. `false` if there is no such admin.
+    pub async fn disable_admin_mfa(&self, app: &App, email: &str) -> crate::Result<bool> {
+        let email = store::normalize_email(email)?;
+        let Some(admin) = store::admin_by_email(app, email).await? else { return Ok(false) };
+        super::mfa::remove_factor(app, Principal::Admin(admin.id)).await?;
+        Ok(true)
     }
 
     pub async fn needs_setup(&self, app: &App) -> crate::Result<bool> {

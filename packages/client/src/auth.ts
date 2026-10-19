@@ -5,9 +5,13 @@
  * ```ts
  * const client = new RxFerrixClient("http://localhost:8090");
  * const auth = getAuth(client);                      // restores a stored session, if any
- * await auth.signIn({ email, password });
+ * const r = await auth.signIn({ email, password });
+ * if (r.mfaRequired) await auth.verifyMfa(r.mfaToken, codeFromAuthenticatorApp);
  * auth.subscribe(() => console.log(auth.state()));   // { isLoading, isAuthenticated, userId, isAdmin }
  * ```
+ *
+ * Two-factor authentication (an authenticator app, with recovery codes) is per account: `setupTotp()` +
+ * `confirmTotp(code)` turn it on, `getMfaStatus()`, `disableMfa(code)` and `regenerateRecoveryCodes(code)` manage it.
  *
  * Tokens are kept in `localStorage` (or the `storage` you pass; an in-memory store when neither exists, e.g. SSR).
  * The access token is short-lived (15 minutes by default) and refreshed with the refresh token shortly before it
@@ -76,9 +80,39 @@ export interface AuthTokens {
 /** Proof of email ownership: the token from an email link, or the email address plus the code from the email. */
 export type CodeProof = { token: string } | { email: string; code: string };
 
+/**
+ * How a sign-in ended. With two-factor authentication enabled on the account, the first step (password, magic link,
+ * OAuth, password reset) returns `mfaRequired` with a short-lived `mfaToken` instead of signing in; finish with
+ * {@link RxFerrixAuth.verifyMfa}`(mfaToken, code)`, where `code` is from the authenticator app or a recovery code.
+ */
+export type SignInResult = { mfaRequired: false } | { mfaRequired: true; mfaToken: string; methods: string[] };
+
+/** The account's two-factor authentication (`GET /api/auth/mfa`). */
+export interface MfaStatus {
+  /** Sign-ins need a code. */
+  enabled: boolean;
+  /** A setup was started but not confirmed with a first code yet. */
+  pending: boolean;
+  recoveryCodesLeft: number;
+  /** The enabled factors (`"totp"`). */
+  methods: string[];
+}
+
+/** A started authenticator (TOTP) setup: show the QR code (or the secret) and ask for the first code. */
+export interface MfaSetup {
+  /** The secret in base32, for entering by hand. */
+  secret: string;
+  /** The `otpauth://totp/...` URI the QR code encodes. */
+  uri: string;
+  /** The QR code as an `<svg>` element (inline it; it scales to its container). */
+  qrSvg: string;
+}
+
 /** What {@link RxFerrixAuth.handleRedirectCallback} found in the URL. */
 export type RedirectResult =
   | { type: "signedIn" }
+  /** The account has two-factor authentication: ask for a code, then `verifyMfa(mfaToken, code)`. */
+  | { type: "mfaRequired"; mfaToken: string }
   | { type: "emailVerified" }
   /** A password reset link: ask for a new password, then call `resetPassword({ token }, password)`. */
   | { type: "passwordReset"; token: string }
@@ -118,6 +152,13 @@ export const systemApi = {
     ),
   },
 } as const;
+
+/** The server's answer to a sign-in that needs a second factor. */
+interface MfaRequiredResponse {
+  mfaRequired: true;
+  mfaToken: string;
+  methods?: string[];
+}
 
 interface StoredTokens {
   accessToken: string;
@@ -465,14 +506,92 @@ export class RxFerrixAuth {
     return { verificationRequired: true };
   }
 
-  /** Sign in with email and password. Rejects with code `"invalid_credentials"` on a wrong email or password. */
-  async signIn(args: { email: string; password: string }): Promise<void> {
-    await this.signedIn(await this.post<AuthTokens>("signin", args));
+  /** Tokens: signed in. A second-factor token: the caller finishes with {@link verifyMfa}. */
+  private async signedInOrMfa(res: AuthTokens | MfaRequiredResponse): Promise<SignInResult> {
+    if ("mfaRequired" in res && res.mfaRequired) {
+      return { mfaRequired: true, mfaToken: res.mfaToken, methods: res.methods ?? ["totp"] };
+    }
+    await this.signedIn(res as AuthTokens);
+    return { mfaRequired: false };
   }
 
-  /** Sign in to an admin account (dashboard). Functions then see `ctx.auth.is_admin()`. */
-  async signInAsAdmin(args: { email: string; password: string }): Promise<void> {
-    await this.signedIn(await this.post<AuthTokens>("admin/signin", args));
+  /**
+   * Sign in with email and password. Rejects with code `"invalid_credentials"` on a wrong email or password. With
+   * two-factor authentication on the account, resolves `{ mfaRequired: true, mfaToken }` without signing in: finish
+   * with {@link verifyMfa}.
+   */
+  async signIn(args: { email: string; password: string }): Promise<SignInResult> {
+    return this.signedInOrMfa(await this.post("signin", args));
+  }
+
+  /**
+   * Sign in to an admin account (dashboard). Functions then see `ctx.auth.is_admin()`. Resolves `mfaRequired` like
+   * {@link signIn} when the administrator has two-factor authentication.
+   */
+  async signInAsAdmin(args: { email: string; password: string }): Promise<SignInResult> {
+    return this.signedInOrMfa(await this.post("admin/signin", args));
+  }
+
+  /**
+   * The second step of a sign-in: the `mfaToken` of a `mfaRequired` result plus a code from the authenticator app
+   * (or a recovery code) sign in. Rejects with `invalid_mfa_code` (wrong or already used), `mfa_locked` (too many
+   * wrong codes; wait) or `invalid_mfa_token` (the sign-in expired after 5 minutes: start again).
+   */
+  async verifyMfa(mfaToken: string, code: string): Promise<void> {
+    await this.signedIn(await this.post<AuthTokens>("mfa/verify", { mfaToken, code }));
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Two-factor authentication of the signed-in account
+
+  private async bearer(): Promise<string> {
+    const token = await this.getAccessToken();
+    if (!token) throw new RxFerrixError("Sign in first", { code: "unauthenticated" });
+    return token;
+  }
+
+  /** Whether the signed-in account has two-factor authentication, and how many recovery codes are left. */
+  async getMfaStatus(): Promise<MfaStatus> {
+    const token = await this.bearer();
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/auth/mfa`, { headers: { Authorization: `Bearer ${token}` } });
+    } catch (e) {
+      throw new RxFerrixError("Could not reach the server", { code: "network_error", cause: e });
+    }
+    const json = (await res.json().catch(() => null)) as unknown;
+    if (!res.ok) throw errorFrom(res.status, json);
+    return json as MfaStatus;
+  }
+
+  /**
+   * Start setting up an authenticator app (TOTP) for the signed-in account: returns the QR code and secret to
+   * enroll with; nothing changes until {@link confirmTotp} gets the app's first code. Accounts with a password
+   * must give it (`password_required`, `invalid_current_password`); `mfa_already_enabled` when it is on already.
+   */
+  async setupTotp(args: { password?: string } = {}): Promise<MfaSetup> {
+    return this.post<MfaSetup>("mfa/totp/setup", args, await this.bearer());
+  }
+
+  /**
+   * Confirm the setup with the authenticator's first code. From then on, sign-ins need a code. Resolves the recovery
+   * codes: show them once and tell the user to keep them; each works once in place of a code. `invalid_mfa_code`.
+   */
+  async confirmTotp(code: string): Promise<{ recoveryCodes: string[] }> {
+    return this.post("mfa/totp/confirm", { code }, await this.bearer());
+  }
+
+  /**
+   * Turn two-factor authentication off for the signed-in account. Needs a current code (or a recovery code) once the
+   * factor is confirmed; a pending setup is dropped without one. `invalid_mfa_code`, `mfa_not_enabled`.
+   */
+  async disableMfa(code?: string): Promise<void> {
+    await this.post("mfa/disable", code ? { code } : {}, await this.bearer());
+  }
+
+  /** Replace the recovery codes (a current code or recovery code proves it's the user); the old ones stop working. */
+  async regenerateRecoveryCodes(code: string): Promise<{ recoveryCodes: string[] }> {
+    return this.post("mfa/recovery-codes", { code }, await this.bearer());
   }
 
   /** Whether the server has no administrator yet (`GET /api/auth/admin/setup`). */
@@ -522,19 +641,20 @@ export class RxFerrixAuth {
     await this.post("reset/request", args);
   }
 
-  /** Set a new password with the reset link token or code; ends other sessions and signs in. */
   /**
    * Change the signed-in user's password; `currentPassword` proves it's them. Their other sessions end, this one stays
    * signed in. Fails with an `RxFerrixError` code such as `invalid_current_password` or `weak_password`.
    */
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
-    const token = await this.getAccessToken();
-    if (!token) throw new RxFerrixError("Sign in first", { code: "unauthenticated" });
-    await this.post("password/change", { currentPassword, newPassword }, token);
+    await this.post("password/change", { currentPassword, newPassword }, await this.bearer());
   }
 
-  async resetPassword(proof: CodeProof, password: string): Promise<void> {
-    await this.signedIn(await this.post<AuthTokens>("reset/confirm", { ...proof, password }));
+  /**
+   * Set a new password with the reset link token or code; ends other sessions and signs in (or resolves
+   * `mfaRequired` like {@link signIn}: a reset email doesn't bypass the second factor).
+   */
+  async resetPassword(proof: CodeProof, password: string): Promise<SignInResult> {
+    return this.signedInOrMfa(await this.post("reset/confirm", { ...proof, password }));
   }
 
   /** Email a magic sign-in link and a one-time code. Succeeds whether or not the account exists. */
@@ -542,14 +662,17 @@ export class RxFerrixAuth {
     await this.post("magic/request", args);
   }
 
-  /** Sign in with the one-time code from a magic link email. */
-  async verifyCode(args: { email: string; code: string }): Promise<void> {
-    await this.signedIn(await this.post<AuthTokens>("magic/verify", args));
+  /** Sign in with the one-time code from a magic link email (or resolve `mfaRequired`, as {@link signIn}). */
+  async verifyCode(args: { email: string; code: string }): Promise<SignInResult> {
+    return this.signedInOrMfa(await this.post("magic/verify", args));
   }
 
-  /** Sign in with the token of a magic link (usually done by {@link handleRedirectCallback}). */
-  async verifyMagicLink(token: string): Promise<void> {
-    await this.signedIn(await this.post<AuthTokens>("magic/verify", { token }));
+  /**
+   * Sign in with the token of a magic link (usually done by {@link handleRedirectCallback}); resolves `mfaRequired`
+   * as {@link signIn} does.
+   */
+  async verifyMagicLink(token: string): Promise<SignInResult> {
+    return this.signedInOrMfa(await this.post("magic/verify", { token }));
   }
 
   /** The URL that starts an OAuth sign-in with `provider`, returning to `redirectTo` (default: this page). */
@@ -573,9 +696,10 @@ export class RxFerrixAuth {
 
   /**
    * Handle the `#rxferrix_…` fragment that OAuth redirects and email links put on the URL: stores tokens (OAuth),
-   * signs in (magic link), confirms the email (verification link) or returns the reset token (password reset). The
-   * `rxferrix_` parameters are removed from the address bar first, so a reload can't replay them. Returns null when
-   * the URL has none.
+   * signs in (magic link), confirms the email (verification link) or returns the reset token (password reset). With
+   * two-factor authentication on the account, OAuth and magic links end in `{ type: "mfaRequired", mfaToken }`:
+   * ask for a code and call {@link verifyMfa}. The `rxferrix_` parameters are removed from the address bar first,
+   * so a reload can't replay them. Returns null when the URL has none.
    */
   async handleRedirectCallback(url?: string): Promise<RedirectResult | null> {
     const g = globalThis as {
@@ -610,10 +734,12 @@ export class RxFerrixAuth {
         await this.signedIn({ accessToken: access, refreshToken: refresh, expiresIn, ...(userId ? { userId } : {}) });
         return { type: "signedIn" };
       }
+      const mfaToken = ours.get("rxferrix_mfa_token");
+      if (mfaToken) return { type: "mfaRequired", mfaToken };
       const magic = ours.get("rxferrix_magic_token");
       if (magic) {
-        await this.verifyMagicLink(magic);
-        return { type: "signedIn" };
+        const r = await this.verifyMagicLink(magic);
+        return r.mfaRequired ? { type: "mfaRequired", mfaToken: r.mfaToken } : { type: "signedIn" };
       }
       const verify = ours.get("rxferrix_verify_token");
       if (verify) {

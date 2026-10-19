@@ -1,6 +1,7 @@
 # Things to know
 
-- **Limits per connection and per run.** A socket may have 1024 live queries and 64 running mutations/actions;
+- **Limits per connection and per run.** A socket may have 1024 live queries (the client refuses the 1025th with
+  `too_many_queries`) and 64 running mutations/actions;
   queries time out after 30 s (`--query-timeout`), mutations after 5 s (`--mutation-timeout`); a client silent for 45 s (it answers pings)
   is disconnected. They bound the server's memory whatever a client does (docs/PROTOCOL.md, Limits).
 - **Query results are cached while nothing they read changes.** Every subscriber of a query shares one result; after

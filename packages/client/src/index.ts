@@ -36,6 +36,9 @@ export {
   type CodeProof,
   type RxFerrixAuthOptions,
   type RedirectResult,
+  type SignInResult,
+  type MfaStatus,
+  type MfaSetup,
   type User,
 } from "./auth.js";
 export type { OptimisticLocalStore, OptimisticUpdate } from "./optimistic_updates.js";

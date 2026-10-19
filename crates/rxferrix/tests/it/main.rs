@@ -27,6 +27,7 @@ mod index_order;
 mod jwt;
 mod limits;
 mod macros;
+mod mfa;
 mod migrations;
 mod model;
 mod oauth_presets;

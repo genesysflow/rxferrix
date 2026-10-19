@@ -574,7 +574,11 @@ with the `.p8` key, cached and replaced 10 minutes before its 1-hour expiry; the
 when the public URL is https); the profile is the token endpoint's ID token, verified with the external-JWT code
 (Apple's JWKS at `/auth/keys`, RS256 only, `iss`, `aud` = services id, `exp`, `nonce`); the name comes from the
 `user` form field of the first sign-in (later sign-ins keep it; its email is ignored). A provider whose Apple key
-doesn't parse is logged at startup and refuses sign-ins.
+doesn't parse is logged at startup and refuses sign-ins. Whatever the provider, an email it didn't verify is neither
+stored on a new user nor allowed to claim an existing one (`email_in_use`); a verified one that matches a user whose
+address was never verified takes that account over, removing its password, sessions and provider links
+(`store::strip_unverified_account`), as does confirming the address through the verification link. The callback
+checks the state cookie before consuming the pending flow.
 
 `AuthConfig::default()` enables no user sign-in method (tokens are still validated; admin sign-in works). Other
 builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(bool)`, `access_token_ttl` (15 min),
@@ -584,20 +588,39 @@ builder methods: `passwordless()`, `signups(bool)`, `require_email_verification(
 command line or in `_settings`; never used outside `--dev`; it can forward to `DevLogMailer.send(email)` to keep the
 log lines; `Email { to, subject, body, html: Option<String> }`, built with `Email::new(to, subject, text).html(..)`,
 an HTML version is sent as `multipart/alternative`; apps send their own email through the same mailer with
-`ActionCtx::send_email`), `rate_limits(Option<RateLimits>)`, `trust_proxy(bool)`,
+`ActionCtx::send_email`), `rate_limits(Option<RateLimits>)` (`credential_*` per client IP and, for password
+sign-ins, per account; `email_*` per IP and per address; `refresh_*` per IP, shared by sign-out; `None` disables
+them), `trust_proxy(bool)`,
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
 `impersonation(bool)` (`POST /api/admin/impersonate`, default true), `on_sign_in(|app: App, sign_in: SignIn| async
 { .. })` (after each successful user sign-in that starts a session, awaited before the response; `SignIn { user,
 session, method, client }`, `SignInMethod::{Password, SignUp, PasswordReset, MagicLink, OAuth(provider)}`; not for
-`sign_in_as`, impersonation, admins, refreshes or external JWTs).
+`sign_in_as`, impersonation, admins, refreshes or external JWTs; with two-factor authentication it runs once the code
+was accepted), `totp_issuer(name)` (what authenticator apps show for this server's second factors; default: the
+public URL's host, else `RxFerrix`).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
-(the password is read from stdin when omitted).
+(the password is read from stdin when omitted), `admin disable-2fa <email>` (removes an administrator's second factor).
 
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
 `authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
-`reset_admin_password`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`, `revocations()`, ...).
+`reset_admin_password`, `disable_admin_mfa`, `create_setup_token`, `oauth_provider_ids()`, `signups_allowed()`,
+`revocations()`, ...). The sign-in operations (`sign_in`, `admin_sign_in`, `verify_magic_link`,
+`confirm_password_reset`, `oauth_sign_in`) return a `SignInOutcome`: `Tokens(AuthTokens)`, or `MfaRequired { mfa_token,
+.. }` for an account with two-factor authentication, which `mfa_verify(app, mfa_token, code, client)` turns into a
+session (`SignInOutcome::tokens()` unwraps the former).
+
+**Two-factor authentication** (`rxferrix::auth::mfa`, `rxferrix::auth::totp`; docs/PROTOCOL.md "Auth"). Users and
+administrators enroll an authenticator app (TOTP, RFC 6238) through `/api/auth/mfa/*` with their access token
+(`mfa_setup` → `mfa_confirm` with the first code, which returns 8 recovery codes; `mfa_status`, `mfa_disable`,
+`mfa_regenerate_recovery_codes`; accounts with a password confirm it to start a setup). Once a factor is confirmed,
+every sign-in method answers `MfaRequired` until a TOTP or recovery code is presented. Codes are checked in constant
+time, a TOTP code works once, 5 wrong codes lock the factor for 5 minutes (`mfa_locked`, 429). The secret is sealed
+with the settings key (`secretbox`) and the owner's id as associated data; recovery codes are keyed hashes. An
+impersonation session can't change a factor. The dashboard's Account page manages the administrator's own factor
+(audited `mfa_enable` / `mfa_disable`), its Users page shows `mfaEnabled` and resets a user's factor
+(`_system/dashboard:reset_mfa`, audited `reset_mfa`); `admin disable-2fa <email>` rescues an administrator.
 `TestApp::with_auth(cfg)` and `TestApp::{query_as, mutation_as, action_as}(&identity, args)` help in tests, as do
 `TestApp::create_user(email, password: Option<&str>) -> Result<Id<User>>` (a verified `_users` row, plus a password
 credential when given; no auth method needs to be enabled and no email is sent; `email_in_use` if taken) and
@@ -662,7 +685,9 @@ account id; for external JWTs the provider is the issuer URL), `_sessions` (user
 refresh token, sliding `expires_at`, user agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on
 impersonation sessions, whose expiry is fixed), `_used_refresh_tokens` (rotated refresh token hashes, for reuse
 detection; deleted with their session), `_verification_codes` (keyed hashes of a 6-digit code and a link token, purpose,
-expiry, attempts), `_admins` (email, argon2id hash). The auth code reads and writes them directly through `QueryDb` /
+expiry, attempts), `_admins` (email, argon2id hash), `_mfa_factors` (`MfaFactor`: `user` or `admin`, `kind: "totp"`,
+`secretEncrypted`, `confirmed`, `recoveryCodeHashes`, `lastUsedStep`, `failedAttempts`, `lockedUntil`; at most one
+per owner, deleted with the user). The auth code reads and writes them directly through `QueryDb` /
 `MutationDb` (not through registered functions), so hashes never appear in function args or the execution log.
 
 **System functions**: `_system/auth:me` (query: the signed-in `Doc<User>` or null) and `_system/auth:update_profile`
@@ -822,6 +847,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
       pub thumbnail_sizes: Option<Vec<(u32, u32)>>, // None; Some(allowlist) = only these sizes (bounds the cache)
       pub thumbnail_max_source_pixels: u64,     // 40_000_000
       pub thumbnail_max_source_bytes: u64,      // 32 MiB
+      pub thumbnail_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP, for variants not yet cached; Some((30, 60))
   }
   // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder
   // setters (`.private(true)`, `.thumbnail_sizes(&[(64, 64), (256, 256)])`, ...).
@@ -2161,22 +2187,24 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 | `delete_documents` | mutation | `{ ids }` → count, in one transaction. |
 | `functions` | query | `{}` → `[{ path, kind, visibility, system, argsTs, outputTs }]`, internal and system functions included. |
 | `run_function` | action | `{ path, args?, asUser? }` → `{ kind, success, value, error: { message, code, data } \| null, logLines, durationMs, ts, identity }`. Runs any function (internal and system included) as the calling admin, or as `asUser` through a real session of that user (5 minutes, `impersonatedBy` = the admin, audited as `impersonate`, deleted when the run ends), so `ctx.auth.session_id()` works and queries are scoped exactly as for the user. The function and the user must exist (`not_found`). Every run is audited as `run_function` (`details`: path, kind, asUser, sessionId, args with secrets redacted, outcome): a mutation's entry is written in the mutation's own transaction (`outcome: "success"`), a failed mutation gets its own entry (`"error"`), queries and actions are recorded before they run (`"started"`). A failing function is a result with `success: false`, not an error. |
-| `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, sessions }>`; newest first, or by email prefix with `search`. |
+| `users` | query | `{ search?, paginationOpts }` → `PaginationResult<{ _id, _creationTime, email, emailVerified, name, image, providers, hasPassword, mfaEnabled, sessions }>`; newest first, or by email prefix with `search`. |
 | `user_sessions` | query | `{ user }` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, impersonatedBy }]` (no token hashes; `impersonatedBy` is the admin id of an impersonation session, else null). |
 | `revoke_session` | mutation | `{ session }` → `null`. Deletes the session and its rotated refresh tokens; its sockets get `AuthError` at once (live revocation). |
-| `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
-| `me` | query | `{}` → `{ _id, email } \| null` of the signed-in admin. |
+| `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes, mfaFactors }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
+| `reset_mfa` | mutation | `{ user }` → `null`. Removes the user's second factor (lost authenticator and recovery codes): their next sign-in needs no code. `not_found`, `mfa_not_enabled`. |
+| `me` | query | `{}` → `{ _id, email, mfaEnabled } \| null` of the signed-in admin (live). |
 
 Write errors (schema validation, unknown table, missing document) are user errors with codes `invalid_document` /
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was
 written: …``).
 
 **Audited.** `insert_document`, `patch_document`, `replace_document`, `delete_documents` (one entry per document),
-`revoke_session` and `delete_user` append an `_audit_log` entry in their own transaction (§4.1.5), so an entry exists
-exactly for the writes that committed.
+`revoke_session`, `delete_user` and `reset_mfa` append an `_audit_log` entry in their own transaction (§4.1.5), so an
+entry exists exactly for the writes that committed.
 
-**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash` or `encrypted` (case-insensitive:
-`passwordHash`, `refreshTokenHash`, `tokenHash`, `codeHash`, `_settings.encrypted`) is replaced by `"••••"` in
+**Secrets.** In every `_`-prefixed table, a field whose name ends in `hash`, `hashes` or `encrypted` (case-insensitive:
+`passwordHash`, `refreshTokenHash`, `tokenHash`, `codeHash`, `_settings.encrypted`, `_mfa_factors.secretEncrypted` and
+`recoveryCodeHashes`) is replaced by `"••••"` in
 everything the dashboard returns (audit log diffs included), and indexes
 over such a field are `usable: false` and refused by `documents` (a range filter on them would let an admin
 binary-search a hash).
@@ -2341,7 +2369,8 @@ action, targetTable, targetId, before, after, details, at }` with indexes `by_at
 `by_action = [action, at]`, `by_table = [targetTable, at]`, `by_target = [targetId, at]`. Actions: `insert`, `patch`,
 `replace`, `delete` (target: the document; `before` / `after`: the changed fields only for updates, the whole document
 for inserts and deletes), `revoke_session` (`before`: the session, hashes masked), `delete_user` (`before`: the user,
-`details`: the counts), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
+`details`: the counts), `reset_mfa` (target: the user), `mfa_enable` / `mfa_disable` (target: the administrator who
+turned their own second factor on or off), `settings_update`, `impersonate` (target: the user; `details`: `purpose` (`run_function` or
 `open_app`), `sessionId`, `expiresAt`), `run_function` (`details` as in §4.1), `restore_stage` / `restore_cancel` /
 `restore_restart` (staged restores, §4.2; `details`: the backup's `source`, its `ts`, `secretIgnored`, `pointInTime`;
 the canceled `source`; or the `exitCode`), `replication_snapshot` (`details`: the snapshot's name and ts),

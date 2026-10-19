@@ -3,7 +3,7 @@
  *
  * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs[?fn=<path>]`, `/_/users`,
  * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/workflows[?state=<state>&id=<id>]`, `/_/migrations`, `/_/backups`, `/_/analytics`, `/_/environment`, `/_/settings`,
- * `/_/audit[?action=…&table=…&target=…&admin=…]`, `/_/setup#token=…`.
+ * `/_/audit[?action=…&table=…&target=…&admin=…]`, `/_/account`, `/_/setup#token=…`.
  */
 export const BASE = "/_/";
 
@@ -22,6 +22,7 @@ export type Page =
   | "environment"
   | "settings"
   | "audit"
+  | "account"
   | "setup";
 
 export interface Route {
@@ -48,6 +49,7 @@ export function parseRoute(pathname: string, search: string): Route {
     "environment",
     "settings",
     "audit",
+    "account",
     "setup",
   ];
   const page = (pages as string[]).includes(first) ? (first as Page) : "overview";

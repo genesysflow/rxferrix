@@ -321,6 +321,7 @@ fn respond(status: StatusCode, headers: HeaderMap, body: Body) -> Response {
 async fn serve_file(
     State(app): State<App>,
     method: Method,
+    caller: Caller,
     Path(id): Path<String>,
     Query(params): Query<ServeParams>,
     headers: HeaderMap,
@@ -359,7 +360,7 @@ async fn serve_file(
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     if let Some(spec) = thumb {
-        return serve_thumbnail(&app, method, &file, spec, &headers, h, inline).await;
+        return serve_thumbnail(&app, method, &caller, &file, spec, &headers, h, inline).await;
     }
 
     let size = file.size;
@@ -463,10 +464,13 @@ fn serve_multipart(
     respond(StatusCode::PARTIAL_CONTENT, h, Body::from_stream(body))
 }
 
-/// Serve (generating and caching it if needed) a thumbnail of `file`.
+/// Serve (generating and caching it if needed) a thumbnail of `file`. Generating one is rate limited per client IP
+/// (`StorageConfig::thumbnail_rate_limit`); serving a cached variant is not.
+#[allow(clippy::too_many_arguments)]
 async fn serve_thumbnail(
     app: &App,
     method: Method,
+    caller: &Caller,
     file: &Doc<StoredFile>,
     spec: ThumbSpec,
     headers: &HeaderMap,
@@ -491,18 +495,28 @@ async fn serve_thumbnail(
     let variant = spec.variant();
     let bytes = match service.cached_thumbnail(&id, &variant).await {
         Ok(Some(bytes)) => bytes,
-        Ok(None) => match generate_thumbnail(&service, &id, spec).await {
-            Ok(bytes) => {
-                service.cache_thumbnail(&id, &variant, bytes.clone()).await;
-                bytes
+        Ok(None) => {
+            if let Err(retry) = super::service::check_thumbnail_rate(&service, &caller.ip) {
+                let failure = AuthFailure {
+                    status: 429,
+                    error: crate::UserError::new("rate_limited", "Too many thumbnails requested; try again later"),
+                    retry_after: Some(retry),
+                };
+                return failure.into_response();
             }
-            Err(Ok(ThumbError::Unsupported)) => {
-                return failure(415, "unsupported_image", ThumbError::Unsupported.to_string());
+            match generate_thumbnail(&service, &id, spec).await {
+                Ok(bytes) => {
+                    service.cache_thumbnail(&id, &variant, bytes.clone()).await;
+                    bytes
+                }
+                Err(Ok(ThumbError::Unsupported)) => {
+                    return failure(415, "unsupported_image", ThumbError::Unsupported.to_string());
+                }
+                Err(Ok(e @ ThumbError::TooLarge { .. })) => return failure(422, "image_too_large", e.to_string()),
+                Err(Ok(e @ ThumbError::Invalid(_))) => return failure(422, "invalid_image", e.to_string()),
+                Err(Err(e)) => return internal(e),
             }
-            Err(Ok(e @ ThumbError::TooLarge { .. })) => return failure(422, "image_too_large", e.to_string()),
-            Err(Ok(e @ ThumbError::Invalid(_))) => return failure(422, "invalid_image", e.to_string()),
-            Err(Err(e)) => return internal(e),
-        },
+        }
         Err(e) => return internal(e),
     };
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(FILE_CSP));

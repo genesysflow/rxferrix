@@ -22,6 +22,7 @@ export type AuthActions = Pick<
   | "signUp"
   | "signIn"
   | "signInAsAdmin"
+  | "verifyMfa"
   | "setupAdmin"
   | "signOut"
   | "signInWithOAuth"
@@ -36,6 +37,11 @@ export type AuthActions = Pick<
   | "verifyEmail"
   | "getAccessToken"
   | "providers"
+  | "getMfaStatus"
+  | "setupTotp"
+  | "confirmTotp"
+  | "disableMfa"
+  | "regenerateRecoveryCodes"
 >;
 
 export function useAuthActions(): AuthActions {
@@ -45,6 +51,7 @@ export function useAuthActions(): AuthActions {
       signUp: auth.signUp.bind(auth),
       signIn: auth.signIn.bind(auth),
       signInAsAdmin: auth.signInAsAdmin.bind(auth),
+      verifyMfa: auth.verifyMfa.bind(auth),
       setupAdmin: auth.setupAdmin.bind(auth),
       signOut: auth.signOut.bind(auth),
       signInWithOAuth: auth.signInWithOAuth.bind(auth),
@@ -59,6 +66,11 @@ export function useAuthActions(): AuthActions {
       verifyEmail: auth.verifyEmail.bind(auth),
       getAccessToken: auth.getAccessToken.bind(auth),
       providers: auth.providers.bind(auth),
+      getMfaStatus: auth.getMfaStatus.bind(auth),
+      setupTotp: auth.setupTotp.bind(auth),
+      confirmTotp: auth.confirmTotp.bind(auth),
+      disableMfa: auth.disableMfa.bind(auth),
+      regenerateRecoveryCodes: auth.regenerateRecoveryCodes.bind(auth),
     }),
     [auth],
   );

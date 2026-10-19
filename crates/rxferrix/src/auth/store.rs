@@ -148,6 +148,9 @@ pub(crate) async fn password_hash_of(app: &App, user: Id<User>) -> crate::Result
     read(app, |db| async move { Ok(credential_of(&db, user).await?.map(|c| c.value.password_hash)) }).await
 }
 
+/// Mark a user's email verified because they proved they own the inbox (a verification or reset code). Any OAuth
+/// account linked while the address was unverified was linked by someone who never proved it (a provider that
+/// shared an unverified address): those links are dropped, so the earlier holder can't sign in through them.
 pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Result<()> {
     write(app, |db| async move {
         if let Some(mut u) = db.get(user).await?
@@ -155,10 +158,19 @@ pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Res
         {
             u.value.email_verified = true;
             db.replace(user, u.value).await?;
+            unlink_accounts(&db, user).await?;
         }
         Ok(())
     })
     .await
+}
+
+/// Delete every OAuth / external account link of `user`.
+async fn unlink_accounts(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
+    for a in db.query::<Account>().with_index(Account::by_user, |q| q.eq(Account::user, user)).collect().await? {
+        db.delete(a.id).await?;
+    }
+    Ok(())
 }
 
 /// Passwordless sign-in for a verified email: find the user or create one.
@@ -245,13 +257,12 @@ pub(crate) async fn oauth_user(
         if !allow_signup {
             return Ok(Err(signups_disabled()));
         }
+        // An address the provider didn't verify is not kept: it could be anyone's, and an unverified user is
+        // taken over by whoever proves the inbox (above, and `passwordless_user`), which would hand that person
+        // this account's data. Whatever the provider, such users start without an email.
+        let email = email.filter(|_| profile.email_verified);
         let user = db
-            .insert(User {
-                email_verified: email.is_some() && profile.email_verified,
-                email,
-                name: profile.name,
-                image: profile.image,
-            })
+            .insert(User { email_verified: email.is_some(), email, name: profile.name, image: profile.image })
             .await?;
         db.insert(Account { user, provider, provider_account_id: account_id }).await?;
         Ok(Ok(user))
@@ -322,7 +333,8 @@ fn signups_disabled() -> UserError {
     UserError::new("signups_disabled", "New accounts can't be created")
 }
 
-/// Remove the password and sessions of an account whose email was never verified.
+/// Remove the password, sessions and linked accounts of an account whose email was never verified: whoever set it
+/// up (maybe not the inbox owner) loses every way back in, including the OAuth account that created it.
 async fn strip_unverified_account(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
     if let Some(c) = credential_of(db, user).await? {
         db.delete(c.id).await?;
@@ -332,6 +344,7 @@ async fn strip_unverified_account(db: &MutationDb, user: Id<User>) -> crate::Res
     for s in sessions {
         delete_session_in(db, s.id).await?;
     }
+    unlink_accounts(db, user).await?;
     Ok(())
 }
 
@@ -445,9 +458,25 @@ pub(crate) async fn delete_session(app: &App, session: Id<Session>) -> crate::Re
     write(app, |db| async move { delete_session_in(&db, session).await }).await
 }
 
-/// Delete the session whose current refresh token is `refresh` (sign-out with a refresh token).
+/// Delete the session whose current refresh token is `refresh` (sign-out with a refresh token). Checked in a
+/// snapshot first: an unknown token (the endpoint is unauthenticated) never takes the write lock.
 pub(crate) async fn delete_session_by_refresh(app: &App, keys: &Keys, refresh: &str) -> crate::Result<bool> {
     let hash = keys.hash_token(refresh);
+    let known = read(app, |db| {
+        let hash = hash.clone();
+        async move {
+            Ok(db
+                .query::<Session>()
+                .with_index(Session::by_refresh_token_hash, |q| q.eq(Session::refresh_token_hash, hash))
+                .first()
+                .await?
+                .is_some())
+        }
+    })
+    .await?;
+    if !known {
+        return Ok(false);
+    }
     write(app, |db| async move {
         let session = db
             .query::<Session>()

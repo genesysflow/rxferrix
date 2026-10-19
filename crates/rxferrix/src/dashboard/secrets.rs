@@ -2,8 +2,9 @@
 //!
 //! **Masking.** The auth tables store password hashes (argon2id) and keyed hashes of refresh tokens, used refresh
 //! tokens, link tokens and numeric codes. The dashboard never returns them: in every `_`-prefixed table, a field whose
-//! name ends in `hash` or `encrypted` (case-insensitive; the latter is `_settings`' sealed secrets) is replaced by
-//! [`MASK`] in every document the dashboard returns (and in `_audit_log` diffs). Indexes
+//! name ends in `hash`, `hashes` or `encrypted` (case-insensitive; the latter are the sealed secrets of `_settings`,
+//! `_env` and `_mfa_factors`) is replaced by [`MASK`] in every document the dashboard returns (and in `_audit_log`
+//! diffs). Indexes
 //! over such a field can't be used to browse a table either (a range filter on a hash index would let an admin
 //! binary-search the hash value), so they are reported as unusable and rejected by `documents`.
 //!
@@ -31,11 +32,11 @@ pub fn is_system_table(table: &str) -> bool {
     table.starts_with('_')
 }
 
-/// Is `field` of `table` a secret that the dashboard never returns? Hashes, and the sealed secrets of `_settings`
-/// (`encrypted`: ciphertext, but there is no reason to hand it out).
+/// Is `field` of `table` a secret that the dashboard never returns? Hashes (`passwordHash`, the
+/// `recoveryCodeHashes` list), and sealed secrets (`encrypted`: ciphertext, but there is no reason to hand it out).
 pub fn is_secret_field(table: &str, field: &str) -> bool {
     let field = field.to_ascii_lowercase();
-    is_system_table(table) && (field.ends_with("hash") || field.ends_with("encrypted"))
+    is_system_table(table) && (field.ends_with("hash") || field.ends_with("hashes") || field.ends_with("encrypted"))
 }
 
 /// The secret fields among the JSON field names of `table`'s indexes and of `doc`, for display.
@@ -132,9 +133,14 @@ mod tests {
         assert_eq!(masked["user"], "u");
         assert_eq!(masked["tokenHash"], Value::Null, "null stays null");
         assert_eq!(mask("files", json!({ "contentHash": "abc" }))["contentHash"], "abc", "app tables are untouched");
-        for f in ["refreshTokenHash", "codeHash", "tokenHash", "passwordHash"] {
+        for f in ["refreshTokenHash", "codeHash", "tokenHash", "passwordHash", "recoveryCodeHashes", "secretEncrypted"]
+        {
             assert!(is_secret_field("_sessions", f), "{f}");
         }
+        let factor = json!({ "secretEncrypted": "v1.abc", "recoveryCodeHashes": ["a", "b"], "confirmed": true });
+        let masked = mask("_mfa_factors", factor);
+        assert_eq!((&masked["secretEncrypted"], &masked["recoveryCodeHashes"]), (&json!(MASK), &json!(MASK)));
+        assert_eq!(masked["confirmed"], true);
         assert!(!is_secret_field("_users", "email"));
     }
 
@@ -149,6 +155,7 @@ mod tests {
             (Session::table_def(), vec!["refreshTokenHash"]),
             (UsedRefreshToken::table_def(), vec!["tokenHash"]),
             (VerificationCode::table_def(), vec!["codeHash", "tokenHash"]),
+            (MfaFactor::table_def(), vec!["recoveryCodeHashes", "secretEncrypted"]),
             (User::table_def(), vec![]),
             (Account::table_def(), vec![]),
             (crate::settings::model::Setting::table_def(), vec!["encrypted"]),

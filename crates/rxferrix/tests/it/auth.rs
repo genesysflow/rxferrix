@@ -815,7 +815,61 @@ async fn oauth_with_mock_oidc_provider() {
     let profile = json!({ "sub": "u-4", "email": "max@example.com", "email_verified": false });
     let refused = fragment(&oauth_flow(&http, &mock, profile, "http://app.test/", true).await);
     assert_eq!(refused["rxferrix_error"], "email_in_use");
-    assert_eq!(mock.lock().unwrap().token_requests, 4, "the replayed callback never reached the provider");
+    // ...and is not stored on a new account either: the provider never checked whose address it is.
+    let profile = json!({ "sub": "u-5", "email": "sky@example.com", "email_verified": false, "name": "Sky" });
+    let f = fragment(&oauth_flow(&http, &mock, profile, "http://app.test/", true).await);
+    let (_, me) = http.call("query", "_system/auth:me", json!({}), Some(&f["rxferrix_access_token"])).await;
+    assert_eq!(
+        (&me["value"]["email"], &me["value"]["emailVerified"], &me["value"]["name"]),
+        (&Value::Null, &json!(false), &json!("Sky"))
+    );
+    assert_eq!(mock.lock().unwrap().token_requests, 5, "the replayed callback never reached the provider");
+}
+
+/// A provider account linked to a user whose email was never verified (data an older version could have created)
+/// goes away when the address's owner claims the account, whether through a provider that verified the address or
+/// through the verification link: the previous holder can't come back in through the link.
+#[tokio::test]
+async fn claiming_an_unverified_account_removes_its_linked_providers() {
+    use rxferrix::ops::export::{self, ImportMode, ImportOptions};
+    let (mock_addr, mock) = start_mock_oidc().await;
+    let mailer = MemoryMailer::new();
+    let auth = config(&mailer).oauth(Oidc::new("mock", format!("http://{mock_addr}"), "client-1", "secret-1"));
+    let t = TestApp::with_auth(auth).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    async fn link(t: &TestApp, user: &str, sub: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("_accounts.jsonl");
+        let row = json!({ "user": user, "provider": "mock", "providerAccountId": sub });
+        std::fs::write(&file, format!("{row}\n")).unwrap();
+        let import =
+            ImportOptions { mode: ImportMode::Upsert, batch_size: 10, allow_system_tables: true, format: None };
+        export::import_path(t.app(), &file, Some("_accounts"), &import).await.unwrap();
+    }
+    let signed_in_as = |profile: Value| async {
+        let f = fragment(&oauth_flow(&http, &mock, profile, "http://app.test/", true).await);
+        assert!(f.contains_key("rxferrix_access_token"), "{f:?}");
+        f["rxferrix_user_id"].clone()
+    };
+
+    // Claimed through a provider that verified the address.
+    let pat = token(&http.sign_up("pat@example.com", "attacker pass").await, "userId");
+    link(&t, &pat, "u-attacker").await;
+    assert_eq!(
+        signed_in_as(json!({ "sub": "u-owner", "email": "pat@example.com", "email_verified": true })).await,
+        pat
+    );
+    let back = signed_in_as(json!({ "sub": "u-attacker", "email_verified": false })).await;
+    assert_ne!(back, pat, "the stale link is gone: a fresh account, not the owner's");
+
+    // Claimed through the verification link (which only the address's owner receives).
+    let sam = token(&http.sign_up("sam@example.com", "attacker pass").await, "userId");
+    link(&t, &sam, "u-attacker-2").await;
+    let verify = wait_for_email(&mailer, "sam@example.com", 1).await;
+    let vt = email_token(&verify.body, "rxferrix_verify_token");
+    assert_eq!(http.post("/api/auth/verify-email/confirm", json!({ "token": vt })).await.0, 200);
+    let back = signed_in_as(json!({ "sub": "u-attacker-2", "email_verified": false })).await;
+    assert_ne!(back, sam);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -927,6 +981,55 @@ async fn auth_endpoints_are_rate_limited() {
     assert_eq!(code_of(&body), "rate_limited");
     // Other endpoint groups have their own buckets.
     assert_eq!(http.post("/api/auth/refresh", json!({ "refreshToken": "x" })).await.0, 401);
+}
+
+#[tokio::test]
+async fn password_guesses_are_limited_per_account_as_well_as_per_address() {
+    let limits = RateLimits { credential_burst: 3, credential_per_minute: 1, ..Default::default() };
+    let auth = AuthConfig::password().rate_limits(Some(limits)).trust_proxy(true);
+    let t = TestApp::with_auth(auth).await.unwrap();
+    let app = t.app().clone();
+    app.auth().create_admin(&app, "root@example.com", "admin password".into()).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    let http = &http;
+    let attempt = |path: &'static str, ip: &'static str, email: &'static str| async move {
+        http.client
+            .post(format!("{}{path}", http.base))
+            .header("x-forwarded-for", ip)
+            .json(&json!({ "email": email, "password": "a guess" }))
+            .send()
+            .await
+            .unwrap()
+    };
+    // Guesses at one account from different addresses: each address has budget left, the account doesn't.
+    for ip in ["203.0.113.1", "203.0.113.2", "203.0.113.3"] {
+        assert_eq!(attempt("/api/auth/signin", ip, "Ana@example.com").await.status(), 401);
+    }
+    let res = attempt("/api/auth/signin", "203.0.113.4", "ana@example.com").await;
+    assert_eq!(res.status(), 429);
+    assert!(res.headers().contains_key("retry-after"));
+    assert_eq!(code_of(&res.json().await.unwrap()), "rate_limited");
+    // The limit is on the account: the same address can still try another one.
+    assert_eq!(attempt("/api/auth/signin", "203.0.113.4", "bo@example.com").await.status(), 401);
+
+    // Administrators too.
+    for ip in ["203.0.113.5", "203.0.113.6", "203.0.113.7"] {
+        assert_eq!(attempt("/api/auth/admin/signin", ip, "root@example.com").await.status(), 401);
+    }
+    assert_eq!(attempt("/api/auth/admin/signin", "203.0.113.8", "root@example.com").await.status(), 429);
+}
+
+#[tokio::test]
+async fn sign_out_is_rate_limited() {
+    let limits = RateLimits { refresh_burst: 2, refresh_per_minute: 1, ..Default::default() };
+    let t = TestApp::with_auth(AuthConfig::password().rate_limits(Some(limits))).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    // Sign-out takes any body, so it shares the refresh budget rather than being a free way to the writer.
+    for _ in 0..2 {
+        assert_eq!(http.post("/api/auth/signout", json!({ "refreshToken": "garbage" })).await.0, 200);
+    }
+    let (s, b) = http.post("/api/auth/signout", json!({ "refreshToken": "garbage" })).await;
+    assert_eq!((s, code_of(&b)), (429, "rate_limited"));
 }
 
 #[tokio::test]

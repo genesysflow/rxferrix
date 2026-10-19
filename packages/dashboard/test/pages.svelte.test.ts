@@ -1,4 +1,4 @@
-import { RxFerrixClient } from "@rxferrix/client";
+import { RxFerrixClient, RxFerrixError } from "@rxferrix/client";
 import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,8 +8,10 @@ import type { Command } from "../src/lib/commands.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
 import CommandPalette from "../src/components/CommandPalette.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
+import Account from "../src/pages/Account.svelte";
 import Analytics from "../src/pages/Analytics.svelte";
 import Backups from "../src/pages/Backups.svelte";
+import Login from "../src/pages/Login.svelte";
 import Overview from "../src/pages/Overview.svelte";
 import Settings from "../src/pages/Settings.svelte";
 import Workflows from "../src/pages/Workflows.svelte";
@@ -529,5 +531,117 @@ describe("Analytics page", () => {
     button("Run").click();
     await settle();
     expect(target.querySelector("[data-testid=olap-error]")?.textContent).toContain("exactly one SELECT");
+  });
+});
+
+describe("Login page", () => {
+  it("asks for a code when the administrator has two-factor authentication", async () => {
+    const signInAsAdmin = vi.fn(async () => ({ mfaRequired: true as const, mfaToken: "mfa-1", methods: ["totp"] }));
+    const verifyMfa = vi.fn(async (_token: string, code: string) => {
+      if (code !== "123456") throw new RxFerrixError("The code is not valid", { code: "invalid_mfa_code" });
+    });
+    const ctx = { auth: { signInAsAdmin, verifyMfa }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Login, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    type(target.querySelector<HTMLInputElement>("input[type=email]")!, "admin@example.com");
+    type(target.querySelector<HTMLInputElement>("input[type=password]")!, "pw");
+    target.querySelector("form")!.requestSubmit();
+    await settle();
+    expect(signInAsAdmin).toHaveBeenCalledWith({ email: "admin@example.com", password: "pw" });
+    expect(target.textContent).toContain("Two-factor authentication");
+    expect(target.querySelector("input[type=password]")).toBeNull();
+
+    const codeInput = target.querySelector<HTMLInputElement>("input[autocomplete=one-time-code]")!;
+    type(codeInput, "000000");
+    target.querySelector("form")!.requestSubmit();
+    await settle();
+    expect(verifyMfa).toHaveBeenCalledWith("mfa-1", "000000");
+    expect(target.querySelector("[role=alert]")?.textContent).toBe("The code is not valid");
+
+    type(codeInput, "123456");
+    target.querySelector("form")!.requestSubmit();
+    await settle();
+    expect(verifyMfa).toHaveBeenLastCalledWith("mfa-1", "123456");
+    expect(target.querySelector("[role=alert]")).toBeNull();
+
+    // "Start over" returns to the password form.
+    button("Start over").click();
+    flushSync();
+    expect(target.querySelector("input[type=password]")).not.toBeNull();
+  });
+});
+
+describe("Account page", () => {
+  it("walks through enabling two-factor authentication and shows the recovery codes once", async () => {
+    const server = new FakeServer();
+    const client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    const status = { enabled: false, pending: false, recoveryCodesLeft: 0, methods: [] as string[] };
+    const auth = {
+      getMfaStatus: vi.fn(async () => ({ ...status })),
+      setupTotp: vi.fn(async ({ password }: { password?: string }) => {
+        if (password !== "pw") throw new RxFerrixError("The password is not correct", { code: "invalid_current_password" });
+        return { secret: "JBSWY3DPEHPK3PXP", uri: "otpauth://totp/x", qrSvg: "<svg data-testid='qr'></svg>" };
+      }),
+      confirmTotp: vi.fn(async (code: string) => {
+        if (code !== "123456") throw new RxFerrixError("The code is not valid", { code: "invalid_mfa_code" });
+        Object.assign(status, { enabled: true, recoveryCodesLeft: 8, methods: ["totp"] });
+        return { recoveryCodes: ["aaaaa-bbbbb", "ccccc-ddddd"] };
+      }),
+      disableMfa: vi.fn(async () => {
+        Object.assign(status, { enabled: false, recoveryCodesLeft: 0, methods: [] });
+      }),
+      regenerateRecoveryCodes: vi.fn(),
+    };
+    const toast = vi.fn();
+    const ctx = { auth, tables: [], tableByNumber: () => undefined, toast };
+    mounted = mount(Account, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    await settle();
+    const mfa = () => target.querySelector("[data-testid=mfa]")!.textContent?.replace(/\s+/g, " ") ?? "";
+    expect(mfa()).toContain("off");
+
+    button("Turn on…").click();
+    await settle();
+    const dialog = () => document.querySelector("dialog")!;
+    type(dialog().querySelector<HTMLInputElement>("input[type=password]")!, "wrong");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === "Continue")!.click();
+    await settle();
+    expect(dialog().querySelector("[role=alert]")?.textContent).toBe("The password is not correct");
+    type(dialog().querySelector<HTMLInputElement>("input[type=password]")!, "pw");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === "Continue")!.click();
+    await settle();
+    expect(auth.setupTotp).toHaveBeenLastCalledWith({ password: "pw" });
+    expect(dialog().querySelector("[data-testid=qr]")).not.toBeNull();
+    expect(dialog().textContent).not.toContain("JBSWY3DPEHPK3PXP");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.includes("Show the key"))!.click();
+    flushSync();
+    expect(dialog().textContent).toContain("JBSWY3DPEHPK3PXP");
+
+    type(dialog().querySelector<HTMLInputElement>("input[autocomplete=one-time-code]")!, "123456");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === "Turn on")!.click();
+    await settle();
+    expect(auth.confirmTotp).toHaveBeenCalledWith("123456");
+    const codes = [...dialog().querySelectorAll("[data-testid=recovery-codes] li")].map((li) => li.textContent);
+    expect(codes).toEqual(["aaaaa-bbbbb", "ccccc-ddddd"]);
+    expect(toast).toHaveBeenCalledWith("Two-factor authentication is on: your next sign-in needs a code");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === "I saved them")!.click();
+    await settle();
+    expect(document.querySelector("dialog")).toBeNull();
+    expect(mfa()).toContain("on");
+    expect(mfa()).toContain("Recovery codes left: 8");
+
+    // Turning off asks for a code.
+    button("Turn off…").click();
+    await settle();
+    type(dialog().querySelector<HTMLInputElement>("input[autocomplete=one-time-code]")!, "aaaaa-bbbbb");
+    [...dialog().querySelectorAll("button")].find((b) => b.textContent?.trim() === "Turn off")!.click();
+    await settle();
+    expect(auth.disableMfa).toHaveBeenCalledWith("aaaaa-bbbbb");
+    expect(mfa()).toContain("off");
+    client.close();
   });
 });

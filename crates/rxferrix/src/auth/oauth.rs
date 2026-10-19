@@ -181,6 +181,12 @@ impl OAuthFlows {
     }
 
     /// Remove and return the pending flow for `state` (each state is usable once).
+    /// The app URL of the pending flow `state`, without consuming it (the callback checks the state cookie first).
+    pub fn redirect_of(&self, state: &str) -> Option<String> {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.get(state).filter(|p| p.created.elapsed() < STATE_TTL).map(|p| p.redirect_to.clone())
+    }
+
     pub fn take(&self, state: &str) -> Option<Pending> {
         let p = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(state)?;
         (p.created.elapsed() < STATE_TTL).then_some(p)
@@ -317,6 +323,8 @@ impl OAuthFlows {
         let user: GhUser = self.get_json(provider, "https://api.github.com/user", token).await?;
         let emails: Vec<GhEmail> =
             self.get_json(provider, "https://api.github.com/user/emails", token).await.unwrap_or_default();
+        // A verified address (the primary one if it is) when there is one; otherwise the primary address, marked
+        // unverified: it can neither claim an existing account nor is it stored on a new one (`store::oauth_user`).
         let chosen = emails
             .iter()
             .find(|e| e.primary && e.verified)

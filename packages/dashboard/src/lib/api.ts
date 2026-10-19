@@ -113,6 +113,8 @@ export interface UserSummary {
   image: string | null;
   providers: string[];
   hasPassword: boolean;
+  /** Two-factor authentication is enabled (a confirmed authenticator). */
+  mfaEnabled: boolean;
   sessions: number;
 }
 
@@ -133,6 +135,16 @@ export interface DeletedUser {
   accounts: number;
   credentials: number;
   verificationCodes: number;
+  /** Second factors (0 or 1). */
+  mfaFactors: number;
+}
+
+/** The signed-in administrator (`me`). */
+export interface AdminSummary {
+  _id: string;
+  email: string;
+  /** Two-factor authentication is enabled for this administrator (live). */
+  mfaEnabled: boolean;
 }
 
 const q = <Args, Out>(name: string) => makeFunctionReference<"query", Args, Out>("query", `_system/dashboard:${name}`);
@@ -157,7 +169,9 @@ export const dashboard = {
   userSessions: q<{ user: string }, SessionSummary[]>("user_sessions"),
   revokeSession: m<{ session: string }, null>("revoke_session"),
   deleteUser: m<{ user: string }, DeletedUser>("delete_user"),
-  me: q<Record<string, never>, { _id: string; email: string } | null>("me"),
+  /** Remove a user's second factor (lost authenticator and recovery codes); audited as `reset_mfa`. */
+  resetMfa: m<{ user: string }, null>("reset_mfa"),
+  me: q<Record<string, never>, AdminSummary | null>("me"),
 } as const;
 
 /** A stored file (`FileSummary` in crates/rxferrix/src/storage/mod.rs). */
@@ -584,6 +598,9 @@ export const AUDIT_ACTIONS = [
   "delete",
   "revoke_session",
   "delete_user",
+  "reset_mfa",
+  "mfa_enable",
+  "mfa_disable",
   "settings_update",
   "env_create",
   "env_update",

@@ -1,6 +1,6 @@
 //! Command line: `rxferrix [serve] [--http ADDR] [--dir DIR] [--dev [--codegen-out DIR]] [auth options]
 //! [--storage LOCATION] [--max-upload-size SIZE] [--storage-private] [operations flags]`,
-//! `rxferrix functions`, `rxferrix codegen [--out DIR]`, `rxferrix admin create|reset-password <email>`,
+//! `rxferrix functions`, `rxferrix codegen [--out DIR]`, `rxferrix admin create|reset-password|disable-2fa <email>`,
 //! `rxferrix migrate [--name NAME] [--dry-run] [--restart]` / `rxferrix migrate status` (`crate::migrations`), and the
 //! operations commands `backup`, `restore`, `export`, `import` (flags and commands in `crate::ops::cli`).
 
@@ -135,6 +135,18 @@ enum AdminCommand {
     Create(AdminArgs),
     /// Set an administrator's password and end their sessions.
     ResetPassword(AdminArgs),
+    /// Remove an administrator's second factor (they lost their authenticator and recovery codes), so they can sign
+    /// in with their password alone and set it up again.
+    #[command(name = "disable-2fa")]
+    Disable2fa(AdminEmailArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct AdminEmailArgs {
+    email: String,
+    /// Data directory.
+    #[arg(long, default_value = "fx_data")]
+    dir: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
@@ -520,15 +532,27 @@ fn check(args: CheckArgs) -> crate::Result<()> {
 }
 
 fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    if let AdminCommand::Disable2fa(args) = cmd {
+        return rt.block_on(async move {
+            let app = App::open(&args.dir, AppOptions { auth, ..Default::default() }).await?;
+            let email = crate::auth::normalize_email(&args.email)?;
+            if !app.auth().disable_admin_mfa(&app, &email).await? {
+                anyhow::bail!("no administrator with email {email}");
+            }
+            println!("Removed the second factor of {email}; their next sign-in needs the password only");
+            Ok(())
+        });
+    }
     let (args, create) = match cmd {
         AdminCommand::Create(a) => (a, true),
         AdminCommand::ResetPassword(a) => (a, false),
+        AdminCommand::Disable2fa(_) => unreachable!("handled above"),
     };
     let password = match args.password {
         Some(p) => p,
         None => read_password()?,
     };
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let app = App::open(&args.dir, AppOptions { auth, ..Default::default() }).await?;
         let email = crate::auth::normalize_email(&args.email)?;
@@ -1049,6 +1073,8 @@ mod tests {
         let cli = parse(&["admin", "create", "a@b.c", "--password", "pw", "--dir", "d"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::Create(ref a)))
             if a.email == "a@b.c" && a.password.as_deref() == Some("pw") && a.dir == Path::new("d")));
+        let cli = parse(&["admin", "disable-2fa", "a@b.c", "--dir", "d"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Admin(AdminCommand::Disable2fa(ref a))) if a.email == "a@b.c"));
         let cli = parse(&["admin", "reset-password", "a@b.c"]).unwrap();
         assert!(
             matches!(cli.command, Some(Command::Admin(AdminCommand::ResetPassword(ref a))) if a.password.is_none())

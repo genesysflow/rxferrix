@@ -1,7 +1,7 @@
 //! Authentication: users, sessions, tokens, email codes, OAuth and admins (docs/CONTRACT.md §1.5, docs/PROTOCOL.md).
 //!
 //! - [`tables`]: the system tables (`_users`, `_credentials`, `_accounts`, `_sessions`, `_used_refresh_tokens`,
-//!   `_verification_codes`, `_admins`).
+//!   `_verification_codes`, `_admins`, `_mfa_factors`).
 //! - [`identity`]: [`Identity`] (who is calling) and [`Auth`] (`ctx.auth` in functions).
 //! - [`tokens`]: the server secret, HS256 access tokens, opaque tokens and keyed hashes.
 //! - [`config`]: [`AuthConfig`] and the OAuth presets [`GitHub`], [`Google`], [`Discord`], [`Apple`], [`Oidc`]
@@ -9,6 +9,8 @@
 //! - [`service`]: [`AuthService`], the auth state of an `App` (`app.auth()`), and the operations behind the
 //!   endpoints. [`http`]: the `/api/auth/*` routes. [`oauth`]: the authorization code flow with PKCE.
 //! - [`email`]: [`Mailer`] (SMTP, dev log, [`MemoryMailer`] for tests).
+//! - [`mfa`]: two-factor authentication with an authenticator app ([`totp`]) and recovery codes, for users and
+//!   admins alike: the `/api/auth/mfa/*` endpoints' operations and the second step of a sign-in.
 //!
 //! The functions in this module are the client-facing system functions `_system/auth:me` and
 //! `_system/auth:update_profile` (hand-written references in `@rxferrix/client`, since codegen skips system functions).
@@ -20,6 +22,7 @@ pub mod email;
 pub mod http;
 pub mod identity;
 pub mod jwt;
+pub mod mfa;
 pub mod oauth;
 pub(crate) mod password;
 pub mod rate_limit;
@@ -29,16 +32,20 @@ pub mod service;
 pub(crate) mod store;
 pub mod tables;
 pub mod tokens;
+pub mod totp;
 
 pub use config::{Apple, AuthConfig, Discord, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
 pub use http::Caller;
 pub use identity::{Auth, FORBIDDEN, Identity, UNAUTHENTICATED};
 pub use jwt::{JwtAlgorithm, JwtProvider};
+pub use mfa::{MfaSetup, MfaStatus};
 pub use revocation::{Revocations, SessionWatch};
-pub use service::{AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignIn, SignInMethod, SignUpResult};
+pub use service::{
+    AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignIn, SignInMethod, SignInOutcome, SignUpResult,
+};
 pub use store::{ClientInfo, normalize_email};
-pub use tables::{Account, Admin, Session, User, VerificationCode};
+pub use tables::{Account, Admin, MfaFactor, Session, User, VerificationCode};
 
 use crate::prelude::*;
 

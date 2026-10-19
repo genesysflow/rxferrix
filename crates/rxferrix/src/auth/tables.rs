@@ -100,3 +100,27 @@ pub struct VerificationCode {
     /// Failed attempts at the numeric code.
     pub attempts: u32,
 }
+
+/// A second factor of a user or an administrator (`_mfa_factors`): a TOTP secret, sealed (`auth::secretbox`) with
+/// the owner's id as associated data, plus the keyed hashes of the unused recovery codes. Exactly one of `user` /
+/// `admin` is set, and at most one row exists per owner. Unconfirmed rows are enrollments in progress: the
+/// factor counts only once its first code was entered (`confirmed`).
+#[table(name = "_mfa_factors")]
+#[index(by_user = [user])]
+#[index(by_admin = [admin])]
+pub struct MfaFactor {
+    pub user: Option<Id<User>>,
+    pub admin: Option<Id<Admin>>,
+    /// `"totp"`.
+    pub kind: String,
+    pub secret_encrypted: String,
+    pub confirmed: bool,
+    /// Keyed hashes of the recovery codes not used yet.
+    pub recovery_code_hashes: Vec<String>,
+    /// The TOTP step of the last accepted code: that step and earlier ones are refused (a code works once).
+    pub last_used_step: Option<i64>,
+    /// Wrong codes in a row; `MAX_MFA_ATTEMPTS` of them lock the factor for a while.
+    pub failed_attempts: u32,
+    /// While set and in the future, codes are refused (ms since the epoch).
+    pub locked_until: Option<f64>,
+}

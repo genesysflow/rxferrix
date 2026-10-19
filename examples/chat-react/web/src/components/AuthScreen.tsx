@@ -1,10 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useAuthActions, type AuthProviders } from "@rxferrix/react";
+import { useAuthActions, type AuthProviders, type SignInResult } from "@rxferrix/react";
 import { errorMessage } from "../lib";
 
 type Mode = "signin" | "signup" | "code";
 
-export function AuthScreen({ initialError }: { initialError: string | null }) {
+export function AuthScreen({ initialError, initialMfaToken = null }: { initialError: string | null; initialMfaToken?: string | null }) {
   const auth = useAuthActions();
   const [mode, setMode] = useState<Mode>("signin");
   const [providers, setProviders] = useState<AuthProviders | null>(null);
@@ -15,8 +15,12 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
   const [codeSent, setCodeSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
+  // Two-factor authentication: the first step passed, a code from the authenticator app finishes the sign-in.
+  const [mfaToken, setMfaToken] = useState<string | null>(initialMfaToken);
+  const [mfaCode, setMfaCode] = useState("");
 
   useEffect(() => setError(initialError), [initialError]);
+  useEffect(() => setMfaToken(initialMfaToken), [initialMfaToken]);
   useEffect(() => {
     auth.providers().then(setProviders, () => setProviders(null));
   }, [auth]);
@@ -33,9 +37,25 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
     }
   };
 
+  /** A sign-in that may stop at the second factor. */
+  const signedIn = (r: SignInResult) => {
+    if (r.mfaRequired) setMfaToken(r.mfaToken);
+  };
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (mode === "signin") return run(() => auth.signIn({ email, password }));
+    if (mfaToken) {
+      return run(async () => {
+        try {
+          await auth.verifyMfa(mfaToken, mfaCode.trim());
+        } catch (err) {
+          // The second-factor token lasts 5 minutes; after that, start over.
+          if ((err as { code?: string }).code === "invalid_mfa_token") setMfaToken(null);
+          throw err;
+        }
+      });
+    }
+    if (mode === "signin") return run(async () => signedIn(await auth.signIn({ email, password })));
     if (mode === "signup") {
       return run(async () => {
         const { verificationRequired } = await auth.signUp({ email, password, name: name.trim() || undefined });
@@ -48,7 +68,7 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
         setCodeSent(true);
       });
     }
-    return run(() => auth.verifyCode({ email, code: code.trim() }));
+    return run(async () => signedIn(await auth.verifyCode({ email, code: code.trim() })));
   };
 
   const switchTo = (next: Mode) => {
@@ -80,6 +100,33 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
             </button>
           ))}
         </div>
+        {mfaToken ? (
+          <form onSubmit={submit} className="auth-form">
+            <p className="hint">Enter the code from your authenticator app, or a recovery code.</p>
+            <label>
+              Code
+              <input
+                autoComplete="one-time-code"
+                required
+                value={mfaCode}
+                onChange={(e) => setMfaCode(e.target.value)}
+                placeholder="123456 or xxxxx-xxxxx"
+                autoFocus
+              />
+            </label>
+            {error && (
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+            )}
+            <button className="btn primary" type="submit" disabled={busy}>
+              Verify
+            </button>
+            <button type="button" className="link" onClick={() => setMfaToken(null)}>
+              Start over
+            </button>
+          </form>
+        ) : (
         <form onSubmit={submit} className="auth-form">
           {mode === "signup" && (
             <label>
@@ -143,7 +190,8 @@ export function AuthScreen({ initialError }: { initialError: string | null }) {
             </button>
           )}
         </form>
-        {providers?.oauth.includes("github") && (
+        )}
+        {!mfaToken && providers?.oauth.includes("github") && (
           <>
             <div className="divider">or</div>
             <button className="btn github" onClick={() => auth.signInWithOAuth("github")}>

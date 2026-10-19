@@ -271,6 +271,67 @@ describe("RxFerrixAuth", () => {
     expect(JSON.parse(storage.getItem(KEY)!).accessToken).toBe(t.accessToken);
   });
 
+  it("stops at the second factor and signs in with verifyMfa", async () => {
+    const t = tokens("m");
+    const { fetch, calls } = mockFetch({
+      "/api/auth/signin": () => ({ status: 200, body: { mfaRequired: true, mfaToken: "mfa-1", methods: ["totp"] } }),
+      "/api/auth/mfa/verify": (b) => (b.code === "123456" ? { status: 200, body: t } : authError(400, "invalid_mfa_code")),
+    });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+
+    const r = await auth.signIn({ email: "a@b.co", password: "pw" });
+    expect(r).toEqual({ mfaRequired: true, mfaToken: "mfa-1", methods: ["totp"] });
+    expect(auth.state()).toMatchObject({ isLoading: false, isAuthenticated: false });
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(server.drain()).toEqual([]);
+
+    const wrong = await auth.verifyMfa("mfa-1", "000000").catch((e: unknown) => e);
+    expect(wrong).toMatchObject({ code: "invalid_mfa_code" });
+    await auth.verifyMfa("mfa-1", "123456");
+    await settle();
+    expect(calls.at(-1)).toEqual({ path: "/api/auth/mfa/verify", body: { mfaToken: "mfa-1", code: "123456" } });
+    expect(JSON.parse(storage.getItem(KEY)!)).toMatchObject({ accessToken: t.accessToken });
+    expect(server.drain()).toEqual([{ type: "Authenticate", baseVersion: 0, token: t.accessToken }]);
+  });
+
+  it("manages the signed-in account's second factor with the bearer token", async () => {
+    const t = tokens("f");
+    storage.setItem(KEY, JSON.stringify({ ...t, expiresAt: Date.now() + 600_000, adminId: null }));
+    const seenAuth: (string | null)[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      seenAuth.push(new Headers(init?.headers).get("Authorization"));
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      const answer = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (path === "/api/auth/mfa") return answer({ enabled: false, pending: false, recoveryCodesLeft: 0, methods: [] });
+      if (path === "/api/auth/mfa/totp/setup") {
+        expect(body).toEqual({ password: "pw" });
+        return answer({ secret: "ABC", uri: "otpauth://totp/x", qrSvg: "<svg/>" });
+      }
+      if (path === "/api/auth/mfa/totp/confirm") return answer({ recoveryCodes: ["aaaaa-bbbbb"] });
+      if (path === "/api/auth/mfa/recovery-codes") return answer({ recoveryCodes: ["ccccc-ddddd"] });
+      if (path === "/api/auth/mfa/disable") {
+        expect(body).toEqual({ code: "654321" });
+        return answer({});
+      }
+      return new Response("{}", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+
+    expect(await auth.getMfaStatus()).toEqual({ enabled: false, pending: false, recoveryCodesLeft: 0, methods: [] });
+    expect(await auth.setupTotp({ password: "pw" })).toEqual({ secret: "ABC", uri: "otpauth://totp/x", qrSvg: "<svg/>" });
+    expect(await auth.confirmTotp("123456")).toEqual({ recoveryCodes: ["aaaaa-bbbbb"] });
+    expect(await auth.regenerateRecoveryCodes("aaaaa-bbbbb")).toEqual({ recoveryCodes: ["ccccc-ddddd"] });
+    await auth.disableMfa("654321");
+    expect(seenAuth).toEqual(Array(5).fill(`Bearer ${t.accessToken}`));
+
+    await auth.signOut();
+    const err = await auth.getMfaStatus().catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "unauthenticated" });
+  });
+
   it("handles OAuth and email-link redirects and cleans the URL", async () => {
     const t = tokens("o");
     const { fetch, calls } = mockFetch({ "/api/auth/magic/verify": () => ({ status: 200, body: t }) });
@@ -299,6 +360,11 @@ describe("RxFerrixAuth", () => {
     location.href = "http://app.test/#rxferrix_magic_token=mt";
     expect(await auth.handleRedirectCallback()).toEqual({ type: "signedIn" });
     expect(calls).toEqual([{ path: "/api/auth/magic/verify", body: { token: "mt" } }]);
+
+    // An account with two-factor authentication: OAuth returns the second-factor token in the fragment.
+    location.href = "http://app.test/cb#rxferrix_mfa_token=mfa-9";
+    expect(await auth.handleRedirectCallback()).toEqual({ type: "mfaRequired", mfaToken: "mfa-9" });
+    expect(replaceState).toHaveBeenLastCalledWith(null, "", "http://app.test/cb");
 
     location.href = "http://app.test/#nothing=here";
     expect(await auth.handleRedirectCallback()).toBeNull();

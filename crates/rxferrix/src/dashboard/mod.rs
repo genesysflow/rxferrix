@@ -14,7 +14,7 @@
 //! | `insert_document`, `patch_document`, `replace_document`, `delete_documents` | mutation | Untyped writes, validated with `TableDef::validate`. |
 //! | `functions` | query | The function registry, internal and system functions included. |
 //! | `run_function` | action | Run any function by path with JSON args, optionally as a given user (through a real, audited, short-lived session). |
-//! | `users`, `user_sessions`, `revoke_session`, `delete_user` | query / mutation | The Users page. |
+//! | `users`, `user_sessions`, `revoke_session`, `delete_user`, `reset_mfa` | query / mutation | The Users page. |
 //! | `me` | query | The signed-in admin. |
 //!
 //! Secrets are never returned and system tables are mostly read-only; see [`secrets`]. Every write is recorded in the
@@ -34,6 +34,7 @@ use serde_json::{Map, Value};
 
 use crate::audit;
 use crate::auth::store;
+use crate::auth::store::Principal;
 use crate::auth::tables::{Account, Admin, Credential, Session, User, VerificationCode};
 use crate::db::catalog::TableInfo;
 use crate::error::ClientError;
@@ -692,6 +693,8 @@ pub struct UserSummary {
     /// Linked OAuth providers, e.g. `["github"]`.
     pub providers: Vec<String>,
     pub has_password: bool,
+    /// Two-factor authentication is enabled (a confirmed factor exists).
+    pub mfa_enabled: bool,
     /// Unexpired sessions.
     pub sessions: u32,
 }
@@ -736,6 +739,8 @@ pub async fn users(
             .iter()
             .filter(|s| s.expires_at > now)
             .count();
+        let mfa_enabled =
+            crate::auth::mfa::factor_in(&ctx.db, Principal::User(u.id)).await?.is_some_and(|f| f.confirmed);
         out.push(UserSummary {
             id: u.id.to_string(),
             creation_time: u.creation_time,
@@ -745,6 +750,7 @@ pub async fn users(
             image: u.image.clone(),
             providers: accounts.into_iter().map(|a| a.value.provider).collect(),
             has_password,
+            mfa_enabled,
             sessions: sessions as u32,
         });
     }
@@ -825,10 +831,13 @@ pub struct DeletedUser {
     pub accounts: u32,
     pub credentials: u32,
     pub verification_codes: u32,
+    /// Second factors (0 or 1).
+    #[serde(default)]
+    pub mfa_factors: u32,
 }
 
-/// Delete a user together with their sessions (and rotated refresh tokens), linked OAuth accounts, password and
-/// pending email codes. Documents of app tables that reference the user are left alone.
+/// Delete a user together with their sessions (and rotated refresh tokens), linked OAuth accounts, password, second
+/// factor and pending email codes. Documents of app tables that reference the user are left alone.
 #[mutation]
 pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser> {
     let admin = ctx.auth.require_admin()?;
@@ -849,6 +858,9 @@ pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser>
     for c in db.query::<Credential>().with_index(Credential::by_user, |q| q.eq(Credential::user, id)).collect().await? {
         db.delete(c.id).await?;
         out.credentials += 1;
+    }
+    if crate::auth::mfa::remove_factor_in(db, Principal::User(id)).await? {
+        out.mfa_factors += 1;
     }
     if let Some(email) = &doc.email {
         let codes = db
@@ -871,6 +883,23 @@ pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser>
     Ok(out)
 }
 
+/// Remove a user's second factor (they lost their authenticator and recovery codes): their next sign-in needs no
+/// code, and they can enroll again. Audited (`reset_mfa`). `not_found` if the user doesn't exist, `mfa_not_enabled`
+/// if they have no factor.
+#[mutation]
+pub async fn reset_mfa(ctx: &MutationCtx, user: String) -> Result<()> {
+    let admin = ctx.auth.require_admin()?;
+    let id: Id<User> = parse_id(&user, "user")?;
+    if ctx.db.get(id).await?.is_none() {
+        return Err(user_error("not_found", format!("User {user} does not exist")));
+    }
+    if !crate::auth::mfa::remove_factor_in(&ctx.db, Principal::User(id)).await? {
+        return Err(user_error("mfa_not_enabled", "This user has no second factor"));
+    }
+    let rec = audit::Record::new("reset_mfa").target(USERS, Some(user));
+    audit::record(&ctx.db, Some(admin), rec).await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
@@ -879,11 +908,16 @@ pub struct AdminSummary {
     #[ts(rename = "_id")]
     pub id: String,
     pub email: String,
+    /// Two-factor authentication is enabled for this administrator.
+    #[serde(default)]
+    pub mfa_enabled: bool,
 }
 
-/// The signed-in administrator.
+/// The signed-in administrator (live: reruns when their second factor changes).
 #[query]
 pub async fn me(ctx: &QueryCtx) -> Result<Option<AdminSummary>> {
     let id: Id<Admin> = ctx.auth.require_admin()?;
-    Ok(ctx.db.get(id).await?.map(|a| AdminSummary { id: a.id.to_string(), email: a.value.email }))
+    let Some(admin) = ctx.db.get(id).await? else { return Ok(None) };
+    let mfa_enabled = crate::auth::mfa::factor_in(&ctx.db, Principal::Admin(id)).await?.is_some_and(|f| f.confirmed);
+    Ok(Some(AdminSummary { id: admin.id.to_string(), email: admin.value.email, mfa_enabled }))
 }

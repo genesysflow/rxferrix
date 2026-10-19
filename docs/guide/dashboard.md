@@ -16,7 +16,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
   the execution log, and the function's own live log.
 - **Logs**: a live tail of executions (filter by path or one function, kind, outcome; expand for the error, log lines
   and args); new executions slide in, tinted by outcome.
-- **Users**: users, linked providers, sessions (revoked live; impersonation sessions marked), delete, and "open app as
+- **Users**: users, linked providers, two-factor status (with a reset for users who lost their authenticator),
+  sessions (revoked live; impersonation sessions marked), delete, and "open app as
   user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.
 - **Files**: stored files with thumbnails and previews (images, video, audio, text), download, delete, and upload by
   drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
@@ -41,6 +42,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
   sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.
+- **Account**: two-factor authentication for your own administrator account (an authenticator app plus recovery
+  codes); signing in then asks for a code after the password. `admin disable-2fa <email>` removes it from the server
+  if both are lost.
 - **Audit log**: document edits, user and session changes, settings and environment variable changes, impersonation,
   function runs, restores and analytics queries, live, filterable by
   administrator, action, table, document and time, with field-level diffs.

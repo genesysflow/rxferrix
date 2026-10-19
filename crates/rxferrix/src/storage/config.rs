@@ -126,6 +126,11 @@ pub struct StorageConfig {
     pub thumbnail_max_source_pixels: u64,
     /// Larger files get no thumbnails (the source is read into memory). Default 32 MiB.
     pub thumbnail_max_source_bytes: u64,
+    /// Thumbnails *generated* (cache misses) per client IP: burst and refill per minute; cached variants are not
+    /// counted. Each new size decodes the source again and is cached for good, so without a size allowlist this is
+    /// what keeps an anonymous client from filling the CPU and the cache with variants. `None` disables the
+    /// limit. Default 30 / 60 per minute.
+    pub thumbnail_rate_limit: Option<(u32, u32)>,
 }
 
 impl Default for StorageConfig {
@@ -147,6 +152,7 @@ impl Default for StorageConfig {
             thumbnail_sizes: None,
             thumbnail_max_source_pixels: DEFAULT_THUMBNAIL_MAX_SOURCE_PIXELS,
             thumbnail_max_source_bytes: DEFAULT_THUMBNAIL_MAX_SOURCE_BYTES,
+            thumbnail_rate_limit: Some((30, 60)),
         }
     }
 }
@@ -243,6 +249,12 @@ impl StorageConfig {
     /// Serve only these thumbnail sizes (`(width, height)`).
     pub fn thumbnail_sizes(mut self, sizes: &[(u32, u32)]) -> Self {
         self.thumbnail_sizes = Some(sizes.to_vec());
+        self
+    }
+
+    /// Thumbnail generations (cache misses) per client IP: `Some((burst, per_minute))`, or `None` for no limit.
+    pub fn thumbnail_rate_limit(mut self, limit: Option<(u32, u32)>) -> Self {
+        self.thumbnail_rate_limit = limit;
         self
     }
 

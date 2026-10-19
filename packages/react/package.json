@@ -1,6 +1,6 @@
 {
   "name": "@rxferrix/react",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "React hooks for RxFerrix",
   "license": "MIT",
   "homepage": "https://genesysflow.github.io/rxferrix/",

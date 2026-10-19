@@ -4,7 +4,7 @@ members = ["crates/rxferrix", "crates/rxferrix-macros", "crates/rxferrix-cli", "
 
 [workspace.package]
 edition = "2024"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 repository = "https://github.com/genesysflow/rxferrix"
 homepage = "https://genesysflow.github.io/rxferrix/"

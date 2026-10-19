@@ -180,13 +180,13 @@ impl OAuthFlows {
         Ok((url.to_string(), state))
     }
 
-    /// Remove and return the pending flow for `state` (each state is usable once).
     /// The app URL of the pending flow `state`, without consuming it (the callback checks the state cookie first).
     pub fn redirect_of(&self, state: &str) -> Option<String> {
         let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.get(state).filter(|p| p.created.elapsed() < STATE_TTL).map(|p| p.redirect_to.clone())
     }
 
+    /// Remove and return the pending flow for `state` (each state is usable once).
     pub fn take(&self, state: &str) -> Option<Pending> {
         let p = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(state)?;
         (p.created.elapsed() < STATE_TTL).then_some(p)

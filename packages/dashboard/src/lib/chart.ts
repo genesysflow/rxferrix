@@ -77,9 +77,9 @@ export function scale(d0: number, d1: number, r0: number, r1: number): (v: numbe
 }
 
 /** An SVG path through the points, broken where the value is null (one `M` per run). */
-export function linePath(
-  points: readonly ChartPoint[],
-  value: (p: ChartPoint) => number | null,
+export function linePath<P extends { t: number } = ChartPoint>(
+  points: readonly NoInfer<P>[],
+  value: (p: P) => number | null,
   x: (t: number) => number,
   y: (v: number) => number,
 ): string {
@@ -98,7 +98,7 @@ export function linePath(
 }
 
 /** The index of the point whose bucket contains (or is nearest to) the x position `px`. */
-export function nearestIndex(points: readonly ChartPoint[], px: number, x: (t: number) => number, bucket: number): number {
+export function nearestIndex(points: readonly { t: number }[], px: number, x: (t: number) => number, bucket: number): number {
   if (points.length === 0) return -1;
   let best = 0;
   let bestDistance = Infinity;
@@ -113,12 +113,29 @@ export function nearestIndex(points: readonly ChartPoint[], px: number, x: (t: n
   return best;
 }
 
-/** Axis labels for a time: `HH:MM` within a day's range, else `MM-DD HH:MM`. */
+/** Axis labels for a time: `HH:MM:SS` within ten minutes, `HH:MM` within a day's range, else `MM-DD HH:MM`. */
 export function timeLabel(t: number, rangeMs: number): string {
   const d = new Date(t);
   const pad = (n: number) => String(n).padStart(2, "0");
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (rangeMs < 600_000) return `${hm}:${pad(d.getSeconds())}`;
   return rangeMs > 86_400_000 ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}` : hm;
+}
+
+const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400].map((s) => s * 1000);
+
+/**
+ * Round times in `[t0, t1]` for an axis (whole seconds, minutes or hours in local time): the smallest step that
+ * gives at most `maxCount` ticks.
+ */
+export function timeTicks(t0: number, t1: number, maxCount: number): number[] {
+  if (!(t1 > t0) || maxCount < 1) return [];
+  const step = TIME_STEPS.find((s) => (t1 - t0) / s <= maxCount) ?? Math.ceil((t1 - t0) / maxCount / 86_400_000) * 86_400_000;
+  // Align to the local day (steps of hours land on 00:00, 06:00, ... rather than on UTC hours).
+  const offset = new Date(t0).getTimezoneOffset() * 60_000;
+  const out: number[] = [];
+  for (let t = Math.ceil((t0 - offset) / step) * step + offset; t <= t1; t += step) out.push(t);
+  return out;
 }
 
 /** The time ranges the charts offer, with a bucket size that gives 60 to 168 bars. */

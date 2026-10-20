@@ -1,18 +1,38 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import type { FunctionStats, Stats } from "../lib/api.js";
-  import { fetchStats } from "../lib/admin.js";
+  import { onMount, type Snippet } from "svelte";
+  import type { FunctionStats, Stats, Timeseries } from "../lib/api.js";
+  import { fetchStats, fetchTimeseries } from "../lib/admin.js";
+  import { fillBuckets, RANGES, rangeWindow, totals } from "../lib/chart.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatDuration, formatSpan, formatTime, formatUptime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
+  import LineChart from "../components/LineChart.svelte";
+  import Panel from "../components/Panel.svelte";
 
   const ctx = dashboardContext();
   let stats = $state<Stats | null>(null);
   let error = $state<string | null>(null);
-  /** Recent samples of the live counters (one per poll), for the sparklines. */
-  let history = $state<{ at: number; commits: number; reruns: number }[]>([]);
+  /** Every app function's executions over the last 24 hours, in 15-minute buckets (refreshed every 30s). */
+  let series = $state<Timeseries | null>(null);
+  /** Recent samples of the live counters (one per poll, 5 minutes' worth), for the live charts. */
+  let history = $state<Sample[]>([]);
   let previous: Stats | null = null;
+
+  interface Sample {
+    at: number;
+    commits: number;
+    reruns: number;
+    sockets: number;
+    subscriptions: number;
+    shared: number;
+    pending: number;
+    running: number;
+    /** Percent of the cache lookups since the previous poll that hit (null without lookups). */
+    hitRate: number | null;
+  }
+
+  const DAY = RANGES.find((r) => r.id === "24h")!;
 
   onMount(() => {
     let stopped = false;
@@ -20,12 +40,26 @@
       try {
         const next = await fetchStats(ctx.auth);
         const o = next.overview;
+        const p = previous?.overview;
         // Reruns per second between two polls (the server reports a running total).
         const reruns =
-          previous && o.queryReruns !== undefined && previous.overview.queryReruns !== undefined
-            ? Math.max(0, o.queryReruns - previous.overview.queryReruns) / Math.max(0.001, (o.now - previous.overview.now) / 1000)
+          p && o.queryReruns !== undefined && p.queryReruns !== undefined
+            ? Math.max(0, o.queryReruns - p.queryReruns) / Math.max(0.001, (o.now - p.now) / 1000)
             : 0;
-        history = [...history, { at: o.now, commits: o.commitsPerSecond ?? 0, reruns }].slice(-60);
+        const hits = p ? (o.cacheHits ?? 0) - (p.cacheHits ?? 0) : 0;
+        const lookups = p ? hits + (o.cacheMisses ?? 0) - (p.cacheMisses ?? 0) : 0;
+        const sample: Sample = {
+          at: o.now,
+          commits: o.commitsPerSecond ?? 0,
+          reruns,
+          sockets: o.sockets,
+          subscriptions: o.subscriptions,
+          shared: o.sharedQueries ?? 0,
+          pending: o.queueDepth ?? 0,
+          running: o.runningJobs ?? 0,
+          hitRate: lookups > 0 ? (Math.max(0, hits) / lookups) * 100 : null,
+        };
+        history = [...history, sample].slice(-100);
         previous = next;
         stats = next;
         error = null;
@@ -34,10 +68,22 @@
       }
       if (!stopped) timer = setTimeout(poll, 3000);
     }
+    async function pollSeries() {
+      try {
+        const { since, until } = rangeWindow(DAY.rangeMs, DAY.bucketMs, Date.now());
+        const s = await fetchTimeseries(ctx.auth, { bucket: DAY.bucketMs, since, until });
+        if (!stopped) series = s;
+      } catch {
+        // The stats poll reports a failing server; the charts keep their last data.
+      }
+      if (!stopped) seriesTimer = setTimeout(pollSeries, 30_000);
+    }
     let timer = setTimeout(poll, 0);
+    let seriesTimer = setTimeout(pollSeries, 0);
     return () => {
       stopped = true;
       clearTimeout(timer);
+      clearTimeout(seriesTimer);
     };
   });
 
@@ -52,21 +98,39 @@
   const appTables = $derived((ctx.tables ?? []).filter((t) => !t.system));
   const totalBytes = $derived((stats?.overview.files ?? []).reduce((n, f) => n + f.bytes, 0));
 
-  /** A sparkline path (0 at the bottom) over the samples. */
+  const points = $derived(series ? fillBuckets(series) : []);
+  const pointTimes = $derived(points.map((p) => p.t));
+  const sum = $derived(totals(points));
+  const times = $derived(history.map((h) => h.at));
+  const pick = (f: (h: Sample) => number | null) => history.map(f);
+
   function cacheHitRate(o: Stats["overview"]): string {
     const total = (o.cacheHits ?? 0) + (o.cacheMisses ?? 0);
     return total === 0 ? "–" : `${Math.round(((o.cacheHits ?? 0) / total) * 100)}%`;
   }
 
-  function spark(values: number[], w = 120, h = 26): string {
-    if (values.length < 2) return "";
-    const max = Math.max(...values, 1e-9);
-    return values
-      .map((v, i) => `${i ? "L" : "M"}${((i / (values.length - 1)) * w).toFixed(1)},${(h - 1 - (v / max) * (h - 2)).toFixed(1)}`)
-      .join("");
-  }
   const rate = (n: number) => (n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2));
+  const count = (n: number) => (n >= 10_000 ? `${Number((n / 1000).toFixed(0))}k` : n >= 1000 ? `${Number((n / 1000).toFixed(1))}k` : `${Number(n.toFixed(2))}`);
+  const percent = (n: number) => `${Number(n.toFixed(n < 1 ? 2 : n < 10 ? 1 : 0))}%`;
+  const ms = (n: number) => (n >= 1000 ? `${Number((n / 1000).toFixed(1))}s` : n >= 10 ? `${Math.round(n)}ms` : `${Number(n.toFixed(2))}ms`);
+  const live = "Collecting samples…";
 </script>
+
+{#snippet section(title: string, note: string, body: Snippet)}
+  <details class="section" open>
+    <summary><span class="chevron" aria-hidden="true"></span>{title}<span class="note faint">{note}</span></summary>
+    {@render body()}
+  </details>
+{/snippet}
+
+{#snippet stat(value: string | number, sub: string, testid?: string)}
+  <div class="value" data-testid={testid}>{value}</div>
+  <div class="sub">{sub}</div>
+{/snippet}
+
+{#snippet headline(value: string, sub: string, testid?: string)}
+  <div class="headline"><span class="value" data-testid={testid}>{value}</span><span class="sub">{sub}</span></div>
+{/snippet}
 
 {#snippet fnTable(rows: FunctionStats[], empty: string)}
   {#if rows.length === 0}
@@ -94,7 +158,7 @@
     <h1>Overview</h1>
     {#if stats}<span class="muted small">rxferrix {stats.overview.version}{stats.overview.dev ? " · dev mode" : ""}</span>{/if}
     <span class="spacer"></span>
-    <span class="faint small">refreshes every 3s · last 24 hours</span>
+    <span class="faint small">refreshes every 3s</span>
   </header>
   <div class="page-body">
     {#if error}<div class="alert" role="alert">{error}</div>{/if}
@@ -102,107 +166,192 @@
       {#if !error}<Empty title="Loading stats…" />{/if}
     {:else}
       {@const o = stats.overview}
-      <section class="cards">
-        <div class="card stat"><div class="label">Commit ts</div><div class="value" data-testid="stat-ts">{o.ts}</div><div class="sub">{formatTime(o.commitTime)}</div></div>
-        <div class="card stat"><div class="label">Connections</div><div class="value" data-testid="stat-sockets">{o.sockets}</div><div class="sub">{o.subscriptions} live subscriptions</div></div>
-        <div class="card stat"><div class="label">Documents</div><div class="value">{o.documents}</div><div class="sub">in {o.tables} tables</div></div>
-        <div class="card stat"><div class="label">Functions</div><div class="value">{o.registeredFunctions}</div><div class="sub">registered</div></div>
-        <div class="card stat"><div class="label">Storage</div><div class="value">{formatBytes(totalBytes)}</div><div class="sub">data.db + aux.db (with WAL)</div></div>
-        <div class="card stat"><div class="label">Uptime</div><div class="value">{formatUptime(o.now - o.startedAt)}</div><div class="sub">since {formatTime(o.startedAt)}</div></div>
-        <div class="card stat" class:warn={o.droppedLogEntries > 0}><div class="label">Dropped log entries</div><div class="value">{o.droppedLogEntries}</div><div class="sub">execution log backlog</div></div>
-      </section>
 
-      {#if o.commitsPerSecond !== undefined}
-        <h2 class="section">Live</h2>
-        <section class="cards" data-testid="live-stats">
-          <div class="card stat">
-            <div class="label">Commits / s</div>
-            <div class="value" data-testid="stat-commits">{rate(o.commitsPerSecond)}</div>
-            <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"><path d={spark(history.map((h) => h.commits))} /></svg>
-            <div class="sub">over the last 10 seconds</div>
-          </div>
-          <div class="card stat">
-            <div class="label">Query reruns / s</div>
-            <div class="value">{rate(history.at(-1)?.reruns ?? 0)}</div>
-            <svg class="spark" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"><path d={spark(history.map((h) => h.reruns))} /></svg>
-            <div class="sub">{o.queryReruns ?? 0} reruns in {o.subscriptionRounds ?? 0} rounds</div>
-          </div>
-          <div class="card stat">
-            <div class="label">Shared queries</div>
-            <div class="value">{o.sharedQueries ?? 0}</div>
-            <div class="sub">serving {o.subscriptions} subscriptions · {o.cachedQueries ?? 0} cached</div>
-          </div>
-          <div class="card stat" data-testid="stat-cache">
-            <div class="label">Query cache</div>
-            <div class="value">{cacheHitRate(o)}</div>
-            <div class="sub">hit rate (HTTP and ctx.run_query) · {formatBytes(o.cacheBytes ?? 0)} kept</div>
-          </div>
-          <a class="card stat link" href={href("scheduler", [], { state: "pending" })} onclick={link}>
-            <div class="label">Scheduler queue</div>
-            <div class="value" data-testid="stat-queue">{o.queueDepth ?? 0}</div>
-            <div class="sub">pending jobs · {o.runningJobs ?? 0} running</div>
-          </a>
-          {#if stats.olap}
-            {@const a = stats.olap}
-            <div class="card stat" class:warn={a.state === "failed"} data-testid="stat-olap" title={a.detail ?? ""}>
-              <div class="label">Analytics copy</div>
+      {#snippet statusBody()}
+        <div class="tiles">
+          <Panel title="Commit ts" help="The timestamp of the latest commit, and when it happened.">
+            {@render stat(o.ts, formatTime(o.commitTime), "stat-ts")}
+          </Panel>
+          <Panel title="Connections" help="Open WebSocket connections, and the live query subscriptions they hold.">
+            {@render stat(o.sockets, `${o.subscriptions} live subscriptions`, "stat-sockets")}
+          </Panel>
+          <Panel title="Documents" help="Documents in every table, system tables included.">
+            {@render stat(o.documents, `in ${o.tables} tables`)}
+          </Panel>
+          <Panel title="Functions" help="Queries, mutations and actions the app registers.">
+            {@render stat(o.registeredFunctions, "registered")}
+          </Panel>
+          <Panel title="Storage" help="data.db and aux.db on disk, write-ahead logs included.">
+            {@render stat(formatBytes(totalBytes), "data.db + aux.db (with WAL)")}
+          </Panel>
+          <Panel title="Uptime" help="How long this server process has been running.">
+            {@render stat(formatUptime(o.now - o.startedAt), `since ${formatTime(o.startedAt)}`)}
+          </Panel>
+          <Panel
+            title="Dropped log entries"
+            help="Execution log entries dropped because the writer fell behind; non-zero means the log is incomplete."
+            warn={o.droppedLogEntries > 0}
+          >
+            {@render stat(o.droppedLogEntries, "execution log backlog")}
+          </Panel>
+          {#if stats!.olap}
+            {@const a = stats!.olap}
+            <Panel title="Analytics copy" help={a.detail ?? "The analytics copy of the data (--olap)."} warn={a.state === "failed"} testid="stat-olap">
               <div class="value small-value">{a.state}</div>
               <div class="sub">
                 {a.latestTs - a.appliedTs} commits behind{a.lagMs > 0 ? ` (${formatSpan(a.lagMs)})` : ""} ·
                 {a.tables.reduce((n, t) => n + t.rows, 0)} rows · {formatBytes(a.sizeBytes)}
               </div>
-            </div>
+            </Panel>
           {/if}
-          <div class="card stat">
-            <div class="label">Prometheus</div>
+          <Panel title="Prometheus" help="Whether the server exposes Prometheus metrics at /metrics.">
             <div class="value small-value">{o.metricsEnabled ? "on" : "off"}</div>
             <div class="sub">{o.metricsEnabled ? "/metrics is served" : "start with --metrics"}</div>
+          </Panel>
+        </div>
+      {/snippet}
+      {@render section("Status", "", statusBody)}
+
+      {#snippet functionsBody()}
+        <div class="charts">
+          <Panel title="Function Calls" help="Calls of every app function per 15 minutes, and how many of them failed.">
+            {#snippet actions()}<span class="total">{count(sum.calls)} calls</span>{/snippet}
+            <LineChart
+              label="Function calls"
+              times={pointTimes}
+              step={series?.bucket ?? 0}
+              format={count}
+              empty="No function calls yet."
+              series={[
+                { label: "Calls", color: "var(--series-1)", values: points.map((p) => p.calls) },
+                { label: "Errors", color: "var(--err)", values: points.map((p) => p.errors) },
+              ]}
+            />
+          </Panel>
+          <Panel title="Failure Rate" help="The share of app function calls that threw (user and server errors), per 15 minutes.">
+            {#snippet actions()}<span class="total" class:error-text={sum.errors > 0}>{percent(sum.errorRate * 100)} overall</span>{/snippet}
+            <LineChart
+              label="Failure rate"
+              times={pointTimes}
+              step={series?.bucket ?? 0}
+              format={percent}
+              max={100}
+              empty="No function calls yet."
+              series={[{ label: "All functions", color: "var(--err)", values: points.map((p) => (p.calls ? (p.errors / p.calls) * 100 : null)) }]}
+            />
+          </Panel>
+          <Panel title="Latency" help="The median (p50) and 95th percentile (p95) duration of app function calls, per 15 minutes.">
+            {#snippet actions()}{#if sum.worstP95 !== null}<span class="total">worst p95 {ms(sum.worstP95)}</span>{/if}{/snippet}
+            <LineChart
+              label="Latency"
+              times={pointTimes}
+              step={series?.bucket ?? 0}
+              format={ms}
+              empty="No function calls yet."
+              series={[
+                { label: "p50", color: "var(--series-1)", values: points.map((p) => p.p50) },
+                { label: "p95", color: "var(--series-2)", values: points.map((p) => p.p95) },
+              ]}
+            />
+          </Panel>
+        </div>
+        <div class="tables">
+          <Panel title="Busiest functions" help="The app functions called most in the last 24 hours.">
+            {@render fnTable(byCalls, "No function calls in the last 24 hours.")}
+          </Panel>
+          <Panel title="Most errors" help="The app functions that failed most in the last 24 hours.">
+            {@render fnTable(byErrors, "No errors in the last 24 hours.")}
+          </Panel>
+        </div>
+      {/snippet}
+      {@render section("Functions", "last 24 hours", functionsBody)}
+
+      {#if o.commitsPerSecond !== undefined}
+        {#snippet liveBody()}
+          <div class="charts" data-testid="live-stats">
+            <Panel title="Commits / s" help="Write transactions committed per second, averaged over the last 10 seconds.">
+              {@render headline(rate(o.commitsPerSecond!), "over the last 10 seconds", "stat-commits")}
+              <LineChart label="Commits per second" {times} format={count} empty={live} series={[{ label: "Commits / s", color: "var(--series-1)", values: pick((h) => h.commits) }]} />
+            </Panel>
+            <Panel title="Query reruns / s" help="Subscribed queries rerun per second because a commit changed what they read.">
+              {@render headline(rate(history.at(-1)?.reruns ?? 0), `${o.queryReruns ?? 0} reruns in ${o.subscriptionRounds ?? 0} rounds`)}
+              <LineChart label="Query reruns per second" {times} format={count} empty={live} series={[{ label: "Reruns / s", color: "var(--series-1)", values: pick((h) => h.reruns) }]} />
+            </Panel>
+            <Panel title="Subscriptions" help="Open connections, the live subscriptions they hold, and the distinct (shared) queries serving them.">
+              {@render headline(String(o.sharedQueries ?? 0), `shared queries serving ${o.subscriptions} subscriptions · ${o.cachedQueries ?? 0} cached`)}
+              <LineChart
+                label="Subscriptions"
+                {times}
+                format={count}
+                empty={live}
+                series={[
+                  { label: "Connections", color: "var(--series-1)", values: pick((h) => h.sockets) },
+                  { label: "Subscriptions", color: "var(--series-2)", values: pick((h) => h.subscriptions) },
+                  { label: "Shared queries", color: "var(--series-3)", values: pick((h) => h.shared) },
+                ]}
+              />
+            </Panel>
+            <Panel title="Query Cache" help="HTTP queries and ctx.run_query calls answered from the cache, as a share of all lookups." testid="stat-cache">
+              {@render headline(cacheHitRate(o), `hit rate · ${formatBytes(o.cacheBytes ?? 0)} kept`)}
+              <LineChart
+                label="Query cache hit rate"
+                {times}
+                format={percent}
+                max={100}
+                empty={live}
+                series={[{ label: "Hit rate", color: "var(--series-3)", values: pick((h) => h.hitRate) }]}
+              />
+            </Panel>
+            <Panel title="Scheduler" help="Scheduled jobs waiting to run, and scheduled actions in progress." href={href("scheduler", [], { state: "pending" })} onclick={link}>
+              {@render headline(String(o.queueDepth ?? 0), `pending jobs · ${o.runningJobs ?? 0} running`, "stat-queue")}
+              <LineChart
+                label="Scheduler queue"
+                {times}
+                format={count}
+                empty={live}
+                series={[
+                  { label: "Pending", color: "var(--series-1)", values: pick((h) => h.pending) },
+                  { label: "Running", color: "var(--series-2)", values: pick((h) => h.running) },
+                ]}
+              />
+            </Panel>
           </div>
-        </section>
+        {/snippet}
+        {@render section("Live", "sampled every 3s · last 5 minutes", liveBody)}
       {/if}
 
-      <section class="two">
-        <div class="card pad">
-          <h2>Busiest functions</h2>
-          {@render fnTable(byCalls, "No function calls in the last 24 hours.")}
-        </div>
-        <div class="card pad">
-          <h2>Most errors</h2>
-          {@render fnTable(byErrors, "No errors in the last 24 hours.")}
-        </div>
-      </section>
-
-      <section class="two">
-        <div class="card pad">
-          <h2>Tables</h2>
-          {#if appTables.length === 0}
-            <p class="muted small">No app tables yet.</p>
-          {:else}
+      {#snippet storageBody()}
+        <div class="tables">
+          <Panel title="Tables" help="The app's tables, their documents and indexes.">
+            {#if appTables.length === 0}
+              <p class="muted small">No app tables yet.</p>
+            {:else}
+              <table class="grid">
+                <thead><tr><th>Table</th><th>Documents</th><th>Indexes</th></tr></thead>
+                <tbody>
+                  {#each appTables as t (t.name)}
+                    <tr>
+                      <td><a href={href("data", [t.name])} onclick={link}>{t.name}</a></td>
+                      <td>{t.documents}</td>
+                      <td class="muted">{t.indexes.filter((i) => !i.builtin).map((i) => i.name).join(", ") || "—"}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </Panel>
+          <Panel title="Files" help="The database files on disk.">
             <table class="grid">
-              <thead><tr><th>Table</th><th>Documents</th><th>Indexes</th></tr></thead>
               <tbody>
-                {#each appTables as t (t.name)}
-                  <tr>
-                    <td><a href={href("data", [t.name])} onclick={link}>{t.name}</a></td>
-                    <td>{t.documents}</td>
-                    <td class="muted">{t.indexes.filter((i) => !i.builtin).map((i) => i.name).join(", ") || "—"}</td>
-                  </tr>
+                {#each o.files as f (f.name)}
+                  <tr><td class="mono">{f.name}</td><td>{formatBytes(f.bytes)}</td></tr>
                 {/each}
               </tbody>
             </table>
-          {/if}
+          </Panel>
         </div>
-        <div class="card pad">
-          <h2>Files</h2>
-          <table class="grid">
-            <tbody>
-              {#each o.files as f (f.name)}
-                <tr><td class="mono">{f.name}</td><td>{formatBytes(f.bytes)}</td></tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      {/snippet}
+      {@render section("Storage", "", storageBody)}
     {/if}
   </div>
 </div>
@@ -211,67 +360,93 @@
   .small {
     font-size: 12.5px;
   }
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
+  .section {
+    margin-bottom: 18px;
   }
-  .stat {
-    padding: 12px 14px;
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    margin-bottom: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
   }
-  .stat.warn {
-    border-color: var(--warn);
+  summary::-webkit-details-marker {
+    display: none;
   }
-  .stat.link {
-    color: inherit;
-    text-decoration: none;
+  .chevron {
+    width: 7px;
+    height: 7px;
+    margin: 0 3px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(-45deg);
+    transition: transform 0.12s;
   }
-  .stat.link:hover {
-    border-color: var(--border-strong);
+  details[open] > summary .chevron {
+    transform: rotate(45deg) translate(-2px, -2px);
   }
-  .small-value {
-    font-size: 18px;
-  }
-  h2.section {
-    margin: 4px 0 10px;
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .spark {
-    display: block;
-    width: 100%;
-    height: 26px;
-    margin: 2px 0;
-  }
-  .spark path {
-    fill: none;
-    stroke: var(--series-1);
-    stroke-width: 1.5;
-    vector-effect: non-scaling-stroke;
-  }
-  .label {
+  .note {
     font-size: 12px;
-    color: var(--muted);
+    font-weight: 400;
+  }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+  }
+  .tables {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .section > .tables:first-of-type {
+    margin-top: 0;
+  }
+  .tables :global(.body) {
+    overflow: auto;
   }
   .value {
     font-size: 22px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
+  .small-value {
+    font-size: 18px;
+  }
   .sub {
     font-size: 12px;
     color: var(--faint);
   }
-  .two {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-    gap: 16px;
-    margin-bottom: 16px;
+  .headline {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 6px;
+    min-width: 0;
   }
-  .pad {
-    padding: 14px 16px;
-    overflow: auto;
+  .headline .value {
+    font-size: 20px;
+  }
+  .headline .sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .total {
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
   }
   table.grid tbody tr {
     cursor: default;

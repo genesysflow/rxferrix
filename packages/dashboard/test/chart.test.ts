@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TimePoint } from "../src/lib/api.js";
-import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, totals, type ChartPoint } from "../src/lib/chart.js";
+import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, timeTicks, totals, type ChartPoint } from "../src/lib/chart.js";
 
 const point = (t: number, calls: number, errors: number, p50Us: number, p95Us: number): TimePoint => ({
   t,
@@ -92,5 +92,17 @@ describe("rangeWindow", () => {
   it("ends with the current bucket and spans whole buckets", () => {
     const now = 10 * 60_000 + 12_345;
     expect(rangeWindow(5 * 60_000, 60_000, now)).toEqual({ since: 6 * 60_000, until: 11 * 60_000 });
+  });
+});
+
+describe("timeTicks", () => {
+  it("picks round times at the smallest step that fits", () => {
+    const t0 = Date.UTC(2026, 0, 1, 12, 0, 3);
+    const ticks = timeTicks(t0, t0 + 60_000, 4);
+    expect(ticks.length).toBeLessThanOrEqual(4);
+    expect(ticks.length).toBeGreaterThan(1);
+    expect(ticks[1]! - ticks[0]!).toBe(15_000);
+    expect(ticks.every((t) => t % 15_000 === 0 && t >= t0 && t <= t0 + 60_000)).toBe(true);
+    expect(timeTicks(t0, t0, 4)).toEqual([]);
   });
 });

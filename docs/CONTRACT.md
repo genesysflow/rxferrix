@@ -2319,7 +2319,7 @@ need the server's configuration and keys), so the dashboard calls them with `use
 
 **`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
 per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`
-(§4.4), `trustedProxy`, `emailTemplates`. `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
+(§4.4), `trustedProxy`, `rateLimits`, `emailTemplates`. `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
 SMTP password, or the backups' S3 secret access key), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
 from `auth_secret.key` (BLAKE3 KDF, context `rxferrix settings v1 …`), a random 192-bit nonce per write, and the row's
 key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
@@ -2329,7 +2329,7 @@ until the secret is entered again.
 | Path `_system/settings:…` | Kind | Args → result |
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
-| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, trustedProxy?, emailTemplates?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings, `emailTemplates` all the templates. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; `trustedProxy` header names that are valid HTTP header names (trimmed, deduplicated case-insensitively, at most 10; none left clears the key); `emailTemplates` (trimmed; nothing left clears the key): an `appName` of at most 100 characters on one line, and per template a subject of 1–200 characters on one line and an HTML body of up to 64 KiB that contains `{code}` or `{link}`, with no `{name}` (lowercase letters and `_`) other than the placeholders; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, trustedProxy?, rateLimits?, emailTemplates?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings, `emailTemplates` all the templates. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; `trustedProxy` header names that are valid HTTP header names (trimmed, deduplicated case-insensitively, at most 10; none left clears the key); `rateLimits` rules with a valid label (below; trimmed), `maxRequests` 1–1,000,000, `intervalSecs` 1–86,400, no label listed twice for the same `audience`, at most 50 (off with no rules clears the key); `emailTemplates` (trimmed; nothing left clears the key): an `appName` of at most 100 characters on one line, and per template a subject of 1–200 characters on one line and an HTML body of up to 64 KiB that contains `{code}` or `{link}`, with no `{name}` (lowercase letters and `_`) other than the placeholders; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
 | `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.rxferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
@@ -2344,6 +2344,7 @@ type SettingsView = {
   sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
   backups: object | null;  // the stored backups setting (§4.4), secretAccessKey masked
   trustedProxy: TrustedProxy | null;
+  rateLimits: RateLimitSettings | null;
   emailTemplates: EmailTemplates | null;
   emailTemplateDefaults: EmailTemplates; // the built-in emails as templates (each one set, appName null)
   locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
@@ -2367,6 +2368,22 @@ type EmailTemplate = { subject: string; html: string };
 // taken, or the leftmost with useLeftmostIp. `AuthConfig::trust_proxy` / `--trust-proxy` means
 // `{ headers: ["x-forwarded-for"], useLeftmostIp: false }` and wins over the setting.
 type TrustedProxy = { headers: string[]; useLeftmostIp: boolean };
+// Request rate limits per client IP (as `trustedProxy` resolves it; IPv6 clients by their /64). Off: kept, not applied.
+// Each rule is a token bucket per client: bursts of up to maxRequests, refilled evenly over intervalSecs. A label is
+// - a path prefix (`/api/`, `/api/storage/upload`, an app route, static files): HTTP requests, counted by a middleware
+//   before the handler (CORS preflights aren't); the longest matching prefix decides, alone; WebSocket connections
+//   (`/api/sync`) and session refreshes (`/api/auth/refresh`) only count against a rule naming them (`/api/sync`), not
+//   against `/api/` or `/`, so the dashboard can't be locked out;
+// - `module:function`, either side `*`, or `*`: app functions called by clients, over HTTP (`/api/query|mutation|
+//   action`) and the WebSocket (mutations and actions; query subscriptions aren't counted); the most specific match
+//   decides (`m:f`, then `m:*`, then `*:f`, then `*`).
+// A `guest` (no valid access token) or `signedIn` rule goes before an `all` rule with the same label. Over the limit:
+// 429 `rate_limited` with `Retry-After` and `errorData.data.retryAfterSecs` in the function API's error shape; over
+// the WebSocket, that mutation or action fails with the same error (the connection stays). Never limited: `/_/`,
+// `/api/admin/*`, `/api/auth/admin/*`, `/api/health`, `/metrics`, `_system/*` functions and administrators. Saving keeps the counts of
+// unchanged rules.
+type RateLimitSettings = { enabled: boolean; rules: { label: string; maxRequests: number; intervalSecs: number;
+                                                      audience: "all" | "guest" | "signedIn" }[] };
 type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
                             clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
                             enabled: boolean; scopes?: string[] | null;

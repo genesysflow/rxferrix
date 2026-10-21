@@ -81,6 +81,7 @@ describe("Settings page", () => {
     corsOrigins: null,
     backups: null,
     trustedProxy: null,
+    rateLimits: null,
     emailTemplates: null,
     emailTemplateDefaults: {
       appName: null,
@@ -206,6 +207,52 @@ describe("Settings page", () => {
       trustedProxy: { headers: ["Fly-Client-IP", "CF-Connecting-IP"], useLeftmostIp: false },
     });
     expect(args).toEqual({ trustedProxy: { headers: ["Fly-Client-IP", "CF-Connecting-IP"], useLeftmostIp: false } });
+  });
+
+  it("adds rate limit rules and shows the server's objections in the section", async () => {
+    mounted = mount(Settings, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await answer("_system/settings:get", loaded);
+    expect(target.querySelector("[data-testid=rate-limits-on]")).toBeNull();
+
+    // The first rule comes filled in with a sensible default and turns limiting on.
+    button("+ Add rate limit rule").click();
+    flushSync();
+    expect(target.querySelector<HTMLInputElement>("input[aria-label='Enable rate limiting']")!.checked).toBe(true);
+    button("+ Add rate limit rule").click();
+    flushSync();
+    type(target.querySelector<HTMLInputElement>("input[aria-label='Rule 2 label']")!, "*:create");
+    type(target.querySelector<HTMLInputElement>("input[aria-label='Rule 2 max requests']")!, "20");
+    type(target.querySelector<HTMLInputElement>("input[aria-label='Rule 2 interval in seconds']")!, "5");
+    const audience = target.querySelector<HTMLSelectElement>("select[aria-label='Rule 2 targeted users']")!;
+    audience.value = "guest";
+    audience.dispatchEvent(new Event("change"));
+    flushSync();
+
+    button("Save changes").click();
+    const rateLimits = {
+      enabled: true,
+      rules: [
+        { label: "/api/", maxRequests: 300, intervalSecs: 10, audience: "all" as const },
+        { label: "*:create", maxRequests: 20, intervalSecs: 5, audience: "guest" as const },
+      ],
+    };
+    const args = await answer("_system/settings:update", { ...loaded, rateLimits });
+    expect(args).toEqual({ rateLimits });
+    expect(target.querySelector("[data-testid=rate-limits-on]")?.textContent).toBe("Enabled");
+
+    target.querySelector<HTMLButtonElement>("button[aria-label='Remove rule 1']")!.click();
+    flushSync();
+    button("Save changes").click();
+    await answer("_system/settings:update", null, { message: "rate limit `*:create`: something", code: "invalid_settings" });
+    const section = target.querySelector("[aria-labelledby=s-rate]")!;
+    expect(section.querySelector("[role=alert]")?.textContent).toBe("rate limit `*:create`: something");
   });
 
   it("customizes an email template with placeholders and a preview", async () => {

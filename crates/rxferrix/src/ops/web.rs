@@ -76,15 +76,27 @@ pub struct WebOptions {
 /// request counting when metrics are enabled.
 pub fn router(app: App, web: &WebOptions) -> Router {
     let mut router = crate::server::router(app.clone());
+    // RxFerrix's routes count against the path rate limits inside `server::router`; the app's routes and static files
+    // get the same middleware here (each request passes through it once).
+    use crate::settings::rate_limits::limit_requests;
     if let Some(routes) = &web.routes {
-        router = router.merge(routes.clone().with_state(app.clone()));
+        router = router.merge(
+            routes
+                .clone()
+                .layer(axum::middleware::from_fn_with_state(app.clone(), limit_requests))
+                .with_state(app.clone()),
+        );
     }
     if let Some(files) = &web.static_files {
         let files = Arc::new(files.clone());
-        router = router.fallback(move |request: Request| {
-            let files = files.clone();
-            async move { serve_static(&files, request.method(), request.uri().path(), request.headers()).await }
-        });
+        let fallback = Router::new()
+            .fallback(move |request: Request| {
+                let files = files.clone();
+                async move { serve_static(&files, request.method(), request.uri().path(), request.headers()).await }
+            })
+            .layer(axum::middleware::from_fn_with_state(app.clone(), limit_requests))
+            .with_state(app.clone());
+        router = router.fallback_service(fallback);
     }
     if app.options().ops.metrics.enabled {
         router = router.layer(axum::middleware::from_fn_with_state(app, super::metrics::track_requests));

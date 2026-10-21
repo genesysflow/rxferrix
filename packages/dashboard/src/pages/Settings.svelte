@@ -16,6 +16,7 @@
     formFromView,
     isLocked,
     newProvider,
+    newRateLimitRule,
     previewTemplate,
     sectionOfError,
     SESSION_TTL_RANGE,
@@ -27,7 +28,8 @@
 
   /**
    * Runtime settings (`_system/settings:*`, actions): sign-ups, token lifetimes, redirect URLs, CORS origins, trusted
-   * proxy headers, SMTP, the auth email templates and OAuth providers. Fields the configuration fixes are read-only; secrets are write-only.
+   * proxy headers, rate limits, SMTP, the auth email templates and OAuth providers. Fields the configuration fixes are
+   * read-only; secrets are write-only.
    */
   const ctx = dashboardContext();
   const get = useAction(settings.get);
@@ -154,6 +156,13 @@
     const p = newProvider(newKind);
     if (form.oauth.some((x) => x.id === p.id)) p.id = "";
     form.oauth = [...form.oauth, p];
+  }
+
+  function addRateLimitRule() {
+    if (!form) return;
+    const first = form.rateLimits.rules.length === 0;
+    form.rateLimits.rules = [...form.rateLimits.rules, newRateLimitRule(first)];
+    if (first) form.rateLimits.enabled = true;
   }
 
   // Headers to offer: those on this very request first (they reached the server), then the common ones.
@@ -393,6 +402,111 @@
             </div>
           </div>
         {/if}
+      </section>
+
+      <section class="card section" aria-labelledby="s-rate">
+        <div class="section-head">
+          <h2 id="s-rate">Rate limiting</h2>
+          <span class="spacer"></span>
+          {#if v.rateLimits?.enabled && v.rateLimits.rules.length}<span class="badge success" data-testid="rate-limits-on">Enabled</span>{/if}
+        </div>
+        <p class="muted small">
+          Limit how many requests one client IP can make (the IP the proxy headers above resolve). Each rule allows a
+          burst of up to <em>max requests</em>, refilled evenly over the interval; past it, requests get
+          <span class="mono">429 rate_limited</span> with <span class="mono">Retry-After</span>.
+        </p>
+        <label class="inline toggle">
+          <input type="checkbox" role="switch" aria-label="Enable rate limiting" bind:checked={form.rateLimits.enabled} />
+          Enable
+        </label>
+        {#if form.rateLimits.rules.length}
+          <table class="rules" aria-label="Rate limit rules">
+            <thead>
+              <tr>
+                <th>Rate limit label</th>
+                <th class="n">Max requests <span class="faint">(per IP)</span></th>
+                <th class="n">Interval <span class="faint">(seconds)</span></th>
+                <th>Targeted users</th>
+                <th aria-label="Remove"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each form.rateLimits.rules as r, i (r.key)}
+                <tr>
+                  <td>
+                    <input
+                      class="mono"
+                      aria-label={`Rule ${i + 1} label`}
+                      placeholder="/api/ or messages:send"
+                      bind:value={r.label}
+                      aria-invalid={err(`rateLimits.${i}.label`) ? "true" : undefined}
+                    />
+                    {@render fieldError(err(`rateLimits.${i}.label`))}
+                  </td>
+                  <td>
+                    <input
+                      class="num"
+                      inputmode="numeric"
+                      aria-label={`Rule ${i + 1} max requests`}
+                      bind:value={r.maxRequests}
+                      aria-invalid={err(`rateLimits.${i}.maxRequests`) ? "true" : undefined}
+                    />
+                    {@render fieldError(err(`rateLimits.${i}.maxRequests`))}
+                  </td>
+                  <td>
+                    <input
+                      class="num"
+                      inputmode="numeric"
+                      aria-label={`Rule ${i + 1} interval in seconds`}
+                      bind:value={r.intervalSecs}
+                      aria-invalid={err(`rateLimits.${i}.intervalSecs`) ? "true" : undefined}
+                    />
+                    {@render fieldError(err(`rateLimits.${i}.intervalSecs`))}
+                  </td>
+                  <td>
+                    <select aria-label={`Rule ${i + 1} targeted users`} bind:value={r.audience}>
+                      <option value="all">All</option>
+                      <option value="guest">Guests</option>
+                      <option value="signedIn">Signed-in users</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button
+                      class="small ghost"
+                      type="button"
+                      aria-label={`Remove rule ${i + 1}`}
+                      onclick={() => (form!.rateLimits.rules = form!.rateLimits.rules.filter((x) => x.key !== r.key))}>×</button
+                    >
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+        <button class="add-rule" type="button" onclick={addRateLimitRule} disabled={form.rateLimits.rules.length >= 50}>+ Add rate limit rule</button>
+        {@render fieldError(err("rateLimits") ?? sectionError("rateLimits"))}
+        <details class="small muted rules-help">
+          <summary>How rules match</summary>
+          <ul>
+            <li>
+              <span class="mono">/api/</span>, <span class="mono">/api/storage/upload</span>, <span class="mono">/webhooks/</span>: HTTP
+              requests whose path starts with it. The longest matching prefix decides. WebSocket connections
+              (<span class="mono">/api/sync</span>) and session refreshes (<span class="mono">/api/auth/refresh</span>) only count
+              against a rule naming them, not against <span class="mono">/api/</span> or <span class="mono">/</span>, so the dashboard
+              stays reachable.
+            </li>
+            <li>
+              <span class="mono">messages:send</span>, <span class="mono">messages:*</span>, <span class="mono">*:create</span>,
+              <span class="mono">*</span>: your functions, called over HTTP or the WebSocket (mutations and actions; live query
+              subscriptions aren't counted). The most specific match decides.
+            </li>
+            <li>A rule for guests or signed-in users goes before an <em>All</em> rule with the same label.</li>
+            <li>
+              Never limited: the dashboard and its API, <span class="mono">/api/health</span>, <span class="mono">/metrics</span>,
+              system functions, and administrators.
+            </li>
+          </ul>
+        </details>
       </section>
 
       <section class="card section" aria-labelledby="s-smtp">
@@ -780,6 +894,54 @@
   .ok-text {
     color: var(--ok);
   }
+  .section-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 2px 0 10px;
+    font-size: 13px;
+  }
+  table.rules {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  table.rules th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--muted);
+    font-size: 12.5px;
+    padding: 4px 6px;
+  }
+  table.rules td {
+    padding: 4px 6px;
+    vertical-align: top;
+    border-top: 1px solid var(--border);
+  }
+  table.rules td:first-child input {
+    width: 100%;
+  }
+  table.rules input.num {
+    width: 100px;
+    margin-right: 0;
+  }
+  .add-rule {
+    width: 100%;
+  }
+  .rules-help {
+    margin-top: 8px;
+  }
+  .rules-help ul {
+    margin: 6px 0 0;
+    padding-left: 18px;
+  }
+
   .provider {
     border: 1px solid var(--border);
     border-radius: 8px;

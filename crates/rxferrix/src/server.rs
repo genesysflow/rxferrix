@@ -9,6 +9,8 @@
 //!   (`crate::ops::http`).
 //! - `GET /metrics`: Prometheus metrics when enabled (`crate::ops::metrics`).
 //!
+//! Requests and function calls are counted against the `rateLimits` setting's rules (`crate::settings::rate_limits`).
+//!
 //! `crate::ops::web::router` adds the app's own routes and static frontend around this router.
 //! - `/_/`: the dashboard SPA (`crate::dashboard::assets`, feature `dashboard`; without it, a minimal `/_/setup`).
 
@@ -29,6 +31,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::error::ClientError;
 use crate::runtime::App;
+use crate::settings::rate_limits;
 use crate::sync::protocol::ClientMessage;
 use crate::sync::worker::{self, Inbound};
 
@@ -45,6 +48,8 @@ pub fn router(app: App) -> Router {
         .merge(crate::dashboard::http::routes())
         .merge(crate::ops::http::routes())
         .merge(dashboard_ui())
+        // Inside CORS, so a browser can read a 429; preflights never count.
+        .layer(axum::middleware::from_fn_with_state(app.clone(), rate_limits::limit_requests))
         // Permissive CORS is fine: auth uses bearer tokens, never ambient cookies (the OAuth state cookie only rides
         // on top-level navigations, which CORS doesn't govern). Administrators can restrict origins at runtime.
         .layer(cors(&app))
@@ -123,13 +128,20 @@ pub async fn serve_with_shutdown(
 /// How long one WebSocket frame may take to send before the connection is given up.
 pub const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-async fn sync_handler(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(app, socket))
+async fn sync_handler(
+    ws: WebSocketUpgrade,
+    State(app): State<App>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+) -> Response {
+    // The client IP the connection's mutations and actions are rate limited by.
+    let ip = rate_limits::request_ip(&app, &extensions, &headers);
+    ws.on_upgrade(move |socket| handle_socket(app, socket, ip))
 }
 
 /// Wire a socket to a sync worker: a reader loop parses frames into the worker's input; a writer task serializes the
 /// worker's output. When the worker stops (fatal error), the writer flushes, closes the socket, and we stop reading.
-async fn handle_socket(app: App, socket: WebSocket) {
+async fn handle_socket(app: App, socket: WebSocket, ip: Option<std::net::IpAddr>) {
     struct Open(App);
     impl Drop for Open {
         fn drop(&mut self) {
@@ -140,7 +152,7 @@ async fn handle_socket(app: App, socket: WebSocket) {
     let _open = Open(app.clone());
     let (mut sink, mut stream) = socket.split();
     let closing = app.clone();
-    let (in_tx, mut out_rx) = worker::spawn(app);
+    let (in_tx, mut out_rx) = worker::spawn_from(app, ip);
 
     let mut writer = tokio::spawn(async move {
         loop {
@@ -235,7 +247,12 @@ fn parse_call(body: &[u8]) -> Result<HttpCall, Box<Response>> {
     Ok(call)
 }
 
-async fn http_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+async fn http_query(
+    State(app): State<App>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -244,6 +261,11 @@ async fn http_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
         Ok(i) => i,
         Err(e) => return e.into_response(),
     };
+    if let Err(limited) = rate_limits::check_function(&app, &call.path, &identity, || {
+        rate_limits::request_ip(&app, &extensions, &headers)
+    }) {
+        return limited.into_response();
+    }
     let run = match app.query_or_cached(&call.path, call.args, &identity, false).await {
         // The cached result's JSON text goes into the response as is.
         crate::runtime::QueryOutcome::Cached(hit) => {
@@ -260,7 +282,12 @@ async fn http_query(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
     }
 }
 
-async fn http_mutation(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+async fn http_mutation(
+    State(app): State<App>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -269,6 +296,11 @@ async fn http_mutation(State(app): State<App>, headers: HeaderMap, body: Bytes) 
         Ok(i) => i,
         Err(e) => return e.into_response(),
     };
+    if let Err(limited) = rate_limits::check_function(&app, &call.path, &identity, || {
+        rate_limits::request_ip(&app, &extensions, &headers)
+    }) {
+        return limited.into_response();
+    }
     let run = app.execute_mutation(&call.path, call.args, &identity, None).await;
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {
@@ -279,7 +311,12 @@ async fn http_mutation(State(app): State<App>, headers: HeaderMap, body: Bytes) 
     }
 }
 
-async fn http_action(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+async fn http_action(
+    State(app): State<App>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let call = match parse_call(&body) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -288,6 +325,11 @@ async fn http_action(State(app): State<App>, headers: HeaderMap, body: Bytes) ->
         Ok(i) => i,
         Err(e) => return e.into_response(),
     };
+    if let Err(limited) = rate_limits::check_function(&app, &call.path, &identity, || {
+        rate_limits::request_ip(&app, &extensions, &headers)
+    }) {
+        return limited.into_response();
+    }
     let run = app.execute_action(&call.path, call.args, &identity).await;
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {

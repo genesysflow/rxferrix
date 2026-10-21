@@ -14,6 +14,8 @@ import {
   type EmailTemplates,
   type OAuthKind,
   type OAuthProviderInput,
+  type RateLimitAudience,
+  type RateLimitSettings,
   type SettingsKey,
   type SettingsUpdate,
   type SettingsView,
@@ -26,6 +28,10 @@ export const SESSION_TTL_RANGE = [60, 400 * 24 * 3600] as const;
 export const MAX_PROVIDERS = 20;
 export const MAX_LIST = 50;
 export const MAX_PROXY_HEADERS = 10;
+/** Rate limit bounds (crates/rxferrix/src/settings/rate_limits.rs). */
+export const MAX_RATE_LIMIT_RULES = 50;
+export const MAX_REQUESTS = 1_000_000;
+export const MAX_INTERVAL_SECS = 24 * 3600;
 /** Headers proxies and CDNs commonly put the client IP in, offered as suggestions. */
 export const COMMON_PROXY_HEADERS = ["CF-Connecting-IP", "X-Forwarded-For", "Fly-Client-IP", "X-Real-IP", "True-Client-IP"];
 
@@ -76,6 +82,16 @@ export interface ProviderForm {
   locked: boolean;
 }
 
+export interface RateLimitRuleForm {
+  /** A stable key for the list (not sent). */
+  key: number;
+  label: string;
+  /** As typed. */
+  maxRequests: string;
+  intervalSecs: string;
+  audience: RateLimitAudience;
+}
+
 export interface SettingsForm {
   signups: "default" | "on" | "off";
   /** Seconds as typed; empty for the default. */
@@ -89,6 +105,7 @@ export interface SettingsForm {
   /** Comma-separated header names; empty: not behind a proxy (the peer address). */
   proxyHeaders: string;
   useLeftmostIp: boolean;
+  rateLimits: { enabled: boolean; rules: RateLimitRuleForm[] };
   /** A template left null: the built-in plain-text email. */
   emailTemplates: { appName: string } & Record<EmailKind, EmailTemplate | null>;
 }
@@ -113,6 +130,11 @@ export function newProvider(kind: OAuthKind = "github"): ProviderForm {
     scopes: "",
     locked: false,
   };
+}
+
+/** A blank rate limit rule; suggests `/api/` for the first one. */
+export function newRateLimitRule(first = false): RateLimitRuleForm {
+  return { key: nextKey++, label: first ? "/api/" : "", maxRequests: first ? "300" : "", intervalSecs: first ? "10" : "", audience: "all" };
 }
 
 export function formFromView(view: SettingsView): SettingsForm {
@@ -142,6 +164,16 @@ export function formFromView(view: SettingsView): SettingsForm {
     })),
     proxyHeaders: (view.trustedProxy?.headers ?? []).join(", "),
     useLeftmostIp: view.trustedProxy?.useLeftmostIp ?? false,
+    rateLimits: {
+      enabled: view.rateLimits?.enabled ?? false,
+      rules: (view.rateLimits?.rules ?? []).map((r) => ({
+        key: nextKey++,
+        label: r.label,
+        maxRequests: String(r.maxRequests),
+        intervalSecs: String(r.intervalSecs),
+        audience: r.audience,
+      })),
+    },
     emailTemplates: {
       appName: view.emailTemplates?.appName ?? "",
       verifyEmail: copyTemplate(view.emailTemplates?.verifyEmail),
@@ -149,6 +181,32 @@ export function formFromView(view: SettingsView): SettingsForm {
       signIn: copyTemplate(view.emailTemplates?.signIn),
     },
   };
+}
+
+/** Why `label` is not a rate limit label (mirrors the server's check), or null. */
+export function rateLimitLabelError(label: string): string | null {
+  const l = label.trim();
+  if (l === "") return "A path such as /api/ or a function such as messages:send";
+  if (l.startsWith("/")) {
+    if (l.includes("*")) return `Paths match by prefix: write ${l.replace(/\*+$/, "")}`;
+    if (!/^[!-~]+$/.test(l) || /[?#]/.test(l)) return "A path, without spaces, query or fragment";
+    return null;
+  }
+  if (l === "*") return null;
+  const [, module = "", name = ""] = /^([^:]+):([^:]+)$/.exec(l) ?? [];
+  const moduleOk = module === "*" || (/^[A-Za-z0-9_./-]+$/.test(module) && !module.startsWith("_system"));
+  const nameOk = name === "*" || /^[A-Za-z0-9_]+$/.test(name);
+  return moduleOk && nameOk ? null : "A path (/api/) or a function: messages:send, messages:*, *:send or *";
+}
+
+function rateLimitsInput(form: SettingsForm): RateLimitSettings | null {
+  const rules = form.rateLimits.rules.map((r) => ({
+    label: r.label.trim(),
+    maxRequests: Number(r.maxRequests),
+    intervalSecs: Number(r.intervalSecs),
+    audience: r.audience,
+  }));
+  return form.rateLimits.enabled || rules.length ? { enabled: form.rateLimits.enabled, rules } : null;
 }
 
 function copyTemplate(t: EmailTemplate | null | undefined): EmailTemplate | null {
@@ -258,6 +316,23 @@ export function validate(form: SettingsForm, view: SettingsView): Record<string,
     else if (headers.length > MAX_PROXY_HEADERS) errors.trustedProxy = `At most ${MAX_PROXY_HEADERS} headers`;
   }
 
+  const rules = form.rateLimits.rules;
+  if (rules.length > MAX_RATE_LIMIT_RULES) errors.rateLimits = `At most ${MAX_RATE_LIMIT_RULES} rules`;
+  const seenRules = new Set<string>();
+  rules.forEach((r, i) => {
+    const at = (field: string, message: string) => (errors[`rateLimits.${i}.${field}`] = message);
+    const labelError = rateLimitLabelError(r.label);
+    if (labelError) at("label", labelError);
+    const whole = (text: string, max: number) => {
+      const n = Number(text.trim());
+      return text.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= max;
+    };
+    if (!whole(r.maxRequests, MAX_REQUESTS)) at("maxRequests", `1 to ${MAX_REQUESTS.toLocaleString("en-US")}`);
+    if (!whole(r.intervalSecs, MAX_INTERVAL_SECS)) at("intervalSecs", `1 to ${MAX_INTERVAL_SECS} seconds`);
+    const id = `${r.label.trim()}\u0000${r.audience}`;
+    if (!labelError && seenRules.has(id)) at("label", "Listed twice for the same users");
+    seenRules.add(id);
+  });
   {
     const { appName } = form.emailTemplates;
     if (appName.trim().length > MAX_APP_NAME || /[\n\r\t]/.test(appName.trim()))
@@ -367,6 +442,15 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
     if (JSON.stringify(want) !== JSON.stringify(view.trustedProxy)) set("trustedProxy", want);
   }
   {
+    const want = rateLimitsInput(form);
+    // Rebuilt in the same key order: the server's JSON has its keys sorted.
+    const have: RateLimitSettings | null = view.rateLimits && {
+      enabled: view.rateLimits.enabled,
+      rules: view.rateLimits.rules.map((r) => ({ label: r.label, maxRequests: r.maxRequests, intervalSecs: r.intervalSecs, audience: r.audience })),
+    };
+    if (JSON.stringify(want) !== JSON.stringify(have)) set("rateLimits", want);
+  }
+  {
     const want = emailTemplatesInput(form.emailTemplates);
     if (JSON.stringify(want) !== JSON.stringify(normalTemplates(view.emailTemplates))) set("emailTemplates", want);
   }
@@ -432,6 +516,7 @@ function normalTemplates(t: EmailTemplates | null): EmailTemplates | null {
 /** The form section a server `invalid_settings` message is about, to show it there. */
 export function sectionOfError(message: string): SettingsKey | "general" {
   const m = message.toLowerCase();
+  if (m.includes("rate limit")) return "rateLimits";
   if (m.includes("email template")) return "emailTemplates";
   if (m.includes("proxy")) return "trustedProxy";
   if (m.includes("oauth") || m.includes("provider")) return "oauth";

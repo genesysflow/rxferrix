@@ -444,6 +444,24 @@ export interface TrustedProxy {
   useLeftmostIp: boolean;
 }
 
+/** Which callers a rate limit rule applies to. */
+export type RateLimitAudience = "all" | "guest" | "signedIn";
+
+/** At most `maxRequests` per `intervalSecs` per client IP (a token bucket: bursts up to `maxRequests`). */
+export interface RateLimitRule {
+  /** An HTTP path prefix (`/api/`) or app functions (`messages:send`, `messages:*`, `*:create`, `*`). */
+  label: string;
+  maxRequests: number;
+  intervalSecs: number;
+  audience: RateLimitAudience;
+}
+
+/** Request rate limits (crates/rxferrix/src/settings/rate_limits.rs); off keeps the rules without applying them. */
+export interface RateLimitSettings {
+  enabled: boolean;
+  rules: RateLimitRule[];
+}
+
 /** An auth email's subject and HTML body, with placeholders (`{link}`, `{code}`, `{expires}`, `{app_name}`, `{email}`). */
 export interface EmailTemplate {
   subject: string;
@@ -473,6 +491,7 @@ export interface SettingsView {
   /** Scheduled backups and their destination (crates/rxferrix/src/settings/backups.rs). */
   backups: BackupsView | null;
   trustedProxy: TrustedProxy | null;
+  rateLimits: RateLimitSettings | null;
   emailTemplates: EmailTemplates | null;
   /** The built-in emails as templates (each one set): where a custom template starts from. */
   emailTemplateDefaults: EmailTemplates;
@@ -575,6 +594,7 @@ export type SettingsKey =
   | "corsOrigins"
   | "backups"
   | "trustedProxy"
+  | "rateLimits"
   | "emailTemplates";
 
 export interface SettingsUpdate {
@@ -587,6 +607,7 @@ export interface SettingsUpdate {
   corsOrigins?: string[];
   backups?: BackupsInput;
   trustedProxy?: TrustedProxy;
+  rateLimits?: RateLimitSettings;
   emailTemplates?: EmailTemplates;
   clear?: SettingsKey[];
 }

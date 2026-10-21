@@ -1,5 +1,5 @@
 //! Runtime settings, editable from the dashboard without a restart: OAuth providers, SMTP, the redirect allowlist,
-//! sign-ups, token lifetimes, CORS origins, the trusted proxy headers and the auth email templates. Stored in the `_settings` system table ([`model`]); secrets (OAuth
+//! sign-ups, token lifetimes, CORS origins, the trusted proxy headers, request rate limits ([`rate_limits`]) and the auth email templates. Stored in the `_settings` system table ([`model`]); secrets (OAuth
 //! client secrets, the SMTP password) are encrypted at rest (`crate::auth::secretbox`) and never returned in clear.
 //!
 //! **Precedence.** What the code, the command line or the environment configures (`AuthConfig`) wins over
@@ -24,6 +24,7 @@
 
 pub mod backups;
 pub mod model;
+pub(crate) mod rate_limits;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -38,7 +39,10 @@ use crate::auth::email::{Email, PLACEHOLDERS, Purpose};
 use crate::dashboard::secrets::MASK;
 use crate::prelude::*;
 use crate::runtime::App;
-use model::{EmailTemplate, EmailTemplates, OAuthKind, Setting, StoredOAuth, StoredSettings, StoredSmtp, TrustedProxy};
+use model::{
+    EmailTemplate, EmailTemplates, OAuthKind, RateLimitSettings, Setting, StoredOAuth, StoredSettings, StoredSmtp,
+    TrustedProxy,
+};
 
 const MAX_LIST: usize = 50;
 const MAX_PROVIDERS: usize = 20;
@@ -124,6 +128,8 @@ pub struct SettingsView {
     #[ts(type = "any")]
     pub backups: Option<backups::BackupsView>,
     pub trusted_proxy: Option<TrustedProxy>,
+    /// Request rate limits per client IP ([`rate_limits`]).
+    pub rate_limits: Option<RateLimitSettings>,
     pub email_templates: Option<EmailTemplates>,
     /// The built-in emails as templates (every one set, `appName` null): where a custom template starts from.
     pub email_template_defaults: EmailTemplates,
@@ -178,8 +184,8 @@ pub async fn get(ctx: &ActionCtx) -> Result<SettingsView> {
 
 /// Change settings. Every argument is optional: omitted ones are unchanged, and `clear` lists keys to reset
 /// (`oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`,
-/// `trustedProxy`, `emailTemplates`). `oauth` replaces the list of providers configured here, `emailTemplates` all the
-/// templates (a template left out: the built-in email). Everything is validated before anything is written; the change
+/// `trustedProxy`, `rateLimits`, `emailTemplates`). `oauth` replaces the list of providers configured here,
+/// `emailTemplates` all the templates (a template left out: the built-in email). Everything is validated before anything is written; the change
 /// is audited and applies immediately.
 #[action]
 #[allow(clippy::too_many_arguments)]
@@ -194,6 +200,7 @@ pub async fn update(
     cors_origins: Option<Vec<String>>,
     backups: Option<backups::BackupsInput>,
     trusted_proxy: Option<TrustedProxy>,
+    rate_limits: Option<RateLimitSettings>,
     email_templates: Option<EmailTemplates>,
     clear: Option<Vec<String>>,
 ) -> Result<SettingsView> {
@@ -209,6 +216,7 @@ pub async fn update(
         cors_origins,
         backups,
         trusted_proxy,
+        rate_limits,
         email_templates,
         clear,
     };
@@ -372,6 +380,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
         cors_origins: stored.cors_origins.clone(),
         backups: stored.backups.as_ref().map(backups::StoredBackups::view),
         trusted_proxy: stored.trusted_proxy.clone(),
+        rate_limits: stored.rate_limits.clone(),
         email_templates: stored.email_templates.clone(),
         email_template_defaults: EmailTemplates {
             app_name: None,
@@ -418,6 +427,7 @@ fn masked_json(s: &StoredSettings) -> Value {
         "corsOrigins": s.cors_origins,
         "backups": s.backups.as_ref().map(backups::StoredBackups::view),
         "trustedProxy": s.trusted_proxy,
+        "rateLimits": s.rate_limits,
         "emailTemplates": s.email_templates,
     })
 }
@@ -539,6 +549,7 @@ struct Changes {
     cors_origins: Option<Vec<String>>,
     backups: Option<backups::BackupsInput>,
     trusted_proxy: Option<TrustedProxy>,
+    rate_limits: Option<RateLimitSettings>,
     email_templates: Option<EmailTemplates>,
     clear: Option<Vec<String>>,
 }
@@ -557,6 +568,7 @@ impl Changes {
                 model::CORS_ORIGINS => s.cors_origins = None,
                 model::BACKUPS => s.backups = None,
                 model::TRUSTED_PROXY => s.trusted_proxy = None,
+                model::RATE_LIMITS => s.rate_limits = None,
                 model::EMAIL_TEMPLATES => s.email_templates = None,
                 other => return Err(invalid(format!("unknown setting `{other}` in clear"))),
             }
@@ -691,6 +703,9 @@ impl Changes {
         }
         if let Some(proxy) = self.trusted_proxy {
             s.trusted_proxy = trusted_proxy_from_input(proxy)?;
+        }
+        if let Some(limits) = self.rate_limits {
+            s.rate_limits = rate_limits::from_input(limits)?;
         }
         if let Some(templates) = self.email_templates {
             s.email_templates = email_templates_from_input(templates)?;

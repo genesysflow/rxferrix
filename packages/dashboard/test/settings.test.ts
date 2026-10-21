@@ -6,7 +6,9 @@ import {
   fillTemplate,
   formFromView,
   newProvider,
+  newRateLimitRule,
   previewTemplate,
+  rateLimitLabelError,
   sectionOfError,
   unknownPlaceholder,
   validate,
@@ -23,6 +25,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
     corsOrigins: null,
     backups: null,
     trustedProxy: null,
+    rateLimits: null,
     emailTemplates: null,
     emailTemplateDefaults: {
       appName: null,
@@ -232,6 +235,57 @@ describe("settings form", () => {
     expect(buildUpdate(locked, edit).changed).toEqual([]);
   });
 
+  it("edits the rate limit rules", () => {
+    const form = formFromView(view());
+    expect(form.rateLimits).toEqual({ enabled: false, rules: [] });
+    expect(buildUpdate(view(), form).changed).toEqual([]);
+
+    form.rateLimits.enabled = true;
+    form.rateLimits.rules = [newRateLimitRule(true), { ...newRateLimitRule(), label: " *:create ", maxRequests: "20", intervalSecs: "5", audience: "guest" }];
+    expect(validate(form, view())).toEqual({});
+    expect(buildUpdate(view(), form)).toEqual({
+      update: {
+        rateLimits: {
+          enabled: true,
+          rules: [
+            { label: "/api/", maxRequests: 300, intervalSecs: 10, audience: "all" },
+            { label: "*:create", maxRequests: 20, intervalSecs: 5, audience: "guest" },
+          ],
+        },
+      },
+      changed: ["rateLimits"],
+    });
+
+    // As the server sends it: keys sorted.
+    const saved = view({ rateLimits: { enabled: true, rules: [{ audience: "all", intervalSecs: 10, label: "/api/", maxRequests: 300 }] } });
+    const edit = formFromView(saved);
+    expect(buildUpdate(saved, edit).changed).toEqual([]);
+    // Turning it off keeps the rules; removing them all while off clears the setting.
+    edit.rateLimits.enabled = false;
+    expect(buildUpdate(saved, edit).update).toEqual({
+      rateLimits: { enabled: false, rules: [{ label: "/api/", maxRequests: 300, intervalSecs: 10, audience: "all" }] },
+    });
+    edit.rateLimits.rules = [];
+    expect(buildUpdate(saved, edit)).toEqual({ update: { clear: ["rateLimits"] }, changed: ["rateLimits"] });
+
+    edit.rateLimits.rules = [
+      { ...newRateLimitRule(), label: "/api/*", maxRequests: "0", intervalSecs: "86401" },
+      { ...newRateLimitRule(), label: "*", maxRequests: "1", intervalSecs: "1" },
+      { ...newRateLimitRule(), label: "*", maxRequests: "2", intervalSecs: "1" },
+    ];
+    const errors = validate(edit, saved);
+    expect(errors["rateLimits.0.label"]).toContain("write /api/");
+    expect(errors["rateLimits.0.maxRequests"]).toBeDefined();
+    expect(errors["rateLimits.0.intervalSecs"]).toBeDefined();
+    expect(errors["rateLimits.2.label"]).toContain("twice");
+  });
+
+  it("checks rate limit labels like the server", () => {
+    for (const ok of ["/api/", "/", "*", "messages:send", "chat/messages:*", "*:create", "*:*"]) expect(rateLimitLabelError(ok)).toBeNull();
+    for (const bad of ["", "messages", ":send", "a b:c", "_system/settings:update", "/a b", "/a?b", "m:se-nd"])
+      expect(rateLimitLabelError(bad)).not.toBeNull();
+  });
+
   it("edits the email templates", () => {
     const form = formFromView(view());
     expect(form.emailTemplates).toEqual({ appName: "", verifyEmail: null, resetPassword: null, signIn: null });
@@ -291,6 +345,8 @@ describe("settings form", () => {
     expect(sectionOfError("accessTokenTtlSecs must be between 30 and 86400 seconds")).toBe("accessTokenTtlSecs");
     expect(sectionOfError("sessionTtlSecs must be between 60 and 34560000 seconds")).toBe("sessionTtlSecs");
     expect(sectionOfError("trusted proxy header `a b` is not a valid header name")).toBe("trustedProxy");
+    expect(sectionOfError("rate limit `/api/`: max requests must be between 1 and 1000000")).toBe("rateLimits");
+    expect(sectionOfError("rate limit `x:y` is listed twice for the same users")).toBe("rateLimits");
     expect(sectionOfError("password reset email template: unknown placeholder `{x}`")).toBe("emailTemplates");
     expect(sectionOfError("something else")).toBe("general");
   });

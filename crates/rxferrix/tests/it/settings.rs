@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use rxferrix::FunctionRef;
 use rxferrix::auth::{AuthConfig, MemoryMailer};
 use rxferrix::testing::TestApp;
 use serde_json::{Value, json};
@@ -335,6 +336,132 @@ async fn trust_proxy_in_the_configuration_locks_the_trusted_headers() {
         .await
         .unwrap();
     assert_eq!((&r["ip"], &r["header"]), (&json!("203.0.113.9"), &json!("x-forwarded-for")));
+}
+
+fn rate_limits(enabled: bool, rules: Value) -> Value {
+    json!({ "rateLimits": { "enabled": enabled, "rules": rules } })
+}
+
+#[tokio::test]
+async fn rate_limits_apply_to_function_calls_over_http_and_websocket() {
+    use crate::authkit::Ws;
+    use crate::common::todos;
+    let (_t, http, admin) = setup(AuthConfig::password()).await;
+    let noop = todos::noop::path();
+
+    for rules in [
+        json!([{ "label": "/api/*", "maxRequests": 1, "intervalSecs": 1 }]),
+        json!([{ "label": "noop", "maxRequests": 1, "intervalSecs": 1 }]),
+        json!([{ "label": "_system/settings:update", "maxRequests": 1, "intervalSecs": 1 }]),
+        json!([{ "label": "*", "maxRequests": 0, "intervalSecs": 1 }]),
+        json!([{ "label": "*", "maxRequests": 1, "intervalSecs": 0 }]),
+        json!([{ "label": "*", "maxRequests": 1, "intervalSecs": 1 }, { "label": "*", "maxRequests": 2, "intervalSecs": 1 }]),
+    ] {
+        let (s, b) = update(&http, &admin, rate_limits(true, rules.clone())).await;
+        assert_eq!((s, code_of(&b)), (400, "invalid_settings"), "{rules}: {b}");
+    }
+
+    let rule = json!([{ "label": noop, "maxRequests": 2, "intervalSecs": 3600, "audience": "all" }]);
+    let view = http.ok("action", "_system/settings:update", rate_limits(true, rule.clone()), &admin).await;
+    assert_eq!(view["rateLimits"], json!({ "enabled": true, "rules": rule }));
+
+    for _ in 0..2 {
+        assert_eq!(http.call("mutation", &noop, json!({}), None).await.0, 200);
+    }
+    let res = http
+        .client
+        .post(format!("{}/api/mutation", http.base))
+        .json(&json!({ "path": noop, "args": {} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+    let retry: u64 = res.headers()["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=1800).contains(&retry), "{retry}");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(code_of(&body), "rate_limited");
+    // Other functions aren't limited, and neither are administrators.
+    assert_eq!(http.call("query", &todos::list::path(), json!({}), None).await.0, 200);
+    assert_eq!(http.call("mutation", &noop, json!({}), Some(&admin)).await.0, 200);
+
+    // The WebSocket shares the client's bucket: the mutation is answered with the error, the connection stays up.
+    let mut ws = Ws::connect(http.base.trim_start_matches("http://").parse().unwrap()).await;
+    ws.send(json!({ "type": "Mutation", "requestId": 7, "udfPath": noop, "args": {} })).await;
+    let reply = loop {
+        let m = ws.recv().await;
+        if m["type"] == "MutationResponse" {
+            break m;
+        }
+    };
+    assert_eq!((&reply["requestId"], &reply["success"]), (&json!(7), &json!(false)), "{reply}");
+    assert_eq!(reply["errorData"]["code"], "rate_limited");
+    let (_, list) = ws.subscribe(&todos::list::path(), json!({})).await;
+    assert_eq!(list, json!([]));
+
+    // Turned off: the rules are kept, none applies.
+    let view = http.ok("action", "_system/settings:update", rate_limits(false, rule.clone()), &admin).await;
+    assert_eq!(view["rateLimits"]["rules"], rule);
+    assert_eq!(http.call("mutation", &noop, json!({}), None).await.0, 200);
+    http.ok("action", "_system/settings:update", json!({ "clear": ["rateLimits"] }), &admin).await;
+    assert_eq!(http.ok("action", "_system/settings:get", json!({}), &admin).await["rateLimits"], Value::Null);
+}
+
+#[tokio::test]
+async fn path_rate_limits_tell_guests_from_users_and_spare_the_dashboard() {
+    use crate::common::todos;
+    let (_t, http, admin) = setup(AuthConfig::password()).await;
+    let user = token(&http.sign_up("u@example.com", "correct horse").await, "accessToken");
+    let rules = json!([
+        { "label": "/api/query", "maxRequests": 1, "intervalSecs": 3600, "audience": "guest" },
+        { "label": "/api/", "maxRequests": 3, "intervalSecs": 3600 },
+        { "label": "/", "maxRequests": 1, "intervalSecs": 3600 },
+    ]);
+    http.ok("action", "_system/settings:update", rate_limits(true, rules), &admin).await;
+    let list = todos::list::path();
+
+    // Guests: the guest rule decides for /api/query.
+    assert_eq!(http.call("query", &list, json!({}), None).await.0, 200);
+    let (s, b) = http.call("query", &list, json!({}), None).await;
+    assert_eq!((s, code_of(&b)), (429, "rate_limited"));
+    // Signed-in users fall through to /api/: three requests.
+    for _ in 0..3 {
+        assert_eq!(http.call("query", &list, json!({}), Some(&user)).await.0, 200);
+    }
+    assert_eq!(http.call("query", &list, json!({}), Some(&user)).await.0, 429);
+    // A forged token is a guest's.
+    assert_eq!(http.call("query", &list, json!({}), Some("not.a.token")).await.0, 429);
+
+    // Health checks and the dashboard's API are never limited, nor are administrators over the limit.
+    for _ in 0..5 {
+        assert_eq!(http.get("/api/health", None).await.0, 200);
+        assert_eq!(http.get("/api/admin/client-ip", Some(&admin)).await.0, 200);
+        assert_eq!(http.call("query", &list, json!({}), Some(&admin)).await.0, 200);
+    }
+    // Saving other settings keeps the counts.
+    http.ok("action", "_system/settings:update", json!({ "signups": true }), &admin).await;
+    assert_eq!(http.call("query", &list, json!({}), None).await.0, 429);
+}
+
+#[tokio::test]
+async fn a_strict_api_rule_does_not_lock_the_dashboard_out() {
+    use crate::authkit::Ws;
+    let (_t, http, admin) = setup(AuthConfig::password()).await;
+    let rules = json!([{ "label": "/api/", "maxRequests": 1, "intervalSecs": 3600 }]);
+    http.ok("action", "_system/settings:update", rate_limits(true, rules), &admin).await;
+    let addr = http.base.trim_start_matches("http://").parse().unwrap();
+    // WebSocket connections (the dashboard's too) and admin sign-ins are not counted by `/api/`.
+    for _ in 0..5 {
+        let mut ws = Ws::connect(addr).await;
+        ws.authenticate(Some(&admin)).await;
+        assert!(http.admin_sign_in("admin@example.com", "admin password").await["accessToken"].is_string());
+    }
+    // A rule naming `/api/sync` does count them.
+    let rules = json!([{ "label": "/api/sync", "maxRequests": 1, "intervalSecs": 3600 }]);
+    http.ok("action", "_system/settings:update", rate_limits(true, rules), &admin).await;
+    let url = format!("ws://{addr}/api/sync");
+    assert!(tokio_tungstenite::connect_async(&url).await.is_ok());
+    let err = tokio_tungstenite::connect_async(&url).await.unwrap_err().to_string();
+    assert!(err.contains("429"), "{err}");
 }
 
 /// The latest email to `to`, once at least `count` were sent to it (auth emails go out in the background).

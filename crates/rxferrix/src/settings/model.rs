@@ -37,6 +37,7 @@ pub const SESSION_TTL: &str = "sessionTtlSecs";
 pub const CORS_ORIGINS: &str = "corsOrigins";
 pub const BACKUPS: &str = "backups";
 pub const TRUSTED_PROXY: &str = "trustedProxy";
+pub const RATE_LIMITS: &str = "rateLimits";
 pub const EMAIL_TEMPLATES: &str = "emailTemplates";
 /// Every setting key.
 pub const KEYS: &[&str] = &[
@@ -49,6 +50,7 @@ pub const KEYS: &[&str] = &[
     CORS_ORIGINS,
     BACKUPS,
     TRUSTED_PROXY,
+    RATE_LIMITS,
     EMAIL_TEMPLATES,
 ];
 
@@ -123,6 +125,44 @@ pub struct TrustedProxy {
     pub use_leftmost_ip: bool,
 }
 
+/// Request rate limits per client IP (`super::rate_limits`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct RateLimitSettings {
+    /// Off: the rules are kept but none applies.
+    pub enabled: bool,
+    pub rules: Vec<RateLimitRule>,
+}
+
+/// One rate limit: at most `max_requests` per `interval_secs` from one client IP, as a token bucket (bursts up to
+/// `max_requests`, refilled evenly over the interval).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct RateLimitRule {
+    /// What it limits: an HTTP path prefix (`/api/`, `/api/storage/upload`), or app functions called by clients
+    /// (`messages:send`, `messages:*`, `*:create`, `*`).
+    pub label: String,
+    pub max_requests: u32,
+    pub interval_secs: u32,
+    #[serde(default)]
+    pub audience: RateLimitAudience,
+}
+
+/// Which callers a rate limit rule applies to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub enum RateLimitAudience {
+    #[default]
+    All,
+    /// Requests without a valid access token.
+    Guest,
+    /// Requests from signed-in users.
+    SignedIn,
+}
+
 /// The subject and HTML body of an auth email, with placeholders (`crate::auth::email::PLACEHOLDERS`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -177,6 +217,8 @@ pub struct StoredSettings {
     pub backups: Option<super::backups::StoredBackups>,
     /// Where the client IP comes from behind a reverse proxy.
     pub trusted_proxy: Option<TrustedProxy>,
+    /// Request rate limits per client IP.
+    pub rate_limits: Option<RateLimitSettings>,
     /// Templates of the verification, password reset and sign-in emails.
     pub email_templates: Option<EmailTemplates>,
 }
@@ -229,6 +271,7 @@ impl StoredSettings {
                 self.backups = Some(backups);
             }
             TRUSTED_PROXY => self.trusted_proxy = Some(serde_json::from_value(value)?),
+            RATE_LIMITS => self.rate_limits = Some(serde_json::from_value(value)?),
             EMAIL_TEMPLATES => self.email_templates = Some(serde_json::from_value(value)?),
             other => anyhow::bail!("unknown setting `{other}`"),
         }
@@ -274,6 +317,7 @@ impl StoredSettings {
                 TRUSTED_PROXY,
                 self.trusted_proxy.as_ref().and_then(|p| json(serde_json::to_value(p).expect("serializes"))),
             ),
+            (RATE_LIMITS, self.rate_limits.as_ref().and_then(|r| json(serde_json::to_value(r).expect("serializes")))),
             (
                 EMAIL_TEMPLATES,
                 self.email_templates.as_ref().and_then(|t| json(serde_json::to_value(t).expect("serializes"))),

@@ -9,6 +9,9 @@
  */
 import {
   MASK,
+  type EmailKind,
+  type EmailTemplate,
+  type EmailTemplates,
   type OAuthKind,
   type OAuthProviderInput,
   type SettingsKey,
@@ -25,6 +28,27 @@ export const MAX_LIST = 50;
 export const MAX_PROXY_HEADERS = 10;
 /** Headers proxies and CDNs commonly put the client IP in, offered as suggestions. */
 export const COMMON_PROXY_HEADERS = ["CF-Connecting-IP", "X-Forwarded-For", "Fly-Client-IP", "X-Real-IP", "True-Client-IP"];
+
+/** Email template limits (crates/rxferrix/src/settings/mod.rs). */
+export const MAX_APP_NAME = 100;
+export const MAX_SUBJECT = 200;
+export const MAX_TEMPLATE_HTML = 64 * 1024;
+
+/** The auth emails a template can replace, in the order shown. `what` names it in the server's messages. */
+export const EMAIL_KINDS: { kind: EmailKind; label: string; what: string; expires: string }[] = [
+  { kind: "verifyEmail", label: "Verify email", what: "verification", expires: "24 hours" },
+  { kind: "resetPassword", label: "Reset password", what: "password reset", expires: "30 minutes" },
+  { kind: "signIn", label: "Sign-in link", what: "sign-in", expires: "15 minutes" },
+];
+
+/** The placeholders of email templates (crates/rxferrix/src/auth/email.rs), with what they become. */
+export const EMAIL_PLACEHOLDERS: { name: string; description: string }[] = [
+  { name: "link", description: "the link to your app that completes the action (empty without a redirect URL)" },
+  { name: "code", description: "the one-time code, to type in instead of following the link" },
+  { name: "expires", description: "how long the link and code stay valid, e.g. 15 minutes" },
+  { name: "app_name", description: "the app name set here" },
+  { name: "email", description: "the recipient's address" },
+];
 
 export interface SecretField {
   /** `keep` the stored secret (if any), `replace` it with `value`, or (SMTP only) store `none`. */
@@ -65,6 +89,8 @@ export interface SettingsForm {
   /** Comma-separated header names; empty: not behind a proxy (the peer address). */
   proxyHeaders: string;
   useLeftmostIp: boolean;
+  /** A template left null: the built-in plain-text email. */
+  emailTemplates: { appName: string } & Record<EmailKind, EmailTemplate | null>;
 }
 
 let nextKey = 1;
@@ -116,7 +142,45 @@ export function formFromView(view: SettingsView): SettingsForm {
     })),
     proxyHeaders: (view.trustedProxy?.headers ?? []).join(", "),
     useLeftmostIp: view.trustedProxy?.useLeftmostIp ?? false,
+    emailTemplates: {
+      appName: view.emailTemplates?.appName ?? "",
+      verifyEmail: copyTemplate(view.emailTemplates?.verifyEmail),
+      resetPassword: copyTemplate(view.emailTemplates?.resetPassword),
+      signIn: copyTemplate(view.emailTemplates?.signIn),
+    },
   };
+}
+
+function copyTemplate(t: EmailTemplate | null | undefined): EmailTemplate | null {
+  return t ? { subject: t.subject, html: t.html } : null;
+}
+
+/**
+ * `template` with each known `{name}` replaced by its value (HTML-escaped with `html`), in one pass, as the server
+ * does it: other braces (CSS, unknown names) stay as they are.
+ */
+export function fillTemplate(template: string, vars: Record<string, string>, html: boolean): string {
+  return template.replace(/\{([a-z_]+)\}/g, (whole, name: string) => {
+    const v = Object.hasOwn(vars, name) ? vars[name] : undefined;
+    if (v === undefined) return whole;
+    return html ? v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`) : v;
+  });
+}
+
+/** The first `{name}` in `text` that isn't a placeholder. */
+export function unknownPlaceholder(text: string): string | null {
+  for (const m of text.matchAll(/\{([a-z_]+)\}/g)) {
+    const name = m[1]!;
+    if (!EMAIL_PLACEHOLDERS.some((p) => p.name === name)) return name;
+  }
+  return null;
+}
+
+/** A template filled with sample values, for the preview. */
+export function previewTemplate(t: EmailTemplate, kind: EmailKind, appName: string): EmailTemplate {
+  const expires = EMAIL_KINDS.find((k) => k.kind === kind)!.expires;
+  const vars = { link: "https://app.example.com/#preview", code: "123456", expires, app_name: appName, email: "ana@example.com" };
+  return { subject: fillTemplate(t.subject, vars, false), html: fillTemplate(t.html, vars, true) };
 }
 
 /** `headers` (comma-separated) with `name` added, unless already listed (case-insensitively). */
@@ -192,6 +256,27 @@ export function validate(form: SettingsForm, view: SettingsView): Record<string,
     const bad = headers.find((h) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(h));
     if (bad) errors.trustedProxy = `\`${bad}\` is not a valid header name`;
     else if (headers.length > MAX_PROXY_HEADERS) errors.trustedProxy = `At most ${MAX_PROXY_HEADERS} headers`;
+  }
+
+  {
+    const { appName } = form.emailTemplates;
+    if (appName.trim().length > MAX_APP_NAME || /[\n\r\t]/.test(appName.trim()))
+      errors["emailTemplates.appName"] = `At most ${MAX_APP_NAME} characters on one line`;
+    for (const { kind } of EMAIL_KINDS) {
+      const t = form.emailTemplates[kind];
+      if (!t) continue;
+      const at = (field: "subject" | "html", message: string) => (errors[`emailTemplates.${kind}.${field}`] = message);
+      const subject = t.subject.trim();
+      const html = t.html.trim();
+      const unknown = unknownPlaceholder(subject) ?? unknownPlaceholder(html);
+      if (subject === "") at("subject", "Required");
+      else if (subject.length > MAX_SUBJECT || /[\n\r\t]/.test(subject)) at("subject", `At most ${MAX_SUBJECT} characters on one line`);
+      if (html === "") at("html", "Required");
+      else if (new TextEncoder().encode(html).length > MAX_TEMPLATE_HTML) at("html", `At most ${MAX_TEMPLATE_HTML / 1024} KiB`);
+      else if (!html.includes("{code}") && !html.includes("{link}")) at("html", "Include {code} or {link}, or nobody can use the email");
+      if (unknown && !errors[`emailTemplates.${kind}.subject`] && !errors[`emailTemplates.${kind}.html`])
+        at(unknownPlaceholder(subject) ? "subject" : "html", `Unknown placeholder {${unknown}}`);
+    }
   }
 
   if (form.oauth.length > MAX_PROVIDERS) errors.oauth = `At most ${MAX_PROVIDERS} providers`;
@@ -281,6 +366,10 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
     const want = headers.length ? { headers, useLeftmostIp: form.useLeftmostIp } : null;
     if (JSON.stringify(want) !== JSON.stringify(view.trustedProxy)) set("trustedProxy", want);
   }
+  {
+    const want = emailTemplatesInput(form.emailTemplates);
+    if (JSON.stringify(want) !== JSON.stringify(normalTemplates(view.emailTemplates))) set("emailTemplates", want);
+  }
   if (!isLocked(view, "smtp")) {
     const { url, from, password } = form.smtp;
     const empty = url.trim() === "" && from.trim() === "";
@@ -317,9 +406,33 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
   return { update, changed };
 }
 
+/** The templates as `update` sends them (trimmed); null when nothing is set. */
+function emailTemplatesInput(t: SettingsForm["emailTemplates"]): EmailTemplates | null {
+  const trim = (x: EmailTemplate | null) => (x ? { subject: x.subject.trim(), html: x.html.trim() } : null);
+  return normalTemplates({
+    appName: t.appName.trim() || null,
+    verifyEmail: trim(t.verifyEmail),
+    resetPassword: trim(t.resetPassword),
+    signIn: trim(t.signIn),
+  });
+}
+
+/** `t` with its keys in one order, or null when nothing is set (to compare a form with the view). */
+function normalTemplates(t: EmailTemplates | null): EmailTemplates | null {
+  if (!t) return null;
+  const out: EmailTemplates = {
+    appName: t.appName ?? null,
+    verifyEmail: copyTemplate(t.verifyEmail),
+    resetPassword: copyTemplate(t.resetPassword),
+    signIn: copyTemplate(t.signIn),
+  };
+  return Object.values(out).some((v) => v !== null) ? out : null;
+}
+
 /** The form section a server `invalid_settings` message is about, to show it there. */
 export function sectionOfError(message: string): SettingsKey | "general" {
   const m = message.toLowerCase();
+  if (m.includes("email template")) return "emailTemplates";
   if (m.includes("proxy")) return "trustedProxy";
   if (m.includes("oauth") || m.includes("provider")) return "oauth";
   if (m.includes("smtp") || m.includes("mailbox") || m.includes("from address")) return "smtp";

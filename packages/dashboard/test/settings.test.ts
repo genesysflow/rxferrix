@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { MASK, type SettingsView } from "../src/lib/api.js";
-import { addHeader, buildUpdate, formFromView, newProvider, sectionOfError, validate } from "../src/lib/settings.js";
+import {
+  addHeader,
+  buildUpdate,
+  fillTemplate,
+  formFromView,
+  newProvider,
+  previewTemplate,
+  sectionOfError,
+  unknownPlaceholder,
+  validate,
+} from "../src/lib/settings.js";
 
 function view(over: Partial<SettingsView> = {}): SettingsView {
   return {
@@ -13,6 +23,13 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
     corsOrigins: null,
     backups: null,
     trustedProxy: null,
+    emailTemplates: null,
+    emailTemplateDefaults: {
+      appName: null,
+      verifyEmail: { subject: "Verify your email address", html: "<p>Please confirm your email address.</p>\n<p>Your code: <strong>{code}</strong></p>" },
+      resetPassword: { subject: "Reset your password", html: "<p>Your code: <strong>{code}</strong></p>" },
+      signIn: { subject: "Your sign-in link", html: "<p><a href=\"{link}\">Sign in</a></p>\n<p>Your code: <strong>{code}</strong></p>" },
+    },
     locked: [],
     effective: {
       signups: true,
@@ -24,6 +41,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
       corsOrigins: null,
       backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
       trustedProxy: { headers: [], useLeftmostIp: false },
+      appName: "",
     },
     ...over,
   };
@@ -214,6 +232,57 @@ describe("settings form", () => {
     expect(buildUpdate(locked, edit).changed).toEqual([]);
   });
 
+  it("edits the email templates", () => {
+    const form = formFromView(view());
+    expect(form.emailTemplates).toEqual({ appName: "", verifyEmail: null, resetPassword: null, signIn: null });
+    expect(buildUpdate(view(), form).changed).toEqual([]);
+    form.emailTemplates.resetPassword = { subject: " Reset your {app_name} password ", html: "<p>{code}</p>\n" };
+    expect(buildUpdate(view(), form)).toEqual({
+      update: {
+        emailTemplates: {
+          appName: null,
+          verifyEmail: null,
+          resetPassword: { subject: "Reset your {app_name} password", html: "<p>{code}</p>" },
+          signIn: null,
+        },
+      },
+      changed: ["emailTemplates"],
+    });
+
+    const saved = view({ emailTemplates: { appName: "Acme", verifyEmail: null, resetPassword: null, signIn: { subject: "Hi", html: "{link}" } } });
+    const edit = formFromView(saved);
+    expect(buildUpdate(saved, edit).changed).toEqual([]);
+    edit.emailTemplates.signIn = null;
+    edit.emailTemplates.appName = " ";
+    expect(buildUpdate(saved, edit)).toEqual({ update: { clear: ["emailTemplates"] }, changed: ["emailTemplates"] });
+
+    const errorsOf = (subject: string, html: string, appName = "") => {
+      const f = formFromView(view());
+      f.emailTemplates.appName = appName;
+      f.emailTemplates.signIn = { subject, html };
+      return validate(f, view());
+    };
+    expect(errorsOf("Hi", "<p>{code}</p>")).toEqual({});
+    expect(errorsOf("", "")).toEqual({ "emailTemplates.signIn.subject": "Required", "emailTemplates.signIn.html": "Required" });
+    expect(errorsOf("Hi", "<p>none</p>")["emailTemplates.signIn.html"]).toContain("{code} or {link}");
+    expect(errorsOf("Hi {name}", "{code}")["emailTemplates.signIn.subject"]).toBe("Unknown placeholder {name}");
+    expect(errorsOf("Two\nlines", "{code}")["emailTemplates.signIn.subject"]).toContain("one line");
+    expect(errorsOf("Hi", "{code}", "x".repeat(101))["emailTemplates.appName"]).toContain("100 characters");
+  });
+
+  it("fills placeholders like the server", () => {
+    const vars = { code: "1", app_name: "A & {code}" };
+    expect(fillTemplate("{app_name}: {code} {nope} p { color: red }", vars, false)).toBe("A & {code}: 1 {nope} p { color: red }");
+    expect(fillTemplate("<b>{app_name}</b>", vars, true)).toBe("<b>A &#38; {code}</b>");
+    expect(fillTemplate("{constructor}", vars, false)).toBe("{constructor}");
+    expect(unknownPlaceholder("{link} {code} {expires} {app_name} {email} { x } {Code}")).toBeNull();
+    expect(unknownPlaceholder("{appname}")).toBe("appname");
+    expect(previewTemplate({ subject: "{code} for {email}", html: "{expires}" }, "resetPassword", "Acme")).toEqual({
+      subject: "123456 for ana@example.com",
+      html: "30 minutes",
+    });
+  });
+
   it("maps server messages to the section they concern", () => {
     expect(sectionOfError("SMTP URL must look like smtp://user@host:587")).toBe("smtp");
     expect(sectionOfError("OAuth provider `x`: a client id is required")).toBe("oauth");
@@ -222,6 +291,7 @@ describe("settings form", () => {
     expect(sectionOfError("accessTokenTtlSecs must be between 30 and 86400 seconds")).toBe("accessTokenTtlSecs");
     expect(sectionOfError("sessionTtlSecs must be between 60 and 34560000 seconds")).toBe("sessionTtlSecs");
     expect(sectionOfError("trusted proxy header `a b` is not a valid header name")).toBe("trustedProxy");
+    expect(sectionOfError("password reset email template: unknown placeholder `{x}`")).toBe("emailTemplates");
     expect(sectionOfError("something else")).toBe("general");
   });
 });

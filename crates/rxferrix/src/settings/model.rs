@@ -37,9 +37,20 @@ pub const SESSION_TTL: &str = "sessionTtlSecs";
 pub const CORS_ORIGINS: &str = "corsOrigins";
 pub const BACKUPS: &str = "backups";
 pub const TRUSTED_PROXY: &str = "trustedProxy";
+pub const EMAIL_TEMPLATES: &str = "emailTemplates";
 /// Every setting key.
-pub const KEYS: &[&str] =
-    &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SESSION_TTL, CORS_ORIGINS, BACKUPS, TRUSTED_PROXY];
+pub const KEYS: &[&str] = &[
+    OAUTH,
+    SMTP,
+    REDIRECT_URLS,
+    SIGNUPS,
+    ACCESS_TTL,
+    SESSION_TTL,
+    CORS_ORIGINS,
+    BACKUPS,
+    TRUSTED_PROXY,
+    EMAIL_TEMPLATES,
+];
 
 /// The kind of an OAuth provider configured at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -112,6 +123,43 @@ pub struct TrustedProxy {
     pub use_leftmost_ip: bool,
 }
 
+/// The subject and HTML body of an auth email, with placeholders (`crate::auth::email::PLACEHOLDERS`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct EmailTemplate {
+    pub subject: String,
+    pub html: String,
+}
+
+/// The auth emails' templates and the `{app_name}` they use. A template not set: the built-in plain-text email.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase", optional_fields = nullable)]
+pub struct EmailTemplates {
+    /// `{app_name}`; not set: the display name of the SMTP sender (`My App <noreply@…>`), if any.
+    #[serde(default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub verify_email: Option<EmailTemplate>,
+    #[serde(default)]
+    pub reset_password: Option<EmailTemplate>,
+    #[serde(default)]
+    pub sign_in: Option<EmailTemplate>,
+}
+
+impl EmailTemplates {
+    /// The template for one kind of auth email, if set.
+    pub fn get(&self, purpose: crate::auth::email::Purpose) -> Option<&EmailTemplate> {
+        use crate::auth::email::Purpose;
+        match purpose {
+            Purpose::VerifyEmail => self.verify_email.as_ref(),
+            Purpose::ResetPassword => self.reset_password.as_ref(),
+            Purpose::SignIn => self.sign_in.as_ref(),
+        }
+    }
+}
+
 /// A stored row: the JSON value and the plaintext of its secret part.
 pub(crate) type Row = (Value, Option<Vec<u8>>);
 
@@ -129,6 +177,8 @@ pub struct StoredSettings {
     pub backups: Option<super::backups::StoredBackups>,
     /// Where the client IP comes from behind a reverse proxy.
     pub trusted_proxy: Option<TrustedProxy>,
+    /// Templates of the verification, password reset and sign-in emails.
+    pub email_templates: Option<EmailTemplates>,
 }
 
 impl StoredSettings {
@@ -179,6 +229,7 @@ impl StoredSettings {
                 self.backups = Some(backups);
             }
             TRUSTED_PROXY => self.trusted_proxy = Some(serde_json::from_value(value)?),
+            EMAIL_TEMPLATES => self.email_templates = Some(serde_json::from_value(value)?),
             other => anyhow::bail!("unknown setting `{other}`"),
         }
         Ok(())
@@ -222,6 +273,10 @@ impl StoredSettings {
             (
                 TRUSTED_PROXY,
                 self.trusted_proxy.as_ref().and_then(|p| json(serde_json::to_value(p).expect("serializes"))),
+            ),
+            (
+                EMAIL_TEMPLATES,
+                self.email_templates.as_ref().and_then(|t| json(serde_json::to_value(t).expect("serializes"))),
             ),
         ]
     }

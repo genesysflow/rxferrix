@@ -2692,7 +2692,7 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
 with `.with_state(())`). In app routes, the extractor `rxferrix::auth::Caller { ip, user_agent }` gives the client
 address as RxFerrix records it (from the trusted proxy headers: the last `X-Forwarded-For` entry with `--trust-proxy`,
-else the `trustedProxy` setting (§4.2); otherwise the peer).
+else the `trustedProxy` setting (§4.1.4); otherwise the peer).
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

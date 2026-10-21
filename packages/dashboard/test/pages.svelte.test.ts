@@ -82,6 +82,13 @@ describe("Settings page", () => {
     backups: null,
     trustedProxy: null,
     rateLimits: null,
+    emailTemplates: null,
+    emailTemplateDefaults: {
+      appName: null,
+      verifyEmail: { subject: "Verify your email address", html: "<p>Please confirm your email address.</p>\n<p>Your code: <strong>{code}</strong></p>" },
+      resetPassword: { subject: "Reset your password", html: "<p>Your code: <strong>{code}</strong></p>" },
+      signIn: { subject: "Your sign-in link", html: "<p><a href=\"{link}\">Sign in</a></p>\n<p>Your code: <strong>{code}</strong></p>" },
+    },
     locked: ["redirectUrls"],
     effective: {
       signups: true,
@@ -93,6 +100,7 @@ describe("Settings page", () => {
       corsOrigins: null,
       backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
       trustedProxy: { headers: [], useLeftmostIp: false },
+      appName: "",
     },
   };
 
@@ -245,6 +253,54 @@ describe("Settings page", () => {
     await answer("_system/settings:update", null, { message: "rate limit `*:create`: something", code: "invalid_settings" });
     const section = target.querySelector("[aria-labelledby=s-rate]")!;
     expect(section.querySelector("[role=alert]")?.textContent).toBe("rate limit `*:create`: something");
+  });
+
+  it("customizes an email template with placeholders and a preview", async () => {
+    mounted = mount(Settings, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await answer("_system/settings:get", loaded);
+
+    button(/^Sign-in link/).click();
+    flushSync();
+    expect(target.querySelector("[role=tabpanel]")!.textContent).toContain("Your sign-in link");
+    button("Customize").click();
+    flushSync();
+    const subject = target.querySelector<HTMLInputElement>("#template-subject")!;
+    const html = target.querySelector<HTMLTextAreaElement>("#template-html")!;
+    expect(subject.value).toBe("Your sign-in link");
+    expect(button(/^Sign-in link/).textContent).toContain("custom");
+
+    type(target.querySelector<HTMLInputElement>("#app-name")!, "Acme <Shop>");
+    type(subject, "Sign in to {app_name}");
+    expect(target.querySelector("[data-testid=template-preview-subject]")!.textContent).toContain("Sign in to Acme <Shop>");
+    expect(target.querySelector("iframe")!.getAttribute("sandbox")).toBe("");
+
+    type(html, "<p>Hello</p>");
+    button("{email}").click();
+    flushSync();
+    expect(html.value).toBe("<p>Hello</p>{email}");
+    button("Save changes").click();
+    flushSync();
+    expect(target.textContent).toContain("Include {code} or {link}");
+
+    type(html, "<p>Hello {email}: {code}</p>");
+    expect(target.querySelector("iframe")!.getAttribute("srcdoc")).toBe("<p>Hello ana@example.com: 123456</p>");
+    button("Save changes").click();
+    const templates = { appName: "Acme <Shop>", verifyEmail: null, resetPassword: null, signIn: { subject: "Sign in to {app_name}", html: "<p>Hello {email}: {code}</p>" } };
+    const args = await answer("_system/settings:update", { ...loaded, emailTemplates: templates });
+    expect(args).toEqual({ emailTemplates: templates });
+
+    // Back to the built-in email: the whole setting is cleared.
+    button("Use the built-in email").click();
+    type(target.querySelector<HTMLInputElement>("#app-name")!, "");
+    button("Save changes").click();
+    expect(await answer("_system/settings:update", loaded)).toEqual({ clear: ["emailTemplates"] });
   });
 });
 

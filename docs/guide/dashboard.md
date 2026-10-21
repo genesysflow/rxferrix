@@ -41,8 +41,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
   queries that read a variable rerun as soon as it changes.
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
   sign-ups, token lifetimes, CORS origins, the trusted proxy headers the client IP is read from (showing your IP as
-  the server sees it) and rate limits per client IP (by path prefix, such as `/api/`, or by function, such as
-  `messages:send` or `*:create`, for everyone, guests or signed-in users), applied without a restart. Fields fixed by the code, a flag or the
+  the server sees it), rate limits per client IP (by path prefix, such as `/api/`, or by function, such as
+  `messages:send` or `*:create`, for everyone, guests or signed-in users) and the templates of the verification,
+  password reset and sign-in emails (with a preview), applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.
 - **Account**: two-factor authentication for your own administrator account (an authenticator app plus recovery
   codes); signing in then asks for a code after the password. `admin disable-2fa <email>` removes it from the server

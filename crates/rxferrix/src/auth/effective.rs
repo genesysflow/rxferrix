@@ -13,7 +13,7 @@ use axum::http::HeaderName;
 
 use super::config::{AuthConfig, OAuthProvider, RedirectAllowlist, SmtpConfig};
 use super::email::{DevLogMailer, Mailer, SmtpMailer};
-use crate::settings::model::{OAuthKind, StoredSettings};
+use crate::settings::model::{EmailTemplates, OAuthKind, StoredSettings};
 use crate::settings::rate_limits::RateLimitRules;
 
 /// Bounds for token lifetimes set at runtime.
@@ -37,6 +37,10 @@ pub(crate) struct Effective {
     pub proxy: ProxyHeaders,
     /// Request rate limits (`rateLimits` setting); none when off.
     pub rate_limits: RateLimitRules,
+    /// The auth emails' templates (`emailTemplates` setting); a template not set: the built-in email.
+    pub email_templates: EmailTemplates,
+    /// `{app_name}` in the templates: the setting, else the display name of the SMTP sender in use, else empty.
+    pub app_name: String,
 }
 
 /// The request headers trusted to carry the client IP (`super::http::client_ip`): `AuthConfig::trust_proxy` (the
@@ -116,6 +120,16 @@ impl Effective {
             None => ProxyHeaders::default(),
         };
         let rate_limits = RateLimitRules::build(stored.rate_limits.as_ref());
+        let email_templates = stored.email_templates.clone().unwrap_or_default();
+        // The sender of the SMTP mailer in use (a custom mailer has none we know of).
+        let from = match (&config.mailer, &config.smtp, &stored.smtp) {
+            (Some(_), _, _) => None,
+            (None, Some(smtp), _) => Some(smtp.from.as_str()),
+            (None, None, Some(smtp)) => Some(smtp.from.as_str()),
+            (None, None, None) => None,
+        };
+        let sender = from.and_then(|f| f.parse::<lettre::message::Mailbox>().ok()).and_then(|m| m.name);
+        let app_name = email_templates.app_name.clone().or(sender).unwrap_or_default();
         Ok(Effective {
             ts,
             signups,
@@ -127,6 +141,8 @@ impl Effective {
             cors_origins,
             proxy,
             rate_limits,
+            email_templates,
+            app_name,
         })
     }
 }

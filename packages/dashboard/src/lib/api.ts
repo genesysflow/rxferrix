@@ -462,6 +462,24 @@ export interface RateLimitSettings {
   rules: RateLimitRule[];
 }
 
+/** An auth email's subject and HTML body, with placeholders (`{link}`, `{code}`, `{expires}`, `{app_name}`, `{email}`). */
+export interface EmailTemplate {
+  subject: string;
+  html: string;
+}
+
+/** The kinds of auth email a template can replace. */
+export type EmailKind = "verifyEmail" | "resetPassword" | "signIn";
+
+/** The auth emails' templates; a template not set (null): the built-in plain-text email. */
+export interface EmailTemplates {
+  /** `{app_name}`; null: the display name of the SMTP sender, if any. */
+  appName: string | null;
+  verifyEmail: EmailTemplate | null;
+  resetPassword: EmailTemplate | null;
+  signIn: EmailTemplate | null;
+}
+
 export interface SettingsView {
   oauth: OAuthProviderView[];
   smtp: SmtpView | null;
@@ -474,6 +492,9 @@ export interface SettingsView {
   backups: BackupsView | null;
   trustedProxy: TrustedProxy | null;
   rateLimits: RateLimitSettings | null;
+  emailTemplates: EmailTemplates | null;
+  /** The built-in emails as templates (each one set): where a custom template starts from. */
+  emailTemplateDefaults: EmailTemplates;
   /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`,
    * `trustedProxy`, `oauth.<id>`, `backups.schedule`, `backups.destination`. */
   locked: string[];
@@ -489,6 +510,8 @@ export interface SettingsView {
     backups: BackupsEffective;
     /** Header names in lowercase; none: the peer address. */
     trustedProxy: TrustedProxy;
+    /** `{app_name}` in the email templates (the setting, else the SMTP sender's display name); may be empty. */
+    appName: string;
   };
 }
 
@@ -571,7 +594,8 @@ export type SettingsKey =
   | "corsOrigins"
   | "backups"
   | "trustedProxy"
-  | "rateLimits";
+  | "rateLimits"
+  | "emailTemplates";
 
 export interface SettingsUpdate {
   oauth?: OAuthProviderInput[];
@@ -584,6 +608,7 @@ export interface SettingsUpdate {
   backups?: BackupsInput;
   trustedProxy?: TrustedProxy;
   rateLimits?: RateLimitSettings;
+  emailTemplates?: EmailTemplates;
   clear?: SettingsKey[];
 }
 

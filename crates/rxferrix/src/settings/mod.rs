@@ -1,5 +1,5 @@
 //! Runtime settings, editable from the dashboard without a restart: OAuth providers, SMTP, the redirect allowlist,
-//! sign-ups, token lifetimes, CORS origins, the trusted proxy headers and request rate limits ([`rate_limits`]). Stored in the `_settings` system table ([`model`]); secrets (OAuth
+//! sign-ups, token lifetimes, CORS origins, the trusted proxy headers, request rate limits ([`rate_limits`]) and the auth email templates. Stored in the `_settings` system table ([`model`]); secrets (OAuth
 //! client secrets, the SMTP password) are encrypted at rest (`crate::auth::secretbox`) and never returned in clear.
 //!
 //! **Precedence.** What the code, the command line or the environment configures (`AuthConfig`) wins over
@@ -35,15 +35,21 @@ use serde_json::Value;
 
 use crate::audit::{self, Record};
 use crate::auth::effective::{ACCESS_TTL_RANGE, Effective, SESSION_TTL_RANGE};
-use crate::auth::email::Email;
+use crate::auth::email::{Email, PLACEHOLDERS, Purpose};
 use crate::dashboard::secrets::MASK;
 use crate::prelude::*;
 use crate::runtime::App;
-use model::{OAuthKind, RateLimitSettings, Setting, StoredOAuth, StoredSettings, StoredSmtp, TrustedProxy};
+use model::{
+    EmailTemplate, EmailTemplates, OAuthKind, RateLimitSettings, Setting, StoredOAuth, StoredSettings, StoredSmtp,
+    TrustedProxy,
+};
 
 const MAX_LIST: usize = 50;
 const MAX_PROVIDERS: usize = 20;
 const MAX_PROXY_HEADERS: usize = 10;
+const MAX_APP_NAME: usize = 100;
+const MAX_SUBJECT: usize = 200;
+const MAX_TEMPLATE_HTML: usize = 64 * 1024;
 
 fn invalid(message: impl Into<String>) -> Error {
     UserError::new("invalid_settings", message).into()
@@ -102,6 +108,8 @@ pub struct EffectiveView {
     pub backups: backups::BackupsEffective,
     /// The headers the client IP is taken from (lowercase), in order; empty: the peer address.
     pub trusted_proxy: TrustedProxy,
+    /// `{app_name}` in the email templates (the setting, else the SMTP sender's display name; may be empty).
+    pub app_name: String,
 }
 
 /// The stored settings (secrets masked; null = not set), the fields the configuration locks, and the result.
@@ -122,6 +130,9 @@ pub struct SettingsView {
     pub trusted_proxy: Option<TrustedProxy>,
     /// Request rate limits per client IP ([`rate_limits`]).
     pub rate_limits: Option<RateLimitSettings>,
+    pub email_templates: Option<EmailTemplates>,
+    /// The built-in emails as templates (every one set, `appName` null): where a custom template starts from.
+    pub email_template_defaults: EmailTemplates,
     /// Fields fixed by the configuration: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`,
     /// `trustedProxy`, `oauth.<id>`, `backups.schedule`, `backups.destination`.
     pub locked: Vec<String>,
@@ -173,7 +184,8 @@ pub async fn get(ctx: &ActionCtx) -> Result<SettingsView> {
 
 /// Change settings. Every argument is optional: omitted ones are unchanged, and `clear` lists keys to reset
 /// (`oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`,
-/// `trustedProxy`, `rateLimits`). `oauth` replaces the list of providers configured here. Everything is validated before anything is written; the change
+/// `trustedProxy`, `rateLimits`, `emailTemplates`). `oauth` replaces the list of providers configured here,
+/// `emailTemplates` all the templates (a template left out: the built-in email). Everything is validated before anything is written; the change
 /// is audited and applies immediately.
 #[action]
 #[allow(clippy::too_many_arguments)]
@@ -189,6 +201,7 @@ pub async fn update(
     backups: Option<backups::BackupsInput>,
     trusted_proxy: Option<TrustedProxy>,
     rate_limits: Option<RateLimitSettings>,
+    email_templates: Option<EmailTemplates>,
     clear: Option<Vec<String>>,
 ) -> Result<SettingsView> {
     let admin = ctx.auth.require_admin()?;
@@ -204,6 +217,7 @@ pub async fn update(
         backups,
         trusted_proxy,
         rate_limits,
+        email_templates,
         clear,
     };
     let auth = app.auth();
@@ -367,6 +381,13 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
         backups: stored.backups.as_ref().map(backups::StoredBackups::view),
         trusted_proxy: stored.trusted_proxy.clone(),
         rate_limits: stored.rate_limits.clone(),
+        email_templates: stored.email_templates.clone(),
+        email_template_defaults: EmailTemplates {
+            app_name: None,
+            verify_email: Some(Purpose::VerifyEmail.default_template()),
+            reset_password: Some(Purpose::ResetPassword.default_template()),
+            sign_in: Some(Purpose::SignIn.default_template()),
+        },
         locked,
         effective: EffectiveView {
             signups: e.signups,
@@ -381,6 +402,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
                 headers: e.proxy.headers.iter().map(|h| h.as_str().to_string()).collect(),
                 use_leftmost_ip: e.proxy.leftmost,
             },
+            app_name: e.app_name.clone(),
         },
     }
 }
@@ -406,6 +428,7 @@ fn masked_json(s: &StoredSettings) -> Value {
         "backups": s.backups.as_ref().map(backups::StoredBackups::view),
         "trustedProxy": s.trusted_proxy,
         "rateLimits": s.rate_limits,
+        "emailTemplates": s.email_templates,
     })
 }
 
@@ -458,6 +481,52 @@ fn trusted_proxy_from_input(input: TrustedProxy) -> Result<Option<TrustedProxy>>
     Ok((!headers.is_empty()).then_some(TrustedProxy { headers, use_leftmost_ip: input.use_leftmost_ip }))
 }
 
+/// The email templates, trimmed and checked; `None` when nothing is left (the built-in emails, no app name).
+fn email_templates_from_input(input: EmailTemplates) -> Result<Option<EmailTemplates>> {
+    let app_name = input.app_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if let Some(name) = &app_name
+        && (name.chars().count() > MAX_APP_NAME || name.chars().any(char::is_control))
+    {
+        return Err(invalid(format!("email template app name: at most {MAX_APP_NAME} characters on one line")));
+    }
+    let template = |what: &str, t: Option<EmailTemplate>| -> Result<Option<EmailTemplate>> {
+        let Some(t) = t else { return Ok(None) };
+        let subject = t.subject.trim().to_string();
+        let html = t.html.trim().to_string();
+        if subject.is_empty() || html.is_empty() {
+            return Err(invalid(format!("{what} email template: a subject and an HTML body are required")));
+        }
+        if subject.chars().count() > MAX_SUBJECT || subject.chars().any(char::is_control) {
+            return Err(invalid(format!(
+                "{what} email template: the subject is at most {MAX_SUBJECT} characters on one line"
+            )));
+        }
+        if html.len() > MAX_TEMPLATE_HTML {
+            return Err(invalid(format!(
+                "{what} email template: the HTML is at most {} KiB",
+                MAX_TEMPLATE_HTML / 1024
+            )));
+        }
+        if let Some(name) =
+            crate::auth::email::unknown_placeholder(&subject).or_else(|| crate::auth::email::unknown_placeholder(&html))
+        {
+            let known = PLACEHOLDERS.iter().map(|p| format!("{{{p}}}")).collect::<Vec<_>>().join(", ");
+            return Err(invalid(format!("{what} email template: unknown placeholder `{{{name}}}` (use {known})")));
+        }
+        if !html.contains("{code}") && !html.contains("{link}") {
+            return Err(invalid(format!("{what} email template: the HTML needs {{code}} or {{link}}")));
+        }
+        Ok(Some(EmailTemplate { subject, html }))
+    };
+    let out = EmailTemplates {
+        app_name,
+        verify_email: template("verification", input.verify_email)?,
+        reset_password: template("password reset", input.reset_password)?,
+        sign_in: template("sign-in", input.sign_in)?,
+    };
+    Ok((out != EmailTemplates::default()).then_some(out))
+}
+
 fn check_http_url(what: &str, s: &str, dev: bool) -> Result<url::Url> {
     let url = url::Url::parse(s).map_err(|e| invalid(format!("{what} `{s}`: {e}")))?;
     let loopback = matches!(url.host(), Some(url::Host::Domain("localhost")))
@@ -481,6 +550,7 @@ struct Changes {
     backups: Option<backups::BackupsInput>,
     trusted_proxy: Option<TrustedProxy>,
     rate_limits: Option<RateLimitSettings>,
+    email_templates: Option<EmailTemplates>,
     clear: Option<Vec<String>>,
 }
 
@@ -499,6 +569,7 @@ impl Changes {
                 model::BACKUPS => s.backups = None,
                 model::TRUSTED_PROXY => s.trusted_proxy = None,
                 model::RATE_LIMITS => s.rate_limits = None,
+                model::EMAIL_TEMPLATES => s.email_templates = None,
                 other => return Err(invalid(format!("unknown setting `{other}` in clear"))),
             }
         }
@@ -636,6 +707,9 @@ impl Changes {
         if let Some(limits) = self.rate_limits {
             s.rate_limits = rate_limits::from_input(limits)?;
         }
+        if let Some(templates) = self.email_templates {
+            s.email_templates = email_templates_from_input(templates)?;
+        }
         Ok(s)
     }
 }
@@ -745,6 +819,26 @@ mod tests {
         assert_eq!(trusted_proxy_from_input(input(&[" "])).unwrap(), None);
         assert!(trusted_proxy_from_input(input(&["X Forwarded For"])).is_err());
         assert!(trusted_proxy_from_input(input(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"])).is_err());
+    }
+
+    #[test]
+    fn email_template_input_is_trimmed_and_checked() {
+        let t = |subject: &str, html: &str| Some(EmailTemplate { subject: subject.into(), html: html.into() });
+        let input = |sign_in| EmailTemplates { app_name: Some("  Acme ".into()), sign_in, ..Default::default() };
+        let out = email_templates_from_input(input(t(" Sign in to {app_name} ", " <p>{code}</p>\n"))).unwrap().unwrap();
+        assert_eq!(out.app_name.as_deref(), Some("Acme"));
+        assert_eq!(out.sign_in, t("Sign in to {app_name}", "<p>{code}</p>"));
+        assert_eq!(out.verify_email, None);
+        let empty = EmailTemplates { app_name: Some(" ".into()), ..Default::default() };
+        assert_eq!(email_templates_from_input(empty).unwrap(), None);
+        let message = |templates| email_templates_from_input(templates).unwrap_err().to_string();
+        assert!(message(input(t("Hi", "<p>no code</p>"))).contains("needs {code} or {link}"));
+        assert!(message(input(t("Hi", "<p>{code} {appname}</p>"))).contains("unknown placeholder `{appname}`"));
+        assert!(message(input(t("Hi\nthere", "{code}"))).contains("one line"));
+        assert!(message(input(t("", "{code}"))).starts_with("sign-in email template"));
+        assert!(message(input(t("Hi", &"x".repeat(MAX_TEMPLATE_HTML + 1)))).contains("KiB"));
+        let long_name = EmailTemplates { app_name: Some("x".repeat(MAX_APP_NAME + 1)), ..Default::default() };
+        assert!(message(long_name).contains("app name"));
     }
 
     #[test]

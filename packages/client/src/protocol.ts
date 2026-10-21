@@ -6,7 +6,7 @@ export type QueryId = number;
 export type RequestId = number;
 export type JSONValue = null | boolean | number | string | JSONValue[] | { [key: string]: JSONValue };
 
-export const CLIENT_VERSION = "0.5.0";
+export const CLIENT_VERSION = "0.6.0";
 
 export interface StateVersion {
   querySet: number;

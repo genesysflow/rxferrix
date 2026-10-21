@@ -3,7 +3,7 @@
   import { useAction } from "@rxferrix/svelte";
   import { onMount } from "svelte";
   import { fetchClientIp } from "../lib/admin.js";
-  import { settings, type ClientIp, type OAuthKind, type SettingsKey, type SettingsView } from "../lib/api.js";
+  import { settings, type ClientIp, type EmailKind, type OAuthKind, type SettingsKey, type SettingsView } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatSeconds } from "../lib/format.js";
   import {
@@ -11,9 +11,12 @@
     addHeader,
     buildUpdate,
     COMMON_PROXY_HEADERS,
+    EMAIL_KINDS,
+    EMAIL_PLACEHOLDERS,
     formFromView,
     isLocked,
     newProvider,
+    previewTemplate,
     sectionOfError,
     SESSION_TTL_RANGE,
     validate,
@@ -24,7 +27,7 @@
 
   /**
    * Runtime settings (`_system/settings:*`, actions): sign-ups, token lifetimes, redirect URLs, CORS origins, trusted
-   * proxy headers, SMTP and OAuth providers. Fields the configuration fixes are read-only; secrets are write-only.
+   * proxy headers, SMTP, the auth email templates and OAuth providers. Fields the configuration fixes are read-only; secrets are write-only.
    */
   const ctx = dashboardContext();
   const get = useAction(settings.get);
@@ -42,6 +45,28 @@
   let testResult = $state<{ ok: boolean; message: string } | null>(null);
   let newKind = $state<OAuthKind>("github");
   let clientIp = $state<ClientIp | null>(null);
+  let emailKind = $state<EmailKind>("verifyEmail");
+  let htmlArea = $state<HTMLTextAreaElement | null>(null);
+
+  // Put `{name}` where the cursor is in the HTML (at the end if it never had the focus).
+  function insertPlaceholder(name: string) {
+    const t = form?.emailTemplates[emailKind];
+    if (!t) return;
+    const at = htmlArea?.selectionStart ?? t.html.length;
+    const end = htmlArea?.selectionEnd ?? at;
+    t.html = `${t.html.slice(0, at)}{${name}}${t.html.slice(end)}`;
+    const caret = at + name.length + 2;
+    requestAnimationFrame(() => {
+      htmlArea?.focus();
+      htmlArea?.setSelectionRange(caret, caret);
+    });
+  }
+
+  const preview = $derived.by(() => {
+    const t = form?.emailTemplates[emailKind];
+    if (!t || !form || !view) return null;
+    return previewTemplate(t, emailKind, form.emailTemplates.appName.trim() || view.effective.appName);
+  });
 
   // How the server sees this browser's IP with the trusted proxy headers in effect (refreshed after a save).
   async function loadClientIp() {
@@ -418,6 +443,97 @@
         </div>
       </section>
 
+      <section class="card section" aria-labelledby="s-templates">
+        <h2 id="s-templates">Email templates</h2>
+        <p class="muted small">
+          The verification, password reset and sign-in emails. Without a template, the built-in plain-text email is sent;
+          with one, your HTML (and a plain-text version made from it).
+        </p>
+        <div class="field">
+          <label for="app-name">App name</label>
+          <div>
+            <input
+              id="app-name"
+              class="wide"
+              placeholder={v.effective.appName ? `${v.effective.appName} (the SMTP sender's name)` : "e.g. Acme"}
+              bind:value={form.emailTemplates.appName}
+              aria-invalid={err("emailTemplates.appName") ? "true" : undefined}
+            />
+            <div class="faint small">What <span class="mono">{"{app_name}"}</span> becomes.</div>
+            {@render fieldError(err("emailTemplates.appName"))}
+          </div>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Email">
+          {#each EMAIL_KINDS as k (k.kind)}
+            <button
+              type="button"
+              role="tab"
+              class="tab"
+              aria-selected={emailKind === k.kind}
+              onclick={() => (emailKind = k.kind)}
+            >
+              {k.label}{#if form.emailTemplates[k.kind]}<span class="badge">custom</span>{/if}
+            </button>
+          {/each}
+        </div>
+        {#each [emailKind] as kind (kind)}
+        {@const builtIn = v.emailTemplateDefaults[kind]!}
+        <div role="tabpanel" class="template">
+          {#if !form.emailTemplates[kind]}
+            <p class="muted small">
+              Built-in plain-text email, subject <strong>{builtIn.subject}</strong>.
+            </p>
+            <button type="button" onclick={() => (form!.emailTemplates[kind] = { ...builtIn })}>Customize</button>
+          {:else}
+            <div class="field">
+              <label for="template-subject">Subject</label>
+              <div>
+                <input
+                  id="template-subject"
+                  class="wide"
+                  bind:value={form.emailTemplates[kind]!.subject}
+                  aria-invalid={err(`emailTemplates.${kind}.subject`) ? "true" : undefined}
+                />
+                {@render fieldError(err(`emailTemplates.${kind}.subject`))}
+              </div>
+              <label for="template-html">HTML</label>
+              <div>
+                <textarea
+                  id="template-html"
+                  rows="10"
+                  spellcheck="false"
+                  bind:this={htmlArea}
+                  bind:value={form.emailTemplates[kind]!.html}
+                  aria-invalid={err(`emailTemplates.${kind}.html`) ? "true" : undefined}
+                ></textarea>
+                <div class="chips faint small">
+                  Insert:
+                  {#each EMAIL_PLACEHOLDERS as p (p.name)}
+                    <button class="chip mono" type="button" title={p.description} onclick={() => insertPlaceholder(p.name)}>{`{${p.name}}`}</button>
+                  {/each}
+                </div>
+                {@render fieldError(err(`emailTemplates.${kind}.html`))}
+                {#if !v.effective.redirectUrls.length}
+                  <div class="faint small">No redirect URL is set, so <span class="mono">{"{link}"}</span> is empty: rely on <span class="mono">{"{code}"}</span>.</div>
+                {/if}
+              </div>
+              <span class="muted small">Preview</span>
+              <div class="preview">
+                <div class="preview-subject" data-testid="template-preview-subject"><span class="faint">Subject:</span> {preview?.subject}</div>
+                <iframe title="Email preview" sandbox="" srcdoc={preview?.html ?? ""}></iframe>
+              </div>
+            </div>
+            <div class="row">
+              <span class="spacer"></span>
+              <button class="small ghost" type="button" onclick={() => (form!.emailTemplates[kind] = { ...builtIn })}>Start over from the built-in text</button>
+              <button class="small danger" type="button" onclick={() => (form!.emailTemplates[kind] = null)}>Use the built-in email</button>
+            </div>
+          {/if}
+        </div>
+        {/each}
+        {@render fieldError(sectionError("emailTemplates"))}
+      </section>
+
       <section class="card section" aria-labelledby="s-oauth">
         <h2 id="s-oauth">OAuth providers</h2>
         <p class="muted small">
@@ -616,6 +732,50 @@
   .chip {
     padding: 1px 6px;
     font-size: 11.5px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin: 10px 0 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: none;
+    margin-bottom: -1px;
+  }
+  .tab[aria-selected="true"] {
+    border-color: var(--border);
+    background: var(--panel);
+    font-weight: 600;
+  }
+  .template {
+    padding-top: 10px;
+  }
+  .preview {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .preview-subject {
+    padding: 6px 10px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+    overflow-wrap: anywhere;
+  }
+  .preview iframe {
+    width: 100%;
+    height: 260px;
+    border: 0;
+    background: #fff;
   }
   .ok-text {
     color: var(--ok);

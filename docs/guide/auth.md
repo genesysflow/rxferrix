@@ -98,6 +98,12 @@ can be imported from the command line). Besides argon2id, `_credentials.password
 (`$2a$`, `$2b$`, `$2y$`: PocketBase, Laravel, Devise, Supabase, ...): those users sign in with their old password,
 and the hash is replaced with an argon2id one on that sign-in.
 
+**Email templates.** The verification, password reset and sign-in emails are plain text by default. In the
+dashboard's **Settings → Email templates**, give any of them a subject and an HTML body (with a live preview); a
+plain-text version is made from the HTML. Placeholders: `{link}` (the link back to your app; empty without a redirect
+URL), `{code}`, `{expires}` (e.g. `15 minutes`), `{app_name}` (set there, else the display name of the SMTP sender) and
+`{email}`. Values are HTML-escaped in the body, and a template must contain `{code}` or `{link}`.
+
 **Sending your own email.** Actions send through the same mailer as the auth emails (`--smtp-url`, `AuthConfig::mailer`
 or SMTP from the dashboard's settings, and the dev log mailer in `--dev`):
 

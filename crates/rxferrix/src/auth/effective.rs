@@ -13,7 +13,7 @@ use axum::http::HeaderName;
 
 use super::config::{AuthConfig, OAuthProvider, RedirectAllowlist, SmtpConfig};
 use super::email::{DevLogMailer, Mailer, SmtpMailer};
-use crate::settings::model::{OAuthKind, StoredSettings};
+use crate::settings::model::{EmailTemplates, OAuthKind, StoredSettings};
 
 /// Bounds for token lifetimes set at runtime.
 pub(crate) const ACCESS_TTL_RANGE: (u64, u64) = (30, 24 * 3600);
@@ -34,6 +34,10 @@ pub(crate) struct Effective {
     pub cors_origins: Option<Vec<String>>,
     /// Where the client IP comes from behind a reverse proxy.
     pub proxy: ProxyHeaders,
+    /// The auth emails' templates (`emailTemplates` setting); a template not set: the built-in email.
+    pub email_templates: EmailTemplates,
+    /// `{app_name}` in the templates: the setting, else the display name of the SMTP sender in use, else empty.
+    pub app_name: String,
 }
 
 /// The request headers trusted to carry the client IP (`super::http::client_ip`): `AuthConfig::trust_proxy` (the
@@ -112,7 +116,29 @@ impl Effective {
             },
             None => ProxyHeaders::default(),
         };
-        Ok(Effective { ts, signups, access_token_ttl, session_ttl, redirects, mailer, oauth, cors_origins, proxy })
+        let email_templates = stored.email_templates.clone().unwrap_or_default();
+        // The sender of the SMTP mailer in use (a custom mailer has none we know of).
+        let from = match (&config.mailer, &config.smtp, &stored.smtp) {
+            (Some(_), _, _) => None,
+            (None, Some(smtp), _) => Some(smtp.from.as_str()),
+            (None, None, Some(smtp)) => Some(smtp.from.as_str()),
+            (None, None, None) => None,
+        };
+        let sender = from.and_then(|f| f.parse::<lettre::message::Mailbox>().ok()).and_then(|m| m.name);
+        let app_name = email_templates.app_name.clone().or(sender).unwrap_or_default();
+        Ok(Effective {
+            ts,
+            signups,
+            access_token_ttl,
+            session_ttl,
+            redirects,
+            mailer,
+            oauth,
+            cors_origins,
+            proxy,
+            email_templates,
+            app_name,
+        })
     }
 }
 

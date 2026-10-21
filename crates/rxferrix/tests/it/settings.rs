@@ -336,3 +336,85 @@ async fn trust_proxy_in_the_configuration_locks_the_trusted_headers() {
         .unwrap();
     assert_eq!((&r["ip"], &r["header"]), (&json!("203.0.113.9"), &json!("x-forwarded-for")));
 }
+
+/// The latest email to `to`, once at least `count` were sent to it (auth emails go out in the background).
+async fn nth_email(mailer: &MemoryMailer, to: &str, count: usize) -> rxferrix::auth::Email {
+    for _ in 0..200 {
+        let mine: Vec<_> = mailer.emails().into_iter().filter(|e| e.to == to).collect();
+        if mine.len() >= count {
+            return mine[count - 1].clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no email #{count} to {to}");
+}
+
+#[tokio::test]
+async fn email_templates_shape_the_auth_emails() {
+    let mailer = MemoryMailer::new();
+    let config = AuthConfig::password().magic_link().mailer(mailer.clone()).redirect_url("https://app.example.com");
+    let (_t, http, admin) = setup(config).await;
+    let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
+    assert_eq!((&view["emailTemplates"], &view["effective"]["appName"]), (&Value::Null, &json!("")));
+    assert_eq!(view["emailTemplateDefaults"]["signIn"]["subject"], "Your sign-in link");
+    assert!(view["emailTemplateDefaults"]["resetPassword"]["html"].as_str().unwrap().contains("{code}"));
+
+    let sign_in =
+        |subject: &str, html: &str| json!({ "emailTemplates": { "signIn": { "subject": subject, "html": html } } });
+    for args in [
+        sign_in("", "<p>{code}</p>"),
+        sign_in("Hi", "<p>no code</p>"),
+        sign_in("Hi {name}", "<p>{code}</p>"),
+        sign_in("Two\nlines", "<p>{code}</p>"),
+    ] {
+        let (s, b) = update(&http, &admin, args.clone()).await;
+        assert_eq!((s, code_of(&b)), (400, "invalid_settings"), "{args}: {b}");
+    }
+
+    let templates = json!({
+        "appName": "Acme <Shop>",
+        "signIn": { "subject": "Sign in to {app_name}", "html": "<p>Hi {email}, <a href=\"{link}\">sign in</a> with <b>{code}</b> within {expires}. {app_name}</p>" },
+    });
+    let view = http.ok("action", "_system/settings:update", json!({ "emailTemplates": templates }), &admin).await;
+    assert_eq!(view["emailTemplates"]["signIn"]["subject"], "Sign in to {app_name}");
+    assert_eq!(
+        (&view["emailTemplates"]["verifyEmail"], &view["effective"]["appName"]),
+        (&Value::Null, &json!("Acme <Shop>"))
+    );
+
+    let email = "ana@example.com";
+    assert_eq!(http.post("/api/auth/magic/request", None, json!({ "email": email })).await.0, 200);
+    let sent = nth_email(&mailer, email, 1).await;
+    assert_eq!(sent.subject, "Sign in to Acme <Shop>", "subjects are not HTML-escaped");
+    let html = sent.html.expect("an HTML part");
+    assert!(html.contains("Hi ana@example.com, <a href=\"https://app.example.com/#rxferrix_magic_token="), "{html}");
+    assert!(html.contains("within 15 minutes. Acme &lt;Shop&gt;</p>"), "{html}");
+    let token = html.split("rxferrix_magic_token=").nth(1).unwrap().split('"').next().unwrap();
+    assert!(
+        sent.body.contains(&format!("sign in (https://app.example.com/#rxferrix_magic_token={token})")),
+        "{}",
+        sent.body
+    );
+    let (s, _) = http.post("/api/auth/magic/verify", None, json!({ "token": token })).await;
+    assert_eq!(s, 200, "the link in the templated email signs in");
+
+    // Emails without a template are the built-in ones; clearing the setting brings back all of them.
+    http.post("/api/auth/reset/request", None, json!({ "email": email })).await;
+    let reset = nth_email(&mailer, email, 2).await;
+    assert_eq!((reset.subject.as_str(), reset.html.is_none()), ("Reset your password", true));
+    http.ok("action", "_system/settings:update", json!({ "clear": ["emailTemplates"] }), &admin).await;
+    http.post("/api/auth/magic/request", None, json!({ "email": email })).await;
+    let built_in = nth_email(&mailer, email, 3).await;
+    assert_eq!((built_in.subject.as_str(), built_in.html.is_none()), ("Your sign-in link", true));
+}
+
+#[tokio::test]
+async fn the_app_name_defaults_to_the_smtp_sender_name() {
+    let (_t, http, admin) = setup(AuthConfig::password()).await;
+    let smtp = json!({ "url": "smtp://mail.example.com:25", "from": "Acme Mail <app@example.com>" });
+    let view = http.ok("action", "_system/settings:update", json!({ "smtp": smtp }), &admin).await;
+    assert_eq!(view["effective"]["appName"], "Acme Mail");
+    let view =
+        http.ok("action", "_system/settings:update", json!({ "emailTemplates": { "appName": "Acme" } }), &admin).await;
+    assert_eq!((&view["effective"]["appName"], &view["emailTemplates"]["signIn"]), (&json!("Acme"), &Value::Null));
+}

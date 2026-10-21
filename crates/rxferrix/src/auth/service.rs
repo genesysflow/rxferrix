@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::config::{AuthConfig, OAuthProvider};
 use super::effective::Effective;
-use super::email::{Email, Mailer, Purpose};
+use super::email::{Mailer, Purpose, auth_email};
 use super::identity::Identity;
 use super::jwt::JwtVerifier;
 use super::oauth::OAuthFlows;
@@ -674,8 +674,8 @@ impl AuthService {
         let (code, token) =
             store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, expires_at).await?;
         let link = redirect.map(|r| format!("{r}#{}={token}", purpose.fragment_key()));
-        let (subject, body) = purpose.render(&code, link.as_deref());
-        let message = Email::new(email, subject, body);
+        let e = self.current();
+        let message = auth_email(email, purpose, &code, link.as_deref(), e.email_templates.get(purpose), &e.app_name);
         tokio::spawn(async move {
             if let Err(e) = mailer.send(message).await {
                 tracing::warn!("auth: sending email failed: {e:#}");

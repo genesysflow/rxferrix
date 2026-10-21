@@ -437,6 +437,13 @@ export interface SmtpView {
   password: string | null;
 }
 
+/** The request headers a reverse proxy puts the client IP in, trusted in order (the first one present wins). */
+export interface TrustedProxy {
+  headers: string[];
+  /** Take the leftmost IP of a list (the original client, but forgeable) instead of the rightmost. */
+  useLeftmostIp: boolean;
+}
+
 export interface SettingsView {
   oauth: OAuthProviderView[];
   smtp: SmtpView | null;
@@ -447,8 +454,9 @@ export interface SettingsView {
   corsOrigins: string[] | null;
   /** Scheduled backups and their destination (crates/rxferrix/src/settings/backups.rs). */
   backups: BackupsView | null;
-  /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `oauth.<id>`,
-   * `backups.schedule`, `backups.destination`. */
+  trustedProxy: TrustedProxy | null;
+  /** Fields the configuration fixes: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`,
+   * `trustedProxy`, `oauth.<id>`, `backups.schedule`, `backups.destination`. */
   locked: string[];
   effective: {
     signups: boolean;
@@ -460,6 +468,8 @@ export interface SettingsView {
     /** null: any origin. */
     corsOrigins: string[] | null;
     backups: BackupsEffective;
+    /** Header names in lowercase; none: the peer address. */
+    trustedProxy: TrustedProxy;
   };
 }
 
@@ -540,7 +550,8 @@ export type SettingsKey =
   | "accessTokenTtlSecs"
   | "sessionTtlSecs"
   | "corsOrigins"
-  | "backups";
+  | "backups"
+  | "trustedProxy";
 
 export interface SettingsUpdate {
   oauth?: OAuthProviderInput[];
@@ -551,6 +562,7 @@ export interface SettingsUpdate {
   sessionTtlSecs?: number;
   corsOrigins?: string[];
   backups?: BackupsInput;
+  trustedProxy?: TrustedProxy;
   clear?: SettingsKey[];
 }
 
@@ -749,6 +761,16 @@ export interface Stats {
     /** `--metrics`: Prometheus `/metrics` is served. */
     metricsEnabled?: boolean;
   };
+}
+
+/** `GET /api/admin/client-ip`: the caller's IP as the server resolves it. */
+export interface ClientIp {
+  ip: string | null;
+  /** The trusted header the IP came from; null: the peer address. */
+  header: string | null;
+  peer: string | null;
+  /** Well-known client IP headers (and trusted ones) present on the request, as received. */
+  proxyHeaders: { name: string; value: string }[];
 }
 
 /** One bucket of `GET /api/admin/stats/timeseries`: the executions that started in `[t, t + bucket)`. */

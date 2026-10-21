@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::HeaderName;
+
 use super::config::{AuthConfig, OAuthProvider, RedirectAllowlist, SmtpConfig};
 use super::email::{DevLogMailer, Mailer, SmtpMailer};
 use crate::settings::model::{OAuthKind, StoredSettings};
@@ -30,6 +32,18 @@ pub(crate) struct Effective {
     pub oauth: BTreeMap<String, OAuthProvider>,
     /// Allowed CORS origins; `None` allows any origin (the default: auth uses bearer tokens, not cookies).
     pub cors_origins: Option<Vec<String>>,
+    /// Where the client IP comes from behind a reverse proxy.
+    pub proxy: ProxyHeaders,
+}
+
+/// The request headers trusted to carry the client IP (`super::http::client_ip`): `AuthConfig::trust_proxy` (the
+/// last `X-Forwarded-For` entry), else the `trustedProxy` setting. Empty: the peer address.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProxyHeaders {
+    /// In order of preference: the first one present wins.
+    pub headers: Vec<HeaderName>,
+    /// Take the leftmost entry of a list rather than the rightmost.
+    pub leftmost: bool,
 }
 
 impl Effective {
@@ -88,12 +102,23 @@ impl Effective {
             oauth.insert(p.id.clone(), provider);
         }
         let cors_origins = stored.cors_origins.clone().filter(|o| !o.is_empty() && !o.iter().any(|x| x == "*"));
-        Ok(Effective { ts, signups, access_token_ttl, session_ttl, redirects, mailer, oauth, cors_origins })
+        let proxy = match &stored.trusted_proxy {
+            _ if config.trust_proxy => {
+                ProxyHeaders { headers: vec![HeaderName::from_static("x-forwarded-for")], leftmost: false }
+            }
+            Some(p) => ProxyHeaders {
+                headers: p.headers.iter().filter_map(|h| HeaderName::from_bytes(h.as_bytes()).ok()).collect(),
+                leftmost: p.use_leftmost_ip,
+            },
+            None => ProxyHeaders::default(),
+        };
+        Ok(Effective { ts, signups, access_token_ttl, session_ttl, redirects, mailer, oauth, cors_origins, proxy })
     }
 }
 
 /// The settings fields that `config` fixes (its values win over `_settings`), as reported by `_system/settings:get`:
-/// `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, and `oauth.<id>` per provider.
+/// `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`, `trustedProxy`, and `oauth.<id>` per
+/// provider.
 pub(crate) fn locked_fields(config: &AuthConfig) -> Vec<String> {
     let mut out = Vec::new();
     let e = config.explicit;
@@ -109,6 +134,9 @@ pub(crate) fn locked_fields(config: &AuthConfig) -> Vec<String> {
     }
     if config.mailer.is_some() || config.smtp.is_some() {
         out.push("smtp".into());
+    }
+    if config.trust_proxy {
+        out.push("trustedProxy".into());
     }
     out.extend(config.oauth.iter().filter(|p| p.is_configured()).map(|p| format!("oauth.{}", p.id)));
     out

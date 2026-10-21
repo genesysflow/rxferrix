@@ -6,13 +6,13 @@
 //! the function API: `{ "status": "error", "errorMessage", "errorData": { "code", "data" } }`. Every response
 //! carries `Cache-Control: no-store`.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 #[cfg(not(feature = "dashboard"))]
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
+use super::effective::ProxyHeaders;
 use super::identity::Identity;
 use super::oauth::{CallbackExtras, STATE_COOKIE, STATE_TTL, with_fragment};
 use super::service::{AuthFailure, AuthResult, CodeProof, Limit, SignInOutcome, SignUpResult};
@@ -103,10 +104,10 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> AuthResult<T> {
         .map_err(|e| AuthFailure::new(400, "invalid_request", format!("Invalid request body: {e}")))
 }
 
-/// The caller's IP address and user agent, as RxFerrix records them on sessions: the last `X-Forwarded-For` entry
-/// when the server trusts its proxy (`AuthConfig::trust_proxy`, `--trust-proxy`), else the peer address. An axum
-/// extractor for the app's own routes (`RxFerrix::app_routes`), so an allowlist or a rate limit sees the same address
-/// RxFerrix does:
+/// The caller's IP address and user agent, as RxFerrix records them on sessions: taken from the first trusted proxy
+/// header present ([`client_ip`]: the `trustedProxy` setting, or the last `X-Forwarded-For` entry with
+/// `AuthConfig::trust_proxy` / `--trust-proxy`), else the peer address. An axum extractor for the app's own routes
+/// (`RxFerrix::app_routes`), so an allowlist or a rate limit sees the same address RxFerrix does:
 ///
 /// ```ignore
 /// async fn webhook(State(app): State<App>, caller: Caller, body: Bytes) -> StatusCode { /* caller.ip */ }
@@ -129,20 +130,40 @@ impl FromRequestParts<App> for Caller {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip().to_string());
-        let forwarded = app.auth().config().trust_proxy.then(|| {
-            parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit(',').next())
-                .map(|ip| ip.trim().to_string())
-                .filter(|ip| !ip.is_empty())
-        });
-        let ip = forwarded.flatten().or(peer).unwrap_or_else(|| "unknown".into());
+        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+        let ip = client_ip(&app.auth().current().proxy, &parts.headers, peer).0;
+        let ip = ip.map_or_else(|| "unknown".into(), |ip| ip.to_string());
         let user_agent = parts.headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(str::to_string);
         Ok(Caller { ip, user_agent })
     }
+}
+
+/// The client IP of a request and the trusted header it came from: the first of `proxy.headers` that holds an IP
+/// address (the leftmost or rightmost entry of a comma-separated list, over all lines of the header), else `peer`.
+pub(crate) fn client_ip<'a>(
+    proxy: &'a ProxyHeaders,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+) -> (Option<IpAddr>, Option<&'a HeaderName>) {
+    for name in &proxy.headers {
+        let mut entries = headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|e| !e.is_empty());
+        let entry = if proxy.leftmost { entries.next() } else { entries.next_back() };
+        if let Some(ip) = entry.and_then(parse_ip) {
+            return (Some(ip), Some(name));
+        }
+    }
+    (peer, None)
+}
+
+/// An address as proxies write it: `203.0.113.7`, `2001:db8::1`, or with a port (`203.0.113.7:4711`, `[2001:db8::1]:4711`).
+fn parse_ip(s: &str) -> Option<IpAddr> {
+    s.parse().ok().or_else(|| s.parse::<SocketAddr>().ok().map(|a| a.ip()))
 }
 
 /// The token of an `Authorization: Bearer <token>` header.
@@ -707,3 +728,48 @@ document.getElementById("f").addEventListener("submit", async (e) => {
 });
 </script></body></html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.append(*k, HeaderValue::from_static(v));
+        }
+        h
+    }
+
+    fn proxy(names: &[&'static str], leftmost: bool) -> ProxyHeaders {
+        ProxyHeaders { headers: names.iter().map(|n| HeaderName::from_static(n)).collect(), leftmost }
+    }
+
+    #[test]
+    fn client_ip_takes_the_first_trusted_header_present() {
+        let peer = Some("10.0.0.1".parse().unwrap());
+        let h = headers(&[
+            ("x-forwarded-for", "198.51.100.9, 203.0.113.1"),
+            ("x-forwarded-for", "203.0.113.2"),
+            ("cf-connecting-ip", "2001:db8::7"),
+        ]);
+        let ip = |p: &ProxyHeaders| client_ip(p, &h, peer).0.unwrap().to_string();
+        assert_eq!(ip(&proxy(&[], false)), "10.0.0.1");
+        assert_eq!(ip(&proxy(&["x-forwarded-for"], false)), "203.0.113.2");
+        assert_eq!(ip(&proxy(&["x-forwarded-for"], true)), "198.51.100.9");
+        assert_eq!(ip(&proxy(&["fly-client-ip", "cf-connecting-ip", "x-forwarded-for"], false)), "2001:db8::7");
+        let p = proxy(&["cf-connecting-ip"], false);
+        assert_eq!(client_ip(&p, &h, peer).1.map(HeaderName::as_str), Some("cf-connecting-ip"));
+        assert_eq!(client_ip(&proxy(&["x-real-ip"], false), &h, peer).1, None);
+    }
+
+    #[test]
+    fn client_ip_skips_values_that_are_not_addresses() {
+        let peer = Some("10.0.0.1".parse().unwrap());
+        let h = headers(&[("x-real-ip", "unknown"), ("x-forwarded-for", "[2001:db8::1]:4711"), ("fly-client-ip", "")]);
+        let p = proxy(&["fly-client-ip", "x-real-ip", "x-forwarded-for"], false);
+        assert_eq!(client_ip(&p, &h, peer).0.unwrap().to_string(), "2001:db8::1");
+        assert_eq!(client_ip(&proxy(&["x-real-ip"], false), &h, peer).0, peer);
+        assert_eq!(parse_ip("203.0.113.7:80").unwrap().to_string(), "203.0.113.7");
+    }
+}

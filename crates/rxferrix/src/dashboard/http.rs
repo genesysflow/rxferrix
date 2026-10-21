@@ -12,6 +12,10 @@
 //!   p50/p95/max duration per time bucket for one function (or every app function without `path`), oldest first,
 //!   only buckets with executions: `{ path, bucket, since, until, points: [TimePoint] }`. Defaults: the last hour in
 //!   1-minute buckets; at most 1500 buckets (400 `invalid_request` otherwise).
+//! - `GET /api/admin/client-ip`: the caller's IP as RxFerrix resolves it, to check the trusted proxy headers
+//!   (`trustedProxy` setting): `{ ip, header, peer, proxyHeaders: [{ name, value }] }`. `header` is the trusted
+//!   header the IP came from (null: the peer address); `proxyHeaders` lists the well-known client IP headers present
+//!   on the request, and any trusted one, as received.
 //!
 //! **Authentication**: every endpoint requires `Authorization: Bearer <access token>` whose `adm` claim is set
 //! (an admin session): 401 `unauthenticated` without a token, 401 `invalid_token` for a bad, expired or revoked one,
@@ -47,6 +51,7 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/logs/stream", get(logs_stream))
         .route("/api/admin/stats", get(stats))
         .route("/api/admin/stats/timeseries", get(timeseries))
+        .route("/api/admin/client-ip", get(client_ip))
         .route("/api/admin/impersonate", axum::routing::post(super::impersonate::impersonate))
 }
 
@@ -182,6 +187,45 @@ async fn logs_stream(
 #[serde(default)]
 struct StatsQuery {
     since: Option<i64>,
+}
+
+/// Headers proxies and CDNs commonly put the client IP in, reported by `client-ip` when present.
+const PROXY_HEADERS: &[&str] = &[
+    "cf-connecting-ip",
+    "true-client-ip",
+    "fly-client-ip",
+    "fastly-client-ip",
+    "x-real-ip",
+    "x-client-ip",
+    "x-cluster-client-ip",
+    "x-envoy-external-address",
+    "x-forwarded-for",
+    "forwarded",
+];
+
+async fn client_ip(State(app): State<App>, extensions: axum::http::Extensions, headers: HeaderMap) -> Response {
+    if let Err(failure) = require_admin(&app, &headers).await {
+        return failure.into_response();
+    }
+    let peer = extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    let effective = app.auth().current();
+    let (ip, header) = crate::auth::http::client_ip(&effective.proxy, &headers, peer);
+    let mut names: Vec<&str> = PROXY_HEADERS.to_vec();
+    names.extend(effective.proxy.headers.iter().map(|h| h.as_str()).filter(|h| !PROXY_HEADERS.contains(h)));
+    let present: Vec<_> = names
+        .into_iter()
+        .filter_map(|name| {
+            let values: Vec<&str> = headers.get_all(name).iter().filter_map(|v| v.to_str().ok()).collect();
+            (!values.is_empty()).then(|| json!({ "name": name, "value": values.join(", ") }))
+        })
+        .collect();
+    let body = json!({
+        "ip": ip.map(|ip| ip.to_string()),
+        "header": header.map(|h| h.as_str()),
+        "peer": peer.map(|ip| ip.to_string()),
+        "proxyHeaders": present,
+    });
+    (no_store(), axum::Json(body)).into_response()
 }
 
 fn file_size(path: &std::path::Path) -> u64 {

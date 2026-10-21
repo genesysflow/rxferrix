@@ -102,18 +102,34 @@ pub struct SyncWorker {
     /// A mutation or action that arrived while every slot was taken: it starts when one frees up, and nothing more is
     /// read from the client until then.
     parked: Option<ClientMessage>,
+    /// The client's IP, which its mutations and actions are rate limited by (`crate::settings::rate_limits`).
+    client_ip: Option<std::net::IpAddr>,
 }
 
-/// Spawn a worker and return its input and output channels (used by the WebSocket handler and by tests).
+/// Spawn a worker and return its input and output channels (used by tests).
 pub fn spawn(app: App) -> (mpsc::Sender<Inbound>, mpsc::Receiver<ServerMessage>) {
+    spawn_from(app, None)
+}
+
+/// [`spawn`] for a client at `ip` (the WebSocket handler).
+pub fn spawn_from(app: App, ip: Option<std::net::IpAddr>) -> (mpsc::Sender<Inbound>, mpsc::Receiver<ServerMessage>) {
     let (in_tx, in_rx) = mpsc::channel(64);
     let (out_tx, out_rx) = mpsc::channel(256);
-    tokio::spawn(run(app, in_rx, out_tx));
+    tokio::spawn(run_from(app, ip, in_rx, out_tx));
     (in_tx, out_rx)
 }
 
 /// Run a worker until the input closes, the output is dropped, or a fatal error occurs.
 pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<ServerMessage>) {
+    run_from(app, None, inbound, out).await
+}
+
+async fn run_from(
+    app: App,
+    client_ip: Option<std::net::IpAddr>,
+    inbound: mpsc::Receiver<Inbound>,
+    out: mpsc::Sender<ServerMessage>,
+) {
     let (conn, mailbox, doorbell) = match app.subscriptions().connect().await {
         Ok(c) => c,
         Err(e) => {
@@ -143,6 +159,7 @@ pub async fn run(app: App, inbound: mpsc::Receiver<Inbound>, out: mpsc::Sender<S
         last_heard: Instant::now(),
         in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
         parked: None,
+        client_ip,
     };
     worker.run(inbound, doorbell).await
 }
@@ -309,6 +326,9 @@ impl SyncWorker {
                 self.conn.authenticate(self.identity_version, identity).await?;
             }
             msg @ (ClientMessage::Mutation { .. } | ClientMessage::Action { .. }) => {
+                if self.rate_limited(&msg) {
+                    return Ok(());
+                }
                 match self.in_flight.clone().try_acquire_owned() {
                     Ok(permit) => self.start(msg, permit),
                     Err(_) => self.parked = Some(msg),
@@ -317,6 +337,27 @@ impl SyncWorker {
             ClientMessage::Pong => {}
         }
         Ok(())
+    }
+
+    /// Count a mutation or action against the function rate limits; over the limit, answer it with `rate_limited`
+    /// (through the completions, so responses keep their usual path) and return true.
+    fn rate_limited(&self, msg: &ClientMessage) -> bool {
+        let (ClientMessage::Mutation { request_id, udf_path, .. } | ClientMessage::Action { request_id, udf_path, .. }) =
+            msg
+        else {
+            return false;
+        };
+        let Err(limited) =
+            crate::settings::rate_limits::check_function(&self.app, udf_path, &self.identity, || self.client_ip)
+        else {
+            return false;
+        };
+        let (request_id, error, log_lines) = (*request_id, limited.client_error(), Vec::new());
+        let _ = self.completions_tx.send(match msg {
+            ClientMessage::Mutation { .. } => Completion::Mutation { request_id, result: Err(error), log_lines },
+            _ => Completion::Action { request_id, result: Err(error), log_lines },
+        });
+        true
     }
 
     /// Run a mutation or action off the worker task (so a slow one doesn't hold up query updates for this socket),

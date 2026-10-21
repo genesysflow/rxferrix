@@ -1,7 +1,9 @@
 //! [`AuthService`]: the auth state an [`App`] carries (keys, config, mailer, rate limiter, OAuth flows, the admin
 //! setup token), and the operations behind the HTTP endpoints, the sync worker and the CLI.
 
+use std::net::IpAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +25,7 @@ use crate::UserError;
 use crate::id::Id;
 use crate::runtime::App;
 use crate::settings::model::StoredSettings;
+use crate::settings::rate_limits::TokenCaller;
 
 /// Tokens returned by every successful sign-in and refresh.
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +196,12 @@ pub struct AuthService {
     /// `config` merged with `_settings`; swapped when the settings change.
     effective: RwLock<Arc<Effective>>,
     limiter: RateLimiter,
+    /// Buckets of the `rateLimits` setting's rules, by (rule, client IP) (`crate::settings::rate_limits`).
+    pub(crate) request_limiter: RateLimiter<(u64, IpAddr)>,
+    /// Whether the effective configuration has path / function rate limit rules: read on every request, so a server
+    /// without rules pays one atomic load instead of a lock and a reference count.
+    path_limits_on: AtomicBool,
+    function_limits_on: AtomicBool,
     pub(crate) oauth: OAuthFlows,
     pub(crate) jwt: JwtVerifier,
     setup_token_hash: Mutex<Option<String>>,
@@ -235,6 +244,9 @@ impl AuthService {
             config_mailer,
             effective: RwLock::new(Arc::new(effective)),
             limiter: RateLimiter::default(),
+            request_limiter: RateLimiter::default(),
+            path_limits_on: AtomicBool::new(false),
+            function_limits_on: AtomicBool::new(false),
             oauth: OAuthFlows::new(),
             jwt,
             setup_token_hash: Mutex::new(None),
@@ -269,9 +281,38 @@ impl AuthService {
         };
         let mut current = self.effective.write().unwrap_or_else(|e| e.into_inner());
         if next.ts >= current.ts {
+            self.path_limits_on.store(next.rate_limits.has_paths(), Ordering::Relaxed);
+            self.function_limits_on.store(next.rate_limits.has_functions(), Ordering::Relaxed);
             *current = Arc::new(next);
         }
         Ok(())
+    }
+
+    /// Whether any path rate limit rule is in effect.
+    pub(crate) fn path_limits_on(&self) -> bool {
+        self.path_limits_on.load(Ordering::Relaxed)
+    }
+
+    /// Whether any function rate limit rule is in effect.
+    pub(crate) fn function_limits_on(&self) -> bool {
+        self.function_limits_on.load(Ordering::Relaxed)
+    }
+
+    /// Who `token` says the caller is, as far as its signature and expiry tell (no session lookup for RxFerrix's own
+    /// tokens): how path rate limit rules tell signed-in users from guests on every request without a database read.
+    pub(crate) async fn token_caller(&self, app: &App, token: &str) -> TokenCaller {
+        if !self.jwt.is_empty() && super::tokens::header_alg(token).is_some_and(|alg| alg != "HS256") {
+            return match self.authenticate(app, token).await {
+                Ok(a) if a.identity.admin_id.is_some() => TokenCaller::Admin,
+                Ok(_) => TokenCaller::User,
+                Err(_) => TokenCaller::Guest,
+            };
+        }
+        match self.keys.verify(token, now_s()) {
+            Ok(claims) if claims.adm => TokenCaller::Admin,
+            Ok(_) => TokenCaller::User,
+            Err(_) => TokenCaller::Guest,
+        }
     }
 
     /// The OAuth provider `id`, if enabled (in code or in `_settings`).

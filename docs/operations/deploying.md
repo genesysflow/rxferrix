@@ -123,6 +123,21 @@ resolves it), or with `--trust-proxy` (`RXFERRIX_TRUST_PROXY`), which trusts the
 over the setting. Only trust a header your proxy always sets or overwrites, and keep the server reachable only
 through the proxy; otherwise clients can pick their own IP.
 
+## Rate limits
+
+In the dashboard's **Settings → Rate limiting**, limit how many requests one client IP may make: per path prefix
+(`/api/` for the whole API, `/api/storage/upload`, your own routes) or per function (`messages:send`, `messages:*`,
+`*:create`, `*` for all of them, over HTTP and the WebSocket), optionally for guests or signed-in users only. Each rule
+allows a burst of up to its max requests, refilled evenly over its interval; over it, clients get 429 `rate_limited`
+with `Retry-After`. Changes apply at once, and turning limiting off keeps the rules. Behind a proxy, set the IP proxy
+headers first, or every client shares the proxy's limit. The dashboard, `/api/health`, `/metrics`, system functions
+and administrators are never limited, and broad rules such as `/api/` don't count WebSocket connections or session
+refreshes (a rule labeled `/api/sync` does). Sign-in, sign-up and email endpoints have their own built-in limits
+(`AuthConfig::rate_limits`).
+
+Without rules a request pays a single atomic load; with rules, a short scan and one token-bucket update on one of 32
+independently locked shards, with no database access.
+
 ## Durability
 
 By default SQLite runs in WAL mode with `synchronous = NORMAL`: a crash of the process loses nothing,

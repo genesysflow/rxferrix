@@ -231,7 +231,10 @@ endpoints' error shape, without `logLines`).
 
 - Response 200 (success): `{ "status": "success", "value": <result>, "logLines": [] }`.
 - Response 4xx/5xx (error): `{ "status": "error", "errorMessage": "…", "errorData": null | {code, data}, "logLines": [] }`.
-  Status codes: 400 for a user error or bad args, 404 for an unknown function, 500 for anything else.
+  Status codes: 400 for a user error or bad args, 404 for an unknown function, 500 for anything else; 429
+  `rate_limited` with `Retry-After` (and `errorData.data.retryAfterSecs`) over a rate limit set in the dashboard
+  (CONTRACT.md §4.1.4, `rateLimits`). Over the WebSocket, a mutation or action over such a limit fails with the same
+  `rate_limited` error in its `MutationResponse` / `ActionResponse`.
 - Mutation responses also include `"ts": number`.
 - `logLines` as in guarantee 8 (only in `--dev`). HTTP mutations are not deduplicated.
 - A query may be answered from the server's query cache (no execution) when a result valid at the latest commit is

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { MASK, type SettingsView } from "../src/lib/api.js";
-import { addHeader, buildUpdate, formFromView, newProvider, sectionOfError, validate } from "../src/lib/settings.js";
+import {
+  addHeader,
+  buildUpdate,
+  formFromView,
+  newProvider,
+  newRateLimitRule,
+  rateLimitLabelError,
+  sectionOfError,
+  validate,
+} from "../src/lib/settings.js";
 
 function view(over: Partial<SettingsView> = {}): SettingsView {
   return {
@@ -13,6 +22,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
     corsOrigins: null,
     backups: null,
     trustedProxy: null,
+    rateLimits: null,
     locked: [],
     effective: {
       signups: true,
@@ -214,6 +224,57 @@ describe("settings form", () => {
     expect(buildUpdate(locked, edit).changed).toEqual([]);
   });
 
+  it("edits the rate limit rules", () => {
+    const form = formFromView(view());
+    expect(form.rateLimits).toEqual({ enabled: false, rules: [] });
+    expect(buildUpdate(view(), form).changed).toEqual([]);
+
+    form.rateLimits.enabled = true;
+    form.rateLimits.rules = [newRateLimitRule(true), { ...newRateLimitRule(), label: " *:create ", maxRequests: "20", intervalSecs: "5", audience: "guest" }];
+    expect(validate(form, view())).toEqual({});
+    expect(buildUpdate(view(), form)).toEqual({
+      update: {
+        rateLimits: {
+          enabled: true,
+          rules: [
+            { label: "/api/", maxRequests: 300, intervalSecs: 10, audience: "all" },
+            { label: "*:create", maxRequests: 20, intervalSecs: 5, audience: "guest" },
+          ],
+        },
+      },
+      changed: ["rateLimits"],
+    });
+
+    // As the server sends it: keys sorted.
+    const saved = view({ rateLimits: { enabled: true, rules: [{ audience: "all", intervalSecs: 10, label: "/api/", maxRequests: 300 }] } });
+    const edit = formFromView(saved);
+    expect(buildUpdate(saved, edit).changed).toEqual([]);
+    // Turning it off keeps the rules; removing them all while off clears the setting.
+    edit.rateLimits.enabled = false;
+    expect(buildUpdate(saved, edit).update).toEqual({
+      rateLimits: { enabled: false, rules: [{ label: "/api/", maxRequests: 300, intervalSecs: 10, audience: "all" }] },
+    });
+    edit.rateLimits.rules = [];
+    expect(buildUpdate(saved, edit)).toEqual({ update: { clear: ["rateLimits"] }, changed: ["rateLimits"] });
+
+    edit.rateLimits.rules = [
+      { ...newRateLimitRule(), label: "/api/*", maxRequests: "0", intervalSecs: "86401" },
+      { ...newRateLimitRule(), label: "*", maxRequests: "1", intervalSecs: "1" },
+      { ...newRateLimitRule(), label: "*", maxRequests: "2", intervalSecs: "1" },
+    ];
+    const errors = validate(edit, saved);
+    expect(errors["rateLimits.0.label"]).toContain("write /api/");
+    expect(errors["rateLimits.0.maxRequests"]).toBeDefined();
+    expect(errors["rateLimits.0.intervalSecs"]).toBeDefined();
+    expect(errors["rateLimits.2.label"]).toContain("twice");
+  });
+
+  it("checks rate limit labels like the server", () => {
+    for (const ok of ["/api/", "/", "*", "messages:send", "chat/messages:*", "*:create", "*:*"]) expect(rateLimitLabelError(ok)).toBeNull();
+    for (const bad of ["", "messages", ":send", "a b:c", "_system/settings:update", "/a b", "/a?b", "m:se-nd"])
+      expect(rateLimitLabelError(bad)).not.toBeNull();
+  });
+
   it("maps server messages to the section they concern", () => {
     expect(sectionOfError("SMTP URL must look like smtp://user@host:587")).toBe("smtp");
     expect(sectionOfError("OAuth provider `x`: a client id is required")).toBe("oauth");
@@ -222,6 +283,8 @@ describe("settings form", () => {
     expect(sectionOfError("accessTokenTtlSecs must be between 30 and 86400 seconds")).toBe("accessTokenTtlSecs");
     expect(sectionOfError("sessionTtlSecs must be between 60 and 34560000 seconds")).toBe("sessionTtlSecs");
     expect(sectionOfError("trusted proxy header `a b` is not a valid header name")).toBe("trustedProxy");
+    expect(sectionOfError("rate limit `/api/`: max requests must be between 1 and 1000000")).toBe("rateLimits");
+    expect(sectionOfError("rate limit `x:y` is listed twice for the same users")).toBe("rateLimits");
     expect(sectionOfError("something else")).toBe("general");
   });
 });

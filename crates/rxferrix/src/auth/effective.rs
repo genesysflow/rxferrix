@@ -14,6 +14,7 @@ use axum::http::HeaderName;
 use super::config::{AuthConfig, OAuthProvider, RedirectAllowlist, SmtpConfig};
 use super::email::{DevLogMailer, Mailer, SmtpMailer};
 use crate::settings::model::{OAuthKind, StoredSettings};
+use crate::settings::rate_limits::RateLimitRules;
 
 /// Bounds for token lifetimes set at runtime.
 pub(crate) const ACCESS_TTL_RANGE: (u64, u64) = (30, 24 * 3600);
@@ -34,6 +35,8 @@ pub(crate) struct Effective {
     pub cors_origins: Option<Vec<String>>,
     /// Where the client IP comes from behind a reverse proxy.
     pub proxy: ProxyHeaders,
+    /// Request rate limits (`rateLimits` setting); none when off.
+    pub rate_limits: RateLimitRules,
 }
 
 /// The request headers trusted to carry the client IP (`super::http::client_ip`): `AuthConfig::trust_proxy` (the
@@ -112,7 +115,19 @@ impl Effective {
             },
             None => ProxyHeaders::default(),
         };
-        Ok(Effective { ts, signups, access_token_ttl, session_ttl, redirects, mailer, oauth, cors_origins, proxy })
+        let rate_limits = RateLimitRules::build(stored.rate_limits.as_ref());
+        Ok(Effective {
+            ts,
+            signups,
+            access_token_ttl,
+            session_ttl,
+            redirects,
+            mailer,
+            oauth,
+            cors_origins,
+            proxy,
+            rate_limits,
+        })
     }
 }
 

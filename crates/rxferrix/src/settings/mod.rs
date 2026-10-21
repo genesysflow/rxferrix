@@ -1,5 +1,5 @@
 //! Runtime settings, editable from the dashboard without a restart: OAuth providers, SMTP, the redirect allowlist,
-//! sign-ups, token lifetimes and CORS origins. Stored in the `_settings` system table ([`model`]); secrets (OAuth
+//! sign-ups, token lifetimes, CORS origins and the trusted proxy headers. Stored in the `_settings` system table ([`model`]); secrets (OAuth
 //! client secrets, the SMTP password) are encrypted at rest (`crate::auth::secretbox`) and never returned in clear.
 //!
 //! **Precedence.** What the code, the command line or the environment configures (`AuthConfig`) wins over
@@ -8,7 +8,7 @@
 //!
 //! **Applying changes.** `update` validates the whole result, writes the rows and an `_audit_log` entry in one
 //! transaction, then rebuilds the effective auth configuration (`crate::auth::effective`) and swaps it in before
-//! returning: the next sign-in, OAuth redirect, email or CORS check uses the new values. Sessions and tokens that
+//! returning: the next sign-in, OAuth redirect, email, CORS check or client IP lookup uses the new values. Sessions and tokens that
 //! already exist are not affected (a shorter access token lifetime applies to tokens issued from then on).
 //!
 //! **Secrets in transit and logs.** Secrets are only ever accepted (in `update` and `send_test_email`), never
@@ -38,10 +38,11 @@ use crate::auth::email::Email;
 use crate::dashboard::secrets::MASK;
 use crate::prelude::*;
 use crate::runtime::App;
-use model::{OAuthKind, Setting, StoredOAuth, StoredSettings, StoredSmtp};
+use model::{OAuthKind, Setting, StoredOAuth, StoredSettings, StoredSmtp, TrustedProxy};
 
 const MAX_LIST: usize = 50;
 const MAX_PROVIDERS: usize = 20;
+const MAX_PROXY_HEADERS: usize = 10;
 
 fn invalid(message: impl Into<String>) -> Error {
     UserError::new("invalid_settings", message).into()
@@ -98,6 +99,8 @@ pub struct EffectiveView {
     /// Backups as they run: destination, schedule (`backups::BackupsEffective`).
     #[ts(type = "any")]
     pub backups: backups::BackupsEffective,
+    /// The headers the client IP is taken from (lowercase), in order; empty: the peer address.
+    pub trusted_proxy: TrustedProxy,
 }
 
 /// The stored settings (secrets masked; null = not set), the fields the configuration locks, and the result.
@@ -115,8 +118,9 @@ pub struct SettingsView {
     /// Scheduled backups and their destination, the secret masked (`backups::BackupsView`).
     #[ts(type = "any")]
     pub backups: Option<backups::BackupsView>,
+    pub trusted_proxy: Option<TrustedProxy>,
     /// Fields fixed by the configuration: `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `redirectUrls`, `smtp`,
-    /// `oauth.<id>`, `backups.schedule`, `backups.destination`.
+    /// `trustedProxy`, `oauth.<id>`, `backups.schedule`, `backups.destination`.
     pub locked: Vec<String>,
     pub effective: EffectiveView,
 }
@@ -165,8 +169,8 @@ pub async fn get(ctx: &ActionCtx) -> Result<SettingsView> {
 }
 
 /// Change settings. Every argument is optional: omitted ones are unchanged, and `clear` lists keys to reset
-/// (`oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`). `oauth`
-/// replaces the list of providers configured here. Everything is validated before anything is written; the change
+/// (`oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`,
+/// `trustedProxy`). `oauth` replaces the list of providers configured here. Everything is validated before anything is written; the change
 /// is audited and applies immediately.
 #[action]
 #[allow(clippy::too_many_arguments)]
@@ -180,6 +184,7 @@ pub async fn update(
     session_ttl_secs: Option<u64>,
     cors_origins: Option<Vec<String>>,
     backups: Option<backups::BackupsInput>,
+    trusted_proxy: Option<TrustedProxy>,
     clear: Option<Vec<String>>,
 ) -> Result<SettingsView> {
     let admin = ctx.auth.require_admin()?;
@@ -193,6 +198,7 @@ pub async fn update(
         session_ttl_secs,
         cors_origins,
         backups,
+        trusted_proxy,
         clear,
     };
     let auth = app.auth();
@@ -354,6 +360,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
         session_ttl_secs: stored.session_ttl_secs,
         cors_origins: stored.cors_origins.clone(),
         backups: stored.backups.as_ref().map(backups::StoredBackups::view),
+        trusted_proxy: stored.trusted_proxy.clone(),
         locked,
         effective: EffectiveView {
             signups: e.signups,
@@ -364,6 +371,10 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
             email_configured: e.mailer.is_some(),
             cors_origins: e.cors_origins.clone(),
             backups: backups::effective(app),
+            trusted_proxy: TrustedProxy {
+                headers: e.proxy.headers.iter().map(|h| h.as_str().to_string()).collect(),
+                use_leftmost_ip: e.proxy.leftmost,
+            },
         },
     }
 }
@@ -387,6 +398,7 @@ fn masked_json(s: &StoredSettings) -> Value {
         "sessionTtlSecs": s.session_ttl_secs,
         "corsOrigins": s.cors_origins,
         "backups": s.backups.as_ref().map(backups::StoredBackups::view),
+        "trustedProxy": s.trusted_proxy,
     })
 }
 
@@ -422,6 +434,23 @@ fn smtp_from_input(input: SmtpInput, stored: Option<&StoredSmtp>) -> Result<Stor
     Ok(StoredSmtp { url: url.to_string(), from, password })
 }
 
+/// The trusted proxy headers, trimmed and checked; `None` when no header is left (the peer address is used).
+fn trusted_proxy_from_input(input: TrustedProxy) -> Result<Option<TrustedProxy>> {
+    let mut headers: Vec<String> = Vec::new();
+    for h in input.headers.iter().map(|h| h.trim()).filter(|h| !h.is_empty()) {
+        if axum::http::HeaderName::from_bytes(h.as_bytes()).is_err() {
+            return Err(invalid(format!("trusted proxy header `{h}` is not a valid header name")));
+        }
+        if !headers.iter().any(|x| x.eq_ignore_ascii_case(h)) {
+            headers.push(h.to_string());
+        }
+    }
+    if headers.len() > MAX_PROXY_HEADERS {
+        return Err(invalid(format!("at most {MAX_PROXY_HEADERS} trusted proxy headers")));
+    }
+    Ok((!headers.is_empty()).then_some(TrustedProxy { headers, use_leftmost_ip: input.use_leftmost_ip }))
+}
+
 fn check_http_url(what: &str, s: &str, dev: bool) -> Result<url::Url> {
     let url = url::Url::parse(s).map_err(|e| invalid(format!("{what} `{s}`: {e}")))?;
     let loopback = matches!(url.host(), Some(url::Host::Domain("localhost")))
@@ -443,6 +472,7 @@ struct Changes {
     session_ttl_secs: Option<u64>,
     cors_origins: Option<Vec<String>>,
     backups: Option<backups::BackupsInput>,
+    trusted_proxy: Option<TrustedProxy>,
     clear: Option<Vec<String>>,
 }
 
@@ -459,6 +489,7 @@ impl Changes {
                 model::SESSION_TTL => s.session_ttl_secs = None,
                 model::CORS_ORIGINS => s.cors_origins = None,
                 model::BACKUPS => s.backups = None,
+                model::TRUSTED_PROXY => s.trusted_proxy = None,
                 other => return Err(invalid(format!("unknown setting `{other}` in clear"))),
             }
         }
@@ -590,6 +621,9 @@ impl Changes {
         if let Some(input) = self.backups {
             s.backups = Some(backups::from_input(input, before.backups.as_ref())?);
         }
+        if let Some(proxy) = self.trusted_proxy {
+            s.trusted_proxy = trusted_proxy_from_input(proxy)?;
+        }
         Ok(s)
     }
 }
@@ -683,6 +717,22 @@ mod tests {
         let nested = json!({ "path": "_system/settings:update", "args": { "smtp": { "password": "p" } } });
         assert_eq!(redact_args("_system/dashboard:run_function", &nested)["args"]["smtp"]["password"], MASK);
         assert!(matches!(redact_args("_system/x:y", &json!({ "a": 1 })), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn trusted_proxy_input_is_trimmed_and_checked() {
+        let input = |headers: &[&str]| TrustedProxy {
+            headers: headers.iter().map(|h| h.to_string()).collect(),
+            use_leftmost_ip: true,
+        };
+        let p = trusted_proxy_from_input(input(&[" CF-Connecting-IP ", "", "cf-connecting-ip", "X-Forwarded-For"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.headers, ["CF-Connecting-IP", "X-Forwarded-For"]);
+        assert!(p.use_leftmost_ip);
+        assert_eq!(trusted_proxy_from_input(input(&[" "])).unwrap(), None);
+        assert!(trusted_proxy_from_input(input(&["X Forwarded For"])).is_err());
+        assert!(trusted_proxy_from_input(input(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"])).is_err());
     }
 
     #[test]

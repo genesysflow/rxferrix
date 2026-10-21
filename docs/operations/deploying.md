@@ -113,6 +113,16 @@ port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port
 without a restart or dropped connections, and a bad pair keeps the current certificate (logged). Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
 (default `0.0.0.0:80` with `--https`, none with `--tls-cert`; `off` turns it off).
 
+## Client IP behind a proxy
+
+Behind a reverse proxy, load balancer or CDN, every connection comes from the proxy, so rate limits, sessions and the
+audit log would all see its address. Tell the server which request header carries the client IP: in the dashboard's
+**Settings → IP proxy headers** (e.g. `CF-Connecting-IP` behind Cloudflare, `Fly-Client-IP` on Fly, `X-Forwarded-For`
+or `X-Real-IP` behind NGINX or Caddy; the first header present wins, and the panel shows your IP as the server
+resolves it), or with `--trust-proxy` (`RXFERRIX_TRUST_PROXY`), which trusts the last `X-Forwarded-For` entry and wins
+over the setting. Only trust a header your proxy always sets or overwrites, and keep the server reachable only
+through the proxy; otherwise clients can pick their own IP.
+
 ## Durability
 
 By default SQLite runs in WAL mode with `synchronous = NORMAL`: a crash of the process loses nothing,

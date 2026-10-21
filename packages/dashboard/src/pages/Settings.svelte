@@ -2,12 +2,15 @@
   import { RxFerrixError } from "@rxferrix/client";
   import { useAction } from "@rxferrix/svelte";
   import { onMount } from "svelte";
-  import { settings, type OAuthKind, type SettingsKey, type SettingsView } from "../lib/api.js";
+  import { fetchClientIp } from "../lib/admin.js";
+  import { settings, type ClientIp, type OAuthKind, type SettingsKey, type SettingsView } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatSeconds } from "../lib/format.js";
   import {
     ACCESS_TTL_RANGE,
+    addHeader,
     buildUpdate,
+    COMMON_PROXY_HEADERS,
     formFromView,
     isLocked,
     newProvider,
@@ -20,8 +23,8 @@
   import Empty from "../components/Empty.svelte";
 
   /**
-   * Runtime settings (`_system/settings:*`, actions): sign-ups, token lifetimes, redirect URLs, CORS origins, SMTP and
-   * OAuth providers. Fields the configuration fixes are read-only; secrets are write-only.
+   * Runtime settings (`_system/settings:*`, actions): sign-ups, token lifetimes, redirect URLs, CORS origins, trusted
+   * proxy headers, SMTP and OAuth providers. Fields the configuration fixes are read-only; secrets are write-only.
    */
   const ctx = dashboardContext();
   const get = useAction(settings.get);
@@ -38,6 +41,16 @@
   let testing = $state(false);
   let testResult = $state<{ ok: boolean; message: string } | null>(null);
   let newKind = $state<OAuthKind>("github");
+  let clientIp = $state<ClientIp | null>(null);
+
+  // How the server sees this browser's IP with the trusted proxy headers in effect (refreshed after a save).
+  async function loadClientIp() {
+    try {
+      clientIp = await fetchClientIp(ctx.auth);
+    } catch {
+      clientIp = null;
+    }
+  }
 
   async function load() {
     loadError = null;
@@ -51,7 +64,10 @@
       loadError = e instanceof Error ? e.message : String(e);
     }
   }
-  onMount(() => void load());
+  onMount(() => {
+    void load();
+    void loadClientIp();
+  });
 
   const errors = $derived(form && view ? validate(form, view) : {});
   const pending = $derived(form && view ? buildUpdate(view, form) : null);
@@ -76,6 +92,7 @@
       form = formFromView(v);
       showErrors = false;
       ctx.toast(`Saved ${changed.join(", ")}; in effect now`);
+      if (changed.includes("trustedProxy")) void loadClientIp();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (e instanceof RxFerrixError && e.code === "invalid_settings") serverError = { section: sectionOfError(message), message };
@@ -113,6 +130,12 @@
     if (form.oauth.some((x) => x.id === p.id)) p.id = "";
     form.oauth = [...form.oauth, p];
   }
+
+  // Headers to offer: those on this very request first (they reached the server), then the common ones.
+  const headerSuggestions = $derived.by(() => {
+    const seen = (clientIp?.proxyHeaders ?? []).map((h) => COMMON_PROXY_HEADERS.find((c) => c.toLowerCase() === h.name) ?? h.name);
+    return [...new Set([...seen, ...COMMON_PROXY_HEADERS])];
+  });
 
   const ttlHint = (text: string, effective: number) => {
     const n = Number(text);
@@ -276,6 +299,75 @@
           aria-invalid={err("corsOrigins") ? "true" : undefined}
         ></textarea>
         {@render fieldError(err("corsOrigins") ?? sectionError("corsOrigins"))}
+      </section>
+
+      <section class="card section" aria-labelledby="s-proxy">
+        <h2 id="s-proxy">IP proxy headers</h2>
+        <p class="muted small">
+          Behind a reverse proxy, load balancer or CDN (NGINX, Caddy, Cloudflare, Fly, …) every request reaches the server
+          from the proxy's address. To see the real client IP (for rate limits, sessions and the audit log), list the
+          headers your proxy puts it in. The first header present wins.
+        </p>
+        <div class="resolved" data-testid="resolved-ip" role="status">
+          {#if clientIp}
+            <div>Your IP, as the server sees it: <strong class="mono">{clientIp.ip ?? "unknown"}</strong></div>
+            <div>
+              Taken from:
+              {#if clientIp.header}<strong class="mono">{clientIp.header}</strong>
+              {:else}<strong>the connection</strong> <span class="faint">(no trusted header)</span>{/if}
+            </div>
+            {#if clientIp.proxyHeaders.length}
+              <div class="faint">
+                Proxy headers on this request: {#each clientIp.proxyHeaders as h, i (h.name)}{i ? ", " : ""}<span class="mono">{h.name}: {h.value}</span>{/each}
+              </div>
+            {/if}
+          {:else}
+            <div class="faint">Checking your IP…</div>
+          {/if}
+        </div>
+        <p class="muted small">
+          If that isn't your real IP, set the header your proxy uses. To keep clients from forging their IP, trust only
+          headers the proxy always sets (overwriting what the client sent), and make sure the server can only be
+          reached through the proxy. Leave the field empty when there is no proxy.
+        </p>
+        {#if isLocked(v, "trustedProxy")}
+          {@render lockedNote("The trusted proxy header", `${v.effective.trustedProxy.headers.join(", ")} (rightmost IP)`)}
+        {:else}
+          <div class="field">
+            <label for="proxy-headers">Trusted headers</label>
+            <div>
+              <div class="row">
+                <input
+                  id="proxy-headers"
+                  class="mono wide"
+                  placeholder="none: not behind a proxy"
+                  bind:value={form.proxyHeaders}
+                  aria-invalid={err("trustedProxy") ? "true" : undefined}
+                />
+                <button class="small ghost" type="button" onclick={() => (form!.proxyHeaders = "")} disabled={form.proxyHeaders === ""}>Clear</button>
+              </div>
+              <div class="chips faint small">
+                Comma-separated, such as:
+                {#each headerSuggestions as h (h)}
+                  <button class="chip mono" type="button" onclick={() => (form!.proxyHeaders = addHeader(form!.proxyHeaders, h))}>{h}</button>
+                {/each}
+              </div>
+              {@render fieldError(err("trustedProxy") ?? sectionError("trustedProxy"))}
+            </div>
+            <label for="proxy-priority">IP priority</label>
+            <div>
+              <select id="proxy-priority" bind:value={form.useLeftmostIp}>
+                <option value={false}>Use rightmost IP</option>
+                <option value={true}>Use leftmost IP</option>
+              </select>
+              <div class="faint small">
+                For lists such as <span class="mono">X-Forwarded-For: client, proxy1, proxy2</span>. The rightmost entry was
+                added by your proxy and can't be forged; the leftmost is the original client only if every proxy on the
+                way can be trusted.
+              </div>
+            </div>
+          </div>
+        {/if}
       </section>
 
       <section class="card section" aria-labelledby="s-smtp">
@@ -501,6 +593,29 @@
   }
   .test input {
     width: 240px;
+  }
+  .resolved {
+    margin: 0 0 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-wrap: anywhere;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    margin-top: 4px;
+  }
+  .chip {
+    padding: 1px 6px;
+    font-size: 11.5px;
   }
   .ok-text {
     color: var(--ok);

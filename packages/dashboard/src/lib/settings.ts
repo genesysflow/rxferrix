@@ -22,6 +22,9 @@ export const ACCESS_TTL_RANGE = [30, 24 * 3600] as const;
 export const SESSION_TTL_RANGE = [60, 400 * 24 * 3600] as const;
 export const MAX_PROVIDERS = 20;
 export const MAX_LIST = 50;
+export const MAX_PROXY_HEADERS = 10;
+/** Headers proxies and CDNs commonly put the client IP in, offered as suggestions. */
+export const COMMON_PROXY_HEADERS = ["CF-Connecting-IP", "X-Forwarded-For", "Fly-Client-IP", "X-Real-IP", "True-Client-IP"];
 
 export interface SecretField {
   /** `keep` the stored secret (if any), `replace` it with `value`, or (SMTP only) store `none`. */
@@ -59,6 +62,9 @@ export interface SettingsForm {
   corsOrigins: string;
   smtp: { url: string; from: string; password: SecretField };
   oauth: ProviderForm[];
+  /** Comma-separated header names; empty: not behind a proxy (the peer address). */
+  proxyHeaders: string;
+  useLeftmostIp: boolean;
 }
 
 let nextKey = 1;
@@ -108,7 +114,16 @@ export function formFromView(view: SettingsView): SettingsForm {
       scopes: (p.scopes ?? []).join(" "),
       locked: p.locked,
     })),
+    proxyHeaders: (view.trustedProxy?.headers ?? []).join(", "),
+    useLeftmostIp: view.trustedProxy?.useLeftmostIp ?? false,
   };
+}
+
+/** `headers` (comma-separated) with `name` added, unless already listed (case-insensitively). */
+export function addHeader(headers: string, name: string): string {
+  const list = lines(headers);
+  if (list.some((h) => h.toLowerCase() === name.toLowerCase())) return headers;
+  return [...list, name].join(", ");
 }
 
 /** Whether the configuration (code, command line or environment) fixes this field: shown read-only. */
@@ -170,6 +185,13 @@ export function validate(form: SettingsForm, view: SettingsView): Record<string,
       if (!/^[^@\s<>]+@[^@\s<>]+$|<[^@\s<>]+@[^@\s<>]+>\s*$/.test(from.trim())) errors["smtp.from"] = "A mailbox such as App <noreply@example.com>";
     }
     if (password.mode === "replace" && password.value === "") errors["smtp.password"] = "Type the new password, or keep the current one";
+  }
+
+  if (!isLocked(view, "trustedProxy")) {
+    const headers = lines(form.proxyHeaders);
+    const bad = headers.find((h) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(h));
+    if (bad) errors.trustedProxy = `\`${bad}\` is not a valid header name`;
+    else if (headers.length > MAX_PROXY_HEADERS) errors.trustedProxy = `At most ${MAX_PROXY_HEADERS} headers`;
   }
 
   if (form.oauth.length > MAX_PROVIDERS) errors.oauth = `At most ${MAX_PROVIDERS} providers`;
@@ -254,6 +276,11 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
     const want = lines(form.corsOrigins);
     if (!sameList(want, view.corsOrigins)) set("corsOrigins", want.length ? want : null);
   }
+  if (!isLocked(view, "trustedProxy")) {
+    const headers = lines(form.proxyHeaders);
+    const want = headers.length ? { headers, useLeftmostIp: form.useLeftmostIp } : null;
+    if (JSON.stringify(want) !== JSON.stringify(view.trustedProxy)) set("trustedProxy", want);
+  }
   if (!isLocked(view, "smtp")) {
     const { url, from, password } = form.smtp;
     const empty = url.trim() === "" && from.trim() === "";
@@ -293,6 +320,7 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
 /** The form section a server `invalid_settings` message is about, to show it there. */
 export function sectionOfError(message: string): SettingsKey | "general" {
   const m = message.toLowerCase();
+  if (m.includes("proxy")) return "trustedProxy";
   if (m.includes("oauth") || m.includes("provider")) return "oauth";
   if (m.includes("smtp") || m.includes("mailbox") || m.includes("from address")) return "smtp";
   if (m.includes("redirect")) return "redirectUrls";

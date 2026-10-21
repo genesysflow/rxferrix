@@ -36,8 +36,10 @@ pub const ACCESS_TTL: &str = "accessTokenTtlSecs";
 pub const SESSION_TTL: &str = "sessionTtlSecs";
 pub const CORS_ORIGINS: &str = "corsOrigins";
 pub const BACKUPS: &str = "backups";
+pub const TRUSTED_PROXY: &str = "trustedProxy";
 /// Every setting key.
-pub const KEYS: &[&str] = &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SESSION_TTL, CORS_ORIGINS, BACKUPS];
+pub const KEYS: &[&str] =
+    &[OAUTH, SMTP, REDIRECT_URLS, SIGNUPS, ACCESS_TTL, SESSION_TTL, CORS_ORIGINS, BACKUPS, TRUSTED_PROXY];
 
 /// The kind of an OAuth provider configured at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -97,6 +99,19 @@ impl StoredSmtp {
     }
 }
 
+/// The request headers a reverse proxy puts the client's IP in, trusted in this order (`crate::auth::http::Caller`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct TrustedProxy {
+    /// Header names, e.g. `CF-Connecting-IP`, `X-Forwarded-For`, `Fly-Client-IP`; the first one present wins.
+    pub headers: Vec<String>,
+    /// Take the leftmost IP of a list (`client, proxy1, proxy2`) instead of the rightmost. The leftmost is the
+    /// original client but anyone can forge it; the rightmost is the one the last proxy added.
+    #[serde(default)]
+    pub use_leftmost_ip: bool,
+}
+
 /// A stored row: the JSON value and the plaintext of its secret part.
 pub(crate) type Row = (Value, Option<Vec<u8>>);
 
@@ -112,6 +127,8 @@ pub struct StoredSettings {
     pub cors_origins: Option<Vec<String>>,
     /// Scheduled backups and their destination (`super::backups`).
     pub backups: Option<super::backups::StoredBackups>,
+    /// Where the client IP comes from behind a reverse proxy.
+    pub trusted_proxy: Option<TrustedProxy>,
 }
 
 impl StoredSettings {
@@ -161,6 +178,7 @@ impl StoredSettings {
                 backups.secret_access_key = secret.map(String::from_utf8).transpose()?;
                 self.backups = Some(backups);
             }
+            TRUSTED_PROXY => self.trusted_proxy = Some(serde_json::from_value(value)?),
             other => anyhow::bail!("unknown setting `{other}`"),
         }
         Ok(())
@@ -200,6 +218,10 @@ impl StoredSettings {
                     let secret = b.secret_access_key.as_ref().filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec());
                     (serde_json::to_value(b).expect("serializes"), secret)
                 }),
+            ),
+            (
+                TRUSTED_PROXY,
+                self.trusted_proxy.as_ref().and_then(|p| json(serde_json::to_value(p).expect("serializes"))),
             ),
         ]
     }

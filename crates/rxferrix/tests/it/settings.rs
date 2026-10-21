@@ -261,3 +261,78 @@ async fn test_emails_report_failures_and_cors_origins_apply() {
     http.ok("action", "_system/settings:update", json!({ "clear": ["corsOrigins"] }), &admin).await;
     assert!(origin("https://evil.example.com").await.is_some());
 }
+
+#[tokio::test]
+async fn trusted_proxy_headers_decide_the_client_ip() {
+    let (_t, http, admin) = setup(AuthConfig::password()).await;
+    let client_ip = |pairs: &'static [(&'static str, &'static str)]| {
+        let (http, admin) = (&http, &admin);
+        async move {
+            let mut req = http.client.get(format!("{}/api/admin/client-ip", http.base)).bearer_auth(admin);
+            for (k, v) in pairs {
+                req = req.header(*k, *v);
+            }
+            let res = req.send().await.unwrap();
+            assert_eq!(res.status(), 200);
+            res.json::<Value>().await.unwrap()
+        }
+    };
+    let proxied: &[(&str, &str)] =
+        &[("cf-connecting-ip", "198.51.100.7"), ("x-forwarded-for", "203.0.113.9, 203.0.113.10")];
+
+    // Not behind a proxy by default: the peer address, whatever the headers say.
+    let r = client_ip(proxied).await;
+    assert_eq!((&r["ip"], &r["header"], &r["peer"]), (&json!("127.0.0.1"), &Value::Null, &json!("127.0.0.1")));
+    assert_eq!(r["proxyHeaders"][0], json!({ "name": "cf-connecting-ip", "value": "198.51.100.7" }));
+    assert_eq!(r["proxyHeaders"][1], json!({ "name": "x-forwarded-for", "value": "203.0.113.9, 203.0.113.10" }));
+
+    let (s, b) = update(&http, &admin, json!({ "trustedProxy": { "headers": ["X Forwarded"] } })).await;
+    assert_eq!((s, code_of(&b)), (400, "invalid_settings"), "{b}");
+
+    let view = http
+        .ok("action", "_system/settings:update", json!({ "trustedProxy": { "headers": ["CF-Connecting-IP"] } }), &admin)
+        .await;
+    assert_eq!(view["trustedProxy"], json!({ "headers": ["CF-Connecting-IP"], "useLeftmostIp": false }));
+    assert_eq!(view["effective"]["trustedProxy"]["headers"], json!(["cf-connecting-ip"]));
+    let r = client_ip(proxied).await;
+    assert_eq!((&r["ip"], &r["header"]), (&json!("198.51.100.7"), &json!("cf-connecting-ip")));
+    // A request without the header falls back to the peer.
+    assert_eq!(client_ip(&[]).await["ip"], "127.0.0.1");
+
+    let both = json!({ "trustedProxy": { "headers": ["Fly-Client-IP", "X-Forwarded-For"], "useLeftmostIp": true } });
+    http.ok("action", "_system/settings:update", both, &admin).await;
+    let r = client_ip(proxied).await;
+    assert_eq!((&r["ip"], &r["header"]), (&json!("203.0.113.9"), &json!("x-forwarded-for")));
+
+    http.ok("action", "_system/settings:update", json!({ "clear": ["trustedProxy"] }), &admin).await;
+    assert_eq!(client_ip(proxied).await["ip"], "127.0.0.1");
+}
+
+#[tokio::test]
+async fn trust_proxy_in_the_configuration_locks_the_trusted_headers() {
+    let (_t, http, admin) = setup(AuthConfig::password().trust_proxy(true)).await;
+    let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
+    assert!(view["locked"].as_array().unwrap().contains(&json!("trustedProxy")));
+    assert_eq!(view["effective"]["trustedProxy"], json!({ "headers": ["x-forwarded-for"], "useLeftmostIp": false }));
+    // A stored setting doesn't override it.
+    http.ok(
+        "action",
+        "_system/settings:update",
+        json!({ "trustedProxy": { "headers": ["CF-Connecting-IP"] } }),
+        &admin,
+    )
+    .await;
+    let r: Value = http
+        .client
+        .get(format!("{}/api/admin/client-ip", http.base))
+        .bearer_auth(&admin)
+        .header("cf-connecting-ip", "198.51.100.7")
+        .header("x-forwarded-for", "203.0.113.9")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!((&r["ip"], &r["header"]), (&json!("203.0.113.9"), &json!("x-forwarded-for")));
+}

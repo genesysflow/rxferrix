@@ -279,7 +279,8 @@ impl AuthConfig {
         self
     }
 
-    /// Take the client IP from the last `X-Forwarded-For` entry (set this only behind a reverse proxy).
+    /// Take the client IP from the last `X-Forwarded-For` entry (set this only behind a reverse proxy). Without it,
+    /// the `trustedProxy` setting (dashboard: Settings → IP proxy headers) decides which headers are trusted.
     pub fn trust_proxy(mut self, trust: bool) -> Self {
         self.trust_proxy = trust;
         self

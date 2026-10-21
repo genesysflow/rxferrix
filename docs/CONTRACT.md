@@ -2319,7 +2319,7 @@ need the server's configuration and keys), so the dashboard calls them with `use
 
 **`_settings`** (`Setting`): `{ key, value, encrypted: string | null, updatedAt, updatedBy }`, index `by_key`. One row
 per key: `oauth`, `smtp`, `redirectUrls`, `signups`, `accessTokenTtlSecs`, `sessionTtlSecs`, `corsOrigins`, `backups`
-(§4.4). `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
+(§4.4), `trustedProxy`. `value` holds the non-secret JSON; `encrypted` the secret part (the OAuth client secrets, and Apple private keys, as a JSON map by provider id, the
 SMTP password, or the backups' S3 secret access key), sealed as `v1.<base64url(nonce ‖ ciphertext ‖ tag)>` with XChaCha20-Poly1305 under a key derived
 from `auth_secret.key` (BLAKE3 KDF, context `rxferrix settings v1 …`), a random 192-bit nonce per write, and the row's
 key as associated data. The data browser shows `encrypted` as `"••••"`; generic writes are refused (`read_only_table`).
@@ -2329,7 +2329,7 @@ until the secret is entered again.
 | Path `_system/settings:…` | Kind | Args → result |
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
-| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, trustedProxy?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; `trustedProxy` header names that are valid HTTP header names (trimmed, deduplicated case-insensitively, at most 10; none left clears the key); at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
 | `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.rxferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
@@ -2343,12 +2343,19 @@ type SettingsView = {
   redirectUrls: string[] | null; signups: boolean | null; accessTokenTtlSecs: number | null;
   sessionTtlSecs: number | null; corsOrigins: string[] | null;               // null: not set in _settings
   backups: object | null;  // the stored backups setting (§4.4), secretAccessKey masked
+  trustedProxy: TrustedProxy | null;
   locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
+                         // | "trustedProxy" (with AuthConfig::trust_proxy / --trust-proxy)
                          // | "backups.schedule" | "backups.destination"
   effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
                oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */;
-               backups: object /* §4.4 */ };
+               backups: object /* §4.4 */; trustedProxy: TrustedProxy /* lowercase names; none: the peer address */ };
 };
+// The headers a reverse proxy puts the client IP in, trusted in order: the first one that holds an IP address wins
+// (else the peer address). In a list (`client, proxy1, proxy2`, over every line of the header) the rightmost entry is
+// taken, or the leftmost with useLeftmostIp. `AuthConfig::trust_proxy` / `--trust-proxy` means
+// `{ headers: ["x-forwarded-for"], useLeftmostIp: false }` and wins over the setting.
+type TrustedProxy = { headers: string[]; useLeftmostIp: boolean };
 type OAuthProviderInput = { id: string; kind: OAuthKind; issuer?: string | null; clientId: string;
                             clientSecret?: string | null /* omitted, null or "••••": keep; else replace */;
                             enabled: boolean; scopes?: string[] | null;
@@ -2437,6 +2444,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>` | `{ since, functions: FunctionStats[], olap: OlapStatus \| null, overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, cachedQueries, cacheBytes, cacheHits, cacheMisses, metricsEnabled } }`. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns; `cachedQueries` / `cacheBytes` / `cacheHits` / `cacheMisses` describe the cache of unwatched query results. `olap` is as for `GET /api/admin/olap` (null without `--olap`). `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
 | `GET /api/admin/stats/timeseries?path=&bucket=&since=&until=` | `{ path, bucket, since, until, points: TimePoint[] }`: the executions of `path` (every app function, system ones excluded, without it) that started in `[since, until)`, in buckets of `bucket` (ms, or `30s` / `1m` / `15m` / `1h` / `1d`; default `1m`), oldest first, only buckets with executions. `TimePoint` = `{ t (bucket start), calls, errors, userErrors, serverErrors, p50Us, p95Us, maxUs }` (nearest-rank percentiles). `since` is rounded down to a multiple of `bucket` (the returned `since`); defaults: `until` now, `since` an hour before. At most 1500 buckets, else 400 `invalid_request` (also for a malformed bucket or `until <= since`). From the execution log (`Logs::timeseries`), so only as far back as its retention. For the Functions page's charts. |
+| `GET /api/admin/client-ip` | `{ ip, header, peer, proxyHeaders: { name, value }[] }`: the caller's IP as RxFerrix resolves it with the trusted proxy headers in effect (`trustedProxy`), to check them from the dashboard. `header`: the trusted header it came from (null: the peer address); `proxyHeaders`: the well-known client IP headers (`cf-connecting-ip`, `true-client-ip`, `fly-client-ip`, `fastly-client-ip`, `x-real-ip`, `x-client-ip`, `x-cluster-client-ip`, `x-envoy-external-address`, `x-forwarded-for`, `forwarded`) and trusted ones present on the request, as received (lines joined with `, `). |
 
 **Why bearer auth for SSE too**: `EventSource` can't send headers, but a token in the URL would end up in proxy and
 server logs and browser history. The dashboard reads the stream with `fetch()` and a streamed body instead, so the
@@ -2683,7 +2691,8 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 `RxFerrix::app_routes(axum::Router<App>)` (handlers take `State<App>`: typed `app.query/mutation/action::<F>` calls,
 internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
 with `.with_state(())`). In app routes, the extractor `rxferrix::auth::Caller { ip, user_agent }` gives the client
-address as RxFerrix records it (the last `X-Forwarded-For` entry with `--trust-proxy`, else the peer).
+address as RxFerrix records it (from the trusted proxy headers: the last `X-Forwarded-For` entry with `--trust-proxy`,
+else the `trustedProxy` setting (§4.2); otherwise the peer).
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

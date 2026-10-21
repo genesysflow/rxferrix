@@ -40,7 +40,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
 - **Environment**: environment variables (`ctx.env`): add, edit, reveal, copy, remove, paste a `.env`; live, and
   queries that read a variable rerun as soon as it changes.
 - **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
-  sign-ups, token lifetimes and CORS origins, applied without a restart. Fields fixed by the code, a flag or the
+  sign-ups, token lifetimes, CORS origins and the trusted proxy headers the client IP is read from (showing your IP as
+  the server sees it), applied without a restart. Fields fixed by the code, a flag or the
   environment are read-only; secrets can be replaced but are never shown.
 - **Account**: two-factor authentication for your own administrator account (an authenticator app plus recovery
   codes); signing in then asks for a code after the password. `admin disable-2fa <email>` removes it from the server

@@ -228,7 +228,8 @@ struct ServeArgs {
     /// Sender address for auth emails, e.g. "My App <noreply@example.com>".
     #[arg(long, env = "RXFERRIX_SMTP_FROM", value_name = "ADDRESS")]
     smtp_from: Option<String>,
-    /// Take client IPs (for rate limiting) from the last X-Forwarded-For entry. Only behind a reverse proxy.
+    /// Take client IPs (for rate limiting) from the last X-Forwarded-For entry. Only behind a reverse proxy; overrides
+    /// the trusted proxy headers set in the dashboard.
     #[arg(long, env = "RXFERRIX_TRUST_PROXY")]
     trust_proxy: bool,
     /// Roll back mutations still running after this long, e.g. `5s`, `500ms`, `2m` (a bare number is seconds).

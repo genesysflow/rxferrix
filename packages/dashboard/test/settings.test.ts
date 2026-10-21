@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MASK, type SettingsView } from "../src/lib/api.js";
-import { buildUpdate, formFromView, newProvider, sectionOfError, validate } from "../src/lib/settings.js";
+import { addHeader, buildUpdate, formFromView, newProvider, sectionOfError, validate } from "../src/lib/settings.js";
 
 function view(over: Partial<SettingsView> = {}): SettingsView {
   return {
@@ -12,6 +12,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
     sessionTtlSecs: null,
     corsOrigins: null,
     backups: null,
+    trustedProxy: null,
     locked: [],
     effective: {
       signups: true,
@@ -22,6 +23,7 @@ function view(over: Partial<SettingsView> = {}): SettingsView {
       emailConfigured: false,
       corsOrigins: null,
       backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
+      trustedProxy: { headers: [], useLeftmostIp: false },
     },
     ...over,
   };
@@ -185,6 +187,33 @@ describe("settings form", () => {
     expect(validate(form, view()).corsOrigins).toBeUndefined();
   });
 
+  it("edits the trusted proxy headers", () => {
+    const form = formFromView(view());
+    expect(form.proxyHeaders).toBe("");
+    form.proxyHeaders = addHeader(addHeader(form.proxyHeaders, "CF-Connecting-IP"), "X-Forwarded-For");
+    expect(addHeader(form.proxyHeaders, "cf-connecting-ip")).toBe(form.proxyHeaders);
+    expect(buildUpdate(view(), form)).toEqual({
+      update: { trustedProxy: { headers: ["CF-Connecting-IP", "X-Forwarded-For"], useLeftmostIp: false } },
+      changed: ["trustedProxy"],
+    });
+
+    const saved = view({ trustedProxy: { headers: ["CF-Connecting-IP"], useLeftmostIp: false } });
+    const edit = formFromView(saved);
+    expect(edit.proxyHeaders).toBe("CF-Connecting-IP");
+    expect(buildUpdate(saved, edit).changed).toEqual([]);
+    edit.useLeftmostIp = true;
+    expect(buildUpdate(saved, edit).update).toEqual({ trustedProxy: { headers: ["CF-Connecting-IP"], useLeftmostIp: true } });
+    edit.proxyHeaders = " ";
+    expect(buildUpdate(saved, edit)).toEqual({ update: { clear: ["trustedProxy"] }, changed: ["trustedProxy"] });
+
+    edit.proxyHeaders = "X Forwarded For";
+    expect(validate(edit, saved).trustedProxy).toContain("not a valid header name");
+    // Fixed by the configuration: neither validated nor sent.
+    const locked = view({ locked: ["trustedProxy"] });
+    expect(validate(edit, locked)).toEqual({});
+    expect(buildUpdate(locked, edit).changed).toEqual([]);
+  });
+
   it("maps server messages to the section they concern", () => {
     expect(sectionOfError("SMTP URL must look like smtp://user@host:587")).toBe("smtp");
     expect(sectionOfError("OAuth provider `x`: a client id is required")).toBe("oauth");
@@ -192,6 +221,7 @@ describe("settings form", () => {
     expect(sectionOfError("CORS origin `x` must be an origin like https://app.example.com")).toBe("corsOrigins");
     expect(sectionOfError("accessTokenTtlSecs must be between 30 and 86400 seconds")).toBe("accessTokenTtlSecs");
     expect(sectionOfError("sessionTtlSecs must be between 60 and 34560000 seconds")).toBe("sessionTtlSecs");
+    expect(sectionOfError("trusted proxy header `a b` is not a valid header name")).toBe("trustedProxy");
     expect(sectionOfError("something else")).toBe("general");
   });
 });

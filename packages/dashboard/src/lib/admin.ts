@@ -7,6 +7,7 @@ import { RxFerrixError, type RxFerrixAuth } from "@rxferrix/client";
 import type {
   BackupInfo,
   BackupListing,
+  ClientIp,
   ExportFormat,
   Impersonation,
   ImportMode,
@@ -58,6 +59,12 @@ export async function fetchLogs(auth: RxFerrixAuth, filter: LogFilter): Promise<
 export async function fetchStats(auth: RxFerrixAuth): Promise<Stats> {
   const res = await adminFetch(auth, "/api/admin/stats");
   return (await res.json()) as Stats;
+}
+
+/** `GET /api/admin/client-ip`: this request's client IP as the server resolves it, and the proxy headers it carried. */
+export async function fetchClientIp(auth: RxFerrixAuth): Promise<ClientIp> {
+  const res = await adminFetch(auth, "/api/admin/client-ip");
+  return (await res.json()) as ClientIp;
 }
 
 export interface TailHandlers {

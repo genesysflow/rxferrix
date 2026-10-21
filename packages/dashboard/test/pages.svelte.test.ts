@@ -80,6 +80,7 @@ describe("Settings page", () => {
     sessionTtlSecs: null,
     corsOrigins: null,
     backups: null,
+    trustedProxy: null,
     locked: ["redirectUrls"],
     effective: {
       signups: true,
@@ -90,6 +91,7 @@ describe("Settings page", () => {
       emailConfigured: true,
       corsOrigins: null,
       backups: { target: "/data/backups", everySecs: null, keep: 7, includeAux: false, includeFiles: false, s3Available: true },
+      trustedProxy: { headers: [], useLeftmostIp: false },
     },
   };
 
@@ -165,6 +167,37 @@ describe("Settings page", () => {
     button("Discard").click();
     flushSync();
     expect(target.querySelector("input[aria-label='SMTP password (stored, hidden)']")).not.toBeNull();
+  });
+
+  it("shows the resolved client IP and edits the trusted proxy headers", async () => {
+    const clientIp = { ip: "203.0.113.7", header: null, peer: "203.0.113.7", proxyHeaders: [{ name: "fly-client-ip", value: "198.51.100.9" }] };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(clientIp))));
+    const auth = { getAccessToken: async () => "admin-token" } as unknown as DashboardContext["auth"];
+    mounted = mount(Settings, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, { ...ctx, auth }],
+      ]),
+    });
+    server.open();
+    await answer("_system/settings:get", loaded);
+
+    const resolved = target.querySelector("[data-testid=resolved-ip]")!;
+    expect(resolved.textContent).toContain("203.0.113.7");
+    expect(resolved.textContent).toContain("fly-client-ip: 198.51.100.9");
+    // The header seen on this request is suggested first; a click adds it.
+    button("Fly-Client-IP").click();
+    flushSync();
+    button("CF-Connecting-IP").click();
+    flushSync();
+    expect(target.querySelector<HTMLInputElement>("#proxy-headers")!.value).toBe("Fly-Client-IP, CF-Connecting-IP");
+    button("Save changes").click();
+    const args = await answer("_system/settings:update", {
+      ...loaded,
+      trustedProxy: { headers: ["Fly-Client-IP", "CF-Connecting-IP"], useLeftmostIp: false },
+    });
+    expect(args).toEqual({ trustedProxy: { headers: ["Fly-Client-IP", "CF-Connecting-IP"], useLeftmostIp: false } });
   });
 });
 

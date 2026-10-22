@@ -4,7 +4,7 @@
 #           check of generated code, the TS packages, the committed dashboard build, and the end-to-end tests
 #           (dashboard, todo example, chat example) in Chromium.
 #   olap         clippy and the tests with the `olap` feature (DuckDB, built from source: a job of its own, with its
-#                own cache and disk; with the cache warm, DuckDB isn't rebuilt).
+#                own cache and disk; DuckDB is compiled once on a cold cache, and not at all with the cache warm).
 #   release      scripts/release.sh: x86_64-unknown-linux-musl todo-server with the web app embedded (an artifact;
 #                attached to the GitHub release for v* tags).
 #   release-olap the same with `olap` (todo-server-olap), smoke-tested with `serve --olap`: for v* tags and manual
@@ -17,8 +17,16 @@
 #                token is stored; each crate and package names this workflow as its trusted publisher (README,
 #                "Releasing"). A version already published is skipped, so a failed run can be rerun.
 #
-# A new push to a branch cancels the run it supersedes (tags are never canceled). Caches are saved even when a run
-# fails, so an expensive build (DuckDB) isn't thrown away with a failing test.
+# A new push to a pull request cancels the run it supersedes; pushes to master and tags are never canceled. The gates'
+# and olap caches are saved from master only (pull requests restore them), and even when a run fails, so an expensive
+# build (DuckDB) isn't thrown away with a failing test. A canceled run must never save one: its key would then match
+# exactly, so rust-cache would keep restoring that near-empty cache instead of saving a complete one (it happened:
+# DuckDB was rebuilt on every run).
+#
+# Clippy runs with `--profile test`, after or before `cargo test`, so both share the build scripts' output: with the
+# dev profile, every build script (DuckDB's C++, SQLite, aws-lc) would run twice. The build-override debug settings
+# below keep their dependencies identical as well: by default, cargo strips the debug info of build-only
+# dependencies, except those `cargo test` also builds for the target, and `cargo clippy` builds none of them.
 #
 # SQLite build flags: `.cargo/config.toml` sets LIBSQLITE3_FLAGS for every cargo build in the repository (the release
 # script and the Docker build included). Nothing here may set LIBSQLITE3_FLAGS: an environment variable would replace
@@ -37,7 +45,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,6 +54,9 @@ env:
   # line tables keep backtraces' file:line.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Build scripts and their dependencies the same way in `cargo test` and `cargo clippy --profile test` (see above).
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
 
 jobs:
   gates:
@@ -70,6 +81,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
           # The `rxferrix new` apps and the macro tests build into target directories of their own.
           cache-directories: |
             target/tests/rxferrix-new
@@ -101,7 +113,7 @@ jobs:
         run: cargo test --workspace
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --profile test --workspace --all-targets -- -D warnings
 
       - name: macro tests
         run: CARGO_TARGET_DIR=target/macros cargo test -p rxferrix-macros
@@ -167,7 +179,7 @@ jobs:
 
   olap:
     runs-on: ubuntu-24.04
-    # DuckDB's C++ is compiled twice on a cold cache (clippy, then the tests): ~45 minutes; a few with the cache.
+    # DuckDB's C++ is compiled once on a cold cache (by clippy; the tests reuse it): ~25 minutes; a few with the cache.
     timeout-minutes: 90
     steps:
       - name: free disk space, in the background (the room is needed later)
@@ -185,9 +197,10 @@ jobs:
         with:
           key: olap
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: cargo clippy --features olap
-        run: cargo clippy -p rxferrix -p todo-server --features rxferrix/olap,todo-server/olap --all-targets -- -D warnings
+        run: cargo clippy --profile test -p rxferrix -p todo-server --features rxferrix/olap,todo-server/olap --all-targets -- -D warnings
 
       - name: cargo test --features olap
         run: cargo test -p rxferrix --features olap --lib --test it && df -h /

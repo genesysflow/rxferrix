@@ -26,7 +26,7 @@
       ? Math.max(0, ...points.map((p) => p.p95 ?? 0))
       : Math.max(0, ...points.map((p) => p.calls)),
   );
-  const ticks = $derived(niceTicks(max || (variant === "latency" ? 1 : 4), 4));
+  const ticks = $derived(niceTicks(max || (variant === "latency" ? 1 : 4), 4, variant === "volume"));
   const top = $derived(ticks.at(-1) ?? 1);
   const y = $derived(scale(0, top, height - M.bottom, M.top));
   const barWidth = $derived(Math.max(1, x(t0 + bucket) - x(t0) - 2));

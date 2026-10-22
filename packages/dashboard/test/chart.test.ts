@@ -63,6 +63,18 @@ describe("niceTicks", () => {
       expect(ticks.length).toBeLessThanOrEqual(7);
     }
   });
+
+  it("keeps whole steps for counts", () => {
+    expect(niceTicks(1, 4, true)).toEqual([0, 1]);
+    expect(niceTicks(2, 4, true)).toEqual([0, 1, 2]);
+    expect(niceTicks(10, 4, true)).toEqual([0, 5, 10]);
+    expect(niceTicks(7, 4, true)).toEqual([0, 2, 4, 6, 8]);
+    for (const max of [0.3, 1, 3, 17, 123.4, 99_999]) {
+      const ticks = niceTicks(max, 4, true);
+      expect(ticks.every(Number.isInteger)).toBe(true);
+      expect(ticks.at(-1)!).toBeGreaterThanOrEqual(max);
+    }
+  });
 });
 
 describe("paths and hit testing", () => {

@@ -636,6 +636,30 @@ describe("Overview page", () => {
     expect(card).toContain("1234 rows");
     expect(card).toContain("3.0 MB");
   });
+
+  it("counts the cached queries apart from the shared ones serving subscriptions", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 4, subscriptions: 17, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+      sharedQueries: 25, cachedQueries: 10, queryReruns: 443, subscriptionRounds: 689, cacheHits: 2, cacheMisses: 3,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("/api/admin/stats?") || url === "/api/admin/stats"
+          ? new Response(JSON.stringify({ since: 0, functions: [], overview }))
+          : new Response(JSON.stringify({ points: [] })),
+      ),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const live = target.querySelector("[data-testid=live-stats]")?.textContent?.replace(/\s+/g, " ") ?? "";
+    expect(live).toMatch(/15 ?shared queries serving 17 subscriptions · 10 cached/);
+    expect(live).toContain("443 reruns in 689 rounds since start");
+    expect(live).toMatch(/40% ?hit rate since start/);
+  });
 });
 
 describe("Analytics page", () => {

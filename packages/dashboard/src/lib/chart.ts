@@ -53,12 +53,16 @@ export function totals(points: readonly ChartPoint[]): Totals {
   return { calls, errors, errorRate: calls ? errors / calls : 0, worstP95 };
 }
 
-/** About `count` round tick values from 0 to at least `max` (1, 2 or 5 × 10^n steps). */
-export function niceTicks(max: number, count = 4): number[] {
+/**
+ * About `count` round tick values from 0 to at least `max` (1, 2 or 5 × 10^n steps). `whole` keeps the steps whole
+ * numbers, for counts (no "0.5 calls").
+ */
+export function niceTicks(max: number, count = 4, whole = false): number[] {
   if (!(max > 0) || !Number.isFinite(max)) return [0, 1];
   const raw = max / count;
   const power = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * power).find((s) => s >= raw) ?? 10 * power;
+  const steps = [1, 2, 2.5, 5, 10].map((m) => m * power).filter((s) => !whole || (s >= 1 && Number.isInteger(s)));
+  const step = steps.find((s) => s >= raw) ?? (whole ? Math.max(1, 10 * power) : 10 * power);
   const ticks: number[] = [];
   for (let v = 0; v < max + step * 1e-9; v += step) ticks.push(roundTo(v, step));
   if (ticks[ticks.length - 1]! < max) ticks.push(roundTo(ticks[ticks.length - 1]! + step, step));

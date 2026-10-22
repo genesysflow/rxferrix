@@ -35,6 +35,11 @@
   const isAdmin = $derived(auth.isAuthenticated && auth.isAdmin);
   const tables = useQuery(dashboard.tables, () => (isAdmin ? {} : "skip"));
   const me = useQuery(dashboard.me, () => (isAdmin ? {} : "skip"));
+  // Keep the tables subscribed on every page: the command palette lists them the moment it opens (a fresh
+  // subscription would have none until its first result, and a table typed quickly would open another match).
+  $effect(() => {
+    void tables.data;
+  });
 
   let toasts = $state<{ id: number; message: string; kind: "info" | "error" }[]>([]);
   let nextToast = 0;

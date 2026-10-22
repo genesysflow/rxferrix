@@ -7,6 +7,7 @@ import type { ChartPoint } from "../src/lib/chart.js";
 import type { Command } from "../src/lib/commands.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
 import CommandPalette from "../src/components/CommandPalette.svelte";
+import LineChart from "../src/components/LineChart.svelte";
 import TimeChart from "../src/components/TimeChart.svelte";
 import Account from "../src/pages/Account.svelte";
 import Analytics from "../src/pages/Analytics.svelte";
@@ -550,6 +551,28 @@ describe("TimeChart", () => {
     const ticks = [...target.querySelectorAll("text.axis")].map((t) => t.textContent);
     expect(ticks).toContain("0");
     expect(ticks).toContain("6");
+  });
+});
+
+describe("LineChart", () => {
+  const times = [0, 3000, 6000];
+  const percent = (n: number) => `${n}%`;
+
+  it("keeps a percentage axis at 0–100% for small values", () => {
+    const series = [{ label: "Hit rate", color: "red", values: [0.2, 0.4, null] }];
+    mounted = mount(LineChart, { target, props: { times, series, format: percent, min: 100, max: 100, label: "Hit rate" } });
+    flushSync();
+    const ticks = [...target.querySelectorAll("text.axis")].map((t) => t.textContent);
+    expect(ticks).toContain("0%");
+    expect(ticks).toContain("100%");
+  });
+
+  it("shows the empty message when every value is null", () => {
+    const series = [{ label: "Hit rate", color: "red", values: [null, null, null] }];
+    mounted = mount(LineChart, { target, props: { times, series, label: "Hit rate", empty: "No cache lookups." } });
+    flushSync();
+    expect(target.querySelector("svg")).toBeNull();
+    expect(target.textContent).toContain("No cache lookups.");
   });
 });
 

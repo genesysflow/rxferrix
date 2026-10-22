@@ -45,6 +45,8 @@
   const M = { top: 8, right: 6, bottom: 20, left: 40 };
 
   const pts = $derived(times.map((t, i) => ({ t, i })));
+  /** Every value null (nothing to measure in the window): the empty message, not a bare axis. */
+  const blank = $derived(series.every((s) => s.values.every((v) => v === null)));
   const t0 = $derived(times[0] ?? 0);
   const t1 = $derived((times.at(-1) ?? 0) + step);
   const x = $derived(scale(t0, t1, M.left, Math.max(M.left + 10, width - M.right)));
@@ -73,7 +75,7 @@
 </script>
 
 <figure class="chart" bind:clientWidth={width}>
-  {#if times.length < 2}
+  {#if times.length < 2 || blank}
     <div class="empty faint" style:height={`${height}px`}>{empty}</div>
   {:else}
     <svg {width} {height} role="img" aria-label={label} onpointermove={onmove} onpointerleave={() => (hover = null)}>

@@ -235,6 +235,7 @@
               times={pointTimes}
               step={series?.bucket ?? 0}
               format={percent}
+              min={100}
               max={100}
               empty="No function calls yet."
               series={[{ label: "All functions", color: "var(--err)", values: points.map((p) => (p.calls ? (p.errors / p.calls) * 100 : null)) }]}
@@ -291,14 +292,15 @@
                 ]}
               />
             </Panel>
-            <Panel title="Query Cache" help="HTTP queries and ctx.run_query calls answered from the cache, as a share of all lookups." testid="stat-cache">
-              {@render headline(cacheHitRate(o), `hit rate · ${formatBytes(o.cacheBytes ?? 0)} kept`)}
+            <Panel title="Query Cache" help="HTTP queries and ctx.run_query calls answered from the cache, as a share of all lookups: since the server started in the headline, per 3-second sample in the chart." testid="stat-cache">
+              {@render headline(cacheHitRate(o), `hit rate since start · ${formatBytes(o.cacheBytes ?? 0)} kept`)}
               <LineChart
                 label="Query cache hit rate"
                 {times}
                 format={percent}
+                min={100}
                 max={100}
-                empty={live}
+                empty={times.length < 2 ? live : "No cache lookups in the last 5 minutes."}
                 series={[{ label: "Hit rate", color: "var(--series-3)", values: pick((h) => h.hitRate) }]}
               />
             </Panel>

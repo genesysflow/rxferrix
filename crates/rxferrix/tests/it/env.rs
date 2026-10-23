@@ -148,6 +148,7 @@ async fn values_are_encrypted_at_rest_kept_across_restarts_and_never_logged() {
     assert_eq!(docs["page"][0]["valueEncrypted"], MASK);
 
     // The execution log has `set`'s value masked; the audit log names the variable once, without the value.
+    t.app().logs().flush().await.unwrap();
     let (_, logs) = http.get("/api/admin/logs?path=_system/env:set", Some(&admin)).await;
     let entries = logs["entries"].as_array().unwrap();
     assert!(!entries.is_empty());

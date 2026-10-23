@@ -196,9 +196,9 @@ async fn an_s3_destination_uses_its_own_credentials_encrypted_and_never_shown() 
         .ok("query", "_system/audit:list", json!({ "paginationOpts": { "numItems": 50, "cursor": null } }), &admin)
         .await;
     assert!(!audit.to_string().contains(fake_s3::SECRET));
+    t.app().logs().flush().await.unwrap();
     let (_, logs) = http.get("/api/admin/logs?path=_system/settings:update", Some(&admin)).await;
     assert!(!logs.to_string().contains(fake_s3::SECRET), "{logs}");
-    t.app().logs().flush().await.unwrap();
     for entry in std::fs::read_dir(t.dir()).unwrap() {
         let path = entry.unwrap().path();
         if path.is_file() {

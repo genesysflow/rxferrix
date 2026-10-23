@@ -56,8 +56,9 @@ export async function fetchLogs(auth: RxFerrixAuth, filter: LogFilter): Promise<
   return ((await res.json()) as { entries: LogEntry[] }).entries;
 }
 
-export async function fetchStats(auth: RxFerrixAuth): Promise<Stats> {
-  const res = await adminFetch(auth, "/api/admin/stats");
+/** `GET /api/admin/stats`; the per-function stats without background work with `excludeBackground`. */
+export async function fetchStats(auth: RxFerrixAuth, opts: { excludeBackground?: boolean } = {}): Promise<Stats> {
+  const res = await adminFetch(auth, `/api/admin/stats${opts.excludeBackground ? "?excludeBackground=true" : ""}`);
   return (await res.json()) as Stats;
 }
 
@@ -114,12 +115,15 @@ export interface TimeseriesOptions {
   bucket: number;
   since: number;
   until?: number;
+  /** Leave out scheduled jobs (crons and workflow steps included) and the functions they call. */
+  excludeBackground?: boolean;
 }
 
 export async function fetchTimeseries(auth: RxFerrixAuth, opts: TimeseriesOptions): Promise<Timeseries> {
   const p = new URLSearchParams({ bucket: String(opts.bucket), since: String(Math.floor(opts.since)) });
   if (opts.path) p.set("path", opts.path);
   if (opts.until !== undefined) p.set("until", String(Math.ceil(opts.until)));
+  if (opts.excludeBackground) p.set("excludeBackground", "true");
   const res = await adminFetch(auth, `/api/admin/stats/timeseries?${p}`);
   return (await res.json()) as Timeseries;
 }

@@ -3,6 +3,7 @@ import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MASK, type SettingsView } from "../src/lib/api.js";
+import { background } from "../src/lib/background.svelte.js";
 import type { ChartPoint } from "../src/lib/chart.js";
 import type { Command } from "../src/lib/commands.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
@@ -692,6 +693,45 @@ describe("Overview page", () => {
     const ticks = [...(chart?.querySelectorAll("text.axis") ?? [])].map((t) => t.textContent);
     expect(ticks).toContain("2%");
     expect(ticks).not.toContain("100%");
+  });
+
+  it("hides background jobs from the function charts and tables, and remembers it", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+    };
+    const fn = (path: string, calls: number) => ({ path, kind: "mutation", calls, errors: 0, userErrors: 0, serverErrors: 0, p50Us: 1, p95Us: 1 });
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        if (url.startsWith("/api/admin/stats/timeseries?")) return new Response(JSON.stringify({ points: [] }));
+        const hidden = url.includes("excludeBackground=true");
+        const functions = hidden ? [fn("todos:add", 3)] : [fn("todos:add", 4), fn("todos:cleanup", 9)];
+        return new Response(JSON.stringify({ since: 0, functions, overview }));
+      }),
+    );
+    localStorage.clear();
+    background.hidden = false;
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    expect(target.textContent).toContain("todos:cleanup");
+
+    const toggle = target.querySelector<HTMLInputElement>("[data-testid=hide-background]")!;
+    toggle.click();
+    await settle();
+    expect(target.textContent).not.toContain("todos:cleanup");
+    expect(target.textContent).toContain("background jobs hidden");
+    expect(urls.filter((u) => u.includes("excludeBackground=true")).map((u) => u.split("?")[0])).toEqual([
+      "/api/admin/stats",
+      "/api/admin/stats/timeseries",
+    ]);
+    expect(localStorage.getItem("rxferrix.dashboard.hideBackground")).toBe("1");
+    background.hidden = false;
+    expect(localStorage.getItem("rxferrix.dashboard.hideBackground")).toBeNull();
   });
 });
 

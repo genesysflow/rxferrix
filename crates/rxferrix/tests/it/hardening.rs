@@ -189,7 +189,7 @@ async fn execution_log_records_every_execution_with_log_lines() {
     assert_eq!((first.id, first.path.clone()), (add.id, add.path.clone()));
 
     // Per-function stats.
-    let stats = logs.stats(0).await.unwrap();
+    let stats = logs.stats(0, false).await.unwrap();
     let s = stats.iter().find(|s| s.path == fns::logged_fail::path()).unwrap();
     assert_eq!((s.calls, s.errors, s.user_errors, s.server_errors), (1, 1, 1, 0));
     let s = stats.iter().find(|s| s.path == fns::logged_add::path()).unwrap();

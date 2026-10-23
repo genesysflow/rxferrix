@@ -1,9 +1,11 @@
 <script lang="ts">
   import type { Timeseries } from "../lib/api.js";
   import { fetchTimeseries } from "../lib/admin.js";
+  import { background } from "../lib/background.svelte.js";
   import { fillBuckets, RANGES, rangeWindow, totals, type RangeId } from "../lib/chart.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatDuration } from "../lib/format.js";
+  import BackgroundToggle from "./BackgroundToggle.svelte";
   import TimeChart from "./TimeChart.svelte";
 
   /** Per-function latency (p50/p95) and calls/errors over time, from the execution log; refreshes every 10s. */
@@ -18,6 +20,7 @@
   $effect(() => {
     const { rangeMs, bucketMs } = range;
     const p = path;
+    const excludeBackground = background.hidden;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     series = null;
@@ -25,7 +28,7 @@
     async function poll() {
       try {
         const { since, until } = rangeWindow(rangeMs, bucketMs, Date.now());
-        const s = await fetchTimeseries(ctx.auth, { path: p, bucket: bucketMs, since, until });
+        const s = await fetchTimeseries(ctx.auth, { path: p, bucket: bucketMs, since, until, excludeBackground });
         if (!stopped) {
           series = s;
           error = null;
@@ -59,6 +62,7 @@
         <button class="small" class:active={r.id === rangeId} aria-pressed={r.id === rangeId} onclick={() => (rangeId = r.id)}>{r.id}</button>
       {/each}
     </div>
+    <BackgroundToggle />
     <span class="spacer"></span>
     {#if series}
       <span class="stats" data-testid="activity-totals">
@@ -75,7 +79,10 @@
     <p class="faint">Loading…</p>
   {:else}
     {#if sum.calls === 0}
-      <p class="faint empty">No calls in the last {range.label}. Run the function to see its latency here.</p>
+      <p class="faint empty">
+        No calls{background.hidden ? " outside background jobs" : ""} in the last {range.label}. Run the function to see its
+        latency here.
+      </p>
     {/if}
     <div class="charts">
       <TimeChart {points} bucket={series.bucket} variant="latency" label="Latency" />

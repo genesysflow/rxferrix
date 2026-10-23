@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { onMount, type Snippet } from "svelte";
+  import type { Snippet } from "svelte";
   import type { FunctionStats, Stats, Timeseries } from "../lib/api.js";
   import { fetchStats, fetchTimeseries } from "../lib/admin.js";
+  import { background } from "../lib/background.svelte.js";
   import { fillBuckets, RANGES, rangeWindow, totals } from "../lib/chart.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatBytes, formatDuration, formatSpan, formatTime, formatUptime } from "../lib/format.js";
   import { href, link } from "../lib/router.svelte.js";
+  import BackgroundToggle from "../components/BackgroundToggle.svelte";
   import Empty from "../components/Empty.svelte";
   import LineChart from "../components/LineChart.svelte";
   import Panel from "../components/Panel.svelte";
@@ -13,7 +15,10 @@
   const ctx = dashboardContext();
   let stats = $state<Stats | null>(null);
   let error = $state<string | null>(null);
-  /** Every app function's executions over the last 24 hours, in 15-minute buckets (refreshed every 30s). */
+  /**
+   * Every app function's executions over the last 24 hours, in 15-minute buckets (refreshed every 30s); without
+   * background work when it is hidden (as are the busiest and failing functions).
+   */
   let series = $state<Timeseries | null>(null);
   /** Recent samples of the live counters (one per poll, 5 minutes' worth), for the live charts. */
   let history = $state<Sample[]>([]);
@@ -36,11 +41,14 @@
 
   const DAY = RANGES.find((r) => r.id === "24h")!;
 
-  onMount(() => {
+  // Restarted (polling at once) when background work is hidden or shown.
+  $effect(() => {
+    const excludeBackground = background.hidden;
     let stopped = false;
     async function poll() {
       try {
-        const next = await fetchStats(ctx.auth);
+        const next = await fetchStats(ctx.auth, { excludeBackground });
+        if (stopped) return;
         const o = next.overview;
         const p = previous?.overview;
         // Reruns per second between two polls (the server reports a running total).
@@ -66,6 +74,7 @@
         stats = next;
         error = null;
       } catch (e) {
+        if (stopped) return;
         error = e instanceof Error ? e.message : String(e);
       }
       if (!stopped) timer = setTimeout(poll, 3000);
@@ -73,7 +82,7 @@
     async function pollSeries() {
       try {
         const { since, until } = rangeWindow(DAY.rangeMs, DAY.bucketMs, Date.now());
-        const s = await fetchTimeseries(ctx.auth, { bucket: DAY.bucketMs, since, until });
+        const s = await fetchTimeseries(ctx.auth, { bucket: DAY.bucketMs, since, until, excludeBackground });
         if (!stopped) series = s;
       } catch {
         // The stats poll reports a failing server; the charts keep their last data.
@@ -165,6 +174,7 @@
     <h1>Overview</h1>
     {#if stats}<span class="muted small">rxferrix {stats.overview.version}{stats.overview.dev ? " · dev mode" : ""}</span>{/if}
     <span class="spacer"></span>
+    <BackgroundToggle />
     <span class="faint small">refreshes every 3s</span>
   </header>
   <div class="page-body">
@@ -272,7 +282,7 @@
           </Panel>
         </div>
       {/snippet}
-      {@render section("Functions", "last 24 hours", functionsBody)}
+      {@render section("Functions", background.hidden ? "last 24 hours · background jobs hidden" : "last 24 hours", functionsBody)}
 
       {#if o.commitsPerSecond !== undefined}
         {#snippet liveBody()}

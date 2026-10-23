@@ -339,6 +339,8 @@ try {
   await shot(a, "reminder");
 
   console.log("infinite scroll: seed 200 messages, scroll up to the first");
+  // Keep a full first page taller than the viewport: history must start loading in response to scrolling.
+  await b.setViewportSize({ width: 1280, height: 600 });
   await send(a, "/seed 200");
   await a.getByTestId("notice").filter({ hasText: "Added 200 sample messages" }).waitFor({ timeout: 15000 });
   const first = message(b, "Sample message #1 of 200");

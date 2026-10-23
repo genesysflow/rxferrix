@@ -170,7 +170,7 @@ tokio::task_local! {
 
 /// The execution log's caller for anonymous executions inside a scheduled job (and the functions it calls).
 pub(crate) fn log_caller() -> Option<String> {
-    IN_JOB.try_with(|_| ()).ok().map(|()| "scheduler".to_string())
+    IN_JOB.try_with(|_| ()).ok().map(|()| crate::exec_log::SCHEDULER.to_string())
 }
 
 fn user_error(code: &str, message: impl Into<String>) -> Error {

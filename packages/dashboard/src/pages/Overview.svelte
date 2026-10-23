@@ -22,9 +22,11 @@
   interface Sample {
     at: number;
     commits: number;
-    reruns: number;
+    /** Null for the first sample (no previous one to compare with). */
+    reruns: number | null;
     sockets: number;
     subscriptions: number;
+    /** Shared queries with a subscriber (not the cached ones nobody watches). */
     shared: number;
     pending: number;
     running: number;
@@ -45,7 +47,7 @@
         const reruns =
           p && o.queryReruns !== undefined && p.queryReruns !== undefined
             ? Math.max(0, o.queryReruns - p.queryReruns) / Math.max(0.001, (o.now - p.now) / 1000)
-            : 0;
+            : null;
         const hits = p ? (o.cacheHits ?? 0) - (p.cacheHits ?? 0) : 0;
         const lookups = p ? hits + (o.cacheMisses ?? 0) - (p.cacheMisses ?? 0) : 0;
         const sample: Sample = {
@@ -54,7 +56,7 @@
           reruns,
           sockets: o.sockets,
           subscriptions: o.subscriptions,
-          shared: o.sharedQueries ?? 0,
+          shared: liveShared(o),
           pending: o.queueDepth ?? 0,
           running: o.runningJobs ?? 0,
           hitRate: lookups > 0 ? (Math.max(0, hits) / lookups) * 100 : null,
@@ -103,6 +105,11 @@
   const sum = $derived(totals(points));
   const times = $derived(history.map((h) => h.at));
   const pick = (f: (h: Sample) => number | null) => history.map(f);
+
+  /** The server counts the cached queries (nobody subscribed) among its shared queries. */
+  function liveShared(o: Stats["overview"]): number {
+    return Math.max(0, (o.sharedQueries ?? 0) - (o.cachedQueries ?? 0));
+  }
 
   function cacheHitRate(o: Stats["overview"]): string {
     const total = (o.cacheHits ?? 0) + (o.cacheMisses ?? 0);
@@ -221,6 +228,7 @@
               times={pointTimes}
               step={series?.bucket ?? 0}
               format={count}
+              whole
               empty="No function calls yet."
               series={[
                 { label: "Calls", color: "var(--series-1)", values: points.map((p) => p.calls) },
@@ -235,7 +243,6 @@
               times={pointTimes}
               step={series?.bucket ?? 0}
               format={percent}
-              min={100}
               max={100}
               empty="No function calls yet."
               series={[{ label: "All functions", color: "var(--err)", values: points.map((p) => (p.calls ? (p.errors / p.calls) * 100 : null)) }]}
@@ -275,15 +282,16 @@
               <LineChart label="Commits per second" {times} format={count} empty={live} series={[{ label: "Commits / s", color: "var(--series-1)", values: pick((h) => h.commits) }]} />
             </Panel>
             <Panel title="Query reruns / s" help="Subscribed queries rerun per second because a commit changed what they read.">
-              {@render headline(rate(history.at(-1)?.reruns ?? 0), `${o.queryReruns ?? 0} reruns in ${o.subscriptionRounds ?? 0} rounds`)}
+              {@render headline(rate(history.at(-1)?.reruns ?? 0), `${o.queryReruns ?? 0} reruns in ${o.subscriptionRounds ?? 0} rounds since start`)}
               <LineChart label="Query reruns per second" {times} format={count} empty={live} series={[{ label: "Reruns / s", color: "var(--series-1)", values: pick((h) => h.reruns) }]} />
             </Panel>
-            <Panel title="Subscriptions" help="Open connections, the live subscriptions they hold, and the distinct (shared) queries serving them.">
-              {@render headline(String(o.sharedQueries ?? 0), `shared queries serving ${o.subscriptions} subscriptions · ${o.cachedQueries ?? 0} cached`)}
+            <Panel title="Subscriptions" help="Open connections, the live subscriptions they hold, and the distinct (shared) queries serving them. Cached queries nobody subscribes to are counted apart.">
+              {@render headline(String(liveShared(o)), `shared queries serving ${o.subscriptions} subscriptions · ${o.cachedQueries ?? 0} cached`)}
               <LineChart
                 label="Subscriptions"
                 {times}
                 format={count}
+                whole
                 empty={live}
                 series={[
                   { label: "Connections", color: "var(--series-1)", values: pick((h) => h.sockets) },
@@ -310,6 +318,7 @@
                 label="Scheduler queue"
                 {times}
                 format={count}
+                whole
                 empty={live}
                 series={[
                   { label: "Pending", color: "var(--series-1)", values: pick((h) => h.pending) },

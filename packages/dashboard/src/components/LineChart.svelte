@@ -24,6 +24,7 @@
     height = 140,
     min = 1,
     max,
+    whole = false,
     label,
     empty = "No data yet.",
   }: {
@@ -36,6 +37,8 @@
     min?: number;
     /** …and at most this (100 for a percentage). */
     max?: number;
+    /** The values are counts: whole-number axis steps. */
+    whole?: boolean;
     label: string;
     empty?: string;
   } = $props();
@@ -51,7 +54,7 @@
   const t1 = $derived((times.at(-1) ?? 0) + step);
   const x = $derived(scale(t0, t1, M.left, Math.max(M.left + 10, width - M.right)));
   const peak = $derived(Math.max(min, ...series.flatMap((s) => s.values.map((v) => v ?? 0))));
-  const ticks = $derived(niceTicks(max === undefined ? peak : Math.min(peak, max), 4));
+  const ticks = $derived(niceTicks(max === undefined ? peak : Math.min(peak, max), 4, whole));
   const y = $derived(scale(0, ticks.at(-1) ?? 1, height - M.bottom, M.top));
   /** Time labels at round times, skipping any that would hang over the plot's edges. */
   const xTicks = $derived(

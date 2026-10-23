@@ -636,6 +636,63 @@ describe("Overview page", () => {
     expect(card).toContain("1234 rows");
     expect(card).toContain("3.0 MB");
   });
+
+  it("counts the cached queries apart from the shared ones serving subscriptions", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 4, subscriptions: 17, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+      sharedQueries: 25, cachedQueries: 10, queryReruns: 443, subscriptionRounds: 689, cacheHits: 2, cacheMisses: 3,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("/api/admin/stats?") || url === "/api/admin/stats"
+          ? new Response(JSON.stringify({ since: 0, functions: [], overview }))
+          : new Response(JSON.stringify({ points: [] })),
+      ),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const live = target.querySelector("[data-testid=live-stats]")?.textContent?.replace(/\s+/g, " ") ?? "";
+    expect(live).toMatch(/15 ?shared queries serving 17 subscriptions · 10 cached/);
+    expect(live).toContain("443 reruns in 689 rounds since start");
+    expect(live).toMatch(/40% ?hit rate since start/);
+  });
+
+  it("scales the failure rate axis to small rates", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+    };
+    const point = (t: number, calls: number, errors: number) => ({
+      t, calls, errors, userErrors: errors, serverErrors: 0, p50Us: 500, p95Us: 900, maxUs: 1000,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/admin/stats/timeseries?")) {
+          const q = new URLSearchParams(url.split("?")[1]);
+          const bucket = Number(q.get("bucket"));
+          const since = Number(q.get("since"));
+          const until = Number(q.get("until"));
+          // 0.5% and 2% of calls failed: the axis should end near 2%, not at 100%.
+          const points = [point(since, 200, 1), point(since + bucket, 100, 2)];
+          return new Response(JSON.stringify({ path: null, bucket, since, until, points }));
+        }
+        return new Response(JSON.stringify({ since: 0, functions: [], overview }));
+      }),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const chart = target.querySelector("svg[aria-label='Failure rate']");
+    const ticks = [...(chart?.querySelectorAll("text.axis") ?? [])].map((t) => t.textContent);
+    expect(ticks).toContain("2%");
+    expect(ticks).not.toContain("100%");
+  });
 });
 
 describe("Analytics page", () => {

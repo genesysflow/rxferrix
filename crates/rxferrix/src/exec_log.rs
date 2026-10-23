@@ -11,7 +11,8 @@
 //!
 //! The dashboard reads it through [`App::logs`](crate::App::logs): [`Logs::query`] (filtered, newest first,
 //! paginated by id), [`Logs::subscribe`] (live tail), [`Logs::stats`] (per-function calls, errors, p50/p95) and
-//! [`Logs::timeseries`] (the same aggregates per time bucket, for the dashboard's charts).
+//! [`Logs::timeseries`] (the same aggregates per time bucket, for the dashboard's charts). Each can leave out background
+//! work: the executions of scheduled jobs (crons and workflow steps included), whose caller is [`SCHEDULER`].
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -203,6 +204,9 @@ pub struct LogFilter {
     pub identity: Option<String>,
     /// Leave out rxferrix's own functions (paths under `_system/`, e.g. the dashboard's queries).
     pub exclude_system: bool,
+    /// Leave out background work: scheduled jobs (crons and workflow steps included) and the functions they call, whose
+    /// caller is [`SCHEDULER`]. What is left is what clients ran.
+    pub exclude_background: bool,
 }
 
 impl LogFilter {
@@ -216,11 +220,21 @@ impl LogFilter {
             && self.since.is_none_or(|t| entry.timestamp >= t)
             && self.identity.as_deref().is_none_or(|i| entry.identity.as_deref().unwrap_or(ANONYMOUS) == i)
             && !(self.exclude_system && crate::private::is_system_path(&entry.path))
+            && !(self.exclude_background && entry.identity.as_deref() == Some(SCHEDULER))
     }
 }
 
 /// The [`LogFilter::identity`] value matching anonymous callers.
 pub const ANONYMOUS: &str = "anonymous";
+
+/// The [`LogEntry::identity`] of executions inside a scheduled job (they run anonymously, whoever scheduled them).
+pub const SCHEDULER: &str = "scheduler";
+
+/// SQL condition leaving out background work ([`LogFilter::exclude_background`]); `IS NOT` keeps anonymous rows.
+const NOT_BACKGROUND: &str = " AND identity IS NOT 'scheduler'";
+
+/// SQL condition leaving out system functions (`is_system_path`: the first path segment is exactly `_system`).
+const NOT_SYSTEM: &str = " AND NOT (path = '_system' OR substr(path, 1, 8) IN ('_system/', '_system:'))";
 
 mod opt_kind_serde {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -270,6 +284,8 @@ pub struct TimeseriesSpec {
     /// ms since the epoch, exclusive.
     pub until: i64,
     pub bucket_ms: i64,
+    /// Leave out background work, as [`LogFilter::exclude_background`].
+    pub exclude_background: bool,
 }
 
 /// One time bucket of [`Logs::timeseries`]: the executions that started in `[t, t + bucket)`.
@@ -411,9 +427,10 @@ impl Logs {
     }
 
     /// Per-function calls, errors and p50/p95 duration for executions that started at or after `since`
-    /// (ms since the epoch), sorted by path.
-    pub async fn stats(&self, since: i64) -> anyhow::Result<Vec<FunctionStats>> {
-        self.with_reader(move |conn| stats(conn, since)).await
+    /// (ms since the epoch), sorted by path; without background work with `exclude_background`
+    /// ([`LogFilter::exclude_background`]).
+    pub async fn stats(&self, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
+        self.with_reader(move |conn| stats(conn, since, exclude_background)).await
     }
 
     /// Calls, errors and p50/p95/max duration per time bucket (oldest first; only buckets with executions), for the
@@ -578,8 +595,10 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
         Some(identity) => arg(&mut sql, " AND identity = ?", identity.to_string().into()),
     }
     if f.exclude_system {
-        // `is_system_path`: the first path segment is exactly `_system`.
-        sql.push_str(" AND NOT (path = '_system' OR substr(path, 1, 8) IN ('_system/', '_system:'))");
+        sql.push_str(NOT_SYSTEM);
+    }
+    if f.exclude_background {
+        sql.push_str(NOT_BACKGROUND);
     }
     let limit = f.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
     arg(&mut sql, " ORDER BY id DESC LIMIT ?", (limit as i64).into());
@@ -588,9 +607,11 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn stats(conn: &Connection, since: i64) -> anyhow::Result<Vec<FunctionStats>> {
-    let mut stmt =
-        conn.prepare("SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1 ORDER BY path")?;
+fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
+    let filter = if exclude_background { NOT_BACKGROUND } else { "" };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1{filter} ORDER BY path"
+    ))?;
     let mut rows = stmt.query([since])?;
     let mut out: Vec<(FunctionStats, Vec<u64>)> = Vec::new();
     while let Some(r) = rows.next()? {
@@ -649,7 +670,10 @@ fn timeseries(conn: &Connection, spec: &TimeseriesSpec) -> anyhow::Result<Vec<Ti
             sql.push_str(" AND path = ?3");
             args.push(path.clone().into());
         }
-        None => sql.push_str(" AND NOT (path = '_system' OR substr(path, 1, 8) IN ('_system/', '_system:'))"),
+        None => sql.push_str(NOT_SYSTEM),
+    }
+    if spec.exclude_background {
+        sql.push_str(NOT_BACKGROUND);
     }
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
@@ -773,7 +797,7 @@ mod tests {
         let recent = logs.query(LogFilter { since: Some(now - 1000), ..Default::default() }).await.unwrap();
         assert_eq!(recent.len(), 3);
 
-        let stats = logs.stats(now - 1000).await.unwrap();
+        let stats = logs.stats(now - 1000, false).await.unwrap();
         assert_eq!(stats.len(), 2);
         let add = &stats[0];
         assert_eq!(
@@ -802,6 +826,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_work_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = Logs::open(&dir.path().join("aux.db"), LogRetention::default()).unwrap();
+        let now = crate::db::wall_clock_ms() as i64;
+        let by = |path: &str, identity: Option<&str>| LogEntry {
+            identity: identity.map(Into::into),
+            ..entry(path, FunctionKind::Mutation, LogOutcome::Success, 10, now)
+        };
+        logs.record(by("todos:add", Some("user:u1")));
+        logs.record(by("todos:add", None));
+        logs.record(by("todos:add", Some(SCHEDULER)));
+        logs.record(by("todos:cleanup", Some(SCHEDULER)));
+        logs.flush().await.unwrap();
+
+        let foreground = LogFilter { exclude_background: true, ..Default::default() };
+        let left = logs.query(foreground.clone()).await.unwrap();
+        assert_eq!(left.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2, 1], "anonymous callers are kept");
+        assert!(foreground.matches(&by("todos:add", None)) && foreground.matches(&by("todos:add", Some("user:u1"))));
+        assert!(!foreground.matches(&by("todos:add", Some(SCHEDULER))));
+        assert_eq!(logs.query(LogFilter::default()).await.unwrap().len(), 4);
+
+        let calls = |stats: Vec<FunctionStats>| stats.iter().map(|s| (s.path.clone(), s.calls)).collect::<Vec<_>>();
+        assert_eq!(calls(logs.stats(0, true).await.unwrap()), vec![("todos:add".to_string(), 2)]);
+        assert_eq!(
+            calls(logs.stats(0, false).await.unwrap()),
+            vec![("todos:add".to_string(), 3), ("todos:cleanup".to_string(), 1)]
+        );
+
+        let spec = TimeseriesSpec {
+            path: None,
+            since: now - 60_000,
+            until: now + 1,
+            bucket_ms: 120_000,
+            exclude_background: true,
+        };
+        assert_eq!(logs.timeseries(spec.clone()).await.unwrap()[0].calls, 2);
+        let one = TimeseriesSpec { path: Some("todos:cleanup".into()), ..spec.clone() };
+        assert!(logs.timeseries(one).await.unwrap().is_empty());
+        assert_eq!(logs.timeseries(TimeseriesSpec { exclude_background: false, ..spec }).await.unwrap()[0].calls, 4);
+
+        let filter: LogFilter = serde_json::from_value(serde_json::json!({ "excludeBackground": true })).unwrap();
+        assert!(filter.exclude_background);
+    }
+
+    #[tokio::test]
     async fn timeseries_buckets() {
         let dir = tempfile::tempdir().unwrap();
         let logs = Logs::open(&dir.path().join("aux.db"), LogRetention::default()).unwrap();
@@ -822,8 +891,13 @@ mod tests {
         logs.record(add(9, 5 * 60_000, LogOutcome::Success));
         logs.flush().await.unwrap();
 
-        let spec =
-            TimeseriesSpec { path: Some("todos:add".into()), since: base, until: base + 5 * 60_000, bucket_ms: 60_000 };
+        let spec = TimeseriesSpec {
+            path: Some("todos:add".into()),
+            since: base,
+            until: base + 5 * 60_000,
+            bucket_ms: 60_000,
+            exclude_background: false,
+        };
         let points = logs.timeseries(spec.clone()).await.unwrap();
         assert_eq!(points.len(), 2, "{points:?}");
         assert_eq!(

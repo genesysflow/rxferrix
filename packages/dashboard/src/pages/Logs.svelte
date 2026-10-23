@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { LogFilter } from "../lib/api.js";
+  import { background } from "../lib/background.svelte.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
+  import BackgroundToggle from "../components/BackgroundToggle.svelte";
   import LogTail from "../components/LogTail.svelte";
 
   /** `?fn=<path>`: only that function (the function view links here). */
@@ -23,6 +25,7 @@
     kind,
     outcome,
     excludeSystem: !includeSystem && !fn,
+    excludeBackground: background.hidden,
   });
 
   function onkeydown(e: KeyboardEvent) {
@@ -62,6 +65,7 @@
       <option value="">All outcomes</option><option value="success">success</option><option value="userError">user error</option><option value="serverError">server error</option>
     </select>
     {#if !fn}<label class="inline"><input type="checkbox" bind:checked={includeSystem} /> include system functions</label>{/if}
+    <BackgroundToggle />
   </div>
 
   <div class="body">

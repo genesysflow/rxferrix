@@ -2,6 +2,7 @@
   import { RxFerrixError } from "@rxferrix/client";
   import { useAction, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
   import { dashboard, type FunctionSummary, type Json, type RunResult } from "../lib/api.js";
+  import { background } from "../lib/background.svelte.js";
   import { parseJson, pretty } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
@@ -182,7 +183,7 @@
         </div>
         <div class="fn-logs" data-testid="function-logs">
           {#key selected.path}
-            <LogTail filter={{ path: selected.path }} pageSize={20} showPath={false} bind:status={logStatus} />
+            <LogTail filter={{ path: selected.path, excludeBackground: background.hidden }} pageSize={20} showPath={false} bind:status={logStatus} />
           {/key}
         </div>
       </div>

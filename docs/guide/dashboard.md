@@ -16,6 +16,9 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
   the execution log, and the function's own live log.
 - **Logs**: a live tail of executions (filter by path or one function, kind, outcome; expand for the error, log lines
   and args); new executions slide in, tinted by outcome.
+- **Hide background jobs**: a switch on the Overview, a function's activity and Logs that leaves out scheduled jobs,
+  crons and workflow steps (and the functions they call), so the charts, tables and logs show only what clients ran.
+  It applies to every page and is remembered per browser.
 - **Users**: users, linked providers, two-factor status (with a reset for users who lost their authenticator),
   sessions (revoked live; impersonation sessions marked), delete, and "open app as
   user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.

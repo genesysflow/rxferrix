@@ -357,7 +357,9 @@ async fn system_tables_without_secrets() {
 #[tokio::test]
 async fn the_sandbox() {
     let mut options = olap(false);
-    options.olap.query_timeout = Duration::from_millis(300);
+    // Short, for the endless query at the end, yet well above what failing ones take on a slow runner: DuckDB looks for
+    // similar names before reporting an unknown function (`getenv`), ~140ms in a debug build.
+    options.olap.query_timeout = Duration::from_secs(2);
     options.olap.max_result_rows = 1000;
     let t = TestApp::with_options(options).await.unwrap();
     t.mutation::<add>(("ann".to_string(), 1.0, 1)).await.unwrap();

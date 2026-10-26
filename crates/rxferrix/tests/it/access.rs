@@ -90,9 +90,10 @@ mod app {
         ctx.users.revoke_sessions(user).await
     }
 
+    /// A string, not `Id<Session>`: codegen's types only know the `_users` system table.
     #[query]
-    pub async fn my_session(ctx: &QueryCtx) -> Result<Option<Id<Session>>> {
-        Ok(ctx.auth.session_id())
+    pub async fn my_session(ctx: &QueryCtx) -> Result<Option<String>> {
+        Ok(ctx.auth.session_id().map(|s| s.to_string()))
     }
 
     /// Ends one session, then fails: the session must survive the rollback.

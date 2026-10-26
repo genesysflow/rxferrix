@@ -35,6 +35,8 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
   assertType<
     Equals<
       TableNames,
+      | "access_grants"
+      | "access_items"
       | "agg_orders"
       | "ann_items"
       | "attachments"

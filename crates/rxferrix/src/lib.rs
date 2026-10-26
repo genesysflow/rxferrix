@@ -5,7 +5,7 @@
 //! - [`keys`]: memcomparable index key encoding.
 //! - [`db`]: SQLite storage, catalog, snapshots, the write transaction, the query engine and read sets.
 //! - [`writelog`]: recent commits, used to invalidate subscriptions.
-//! - [`runtime`]: function registry, contexts and [`App`].
+//! - [`runtime`]: function registry, contexts and [`App`]. [`guard`]: the app's check before every client call.
 //! - [`log`]: `log::info!` & co. for functions, and capture of their log lines. [`exec_log`]: the execution log in
 //!   `aux.db` ([`App::logs`]).
 //! - [`sync`]: WebSocket protocol messages, the per-connection sync worker, and the shared subscription manager.
@@ -34,6 +34,7 @@ mod determinism;
 pub mod env;
 pub mod error;
 pub mod exec_log;
+pub mod guard;
 pub mod id;
 pub mod keys;
 pub mod log;
@@ -70,6 +71,7 @@ pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQu
 pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
 pub use error::{Error, MutationTimeout, QueryTimeout, Result, UserError};
 pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
+pub use guard::{Guard, GuardCtx, GuardedFunction};
 pub use id::Id;
 pub use private::FunctionKind;
 pub use runtime::{

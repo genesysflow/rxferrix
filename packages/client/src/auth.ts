@@ -495,9 +495,17 @@ export class RxFerrixAuth {
 
   /**
    * Create an account with email and password and sign in. Resolves `{ verificationRequired: true }` (without
-   * signing in) when the server requires a verified email first.
+   * signing in) when the server requires a verified email first. `redirectTo` is the page the verification email
+   * links to (it must be allowed by the server's `--auth-redirect-url` list), and what the server's sign-up check
+   * (`before_sign_up`) sees: an invite page passes its own URL. A refused sign-up rejects with the check's code
+   * (`signup_not_allowed`, or the app's own, such as `invite_required`).
    */
-  async signUp(args: { email: string; password: string; name?: string }): Promise<{ verificationRequired: boolean }> {
+  async signUp(args: {
+    email: string;
+    password: string;
+    name?: string;
+    redirectTo?: string;
+  }): Promise<{ verificationRequired: boolean }> {
     const res = await this.post<AuthTokens | { verificationRequired: true }>("signup", args);
     if ("accessToken" in res) {
       await this.signedIn(res);

@@ -304,7 +304,7 @@ async fn fifty_sockets_one_execution_per_commit() {
 // ---------------------------------------------------------------------------------------------------------------------
 
 pub async fn sign_up(app: &App, email: &str) -> (String, String) {
-    let res = app.auth().sign_up(app, email, "correct horse".into(), None, ClientInfo::default()).await.unwrap();
+    let res = app.auth().sign_up(app, email, "correct horse".into(), None, None, ClientInfo::default()).await.unwrap();
     let SignUpResult::SignedIn(tokens) = res else { panic!("signed in") };
     (tokens.user_id.clone().unwrap(), tokens.access_token)
 }

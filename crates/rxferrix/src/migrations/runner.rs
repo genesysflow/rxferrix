@@ -10,6 +10,7 @@ use super::{
 };
 use crate::db::query::MutationDb;
 use crate::db::schema_check;
+use crate::guard::Origin;
 use crate::private::MigrationDef;
 use crate::runtime::{App, Identity, MutationHook};
 use crate::schema::{CREATION_TIME_FIELD, ID_FIELD};
@@ -262,12 +263,13 @@ async fn call_batch(app: &App, name: &str, dry_run: bool, cursor: Option<String>
     let args = json!({ "name": name, "dryRun": dry_run, "cursor": cursor });
     let hook: Option<&dyn MutationHook> = if dry_run { Some(&RollBack) } else { None };
     let path = <super::run_batch as FunctionRef>::path();
-    let run = app.call_mutation_hooked(&path, args, &Identity::default(), true, None, hook).await;
+    let run = app.call_mutation_hooked(&path, args, &Identity::default(), Origin::Server, None, hook).await;
     Ok(serde_json::from_value(run.result?.0)?)
 }
 
 async fn call<F: crate::MutationFunction>(app: &App, args: F::Args) -> crate::Result<F::Output> {
-    let run = app.call_mutation(&F::path(), serde_json::to_value(args)?, &Identity::default(), true, None).await;
+    let run =
+        app.call_mutation(&F::path(), serde_json::to_value(args)?, &Identity::default(), Origin::Server, None).await;
     Ok(serde_json::from_value(run.result?.0)?)
 }
 

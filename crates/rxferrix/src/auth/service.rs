@@ -92,6 +92,47 @@ impl SignInMethod {
     }
 }
 
+/// A sign-up about to create an account, as [`super::AuthConfig::before_sign_up`] sees it.
+#[derive(Debug, Clone)]
+pub struct SignUpAttempt {
+    /// The address the new account gets (normalized). `None` for an OAuth sign-up whose provider shared no verified
+    /// address (the account gets none).
+    pub email: Option<String>,
+    /// Whether the address is proven: by the magic link or code, or by the OAuth provider. A password sign-up's isn't
+    /// (yet).
+    pub email_verified: bool,
+    pub method: SignUpMethod,
+    /// The app URL this sign-up returns to: the `redirectTo` the client passed (to `signUp`, `requestMagicLink`, or the
+    /// OAuth start), which passed the redirect allowlist, else the default (first allowed) one; `None` without either.
+    /// Comes from the client: it proves nothing by itself, but a secret in it (an invite token) does.
+    pub redirect_to: Option<String>,
+    /// The name given at password sign-up, or the OAuth provider's.
+    pub name: Option<String>,
+    /// User agent and IP address of the client.
+    pub client: ClientInfo,
+}
+
+/// How a user signs up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignUpMethod {
+    Password,
+    /// A magic link or a one-time code to an address without an account.
+    MagicLink,
+    /// The OAuth provider's id (`google`, `github`, ...).
+    OAuth(String),
+}
+
+impl std::fmt::Display for SignUpMethod {
+    /// `password`, `magic_link`, `oauth:<provider>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignUpMethod::Password => f.write_str("password"),
+            SignUpMethod::MagicLink => f.write_str("magic_link"),
+            SignUpMethod::OAuth(provider) => write!(f, "oauth:{provider}"),
+        }
+    }
+}
+
 /// How a sign-in ended: with a session, or, for an account with two-factor authentication, with a short-lived
 /// token to present together with a code (`POST /api/auth/mfa/verify`), which then starts the session.
 #[derive(Debug, Clone, Serialize)]
@@ -338,6 +379,31 @@ impl AuthService {
         }
     }
 
+    /// Whether sign-ups go through a check ([`AuthConfig::before_sign_up`], or an allowlist) before an account is
+    /// created.
+    fn sign_ups_checked(&self) -> bool {
+        self.config.before_sign_up.is_some() || self.config.has_signup_allowlist()
+    }
+
+    /// The allowlists, then the `before_sign_up` hook: may `attempt` create an account?
+    async fn check_sign_up(&self, app: &App, attempt: SignUpAttempt) -> AuthResult<()> {
+        let proven = attempt.email_verified || attempt.method == SignUpMethod::Password;
+        if !self.config.allowlist_admits(attempt.email.as_deref().filter(|_| proven)) {
+            return Err(AuthFailure::new(403, "signup_not_allowed", "This email address can't be used to sign up"));
+        }
+        let Some(hook) = &self.config.before_sign_up else { return Ok(()) };
+        hook(app.clone(), attempt).await.map_err(|e| match e.downcast::<UserError>() {
+            Ok(refusal) => AuthFailure { status: 403, error: refusal, retry_after: None },
+            Err(e) => AuthFailure::from(e.context("the before_sign_up hook failed")),
+        })
+    }
+
+    /// Whether signing in as `email` would create an account (none has the address), for the magic link and code.
+    async fn new_email(&self, app: &App, email: &str) -> AuthResult<bool> {
+        let email = email.to_string();
+        Ok(store::read(app, |db| async move { store::user_by_email(&db, &email).await }).await?.is_none())
+    }
+
     fn access_ttl_s(&self) -> u64 {
         self.current().access_token_ttl.as_secs().max(1)
     }
@@ -531,6 +597,17 @@ impl AuthService {
             .map_err(|f| anyhow::anyhow!(f.error))
     }
 
+    /// Delete `user` with their sessions, accounts, password, second factor and email codes, in a transaction of its
+    /// own (from a mutation: `ctx.users.delete`, [`super::Users`]). `None` if there is no such user.
+    pub async fn delete_user(&self, app: &App, user: Id<User>) -> crate::Result<Option<super::DeletedUser>> {
+        store::write(app, |db| async move { super::users::delete_user_in(&db, user).await }).await
+    }
+
+    /// End every session of `user` (from a mutation: `ctx.users.revoke_sessions`). Returns how many there were.
+    pub async fn revoke_sessions(&self, app: &App, user: Id<User>) -> crate::Result<u32> {
+        store::write(app, |db| async move { super::Users::new(db).revoke_sessions(user).await }).await
+    }
+
     /// Impersonation: a real session of `user` minted by `admin`, marked `impersonated_by`, expiring after `ttl`
     /// (capped at [`MAX_IMPERSONATION_TTL`]; refreshing never extends it), and audited (`impersonate`) in the same
     /// transaction. `purpose` goes into the audit entry's details. `None` if the user doesn't exist.
@@ -559,12 +636,15 @@ impl AuthService {
         if self.config.password { Ok(()) } else { Err(AuthFailure::not_found("Password sign-in")) }
     }
 
+    /// Password sign-up. `redirect_to` is the app URL the verification email links to (checked against the redirect
+    /// allowlist; default: the first allowed URL), and what [`super::AuthConfig::before_sign_up`] sees.
     pub async fn sign_up(
         &self,
         app: &App,
         email: &str,
         password: String,
         name: Option<String>,
+        redirect_to: Option<&str>,
         client: ClientInfo,
     ) -> AuthResult<SignUpResult> {
         self.require_password()?;
@@ -573,14 +653,29 @@ impl AuthService {
         }
         let email = store::normalize_email(email)?;
         password::check_password_policy(&password)?;
+        let redirect = self.resolve_redirect(redirect_to)?;
         let name = name.map(|n| n.trim().chars().take(200).collect::<String>()).filter(|n| !n.is_empty());
+        if self.sign_ups_checked() {
+            // A taken address gets the answer it gets without a check (and the check never runs for it).
+            if !self.new_email(app, &email).await? {
+                return Err(store::email_in_use().into());
+            }
+            let attempt = SignUpAttempt {
+                email: Some(email.clone()),
+                email_verified: false,
+                method: SignUpMethod::Password,
+                redirect_to: redirect.clone(),
+                name: name.clone(),
+                client: client.clone(),
+            };
+            self.check_sign_up(app, attempt).await?;
+        }
         let hash = password::hash(password).await?;
         let user = store::create_password_user(app, email.clone(), hash, name).await??;
         if self.current().mailer.is_some() {
-            let redirect = self.current().redirects.default_target();
             self.send_code(app, email, Purpose::VerifyEmail, Some(user), redirect).await?;
         }
-        if self.config.require_email_verification {
+        if self.config.verification_required() {
             return Ok(SignUpResult::VerificationRequired);
         }
         Ok(SignUpResult::SignedIn(
@@ -620,7 +715,7 @@ impl AuthService {
                 tracing::warn!(user = %user.id, "could not upgrade an imported password hash: {e:#}");
             }
         }
-        if self.config.require_email_verification && !user.email_verified {
+        if self.config.verification_required() && !user.email_verified {
             return Err(AuthFailure::new(403, "email_not_verified", "Verify your email address before signing in"));
         }
         self.finish_sign_in(app, Principal::User(user.id), client, Some(SignInMethod::Password)).await
@@ -712,9 +807,12 @@ impl AuthService {
     ) -> AuthResult<()> {
         let mailer = self.require_mailer()?;
         let expires_at = now_ms() + purpose.ttl_ms();
+        // A sign-in code keeps its app URL for the `before_sign_up` hook, which runs when it is used.
+        let keep_redirect = redirect.clone().filter(|_| matches!(purpose, Purpose::SignIn));
         let (code, token) =
-            store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, expires_at).await?;
-        let link = redirect.map(|r| format!("{r}#{}={token}", purpose.fragment_key()));
+            store::create_code(app, &self.keys, email.clone(), purpose.as_str(), user, keep_redirect, expires_at)
+                .await?;
+        let link = redirect.as_ref().map(|r| format!("{r}#{}={token}", purpose.fragment_key()));
         let e = self.current();
         let message = auth_email(email, purpose, &code, link.as_deref(), e.email_templates.get(purpose), &e.app_name);
         tokio::spawn(async move {
@@ -850,16 +948,10 @@ impl AuthService {
         let redirect = self.resolve_redirect(redirect_to)?;
         let email = store::normalize_email(email)?;
         self.limit(Limit::Email, &email)?;
-        if !self.current().signups {
-            let exists = store::read(app, |db| {
-                let email = email.clone();
-                async move { store::user_by_email(&db, &email).await }
-            })
-            .await?
-            .is_some();
-            if !exists {
-                return Ok(());
-            }
+        // No email for an address that couldn't sign up anyway (the same answer either way: no enumeration).
+        let signups = self.current().signups;
+        if (!signups || !self.config.allowlist_admits(Some(&email))) && self.new_email(app, &email).await? {
+            return Ok(());
         }
         self.send_code(app, email, Purpose::SignIn, None, redirect).await
     }
@@ -874,19 +966,53 @@ impl AuthService {
             return Err(AuthFailure::not_found("Magic link sign-in"));
         }
         let row = self.consume(app, Purpose::SignIn, proof).await?;
-        let user = store::passwordless_user(app, row.email, self.current().signups).await??;
+        let signups = self.current().signups;
+        // Without a check, the sign-in creates the account if needed. With one, only after the check passed; if the
+        // account appears or goes between this look and the write, the write decides without creating anything.
+        let mut create = signups && !self.sign_ups_checked();
+        if signups && self.sign_ups_checked() && self.new_email(app, &row.email).await? {
+            let attempt = SignUpAttempt {
+                email: Some(row.email.clone()),
+                email_verified: true,
+                method: SignUpMethod::MagicLink,
+                redirect_to: row.redirect_to.clone(),
+                name: None,
+                client: client.clone(),
+            };
+            self.check_sign_up(app, attempt).await?;
+            create = true;
+        }
+        let user = store::passwordless_user(app, row.email, create).await??;
         self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::MagicLink)).await
     }
 
-    /// Finish an OAuth sign-in for a provider profile.
+    /// Finish an OAuth sign-in for a provider profile. `redirect_to` is the flow's app URL.
     pub(crate) async fn oauth_sign_in(
         &self,
         app: &App,
         provider: &str,
         profile: store::ExternalProfile,
+        redirect_to: Option<String>,
         client: ClientInfo,
     ) -> AuthResult<SignInOutcome> {
-        let user = store::oauth_user(app, provider.to_string(), profile, self.current().signups).await??;
+        let signups = self.current().signups;
+        // As for magic links: create an account only without a check, or once it passed.
+        let mut create = signups && !self.sign_ups_checked();
+        if signups && self.sign_ups_checked() && store::oauth_would_create(app, provider, &profile).await? {
+            let email = profile.email.as_deref().and_then(|e| store::normalize_email(e).ok());
+            let email = email.filter(|_| profile.email_verified);
+            let attempt = SignUpAttempt {
+                email_verified: email.is_some(),
+                email,
+                method: SignUpMethod::OAuth(provider.to_string()),
+                redirect_to,
+                name: profile.name.clone(),
+                client: client.clone(),
+            };
+            self.check_sign_up(app, attempt).await?;
+            create = true;
+        }
+        let user = store::oauth_user(app, provider.to_string(), profile, create).await??;
         self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::OAuth(provider.to_string()))).await
     }
 
@@ -982,7 +1108,8 @@ impl AuthService {
 #[derive(Debug)]
 pub enum SignUpResult {
     SignedIn(AuthTokens),
-    /// `require_email_verification` is on: a verification email was sent; sign in after verifying.
+    /// `require_email_verification` is on (or a sign-up allowlist is set): a verification email was sent; sign in after
+    /// verifying.
     VerificationRequired,
 }
 

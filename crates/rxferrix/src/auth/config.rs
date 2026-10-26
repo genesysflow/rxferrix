@@ -22,11 +22,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::email::Mailer;
-use super::service::SignIn;
+use super::service::{SignIn, SignUpAttempt};
 
 /// What [`AuthConfig::on_sign_in`] runs.
 pub(crate) type SignInHook =
     Arc<dyn Fn(crate::App, SignIn) -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static>;
+
+/// What [`AuthConfig::before_sign_up`] runs.
+pub(crate) type SignUpHook = Arc<
+    dyn Fn(crate::App, SignUpAttempt) -> futures::future::BoxFuture<'static, crate::Result<()>> + Send + Sync + 'static,
+>;
 
 /// How users may sign in, plus token lifetimes, email and redirect settings.
 ///
@@ -58,6 +63,12 @@ pub struct AuthConfig {
     pub(crate) impersonation: bool,
     /// Runs after each successful user sign-in ([`AuthConfig::on_sign_in`]).
     pub(crate) on_sign_in: Option<SignInHook>,
+    /// Decides whether a sign-up may create an account ([`AuthConfig::before_sign_up`]).
+    pub(crate) before_sign_up: Option<SignUpHook>,
+    /// Addresses ([`AuthConfig::allowed_emails`]) and domains ([`AuthConfig::allowed_domains`]) that may sign up;
+    /// both empty: any. Normalized (lowercase; domains without `@`).
+    pub(crate) allowed_emails: Vec<String>,
+    pub(crate) allowed_domains: Vec<String>,
     /// The name authenticator apps show for this server's TOTP second factors ([`AuthConfig::totp_issuer`]).
     pub(crate) totp_issuer: Option<String>,
     /// Which defaults were set explicitly in code (they then win over `_settings`).
@@ -94,6 +105,9 @@ impl Default for AuthConfig {
             audit_retention: Duration::from_secs(90 * 24 * 3600),
             impersonation: true,
             on_sign_in: None,
+            before_sign_up: None,
+            allowed_emails: Vec::new(),
+            allowed_domains: Vec::new(),
             totp_issuer: None,
             explicit: Explicit::default(),
         }
@@ -122,6 +136,9 @@ impl fmt::Debug for AuthConfig {
             .field("audit_retention", &self.audit_retention)
             .field("impersonation", &self.impersonation)
             .field("on_sign_in", &self.on_sign_in.as_ref().map(|_| "<hook>"))
+            .field("before_sign_up", &self.before_sign_up.as_ref().map(|_| "<hook>"))
+            .field("allowed_emails", &self.allowed_emails)
+            .field("allowed_domains", &self.allowed_domains)
             .field("totp_issuer", &self.totp_issuer)
             .finish()
     }
@@ -271,6 +288,83 @@ impl AuthConfig {
     {
         self.on_sign_in = Some(Arc::new(move |app, sign_in| Box::pin(hook(app, sign_in))));
         self
+    }
+
+    /// Decide whether a sign-up may create an account: password sign-up, and the first sign-in by magic link or code
+    /// or by OAuth. `hook` runs before the account is created (after [`AuthConfig::allowed_emails`] /
+    /// [`AuthConfig::allowed_domains`], when [`AuthConfig::signups`] allows sign-ups at all); an error refuses the
+    /// sign-up and nothing is created. A [`crate::UserError`]'s code and message reach the client (status 403; for
+    /// OAuth in the `rxferrix_error` of the redirect), so it can show "invite required"; any other error is a server
+    /// error. Sign-ins to existing accounts don't run it, nor do accounts made by server code (`TestApp::create_user`)
+    /// or by an external JWT issuer ([`AuthConfig::jwt`]), which decides who its users are.
+    ///
+    /// [`SignUpAttempt::redirect_to`] is the app URL the sign-up returns to, so an invite link can authorize it: the
+    /// invite page passes its own URL as `redirectTo` (to `signUp`, `requestMagicLink` or the OAuth start), and the
+    /// hook finds the invite token in it.
+    ///
+    /// ```ignore
+    /// AuthConfig::password().magic_link().before_sign_up(|app, attempt| async move {
+    ///     let token = attempt.redirect_to.as_deref().and_then(invite_token);
+    ///     if !app.query::<invites::valid>((token, attempt.email)).await? {
+    ///         return Err(UserError::new("invite_required", "You need an invite to sign up").into());
+    ///     }
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// Keep it a check: the account can still fail to be created after it allowed the sign-up (the address was taken
+    /// meanwhile), so record what the sign-up used (accept the invite) from the app once the user is signed in. For a
+    /// magic link it runs when the link or code is used, not when it is requested (the address is proven then, and a
+    /// refusal reveals nothing to someone who doesn't own the inbox). The response waits for it.
+    pub fn before_sign_up<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(crate::App, SignUpAttempt) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::Result<()>> + Send + 'static,
+    {
+        self.before_sign_up = Some(Arc::new(move |app, attempt| Box::pin(hook(app, attempt))));
+        self
+    }
+
+    /// Only these email addresses may sign up (with [`AuthConfig::allowed_domains`]: these, plus any address at those
+    /// domains). Others are refused with `signup_not_allowed`, before [`AuthConfig::before_sign_up`] runs; existing
+    /// accounts sign in as before. Repeatable; case doesn't matter.
+    ///
+    /// An address must be proven to pass: an OAuth sign-up needs a provider-verified one, and while a list is set,
+    /// password accounts must verify their address before they can sign in (as with
+    /// [`AuthConfig::require_email_verification`]), so typing someone else's address into the sign-up form gets nobody
+    /// in. A magic link is only sent to an address without an account if it is allowed.
+    pub fn allowed_emails(mut self, emails: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.allowed_emails.extend(emails.into_iter().map(|e| e.into().trim().to_lowercase()));
+        self
+    }
+
+    /// Only addresses at these domains may sign up: `allowed_domains(["example.com"])` lets `ann@example.com` in, not
+    /// `ann@mail.example.com` (list subdomains separately). See [`AuthConfig::allowed_emails`], which works the same
+    /// way and adds to it.
+    pub fn allowed_domains(mut self, domains: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.allowed_domains
+            .extend(domains.into_iter().map(|d| d.into().trim().trim_start_matches('@').to_lowercase()));
+        self
+    }
+
+    /// Whether [`AuthConfig::allowed_emails`] or [`AuthConfig::allowed_domains`] restrict sign-ups.
+    pub(crate) fn has_signup_allowlist(&self) -> bool {
+        !self.allowed_emails.is_empty() || !self.allowed_domains.is_empty()
+    }
+
+    /// Whether the allowlists let `email` (normalized) sign up. Always true without lists.
+    pub(crate) fn allowlist_admits(&self, email: Option<&str>) -> bool {
+        if !self.has_signup_allowlist() {
+            return true;
+        }
+        let Some(email) = email else { return false };
+        let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
+        self.allowed_emails.iter().any(|e| e == email) || self.allowed_domains.iter().any(|d| d == domain)
+    }
+
+    /// Whether password accounts must verify their address before signing in.
+    pub(crate) fn verification_required(&self) -> bool {
+        self.require_email_verification || self.has_signup_allowlist()
     }
 
     /// Rate limits for the auth endpoints; `None` disables rate limiting.

@@ -173,9 +173,10 @@ upgrade then fail with `paginate: cursor does not belong to this query` (the ver
 
 ```rust
 pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage, pub env: Env,    /* private */ }
-pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, pub workflows: Workflows, pub env: Env, /* private */ }
+pub struct MutationCtx { pub db: MutationDb, pub auth: Auth, pub storage: MutationStorage, pub scheduler: Scheduler, pub workflows: Workflows, pub env: Env, pub users: Users, /* private */ }
 pub struct ActionCtx   { pub auth: Auth, pub storage: ActionStorage, pub scheduler: Scheduler, pub workflows: Workflows, pub olap: Olap, pub env: Env, /* private: runtime handle */ }
 // ctx.storage: file storage, see §1.6. ctx.scheduler: scheduling, see §1.7. ctx.env: environment variables, §1.13.
+// ctx.users: deleting users and ending sessions in the mutation's transaction, see §1.5.
 // All three contexts are Send + Sync. QueryCtx/MutationCtx::now() -> f64 is the ms timestamp of the snapshot or commit
 // (in a query: the snapshot's commit time, NOT a reactive clock; see §1.10).
 // ctx.is_dev() -> bool on all three: the app runs in dev mode (`serve --dev`; `TestApp` too).
@@ -422,9 +423,22 @@ pub struct AppOptions {
     pub writer_cache_size: u64,       // default 32 MiB (`--writer-cache-size`): the writer connection's page cache, taken as used
     pub determinism_check: Option<Duration>, // None; Some(10s) in `--dev` and TestApp: see below
     pub olap: rxferrix::olap::OlapOptions, // the analytics copy (§1.11): enabled = false
+    pub guard: Option<rxferrix::Guard>, // None; `RxFerrix::guard`: see below
 }
 impl Default for AppOptions { /* the defaults above, dev = false */ }
 ```
+- **Guard** (`rxferrix::guard`). `Guard::new(|ctx: GuardCtx, function: GuardedFunction| async { .. -> Result<()> })`,
+  or `RxFerrix::guard(..)` (which `serve` puts here), runs before every call a client (WebSocket, HTTP API) makes to
+  a public, non-system function, every rerun of a subscribed query included; an error refuses the call and reaches the
+  client like the function's own (a `UserError` keeps its code; the execution log records a failed call).
+  `GuardCtx { db: QueryDb, auth: Auth, env: Env }` is the query's snapshot and `Auth` (its reads are the query's: it
+  reruns with them, and its `ctx.auth` reads decide who shares the result), the mutation's transaction, or for actions
+  a fresh snapshot; `GuardedFunction::{path(), kind(), is::<F>()}` names the call, so exemptions are checked by the
+  compiler. It runs inside the function's timeout and panic handling. Not guarded: internal and `_system/*`
+  functions, and server code (`ctx.run_*`, `app.query/mutation/action`, scheduled jobs and crons, migrations, the
+  dashboard's function runner); `TestApp::{query_as, mutation_as, action_as, as_user}` are guarded like a client for
+  public functions. A query run by server code that skipped the guard is not offered to the query cache (a client's
+  call would otherwise be answered without it).
 - **Query timeout.** A query still running after `query_timeout` fails with `rxferrix::QueryTimeout { path, timeout }`
   (a server error; checked at `.await` points only). A stuck query would otherwise keep a reader connection, and the
   older results its subscribers' other queries are kept at, for good.
@@ -600,11 +614,41 @@ them), `trust_proxy(bool)`,
 session, method, client }`, `SignInMethod::{Password, SignUp, PasswordReset, MagicLink, OAuth(provider)}`; not for
 `sign_in_as`, impersonation, admins, refreshes or external JWTs; with two-factor authentication it runs once the code
 was accepted), `totp_issuer(name)` (what authenticator apps show for this server's second factors; default: the
-public URL's host, else `RxFerrix`).
+public URL's host, else `RxFerrix`), `before_sign_up(|app: App, attempt: SignUpAttempt| async { .. -> Result<()> })`
+and `allowed_emails([..])` / `allowed_domains([..])` (the sign-up check, below).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted), `admin disable-2fa <email>` (removes an administrator's second factor).
+
+**Sign-up check.** Before a sign-up creates an account (password sign-up; the first sign-in by magic link or code, or
+by OAuth) and only when `signups` allows sign-ups: first the allowlists, then `before_sign_up`. The allowlists
+(`allowed_emails`, `allowed_domains`: exact, case-insensitive; a domain list doesn't include subdomains) refuse with
+403 `signup_not_allowed` an address that isn't listed, or isn't proven (an OAuth address the provider didn't verify,
+or none); while one is set, password accounts must verify their address before signing in (`verification_required`:
+`require_email_verification` or a list) and sign-up answers `verificationRequired`, and a magic link is only sent to
+an address without an account if it is listed. The hook gets `SignUpAttempt { email: Option<String>, email_verified,
+method: SignUpMethod::{Password, MagicLink, OAuth(provider)}, redirect_to: Option<String>, name, client }`: `email` is
+the address the account gets (normalized; for OAuth only a verified one), `redirect_to` the sign-up's app URL (the
+client's `redirectTo` to `signUp` / `requestMagicLink` or the OAuth start's `redirect_to`, which passed the redirect
+allowlist, else the default target). A `UserError` from it refuses the sign-up with status 403 and its code and
+message (for OAuth: `rxferrix_error` / `rxferrix_error_description` in the redirect's fragment); another error is a
+500 `server_error`. Nothing is created when it refuses. It runs: for a password sign-up after the address was found
+free (a taken one answers `email_in_use` without it); for a magic link when the link or code is used (the code row
+keeps `redirectTo`), not when it is requested; for OAuth when the callback finds neither a linked account nor a user
+with the address (`store::oauth_would_create`). If an account appears or disappears between that look and the write,
+the write neither creates an account nor runs the check again (`signups_disabled`). Sign-ins to existing accounts,
+`sign_in_as`, `TestApp::create_user` and external JWT users never run it. `AuthService::sign_up(app, email, password,
+name, redirect_to, client)`; `POST /api/auth/signup` takes `redirectTo` (the verification email's link target too).
+
+**Users from app code** (`rxferrix::auth::users`). `ctx.users: Users` in mutations: `delete(user) ->
+Result<Option<DeletedUser>>` (the user with their sessions and rotated refresh tokens, accounts, password, second
+factor and email codes; `DeletedUser { sessions, accounts, credentials, verification_codes, mfa_factors }`; `None` if
+there is no such user; app documents referencing the user are kept), `revoke_sessions(user) -> Result<u32>` and
+`revoke_session(session) -> Result<bool>` (`false` if already gone). They write in the mutation's transaction (undone
+if it fails), take effect like sign-out (live revocation, below), and check nothing: the calling function decides who
+may. Not audited (the dashboard's `delete_user` / `revoke_session`, which use the same code, are). From outside a
+mutation: `app.auth().delete_user(app, user)` and `app.auth().revoke_sessions(app, user)`, each in its own transaction.
 
 `App::auth() -> &AuthService` exposes the operations behind the endpoints (`authenticate(app, token)`,
 `authenticate_watched(app, token)` (also returns a `SessionWatch`, below), `sign_in_as(app, user)`, `create_admin`,
@@ -688,7 +732,7 @@ account id; for external JWTs the provider is the issuer URL), `_sessions` (user
 refresh token, sliding `expires_at`, user agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on
 impersonation sessions, whose expiry is fixed), `_used_refresh_tokens` (rotated refresh token hashes, for reuse
 detection; deleted with their session), `_verification_codes` (keyed hashes of a 6-digit code and a link token, purpose,
-expiry, attempts), `_admins` (email, argon2id hash), `_mfa_factors` (`MfaFactor`: `user` or `admin`, `kind: "totp"`,
+expiry, attempts, and for sign-in codes the `redirectTo` app URL, for the sign-up check), `_admins` (email, argon2id hash), `_mfa_factors` (`MfaFactor`: `user` or `admin`, `kind: "totp"`,
 `secretEncrypted`, `confirmed`, `recoveryCodeHashes`, `lastUsedStep`, `failedAttempts`, `lockedUntil`; at most one
 per owner, deleted with the user). The auth code reads and writes them directly through `QueryDb` /
 `MutationDb` (not through registered functions), so hashes never appear in function args or the execution log.
@@ -2723,7 +2767,14 @@ tls::start(router, &Listen::{Http(addr) | Acme { https, redirect, acme } | CertF
 internal functions included, and `app.auth()`; `WebOptions::routes` is a `Router<App>`, a stateless router becomes one
 with `.with_state(())`). In app routes, the extractor `rxferrix::auth::Caller { ip, user_agent }` gives the client
 address as RxFerrix records it (from the trusted proxy headers: the last `X-Forwarded-For` entry with `--trust-proxy`,
-else the `trustedProxy` setting (§4.1.4); otherwise the peer).
+else the `trustedProxy` setting (§4.1.4); otherwise the peer). `RxFerrix::guard(|ctx, function| async { .. })` sets
+`AppOptions::guard` (§1.4). `RxFerrix::on_start(|app: App| async { .. -> Result<()> })` (repeatable, in order) runs in
+`serve` once the app is open, before the scheduler starts and before the server listens; an error stops `serve`
+(`an on_start hook failed: ..`, exit code 1). Other commands and `TestApp` don't run it. Services started from it run
+as `App::spawn(future)`: a tracked task that should end when `App::closed()` resolves; on shutdown `serve` waits up to
+10 s for these tasks (after `begin_close`, before the replication flush and the seal, so they may still run functions),
+then drops the rest, so what they hold (a port) is released before the lock is. With `--takeover` the new process
+runs the hooks after the old one has exited.
 Routing and caching rules are in `crates/rxferrix/src/ops/web.rs`: RxFerrix's routes and the app's routes first, static
 files as the fallback (never under `/api` or `/_`), SPA fallback to `index.html`, `no-cache` HTML, immutable hashed
 assets, precompressed `.br`/`.gz`, ETags.

@@ -2,6 +2,7 @@
 
 mod common;
 
+mod access;
 mod aggregates;
 mod audit;
 mod auth;

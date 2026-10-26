@@ -11,6 +11,7 @@
 //! - [`email`]: [`Mailer`] (SMTP, dev log, [`MemoryMailer`] for tests).
 //! - [`mfa`]: two-factor authentication with an authenticator app ([`totp`]) and recovery codes, for users and
 //!   admins alike: the `/api/auth/mfa/*` endpoints' operations and the second step of a sign-in.
+//! - [`users`]: [`Users`] (`ctx.users` in mutations): deleting users and ending sessions from app code.
 //!
 //! The functions in this module are the client-facing system functions `_system/auth:me` and
 //! `_system/auth:update_profile` (hand-written references in `@rxferrix/client`, since codegen skips system functions).
@@ -33,6 +34,7 @@ pub(crate) mod store;
 pub mod tables;
 pub mod tokens;
 pub mod totp;
+pub mod users;
 
 pub use config::{Apple, AuthConfig, Discord, GitHub, Google, OAuthProvider, Oidc, RateLimits, SmtpConfig};
 pub use email::{DevLogMailer, Email, Mailer, MemoryMailer};
@@ -42,10 +44,12 @@ pub use jwt::{JwtAlgorithm, JwtProvider};
 pub use mfa::{MfaSetup, MfaStatus};
 pub use revocation::{Revocations, SessionWatch};
 pub use service::{
-    AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignIn, SignInMethod, SignInOutcome, SignUpResult,
+    AuthFailure, AuthService, AuthTokens, Authenticated, CodeProof, SignIn, SignInMethod, SignInOutcome, SignUpAttempt,
+    SignUpMethod, SignUpResult,
 };
 pub use store::{ClientInfo, normalize_email};
 pub use tables::{Account, Admin, MfaFactor, Session, User, VerificationCode};
+pub use users::{DeletedUser, Users};
 
 use crate::prelude::*;
 

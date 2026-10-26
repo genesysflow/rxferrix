@@ -133,3 +133,70 @@ AuthConfig::password().on_sign_in(|app, sign_in| async move {
 
 The user is already signed in when it runs, and the response waits for it: keep it short.
 
+**Who may sign up.** `signups(false)` closes sign-ups altogether. To let only some people in, list them, or decide in
+code; either way the check runs before an account is created (password sign-up, and the first sign-in by magic link
+or OAuth), and nothing is created when it refuses:
+
+```rust
+AuthConfig::password().magic_link()
+    .allowed_domains(["example.com"])          // and/or .allowed_emails(["guest@gmail.com"]): `signup_not_allowed`
+    .before_sign_up(|app, attempt| async move {
+        // attempt.email, attempt.email_verified, attempt.method, attempt.name, and attempt.redirect_to: the app URL
+        // the sign-up returns to, so an invite page that passes its own URL lets the invite authorize it.
+        let token = attempt.redirect_to.as_deref().and_then(invite_token);
+        if !app.query::<invites::valid>((token, attempt.email)).await? {
+            return Err(UserError::new("invite_required", "You need an invite to sign up").into());
+        }
+        Ok(())
+    })
+```
+
+```ts
+await auth.signUp({ email, password, redirectTo: location.href });   // also requestMagicLink, signInWithOAuth
+// rejects with RxFerrixError code "invite_required"; OAuth returns with `rxferrix_error=invite_required`
+```
+
+The refusal's code reaches the client (status 403). Only proven addresses pass the lists: while one is set, password
+accounts verify their address before they can sign in, and OAuth needs a provider-verified address. For a magic link
+the hook runs when the link is used, so the address is proven by then. Keep the hook a check (accept the invite from
+the app once the user is in): the account can still fail to be created after it said yes.
+
+**Keeping everything behind a check.** A guard runs before every call a client makes to one of the app's public
+functions, and can refuse it, so a new function can't forget the check:
+
+```rust
+RxFerrix::new().guard(|ctx, function| async move {
+    if function.is::<access::status>() || function.is::<invites::accept>() {
+        return Ok(());                       // reachable before access is granted
+    }
+    let user = ctx.auth.require_user()?;
+    if !access::granted(&ctx.db, user).await? {
+        return Err(UserError::new("access_required", "Ask for an invite first").into());
+    }
+    Ok(())
+})
+```
+
+It reads through the call's own snapshot or transaction: a subscribed query reruns when the access data changes,
+going from the guard's error to results by itself. Internal functions, `_system/*` functions (`me`, the dashboard)
+and server code (actions calling `ctx.run_*`, `app.mutation`, scheduled jobs, the dashboard's function runner) are not
+guarded. In tests, set `AppOptions::guard` (`Guard::new(..)`); `TestApp::as_user` calls go through it.
+
+**Removing users from app code.** Mutations have `ctx.users`, in the mutation's transaction: `delete(user)` (with
+their sessions, linked accounts, password, second factor and email codes; `None` if already gone),
+`revoke_sessions(user)` and `revoke_session(session)`. Ended sessions are signed out at once, sockets included. They
+check nothing themselves: guard the mutation that calls them, or make it internal.
+
+```rust
+#[internal_mutation]
+pub async fn reject(ctx: &MutationCtx, request: Id<AccessRequest>) -> Result<()> {
+    let Some(r) = ctx.db.get(request).await? else { return Ok(()) };
+    ctx.db.delete(request).await?;
+    ctx.users.delete(r.user).await?;
+    Ok(())
+}
+```
+
+Ending sessions doesn't keep anyone out (they can sign in again). To ban someone from a space, record the ban in the
+app's data and check it in the guard or the space's functions; to remove them entirely, delete the user and refuse
+their sign-up.

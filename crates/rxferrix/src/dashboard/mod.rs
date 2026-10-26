@@ -35,9 +35,10 @@ use serde_json::{Map, Value};
 use crate::audit;
 use crate::auth::store;
 use crate::auth::store::Principal;
-use crate::auth::tables::{Account, Admin, Credential, Session, User, VerificationCode};
+use crate::auth::tables::{Account, Admin, Credential, Session, User};
 use crate::db::catalog::TableInfo;
 use crate::error::ClientError;
+use crate::guard::Origin;
 use crate::prelude::*;
 use crate::private::{FunctionKind, is_system_path};
 use crate::runtime::Identity;
@@ -609,14 +610,14 @@ pub async fn run_function(
     let started = Instant::now();
     let (result, ts, log_lines) = match kind {
         FunctionKind::Query => {
-            let run = app.call_query(&path, args, &identity, true).await;
+            let run = app.call_query(&path, args, &identity, Origin::Server).await;
             (run.result, Some(run.ts), run.log_lines)
         }
         FunctionKind::Mutation => {
             // Audited inside the mutation's transaction, so the entry commits with its writes; a failed run (rolled
             // back) is audited on its own.
             let hook = AuditHook { admin, record: audit_entry(json!("success")) };
-            let run = app.call_mutation_hooked(&path, args, &identity, true, None, Some(&hook)).await;
+            let run = app.call_mutation_hooked(&path, args, &identity, Origin::Server, None, Some(&hook)).await;
             if run.result.is_err() {
                 let rec = audit_entry(json!("error"));
                 store::write(app, |db| async move { audit::record(&db, Some(admin), rec).await }).await?;
@@ -625,7 +626,7 @@ pub async fn run_function(
             (run.result.map(|(v, _)| v), ts, run.log_lines)
         }
         FunctionKind::Action => {
-            let run = app.call_action(&path, args, &identity, true).await;
+            let run = app.call_action(&path, args, &identity, Origin::Server).await;
             (run.result, None, run.log_lines)
         }
     };
@@ -823,21 +824,11 @@ pub async fn revoke_session(ctx: &MutationCtx, session: String) -> Result<()> {
     audit::record(&ctx.db, Some(admin), rec).await
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
-pub struct DeletedUser {
-    pub sessions: u32,
-    pub accounts: u32,
-    pub credentials: u32,
-    pub verification_codes: u32,
-    /// Second factors (0 or 1).
-    #[serde(default)]
-    pub mfa_factors: u32,
-}
+pub use crate::auth::users::DeletedUser;
 
 /// Delete a user together with their sessions (and rotated refresh tokens), linked OAuth accounts, password, second
-/// factor and pending email codes. Documents of app tables that reference the user are left alone.
+/// factor and pending email codes (`crate::auth::Users::delete`). Documents of app tables that reference the user are
+/// left alone.
 #[mutation]
 pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser> {
     let admin = ctx.auth.require_admin()?;
@@ -845,41 +836,15 @@ pub async fn delete_user(ctx: &MutationCtx, user: String) -> Result<DeletedUser>
     let Some(doc) = ctx.db.get(id).await? else {
         return Err(user_error("not_found", format!("User {user} does not exist")));
     };
-    let db = &ctx.db;
-    let mut out = DeletedUser::default();
-    for s in db.query::<Session>().with_index(Session::by_user, |q| q.eq(Session::user, Some(id))).collect().await? {
-        store::delete_session_in(db, s.id).await?;
-        out.sessions += 1;
-    }
-    for a in db.query::<Account>().with_index(Account::by_user, |q| q.eq(Account::user, id)).collect().await? {
-        db.delete(a.id).await?;
-        out.accounts += 1;
-    }
-    for c in db.query::<Credential>().with_index(Credential::by_user, |q| q.eq(Credential::user, id)).collect().await? {
-        db.delete(c.id).await?;
-        out.credentials += 1;
-    }
-    if crate::auth::mfa::remove_factor_in(db, Principal::User(id)).await? {
-        out.mfa_factors += 1;
-    }
-    if let Some(email) = &doc.email {
-        let codes = db
-            .query::<VerificationCode>()
-            .with_index(VerificationCode::by_email_purpose, |q| q.eq(VerificationCode::email, email.clone()))
-            .collect()
-            .await?;
-        for c in codes {
-            db.delete(c.id).await?;
-            out.verification_codes += 1;
-        }
-    }
-    db.delete(id).await?;
+    let Some(out) = crate::auth::users::delete_user_in(&ctx.db, id).await? else {
+        return Err(user_error("not_found", format!("User {user} does not exist")));
+    };
     let before = serde_json::to_value(&doc)?;
     let rec = audit::Record::new("delete_user")
         .target(USERS, Some(user))
         .documents(USERS, Some(before), None)
         .details(serde_json::to_value(&out)?);
-    audit::record(db, Some(admin), rec).await?;
+    audit::record(&ctx.db, Some(admin), rec).await?;
     Ok(out)
 }
 

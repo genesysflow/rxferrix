@@ -85,7 +85,7 @@ pub(crate) async fn create_password_user(
 ) -> crate::Result<Result<Id<User>, UserError>> {
     write(app, |db| async move {
         if user_by_email(&db, &email).await?.is_some() {
-            return Ok(Err(UserError::new("email_in_use", "An account with this email already exists")));
+            return Ok(Err(email_in_use()));
         }
         let user = db.insert(User { email: Some(email), email_verified: false, name, image: None }).await?;
         db.insert(Credential { user, password_hash }).await?;
@@ -197,6 +197,11 @@ pub(crate) async fn passwordless_user(
     .await
 }
 
+/// The answer to a sign-up with an address that has an account.
+pub(crate) fn email_in_use() -> UserError {
+    UserError::new("email_in_use", "An account with this email already exists")
+}
+
 /// A user profile from an OAuth / OIDC provider.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExternalProfile {
@@ -266,6 +271,31 @@ pub(crate) async fn oauth_user(
             .await?;
         db.insert(Account { user, provider, provider_account_id: account_id }).await?;
         Ok(Ok(user))
+    })
+    .await
+}
+
+/// Whether [`oauth_user`] would create a user for this profile (as of a snapshot): no account links it, and no user
+/// has its address.
+pub(crate) async fn oauth_would_create(app: &App, provider: &str, profile: &ExternalProfile) -> crate::Result<bool> {
+    let (provider, account_id) = (provider.to_string(), profile.account_id.clone());
+    let email = profile.email.as_deref().and_then(|e| normalize_email(e).ok());
+    read(app, |db| async move {
+        let linked = db
+            .query::<Account>()
+            .with_index(Account::by_provider_account, |q| {
+                q.eq(Account::provider, provider).eq(Account::provider_account_id, account_id)
+            })
+            .first()
+            .await?
+            .is_some();
+        if linked {
+            return Ok(false);
+        }
+        match email {
+            Some(email) => Ok(user_by_email(&db, &email).await?.is_none()),
+            None => Ok(true),
+        }
     })
     .await
 }
@@ -606,6 +636,7 @@ pub(crate) async fn create_code(
     email: String,
     purpose: &'static str,
     user: Option<Id<User>>,
+    redirect_to: Option<String>,
     expires_at: f64,
 ) -> crate::Result<(String, String)> {
     let code = random_code(CODE_DIGITS);
@@ -614,6 +645,7 @@ pub(crate) async fn create_code(
         email: email.clone(),
         purpose: purpose.to_string(),
         user,
+        redirect_to,
         code_hash: keys.hash_token(&code),
         token_hash: keys.hash_token(&token),
         expires_at,

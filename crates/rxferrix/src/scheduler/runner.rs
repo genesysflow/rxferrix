@@ -44,6 +44,7 @@ use super::{IN_JOB, SchedulerOptions, Workpool};
 use crate::Table;
 use crate::db::Clock;
 use crate::db::query::MutationDb;
+use crate::guard::Origin;
 use crate::id::Id;
 use crate::private::FunctionKind;
 use crate::runtime::{App, Identity, MutationHook};
@@ -520,7 +521,7 @@ async fn run_mutation_job(app: &App, job: &Doc<ScheduledJob>) -> crate::Result<b
     let hook = JobTxn { id: job.id, clock: app.db().clock() };
     let identity = Identity::anonymous();
     let started = app.db().clock().now_ms();
-    let call = app.call_mutation_hooked(&job.path, job.args.clone(), &identity, true, None, Some(&hook));
+    let call = app.call_mutation_hooked(&job.path, job.args.clone(), &identity, Origin::Server, None, Some(&hook));
     let run = IN_JOB.scope((), call).await;
     match run.result {
         Ok(_) => Ok(true),
@@ -593,7 +594,7 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
         // Canceled between the claim and the start: never started.
         return;
     }
-    let run = app.call_action(&job.path, job.args.clone(), &Identity::anonymous(), true).await;
+    let run = app.call_action(&job.path, job.args.clone(), &Identity::anonymous(), Origin::Server).await;
     let backoff_base = app.scheduler_state().options.retry_backoff;
     let canceled = signal.is_canceled();
     let recorded = store::write(app, |db| async move {

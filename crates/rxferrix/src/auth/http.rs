@@ -245,11 +245,13 @@ async fn sign_up(State(app): State<App>, caller: Caller, body: Bytes) -> Respons
         email: String,
         password: String,
         name: Option<String>,
+        redirect_to: Option<String>,
     }
     let result = async {
         app.auth().limit(Limit::Credentials, &caller.ip)?;
         let b: Body = parse(&body)?;
-        match app.auth().sign_up(&app, &b.email, b.password, b.name, caller.client()).await? {
+        let redirect_to = b.redirect_to.as_deref();
+        match app.auth().sign_up(&app, &b.email, b.password, b.name, redirect_to, caller.client()).await? {
             SignUpResult::SignedIn(tokens) => Ok(serde_json::to_value(tokens).unwrap_or_default()),
             SignUpResult::VerificationRequired => Ok(json!({ "verificationRequired": true })),
         }
@@ -668,7 +670,8 @@ async fn oauth_complete(
     let extras = CallbackExtras { apple_user: q.user.clone() };
     let result = async {
         let profile = auth.oauth.finish(&provider, code, &pending, &callback, &extras).await?;
-        auth.oauth_sign_in(&app, &provider_id, profile, caller.client()).await
+        let redirect_to = Some(pending.redirect_to.clone());
+        auth.oauth_sign_in(&app, &provider_id, profile, redirect_to, caller.client()).await
     }
     .await;
     match result {

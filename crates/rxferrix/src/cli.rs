@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -346,6 +347,17 @@ pub struct RxFerrix {
     storage: StorageConfig,
     scheduler: SchedulerOptions,
     web: crate::ops::WebOptions,
+    guard: Option<crate::guard::Guard>,
+    on_start: Vec<StartHook>,
+}
+
+/// What [`RxFerrix::on_start`] runs.
+struct StartHook(Box<dyn FnOnce(App) -> futures::future::BoxFuture<'static, crate::Result<()>> + Send>);
+
+impl std::fmt::Debug for StartHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StartHook(<fn>)")
+    }
 }
 
 impl RxFerrix {
@@ -454,6 +466,62 @@ impl RxFerrix {
         self
     }
 
+    /// Check every call a client makes to a public function before it runs, and refuse it with an error: one place
+    /// for an access policy instead of a check in each function. See [`crate::guard`] for what it covers and sees.
+    ///
+    /// ```ignore
+    /// RxFerrix::new().guard(|ctx, function| async move {
+    ///     if function.is::<access::status>() || function.is::<invites::accept>() {
+    ///         return Ok(());
+    ///     }
+    ///     let user = ctx.auth.require_user()?;
+    ///     if !access::granted(&ctx.db, user).await? {
+    ///         return Err(UserError::new("access_required", "Ask for an invite first").into());
+    ///     }
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// Only `serve` uses it; tests set [`AppOptions::guard`] (`TestApp::with_options`).
+    pub fn guard<F, Fut>(mut self, guard: F) -> Self
+    where
+        F: Fn(crate::guard::GuardCtx, crate::guard::GuardedFunction) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::Result<()>> + Send + 'static,
+    {
+        self.guard = Some(crate::guard::Guard::new(guard));
+        self
+    }
+
+    /// Run `hook` when `serve` starts, once the app is open and before the scheduler runs or the server accepts a
+    /// connection: start background services that live as long as the server, clear state a previous run left
+    /// behind. An error stops `serve` before it listens. Repeated calls run in order.
+    ///
+    /// Run a service with [`App::spawn`]: it should end once [`App::closed`] resolves, and `serve` waits for it (a
+    /// while) before it lets go of the database, so the service can still write and has released what it holds (a
+    /// port) before the next server starts:
+    ///
+    /// ```ignore
+    /// RxFerrix::new().on_start(|app| async move {
+    ///     app.mutation::<voice::clear_stale>(()).await?;
+    ///     let media = MediaServer::bind(media_port()).await?;   // a port in use stops the server here
+    ///     let closed = app.clone();
+    ///     app.spawn(async move { media.run_until(closed.closed()).await });
+    ///     Ok(())
+    /// })
+    /// ```
+    ///
+    /// With `serve --takeover`, the hooks run after the old server has stopped (that is when the new one opens the
+    /// database), so its services have let go of their ports; a hook that fails there leaves no server running. Other
+    /// commands (`migrate`, `admin`, ...) and `TestApp` don't run the hooks.
+    pub fn on_start<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce(App) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::Result<()>> + Send + 'static,
+    {
+        self.on_start.push(StartHook(Box::new(move |app| Box::pin(hook(app)))));
+        self
+    }
+
     /// Parse the command line and run it. Builds its own tokio runtime.
     pub fn run(self) -> crate::Result<()> {
         let cli = Cli::parse();
@@ -472,8 +540,10 @@ impl RxFerrix {
             Some(Command::Migrate(args)) => migrate(args, self.auth, self.storage, self.scheduler),
             Some(Command::Check(args)) => check(args),
             Some(Command::Health(args)) => health(args),
-            Some(Command::Serve(args)) => serve(args, self.auth, self.storage, self.scheduler, self.web),
-            None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web),
+            Some(Command::Serve(args)) => {
+                serve(args, self.auth, self.storage, self.scheduler, self.web, self.guard, self.on_start)
+            }
+            None => serve(cli.serve, self.auth, self.storage, self.scheduler, self.web, self.guard, self.on_start),
         }
     }
 }
@@ -834,6 +904,8 @@ fn storage_config(
 
 /// How long a stopping server keeps serving with `Connection: close` before it stops accepting.
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
+/// How long a stopping server waits for the tasks of `App::spawn` to end before it drops them.
+const SERVICES_GRACE: Duration = Duration::from_secs(10);
 
 fn serve(
     args: ServeArgs,
@@ -841,6 +913,8 @@ fn serve(
     storage: StorageConfig,
     scheduler: SchedulerOptions,
     web: crate::ops::WebOptions,
+    guard: Option<crate::guard::Guard>,
+    on_start: Vec<StartHook>,
 ) -> crate::Result<()> {
     // stdout logging (filtered by RUST_LOG) plus the capture of function log lines.
     let stdout_filter =
@@ -876,6 +950,7 @@ fn serve(
             auth,
             storage,
             scheduler,
+            guard,
             ..Default::default()
         };
         args.ops.apply(&mut options);
@@ -917,6 +992,9 @@ fn serve(
         }
         let restart = options.ops.restart.clone();
         let app = App::open(&args.dir, options).await?;
+        for hook in on_start {
+            (hook.0)(app.clone()).await.context("an on_start hook failed")?;
+        }
         app.start_scheduler().await?;
         if args.migrate {
             let app = app.clone();
@@ -1020,6 +1098,8 @@ fn serve(
                 app.begin_close();
             })
             .await?;
+        // Services end on `begin_close`; they may still write, and must let go of what they hold before the next server.
+        app.stop_tasks(SERVICES_GRACE).await;
         if !handed_over.load(std::sync::atomic::Ordering::SeqCst) {
             // The last commits reach the replication target before the process exits. (After a handover the
             // journal goes to the new process, which ships them.)

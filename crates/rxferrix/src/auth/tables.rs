@@ -99,6 +99,8 @@ pub struct VerificationCode {
     pub expires_at: f64,
     /// Failed attempts at the numeric code.
     pub attempts: u32,
+    /// The app URL a sign-in code's link goes to, for `AuthConfig::before_sign_up` (`"sign_in"` codes only).
+    pub redirect_to: Option<String>,
 }
 
 /// A second factor of a user or an administrator (`_mfa_factors`): a TOTP secret, sealed (`auth::secretbox`) with

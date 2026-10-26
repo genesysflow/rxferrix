@@ -1591,7 +1591,7 @@ impl Manager {
                 guard.job = Some((id, seq));
                 let Some(app) = app.upgrade() else { break };
                 let started = std::time::Instant::now();
-                let run = app.query_in_snapshot(&snapshot, &path, args, &identity, false).await;
+                let run = app.query_in_snapshot(&snapshot, &path, args, &identity, crate::guard::Origin::Client).await;
                 let elapsed = started.elapsed();
                 drop(app);
                 guard.job = None;

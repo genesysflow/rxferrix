@@ -266,7 +266,7 @@ async fn http_query(
     }) {
         return limited.into_response();
     }
-    let run = match app.query_or_cached(&call.path, call.args, &identity, false).await {
+    let run = match app.query_or_cached(&call.path, call.args, &identity, crate::guard::Origin::Client).await {
         // The cached result's JSON text goes into the response as is.
         crate::runtime::QueryOutcome::Cached(hit) => {
             let log_lines = serde_json::to_string(&hit.log_lines).unwrap_or_else(|_| "[]".into());

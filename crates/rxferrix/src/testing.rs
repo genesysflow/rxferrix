@@ -14,6 +14,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::guard::Origin;
 use crate::runtime::{App, AppOptions, Identity};
 use crate::{ActionFunction, MutationFunction, QueryFunction};
 
@@ -105,7 +106,7 @@ impl TestApp {
         identity: &Identity,
         args: impl Into<F::Args>,
     ) -> crate::Result<F::Output> {
-        self.app.typed_query::<F>(args.into(), identity).await
+        self.app.typed_query_from::<F>(args.into(), identity, Origin::Test).await
     }
 
     /// Run a mutation as `identity`.
@@ -114,7 +115,7 @@ impl TestApp {
         identity: &Identity,
         args: impl Into<F::Args>,
     ) -> crate::Result<F::Output> {
-        Ok(self.app.typed_mutation::<F>(args.into(), identity).await?.0)
+        Ok(self.app.typed_mutation_from::<F>(args.into(), identity, Origin::Test).await?.0)
     }
 
     /// Run an action as `identity`.
@@ -123,7 +124,7 @@ impl TestApp {
         identity: &Identity,
         args: impl Into<F::Args>,
     ) -> crate::Result<F::Output> {
-        self.app.typed_action::<F>(args.into(), identity).await
+        self.app.typed_action_from::<F>(args.into(), identity, Origin::Test).await
     }
 
     /// Create a user in `_users` (email verified), with a password credential when `password` is given (so the
@@ -185,7 +186,7 @@ impl TestApp {
         args: impl Into<F::Args>,
     ) -> crate::Result<crate::runtime::QueryRun> {
         let args = serde_json::to_value(args.into())?;
-        Ok(self.app.call_query(&F::path(), args, &Identity::default(), true).await)
+        Ok(self.app.call_query(&F::path(), args, &Identity::default(), Origin::Server).await)
     }
 
     /// Like [`TestApp::mutation`], also returning the commit ts.

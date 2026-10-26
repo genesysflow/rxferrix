@@ -68,6 +68,25 @@ async fn stripe(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Stat
 rxferrix::RxFerrix::new().app_routes(axum::Router::new().route("/webhooks/stripe", post(stripe))).run()
 ```
 
+Background services that live as long as the server (a media server on its own UDP port, a queue consumer) start
+in `.on_start`. It runs once the app is open, before the scheduler runs and before the server accepts a connection,
+so an error (the port is taken) stops `serve` at boot. Run the service with `app.spawn`, and end it when
+`app.closed()` resolves: on shutdown `serve` waits for it (up to 10 seconds) before letting go of the database, so it
+can still write, and its port is free when the next server starts (with `--takeover`, the new process runs its hooks
+after the old one has exited):
+
+```rust
+rxferrix::RxFerrix::new()
+    .on_start(|app| async move {
+        app.mutation::<voice::clear_stale>(()).await?;            // state the last run left behind
+        let media = MediaServer::bind(media_port()).await?;      // fails `serve` if the port is taken
+        let closed = app.clone();
+        app.spawn(async move { media.run_until(closed.closed()).await });
+        Ok(())
+    })
+    .run()
+```
+
 Unknown paths get `index.html` (client-side routing) except under `/api` and `/_`, which static files never shadow,
 and a missing file with an extension (`/logo.png`) is a 404 unless the client asks for HTML.
 HTML is `no-cache`, hashed assets (`assets/*`, `name-<hash>.js`) are cached for a year, and `<file>.br` / `.gz`

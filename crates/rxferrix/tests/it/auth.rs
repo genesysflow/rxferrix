@@ -826,6 +826,63 @@ async fn oauth_with_mock_oidc_provider() {
     assert_eq!(mock.lock().unwrap().token_requests, 5, "the replayed callback never reached the provider");
 }
 
+/// `before_sign_up` and the allowlists for OAuth: they run only when the callback would create an account, see the
+/// flow's app URL and a provider-verified address only, and a refusal reaches the app in the redirect's fragment.
+#[tokio::test]
+async fn oauth_sign_ups_go_through_the_sign_up_check() {
+    let (mock_addr, mock) = start_mock_oidc().await;
+    let mailer = MemoryMailer::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    let auth = config(&mailer)
+        .oauth(Oidc::new("mock", format!("http://{mock_addr}"), "client-1", "secret-1"))
+        .allowed_domains(["team.test"])
+        .before_sign_up(move |_app, attempt| {
+            let recorded = recorded.clone();
+            async move {
+                let invited = attempt.redirect_to.as_deref().is_some_and(|r| r.contains("invite=yes"));
+                recorded.lock().unwrap().push(attempt);
+                if !invited {
+                    return Err(rxferrix::UserError::new("invite_required", "You need an invite to sign up").into());
+                }
+                Ok(())
+            }
+        });
+    let t = TestApp::with_auth(auth).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+
+    let profile = json!({ "sub": "o-1", "email": "Ola@Team.test", "email_verified": true, "name": "Ola" });
+    let refused = fragment(&oauth_flow(&http, &mock, profile.clone(), "http://app.test/join", true).await);
+    assert_eq!(refused["rxferrix_error"], "invite_required", "{refused:?}");
+    assert_eq!(refused["rxferrix_error_description"], "You need an invite to sign up");
+    assert!(!refused.contains_key("rxferrix_access_token"));
+
+    let invited = fragment(&oauth_flow(&http, &mock, profile.clone(), "http://app.test/join?invite=yes", true).await);
+    assert!(invited.contains_key("rxferrix_access_token"), "{invited:?}");
+    {
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!((last.email.as_deref(), last.email_verified), (Some("ola@team.test"), true));
+        assert_eq!(last.method, rxferrix::auth::SignUpMethod::OAuth("mock".into()));
+        assert_eq!(last.name.as_deref(), Some("Ola"));
+        assert_eq!(last.redirect_to.as_deref(), Some("http://app.test/join?invite=yes"));
+    }
+    // Signing in again (a linked account) doesn't ask.
+    let calls = seen.lock().unwrap().len();
+    let again = fragment(&oauth_flow(&http, &mock, profile, "http://app.test/", true).await);
+    assert_eq!(again["rxferrix_user_id"], invited["rxferrix_user_id"]);
+    assert_eq!(seen.lock().unwrap().len(), calls);
+
+    // The allowlist wants a verified address at an allowed domain, and is checked first.
+    let unverified = json!({ "sub": "o-2", "email": "pat@team.test", "email_verified": false });
+    let f = fragment(&oauth_flow(&http, &mock, unverified, "http://app.test/?invite=yes", true).await);
+    assert_eq!(f["rxferrix_error"], "signup_not_allowed");
+    let elsewhere = json!({ "sub": "o-3", "email": "pat@example.com", "email_verified": true });
+    let f = fragment(&oauth_flow(&http, &mock, elsewhere, "http://app.test/?invite=yes", true).await);
+    assert_eq!(f["rxferrix_error"], "signup_not_allowed");
+    assert_eq!(seen.lock().unwrap().len(), calls, "the hook never saw them");
+}
+
 /// A provider account linked to a user whose email was never verified (data an older version could have created)
 /// goes away when the address's owner claims the account, whether through a provider that verified the address or
 /// through the verification link: the previous holder can't come back in through the link.

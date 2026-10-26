@@ -18,6 +18,7 @@ use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
 use crate::error::{FunctionNotFound, MutationTimeout, QueryTimeout};
 use crate::exec_log::{LogRetention, Logs};
+use crate::guard::{Guard, GuardCtx, GuardedFunction, Origin};
 use crate::private::{FUNCTIONS, FunctionDef, FunctionKind, Handler, QueryHandler, TABLES, Visibility};
 use crate::sync::subscriptions::{SubscriptionManager, SubscriptionStats};
 use crate::{ActionFunction, MutationFunction, QueryFunction, TableDef};
@@ -81,6 +82,8 @@ pub struct MutationCtx {
     pub workflows: crate::workflow::Workflows,
     /// Environment variables, read in this mutation's transaction (`crate::env`).
     pub env: crate::env::Env,
+    /// Delete users and end sessions, in this mutation's transaction (`crate::auth::users`).
+    pub users: crate::auth::Users,
     now: f64,
     dev: bool,
 }
@@ -280,6 +283,8 @@ pub struct AppOptions {
     pub determinism_check: Option<Duration>,
     /// The analytics copy and `ctx.olap` (`--olap`; [`crate::olap`]). Needs the `olap` cargo feature.
     pub olap: crate::olap::OlapOptions,
+    /// Runs before every client call of a public function and can refuse it ([`crate::guard`]).
+    pub guard: Option<Guard>,
 }
 
 /// [`AppOptions::determinism_check`] in `rxferrix serve --dev` and `TestApp`.
@@ -327,6 +332,7 @@ impl Default for AppOptions {
             writer_cache_size: crate::db::DEFAULT_WRITER_CACHE_SIZE,
             determinism_check: None,
             olap: Default::default(),
+            guard: None,
         }
     }
 }
@@ -399,6 +405,8 @@ struct AppInner {
     olap: OnceLock<Arc<crate::olap::OlapService>>,
     /// The slow lane of one-off queries ([`crate::read_lanes`]).
     read_lanes: crate::read_lanes::ReadLanes,
+    /// The app's background tasks ([`App::spawn`]).
+    tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 /// A weak handle on an [`App`], for background tasks that must not keep it alive.
@@ -607,6 +615,7 @@ impl App {
                 determinism,
                 olap: OnceLock::new(),
                 read_lanes: crate::read_lanes::ReadLanes::new(readers),
+                tasks: Default::default(),
             }),
         };
         crate::storage::service::ensure_schema(&app).await?;
@@ -726,6 +735,40 @@ impl App {
         let _ = rx.wait_for(|closing| *closing).await;
     }
 
+    /// Run `task` in the background for as long as the server runs: a service started from
+    /// [`crate::RxFerrix::on_start`]. It should end once [`App::closed`] resolves; `serve` waits a while for it (it may
+    /// still run functions then) before it seals the database, and drops it if it hasn't ended by then. A task that
+    /// panics is logged.
+    pub fn spawn<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.inner.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        // Reap finished tasks, so short ones don't pile up.
+        while let Some(done) = tasks.try_join_next() {
+            log_task_end(done);
+        }
+        tasks.spawn(task);
+    }
+
+    /// Wait up to `grace` for the tasks of [`App::spawn`] to end (after [`App::begin_close`]), then drop the rest.
+    pub(crate) async fn stop_tasks(&self, grace: Duration) {
+        let mut tasks = std::mem::take(&mut *self.inner.tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        let all_done = tokio::time::timeout(grace, async {
+            while let Some(done) = tasks.join_next().await {
+                log_task_end(done);
+            }
+        })
+        .await;
+        if all_done.is_err() {
+            tracing::warn!(
+                left = tasks.len(),
+                "background tasks still running {grace:?} after shutdown; dropping them"
+            );
+            tasks.shutdown().await;
+        }
+    }
+
     /// The key that seals environment variables (`crate::env`), for a context.
     pub(crate) fn env_box(&self) -> Arc<crate::auth::secretbox::SecretBox> {
         Arc::new(self.auth().keys.secret_box())
@@ -735,14 +778,14 @@ impl App {
         &self.inner.auth
     }
 
-    /// Look up a function of `kind`. Internal functions are only found when `allow_internal`; dev-only functions
+    /// Look up a function of `kind`. Internal functions are only found when `origin` allows them; dev-only functions
     /// are refused (whoever calls) unless the app runs in dev mode.
-    fn lookup(&self, path: &str, kind: FunctionKind, allow_internal: bool) -> crate::Result<&'static FunctionDef> {
+    fn lookup(&self, path: &str, kind: FunctionKind, origin: Origin) -> crate::Result<&'static FunctionDef> {
         let def = self
             .inner
             .registry
             .get(path)
-            .filter(|d| allow_internal || d.visibility == Visibility::Public)
+            .filter(|d| origin.allows_internal() || d.visibility == Visibility::Public)
             .ok_or_else(|| FunctionNotFound(format!("Could not find public function for '{path}'")))?;
         if def.dev_only && !self.options().dev {
             return Err(FunctionNotFound(format!(
@@ -763,12 +806,12 @@ impl App {
 
     /// Run a public query at the latest snapshot.
     pub async fn run_query(&self, path: &str, args: Value, identity: &Identity) -> QueryRun {
-        self.call_query(path, args, identity, false).await
+        self.call_query(path, args, identity, Origin::Client).await
     }
 
     /// Run a public mutation; returns its result and commit ts.
     pub async fn run_mutation(&self, path: &str, args: Value, identity: &Identity) -> crate::Result<(Value, u64)> {
-        self.call_mutation(path, args, identity, false, None).await.result
+        self.call_mutation(path, args, identity, Origin::Client, None).await.result
     }
 
     /// Run a public mutation, returning its log lines too. With an `idempotency_key`, a key seen in the last ~10
@@ -780,17 +823,17 @@ impl App {
         identity: &Identity,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> MutationRun {
-        self.call_mutation(path, args, identity, false, idempotency_key).await
+        self.call_mutation(path, args, identity, Origin::Client, idempotency_key).await
     }
 
     /// Run a public action.
     pub async fn run_action(&self, path: &str, args: Value, identity: &Identity) -> crate::Result<Value> {
-        self.call_action(path, args, identity, false).await.result
+        self.call_action(path, args, identity, Origin::Client).await.result
     }
 
     /// Run a public action, returning its log lines too.
     pub async fn execute_action(&self, path: &str, args: Value, identity: &Identity) -> ActionRun {
-        self.call_action(path, args, identity, false).await
+        self.call_action(path, args, identity, Origin::Client).await
     }
 
     /// Run a query by its typed reference (internal functions allowed): `app.query::<list>((x,))`.
@@ -813,7 +856,16 @@ impl App {
         args: F::Args,
         identity: &Identity,
     ) -> crate::Result<F::Output> {
-        match self.query_or_cached(&F::path(), serde_json::to_value(args)?, identity, true).await {
+        self.typed_query_from::<F>(args, identity, Origin::Server).await
+    }
+
+    pub(crate) async fn typed_query_from<F: QueryFunction>(
+        &self,
+        args: F::Args,
+        identity: &Identity,
+        origin: Origin,
+    ) -> crate::Result<F::Output> {
+        match self.query_or_cached(&F::path(), serde_json::to_value(args)?, identity, origin).await {
             QueryOutcome::Cached(hit) => Ok(serde_json::from_str(hit.value.json())?),
             QueryOutcome::Ran(run) => Ok(serde_json::from_value(run.result?)?),
         }
@@ -827,10 +879,11 @@ impl App {
         path: &str,
         args: Value,
         identity: &Identity,
-        allow_internal: bool,
+        origin: Origin,
     ) -> QueryOutcome {
         // Visibility first: a cached result of an internal query must not reach a public caller.
-        if self.lookup(path, FunctionKind::Query, allow_internal).is_ok() {
+        let def = self.lookup(path, FunctionKind::Query, origin);
+        if def.is_ok() {
             let latest = self.db().write_log().latest();
             let hit = self.subscriptions().cache().get(path, &args, identity, latest);
             self.inner.metrics.record_cache_lookup(hit.is_some());
@@ -838,8 +891,16 @@ impl App {
                 return QueryOutcome::Cached(hit);
             }
         }
-        let run = self.call_query(path, args.clone(), identity, allow_internal).await;
-        self.subscriptions().offer(path, &args, identity, &run);
+        let run = self.call_query(path, args.clone(), identity, origin).await;
+        // A run that skipped the guard (server code) must not answer a client's call later, which would skip it too.
+        let unguarded = def.is_ok_and(|d| {
+            self.options().guard.is_some()
+                && Origin::Client.guarded(path, d.visibility)
+                && !origin.guarded(path, d.visibility)
+        });
+        if !unguarded {
+            self.subscriptions().offer(path, &args, identity, &run);
+        }
         QueryOutcome::Ran(run)
     }
 
@@ -848,8 +909,17 @@ impl App {
         args: F::Args,
         identity: &Identity,
     ) -> crate::Result<(F::Output, u64)> {
+        self.typed_mutation_from::<F>(args, identity, Origin::Server).await
+    }
+
+    pub(crate) async fn typed_mutation_from<F: MutationFunction>(
+        &self,
+        args: F::Args,
+        identity: &Identity,
+        origin: Origin,
+    ) -> crate::Result<(F::Output, u64)> {
         let (out, ts) =
-            self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, true, None).await.result?;
+            self.call_mutation(&F::path(), serde_json::to_value(args)?, identity, origin, None).await.result?;
         Ok((serde_json::from_value(out)?, ts))
     }
 
@@ -858,8 +928,23 @@ impl App {
         args: F::Args,
         identity: &Identity,
     ) -> crate::Result<F::Output> {
-        let out = self.call_action(&F::path(), serde_json::to_value(args)?, identity, true).await.result?;
+        self.typed_action_from::<F>(args, identity, Origin::Server).await
+    }
+
+    pub(crate) async fn typed_action_from<F: ActionFunction>(
+        &self,
+        args: F::Args,
+        identity: &Identity,
+        origin: Origin,
+    ) -> crate::Result<F::Output> {
+        let out = self.call_action(&F::path(), serde_json::to_value(args)?, identity, origin).await.result?;
         Ok(serde_json::from_value(out)?)
+    }
+
+    /// The guard to run for a call of `def` at `path` from `origin`, if any ([`crate::guard`]).
+    fn guard_for(&self, def: &FunctionDef, path: &str, origin: Origin) -> Option<(Guard, GuardedFunction)> {
+        let guard = self.options().guard.as_ref().filter(|_| origin.guarded(path, def.visibility))?;
+        Some((guard.clone(), GuardedFunction::new(path, def.handler.kind())))
     }
 
     /// The slow lane of reads ([`crate::read_lanes`]).
@@ -867,13 +952,7 @@ impl App {
         &self.inner.read_lanes
     }
 
-    pub(crate) async fn call_query(
-        &self,
-        path: &str,
-        args: Value,
-        identity: &Identity,
-        allow_internal: bool,
-    ) -> QueryRun {
+    pub(crate) async fn call_query(&self, path: &str, args: Value, identity: &Identity, origin: Origin) -> QueryRun {
         let lanes = &self.inner.read_lanes;
         let _slow = lanes.enter(path).await;
         let snapshot = match self.db().snapshot().await {
@@ -881,8 +960,8 @@ impl App {
             Err(e) => return QueryRun::not_run(e, 0),
         };
         let started = Instant::now();
-        let run = self.query_in_snapshot(&snapshot, path, args, identity, allow_internal).await;
-        if self.lookup(path, FunctionKind::Query, allow_internal).is_ok() {
+        let run = self.query_in_snapshot(&snapshot, path, args, identity, origin).await;
+        if self.lookup(path, FunctionKind::Query, origin).is_ok() {
             lanes.record(path, started.elapsed());
         }
         run
@@ -895,13 +974,14 @@ impl App {
         path: &str,
         args: Value,
         identity: &Identity,
-        allow_internal: bool,
+        origin: Origin,
     ) -> QueryRun {
         let ts = snapshot.ts;
-        let def = match self.lookup(path, FunctionKind::Query, allow_internal) {
+        let def = match self.lookup(path, FunctionKind::Query, origin) {
             Ok(d) => d,
             Err(e) => return QueryRun::not_run(e, ts),
         };
+        let guard = self.guard_for(def, path, origin);
         let Handler::Query(handler) = def.handler else { unreachable!("kind checked by lookup") };
         let db = QueryDb::new(Source::Snapshot(snapshot.clone()), self.db().catalog().clone());
         let read_set = db.read_set_handle();
@@ -912,7 +992,9 @@ impl App {
         let exec = Execution::start(path, FunctionKind::Query, identity, &args);
         let check = self.inner.determinism.as_ref().filter(|c| c.due(path));
         let rerun_args = check.map(|_| args.clone());
-        let (result, mut log_lines) = crate::log::capture(self.run_query_handler(handler, ctx, args, path)).await;
+        let guarded = self.guarded_query(guard.clone(), &ctx);
+        let (result, mut log_lines) =
+            crate::log::capture(self.run_query_handler(handler, ctx, args, path, guarded)).await;
         let elapsed = exec.started.elapsed();
         let read_set = std::mem::take(&mut *read_set.lock().unwrap_or_else(|e| e.into_inner()));
         if let (Some(check), Some(args)) = (check, rerun_args)
@@ -923,7 +1005,8 @@ impl App {
             let storage = crate::storage::QueryStorage::new(db.share(), self.storage().clone());
             let env = crate::env::Env::in_db(db.share(), self.env_box());
             let ctx = QueryCtx { db, auth: Auth::new(identity.clone()), storage, env, dev: self.options().dev };
-            let again = crate::log::discard(self.run_query_handler(handler, ctx, args, path)).await;
+            let guarded = self.guarded_query(guard, &ctx);
+            let again = crate::log::discard(self.run_query_handler(handler, ctx, args, path, guarded)).await;
             if let Some(warning) = crate::determinism::compare(path, ts, &result, &again) {
                 tracing::warn!(path, ts, "{warning}");
                 log_lines.push(format!("[WARN] {warning}"));
@@ -933,16 +1016,28 @@ impl App {
         QueryRun { result, read_set, ts, log_lines, auth_deps: auth_access.deps() }
     }
 
-    /// Run a query's handler, with the query timeout and panics caught.
+    /// The guard of a query run, with its context: the query's snapshot and `Auth` (reads count as the query's).
+    fn guarded_query(
+        &self,
+        guard: Option<(Guard, GuardedFunction)>,
+        ctx: &QueryCtx,
+    ) -> Option<(Guard, GuardCtx, GuardedFunction)> {
+        let (guard, function) = guard?;
+        let env = crate::env::Env::in_db(ctx.db.share(), self.env_box());
+        Some((guard, GuardCtx { db: ctx.db.share(), auth: ctx.auth.clone(), env }, function))
+    }
+
+    /// Run a query's handler (after its guard), with the query timeout and panics caught.
     async fn run_query_handler(
         &self,
         handler: QueryHandler,
         ctx: QueryCtx,
         args: Value,
         path: &str,
+        guard: Option<(Guard, GuardCtx, GuardedFunction)>,
     ) -> crate::Result<Value> {
         let timeout = self.options().query_timeout;
-        match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+        match tokio::time::timeout(timeout, catch_panics(after_guard(guard, handler(ctx, args)))).await {
             Ok(result) => result,
             Err(_elapsed) => Err(QueryTimeout { path: path.to_string(), timeout }.into()),
         }
@@ -953,10 +1048,10 @@ impl App {
         path: &str,
         args: Value,
         identity: &Identity,
-        allow_internal: bool,
+        origin: Origin,
         idempotency_key: Option<&IdempotencyKey>,
     ) -> MutationRun {
-        self.call_mutation_hooked(path, args, identity, allow_internal, idempotency_key, None).await
+        self.call_mutation_hooked(path, args, identity, origin, idempotency_key, None).await
     }
 
     /// [`App::call_mutation`], with `hook` running inside the mutation's transaction (the scheduler records a job's
@@ -966,12 +1061,12 @@ impl App {
         path: &str,
         args: Value,
         identity: &Identity,
-        allow_internal: bool,
+        origin: Origin,
         idempotency_key: Option<&IdempotencyKey>,
         hook: Option<&dyn MutationHook>,
     ) -> MutationRun {
         let not_run = |e| MutationRun { result: Err(e), log_lines: Vec::new() };
-        let def = match self.lookup(path, FunctionKind::Mutation, allow_internal) {
+        let def = match self.lookup(path, FunctionKind::Mutation, origin) {
             Ok(d) => d,
             Err(e) => return not_run(e),
         };
@@ -1019,13 +1114,20 @@ impl App {
             scheduler: crate::scheduler::Scheduler::in_mutation(txn.clone(), path, pools.clone()),
             workflows: crate::workflow::Workflows::in_mutation(txn.clone(), path, pools),
             env: crate::env::Env::in_db(MutationDb::new(txn.clone()).share(), self.env_box()),
+            users: crate::auth::Users::new(MutationDb::new(txn.clone())),
             now: txn.now(),
             dev: self.options().dev,
         };
+        // In the transaction: what the guard reads is part of the mutation's reads.
+        let guard = self.guard_for(def, path, origin).map(|(guard, function)| {
+            let env = crate::env::Env::in_db(ctx.db.share(), self.env_box());
+            (guard, GuardCtx { db: ctx.db.share(), auth: ctx.auth.clone(), env }, function)
+        });
         let timeout = self.options().mutation_timeout;
         let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
         let run = async {
-            let mut result = match tokio::time::timeout(timeout, catch_panics(handler(ctx, args))).await {
+            let handled = catch_panics(after_guard(guard, handler(ctx, args)));
+            let mut result = match tokio::time::timeout(timeout, handled).await {
                 Ok(r) => r,
                 Err(_elapsed) => Err(MutationTimeout { path: path.to_string(), timeout }.into()),
             };
@@ -1071,14 +1173,8 @@ impl App {
         MutationRun { result, log_lines }
     }
 
-    pub(crate) async fn call_action(
-        &self,
-        path: &str,
-        args: Value,
-        identity: &Identity,
-        allow_internal: bool,
-    ) -> ActionRun {
-        let def = match self.lookup(path, FunctionKind::Action, allow_internal) {
+    pub(crate) async fn call_action(&self, path: &str, args: Value, identity: &Identity, origin: Origin) -> ActionRun {
+        let def = match self.lookup(path, FunctionKind::Action, origin) {
             Ok(d) => d,
             Err(e) => return ActionRun { result: Err(e), log_lines: Vec::new() },
         };
@@ -1095,11 +1191,49 @@ impl App {
             identity: identity.clone(),
         };
         let exec = Execution::start(path, FunctionKind::Action, identity, &args);
+        let handled = match self.guard_for(def, path, origin) {
+            // An action has no snapshot of its own: its guard reads the latest one.
+            Some((guard, function)) => {
+                let app = self.clone();
+                let auth = ctx.auth.clone();
+                let handled = handler(ctx, args);
+                Box::pin(async move {
+                    let snapshot = app.db().snapshot().await?;
+                    let db = QueryDb::new(Source::Snapshot(snapshot), app.db().catalog().clone());
+                    let env = crate::env::Env::in_db(db.share(), app.env_box());
+                    guard.check(GuardCtx { db, auth, env }, function).await?;
+                    handled.await
+                })
+            }
+            None => handler(ctx, args),
+        };
         // Inside a scheduled job that gets canceled, the handler is dropped after the grace period.
-        let run = crate::scheduler::cancellation::abortable(catch_panics(handler(ctx, args)));
+        let run = crate::scheduler::cancellation::abortable(catch_panics(handled));
         let (result, log_lines) = crate::log::capture(run).await;
         exec.finish(self, &result, &log_lines);
         ActionRun { result, log_lines }
+    }
+}
+
+fn log_task_end(result: Result<(), tokio::task::JoinError>) {
+    if let Err(e) = result
+        && e.is_panic()
+    {
+        tracing::error!("a background task (App::spawn) panicked: {e}");
+    }
+}
+
+/// `handler`, after the guard allowed the call (if there is one).
+fn after_guard(
+    guard: Option<(Guard, GuardCtx, GuardedFunction)>,
+    handler: futures::future::BoxFuture<'static, crate::Result<Value>>,
+) -> futures::future::BoxFuture<'static, crate::Result<Value>> {
+    match guard {
+        Some((guard, ctx, function)) => Box::pin(async move {
+            guard.check(ctx, function).await?;
+            handler.await
+        }),
+        None => handler,
     }
 }
 
@@ -1196,5 +1330,51 @@ pub(crate) async fn catch_panics(
                 .unwrap_or_else(|| "unknown panic".into());
             Err(anyhow::anyhow!("function panicked: {msg}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    /// `serve`'s shutdown: tasks that end on `closed()` are waited for (and may still run functions); one that doesn't
+    /// is dropped after the grace period, releasing what it holds.
+    #[tokio::test]
+    async fn spawned_tasks_end_with_the_server() {
+        let t = crate::testing::TestApp::new().await.unwrap();
+        let app = t.app().clone();
+        let (finished, dropped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+
+        let (a, f) = (app.clone(), finished.clone());
+        app.spawn(async move {
+            a.closed().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            f.store(true, Ordering::SeqCst);
+        });
+        app.spawn(async { panic!("a service bug") });
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let guard = OnDrop(dropped.clone());
+        app.spawn(async move {
+            let _held = guard;
+            std::future::pending::<()>().await;
+        });
+
+        app.begin_close();
+        let started = Instant::now();
+        app.stop_tasks(Duration::from_millis(300)).await;
+        assert!(finished.load(Ordering::SeqCst), "the well-behaved task ran to its end");
+        assert!(dropped.load(Ordering::SeqCst), "the stuck task was dropped");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        // Nothing is left to wait for the next time.
+        let again = Instant::now();
+        app.stop_tasks(Duration::from_secs(5)).await;
+        assert!(again.elapsed() < Duration::from_secs(1));
     }
 }

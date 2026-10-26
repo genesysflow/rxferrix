@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { getAllPages, useMutation, usePaginatedQueryWithStatus } from "@rxferrix/react";
 import { api, type MessageView } from "../rxferrix";
 import type { ChannelInfo, Profile } from "../lib";
@@ -19,27 +19,39 @@ export function MessageList({ channel, me, onBack }: { channel: ChannelInfo; me:
     { initialNumItems: PAGE },
   );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
   // Infinite scroll: the list is `column-reverse` (newest at the bottom, scroll anchored there), so older pages are
-  // added at the top without moving what's on screen. scrollTop is zero at the bottom and negative towards the top.
-  // Check the remaining distance on every scroll and page arrival: an intersection observer can miss a transition
-  // while a page is loading, then leave the reader at the top with no further event to load the next page.
-  const loadOlderIfNearTop = useCallback(() => {
-    const root = scrollRef.current;
-    if (status !== "CanLoadMore" || !root) return;
-    const remaining = root.scrollHeight - root.clientHeight + root.scrollTop;
-    if (remaining <= PRELOAD_PX) loadMore(PAGE);
-  }, [status, loadMore]);
+  // added at the top without moving what's on screen. Load more while the sentinel at the top is near the viewport.
+  const statusRef = useRef(status);
+  const loadMoreRef = useRef(loadMore);
+  // Before the browser can run the observer's callback: with a plain effect, a scroll right after a page arrived could
+  // reach the callback with the previous status ("LoadingMore") and be ignored, and the sentinel, still in view,
+  // fires no new event, so loading stopped there.
   useLayoutEffect(() => {
-    loadOlderIfNearTop();
-  }, [loadOlderIfNearTop, results.length, error]);
-  // Resizing can also bring the top within reach, or leave a short page unable to fill the viewport.
+    statusRef.current = status;
+    loadMoreRef.current = loadMore;
+  });
   useEffect(() => {
     const root = scrollRef.current;
-    if (!root) return;
-    const observer = new ResizeObserver(loadOlderIfNearTop);
-    observer.observe(root);
+    const sentinel = sentinelRef.current;
+    if (!root || !sentinel) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting && statusRef.current === "CanLoadMore") loadMoreRef.current(PAGE);
+      },
+      { root, rootMargin: `${PRELOAD_PX}px 0px 0px 0px` },
+    );
+    observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [loadOlderIfNearTop, error]);
+  }, []);
+  // A page that didn't fill the screen leaves the sentinel in view, which fires no new intersection event: measure.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const sentinel = sentinelRef.current;
+    if (status !== "CanLoadMore" || !root || !sentinel) return;
+    if (sentinel.getBoundingClientRect().bottom >= root.getBoundingClientRect().top - PRELOAD_PX) loadMoreRef.current(PAGE);
+  }, [status, results.length]);
 
   // Mark the channel read whenever a new message shows up while it is open.
   const markRead = useMutation(api.channels.mark_read);
@@ -70,7 +82,7 @@ export function MessageList({ channel, me, onBack }: { channel: ChannelInfo; me:
 
   if (error) return <AccessError error={error} onBack={onBack} />;
   return (
-    <div className="messages" ref={scrollRef} onScroll={loadOlderIfNearTop} data-testid="messages">
+    <div className="messages" ref={scrollRef} data-testid="messages">
       {results.map((m, i) => {
         const older = results[i + 1];
         const grouped =
@@ -90,7 +102,7 @@ export function MessageList({ channel, me, onBack }: { channel: ChannelInfo; me:
           />
         );
       })}
-      <div className="history-edge">
+      <div ref={sentinelRef} className="history-edge">
         {status === "LoadingFirstPage" || status === "LoadingMore" ? (
           <span className="muted">Loading messages…</span>
         ) : status === "Exhausted" ? (

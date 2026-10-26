@@ -723,6 +723,8 @@ export interface LogFilter {
   outcome?: LogEntry["outcome"] | "";
   identity?: string;
   excludeSystem?: boolean;
+  /** Leave out scheduled jobs (crons and workflow steps included) and the functions they call. */
+  excludeBackground?: boolean;
   limit?: number;
   beforeId?: number;
 }

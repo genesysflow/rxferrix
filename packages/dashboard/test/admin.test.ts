@@ -4,6 +4,7 @@ import {
   cancelRestore,
   createBackup,
   exportTable,
+  fetchStats,
   fetchTimeseries,
   filenameFromDisposition,
   getReplication,
@@ -215,6 +216,17 @@ describe("other admin endpoints", () => {
     const fetch = mockFetch(new Response(JSON.stringify({ path: "a:b", bucket: 60000, since: 0, until: 1, points: [] })));
     await fetchTimeseries(fakeAuth(), { path: "a:b", bucket: 60_000, since: 1.7, until: 120_000.2 });
     expect(fetch.mock.calls[0]![0]).toBe("/api/admin/stats/timeseries?bucket=60000&since=1&path=a%3Ab&until=120001");
+    const again = mockFetch(new Response(JSON.stringify({ path: null, bucket: 60000, since: 0, until: 1, points: [] })));
+    await fetchTimeseries(fakeAuth(), { bucket: 60_000, since: 1, excludeBackground: true });
+    expect(again.mock.calls[0]![0]).toBe("/api/admin/stats/timeseries?bucket=60000&since=1&excludeBackground=true");
+  });
+
+  it("asks for stats with or without background work", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ since: 0, functions: [] })));
+    vi.stubGlobal("fetch", fetch);
+    await fetchStats(fakeAuth());
+    await fetchStats(fakeAuth(), { excludeBackground: true });
+    expect(fetch.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["/api/admin/stats", "/api/admin/stats?excludeBackground=true"]);
   });
 
   it("keeps no tokens from an impersonation", async () => {

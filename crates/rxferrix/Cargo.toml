@@ -68,9 +68,9 @@ rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs
 rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "webpki-roots", "axum"] }
 
 # DuckDB, compiled from its bundled C++ sources (feature `olap`).
-duckdb = { version = "1.10506.0", features = ["bundled", "json"], optional = true }
+duckdb = { version = "1.20000.0", features = ["bundled", "json"], optional = true }
 # Parquet exports of analytics queries, written from DuckDB's Arrow batches (same Arrow major version as duckdb's).
-parquet = { version = "58", default-features = false, features = ["arrow", "zstd"], optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
 # Verifying imported bcrypt password hashes (`auth::password`).
 bcrypt = "0.19.3"
 # The QR code (as SVG) of a TOTP enrollment (`auth::totp`); no dependencies of its own.

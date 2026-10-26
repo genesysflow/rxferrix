@@ -6,12 +6,15 @@
 //!   `event: log` per entry with the `LogEntry` as JSON, `event: lagged` with the number of skipped entries when the
 //!   client fell behind, `event: expired` right before the stream ends at the access token's expiry, and
 //!   `event: revoked` when it ends because the admin's session ended: signed out or revoked).
-//! - `GET /api/admin/stats?since=<ms>`: per-function stats since `since` (default: the last 24 hours), an overview,
-//!   and the analytics copy's status (`olap`, null without `--olap`).
-//! - `GET /api/admin/stats/timeseries?path=<fn>&bucket=<1m|15m|1h|ms>&since=<ms>&until=<ms>`: calls, errors and
-//!   p50/p95/max duration per time bucket for one function (or every app function without `path`), oldest first,
-//!   only buckets with executions: `{ path, bucket, since, until, points: [TimePoint] }`. Defaults: the last hour in
-//!   1-minute buckets; at most 1500 buckets (400 `invalid_request` otherwise).
+//! - `GET /api/admin/stats?since=<ms>&excludeBackground=<bool>`: per-function stats since `since` (default: the last
+//!   24 hours), an overview, and the analytics copy's status (`olap`, null without `--olap`).
+//! - `GET /api/admin/stats/timeseries?path=<fn>&bucket=<1m|15m|1h|ms>&since=<ms>&until=<ms>&excludeBackground=<bool>`:
+//!   calls, errors and p50/p95/max duration per time bucket for one function (or every app function without `path`),
+//!   oldest first, only buckets with executions: `{ path, bucket, since, until, points: [TimePoint] }`. Defaults: the
+//!   last hour in 1-minute buckets; at most 1500 buckets (400 `invalid_request` otherwise).
+//!
+//! `excludeBackground` (here and in `LogFilter`) leaves out scheduled jobs (crons and workflow steps included) and the
+//! functions they call: what is left is what clients ran.
 //! - `GET /api/admin/client-ip`: the caller's IP as RxFerrix resolves it, to check the trusted proxy headers
 //!   (`trustedProxy` setting): `{ ip, header, peer, proxyHeaders: [{ name, value }] }`. `header` is the trusted
 //!   header the IP came from (null: the peer address); `proxyHeaders` lists the well-known client IP headers present
@@ -24,7 +27,7 @@
 //! in proxy or server logs). The stream ends when the access token expires; the client reconnects with a fresh one.
 //!
 //! `LogFilter` query parameters: `pathPrefix`, `path` (one function), `kind` (`query|mutation|action`), `outcome`
-//! (`success|userError|serverError`), `since`, `limit`, `beforeId`, `identity`, `excludeSystem`.
+//! (`success|userError|serverError`), `since`, `limit`, `beforeId`, `identity`, `excludeSystem`, `excludeBackground`.
 
 use std::convert::Infallible;
 use std::time::{Duration, SystemTime};
@@ -184,9 +187,10 @@ async fn logs_stream(
 }
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct StatsQuery {
     since: Option<i64>,
+    exclude_background: bool,
 }
 
 /// Headers proxies and CDNs commonly put the client IP in, reported by `client-ip` when present.
@@ -247,7 +251,7 @@ async fn stats(
     let now = crate::db::wall_clock_ms();
     let since = q.since.unwrap_or(now as i64 - 24 * 3600 * 1000);
     let result: crate::Result<serde_json::Value> = async {
-        let functions = app.logs().stats(since).await?;
+        let functions = app.logs().stats(since, q.exclude_background).await?;
         let snapshot = app.db().snapshot().await?;
         let (ts, commit_time) = (snapshot.ts, snapshot.time);
         let documents: i64 =
@@ -309,12 +313,13 @@ async fn stats(
 }
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct TimeseriesQuery {
     path: Option<String>,
     bucket: Option<String>,
     since: Option<i64>,
     until: Option<i64>,
+    exclude_background: bool,
 }
 
 /// A bucket size: milliseconds (`60000`) or a number with a unit (`30s`, `1m`, `15m`, `1h`, `1d`).
@@ -352,7 +357,13 @@ async fn timeseries(
     // Times before the epoch can't hold executions; clamping also keeps the bucket arithmetic in range.
     let since = q.since.unwrap_or(until - 3_600_000).max(0);
     let path = q.path.filter(|p| !p.is_empty());
-    let spec = crate::exec_log::TimeseriesSpec { path: path.clone(), since, until, bucket_ms };
+    let spec = crate::exec_log::TimeseriesSpec {
+        path: path.clone(),
+        since,
+        until,
+        bucket_ms,
+        exclude_background: q.exclude_background,
+    };
     if until <= since {
         return bad_query("`until` must be after `since`");
     }

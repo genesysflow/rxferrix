@@ -555,6 +555,10 @@ async fn scheduled_functions_run_without_identity_and_log_as_scheduler() {
     let logs =
         t.app().logs().query(LogFilter { identity: Some("scheduler".into()), ..Default::default() }).await.unwrap();
     assert!(logs.iter().any(|e| e.path == whoami::path()), "{logs:?}");
+    // Hiding background work leaves out the job, but not the user's call that scheduled it.
+    let foreground = t.app().logs().query(LogFilter { exclude_background: true, ..Default::default() }).await.unwrap();
+    assert!(foreground.iter().all(|e| e.path != whoami::path()), "{foreground:?}");
+    assert!(foreground.iter().any(|e| e.path == schedule_whoami::path()), "{foreground:?}");
 }
 
 fn crons_options(crons: SchedulerOptions) -> AppOptions {

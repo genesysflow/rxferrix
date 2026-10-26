@@ -558,6 +558,51 @@ async fn run_function_as_admin_or_as_a_user() {
 }
 
 #[tokio::test]
+async fn background_work_can_be_left_out() {
+    let (t, http, admin, _, _) = setup().await;
+    let path = app::add_item::path();
+    let now = rxferrix::db::wall_clock_ms() as i64;
+    for identity in [Some("user:u1"), None, Some("scheduler"), Some("scheduler")] {
+        t.app().logs().record(rxferrix::LogEntry {
+            id: 0,
+            timestamp: now,
+            path: path.to_string(),
+            kind: rxferrix::FunctionKind::Mutation,
+            identity: identity.map(Into::into),
+            duration_us: 10,
+            outcome: rxferrix::LogOutcome::Success,
+            error: None,
+            log_lines: Vec::new(),
+            args: "{}".into(),
+            args_truncated: false,
+        });
+    }
+    t.app().logs().flush().await.unwrap();
+
+    let identities =
+        |b: &Value| b["entries"].as_array().unwrap().iter().map(|e| e["identity"].clone()).collect::<Vec<_>>();
+    let (s, b) = http.get(&format!("/api/admin/logs?path={path}&excludeBackground=true"), Some(&admin)).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(identities(&b), vec![json!(null), json!("user:u1")], "anonymous clients are kept");
+    let (_, b) = http.get(&format!("/api/admin/logs?path={path}"), Some(&admin)).await;
+    assert_eq!(identities(&b).len(), 4);
+
+    let calls =
+        |b: &Value| b["functions"].as_array().unwrap().iter().find(|f| f["path"] == path).unwrap()["calls"].clone();
+    let (_, b) = http.get("/api/admin/stats?excludeBackground=true", Some(&admin)).await;
+    assert_eq!(calls(&b), 2);
+    let (_, b) = http.get("/api/admin/stats", Some(&admin)).await;
+    assert_eq!(calls(&b), 4);
+
+    let series = format!("/api/admin/stats/timeseries?path={path}&bucket=1h&since={}", now - 1000);
+    let (s, b) = http.get(&format!("{series}&excludeBackground=true"), Some(&admin)).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["points"][0]["calls"], 2);
+    let (_, b) = http.get(&series, Some(&admin)).await;
+    assert_eq!(b["points"][0]["calls"], 4);
+}
+
+#[tokio::test]
 async fn logs_history_and_live_tail() {
     let (t, http, admin, _, _) = setup().await;
     for i in 0..3 {

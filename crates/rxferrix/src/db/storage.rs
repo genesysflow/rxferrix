@@ -16,6 +16,9 @@ use crate::schema::Order;
 
 const DDL: &str = "
 CREATE TABLE IF NOT EXISTS documents (id BLOB PRIMARY KEY, table_number INTEGER NOT NULL, json TEXT NOT NULL, ts INTEGER NOT NULL) WITHOUT ROWID;
+-- Narrow (table number and id only), so counting every document reads it instead of each page of `json`. Updates
+-- don't touch it (they never change either column).
+CREATE INDEX IF NOT EXISTS documents_by_table ON documents (table_number);
 CREATE TABLE IF NOT EXISTS index_entries (index_id INTEGER NOT NULL, key BLOB NOT NULL, doc_id BLOB NOT NULL, PRIMARY KEY (index_id, key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _meta (k TEXT PRIMARY KEY, v);
 CREATE TABLE IF NOT EXISTS _tables (table_number INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
@@ -210,19 +213,21 @@ pub fn table_documents(conn: &Connection, table_number: u32) -> anyhow::Result<V
     Ok(out)
 }
 
-/// The number of documents in a table (a range count over the `documents` primary key; see [`table_documents`]).
+/// The number of documents in a table (a range count over the `documents_by_table` index; the same documents as the
+/// table's range of the primary key, see [`table_documents`], since writes check that an id's table is its row's).
 pub fn count_documents(conn: &Connection, table_number: u32) -> anyhow::Result<u64> {
-    let start = table_number.to_be_bytes().to_vec();
-    let n: i64 = match crate::keys::prefix_successor(&start) {
-        Some(end) => conn
-            .prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1 AND id < ?2")?
-            .query_row(params![start, end], |r| r.get(0))?,
-        None => conn
-            .prepare_cached("SELECT COUNT(*) FROM documents WHERE id >= ?1")?
-            .query_row(params![start], |r| r.get(0))?,
-    };
+    let n: i64 = conn.prepare_cached(COUNT_TABLE_DOCUMENTS)?.query_row([table_number], |r| r.get(0))?;
     Ok(n as u64)
 }
+
+/// The number of documents in all tables (a count over the `documents_by_table` index).
+pub fn count_all_documents(conn: &Connection) -> anyhow::Result<u64> {
+    let n: i64 = conn.prepare_cached(COUNT_ALL_DOCUMENTS)?.query_row([], |r| r.get(0))?;
+    Ok(n as u64)
+}
+
+const COUNT_TABLE_DOCUMENTS: &str = "SELECT COUNT(*) FROM documents WHERE table_number = ?1";
+const COUNT_ALL_DOCUMENTS: &str = "SELECT COUNT(*) FROM documents";
 
 /// The number of entries of one index in `range` (a range count over the `index_entries` primary key; documents
 /// are not read).
@@ -276,4 +281,33 @@ pub fn scan_index_batch(
         out.push((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_read_the_narrow_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_writer(&dir.path().join("data.db")).unwrap();
+        let plan = |sql: &str, args: &[u32]| -> String {
+            let sql = format!("EXPLAIN QUERY PLAN {sql}");
+            conn.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(3)).unwrap()
+        };
+        assert_eq!(plan(COUNT_ALL_DOCUMENTS, &[]), "SCAN documents USING COVERING INDEX documents_by_table");
+        assert_eq!(
+            plan(COUNT_TABLE_DOCUMENTS, &[1]),
+            "SEARCH documents USING COVERING INDEX documents_by_table (table_number=?)"
+        );
+        for (i, table) in [1u32, 1, 2, u32::MAX].into_iter().enumerate() {
+            let mut id = [0u8; 16];
+            id[..4].copy_from_slice(&table.to_be_bytes());
+            id[15] = i as u8;
+            insert_document(&conn, &id, table, "{}", 1).unwrap();
+        }
+        assert_eq!(count_all_documents(&conn).unwrap(), 4);
+        let counts: Vec<u64> = [0, 1, 2, u32::MAX].map(|t| count_documents(&conn, t).unwrap()).into();
+        assert_eq!(counts, vec![0, 2, 1, 1]);
+    }
 }

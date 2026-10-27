@@ -484,7 +484,7 @@ impl App {
 }
 ```
 
-**Execution log** (`<dir>/aux.db`, table `_logs`). Every execution is recorded: queries (including subscription
+**Execution log** (`<dir>/aux.db`, table `_logs`; `aux.db` also holds the scheduler's job history, §1.7). Every execution is recorded: queries (including subscription
 reruns: one entry per shared rerun, however many sockets it served, with the identity it ran as), mutations,
 actions, and nested `ctx.run_*` calls. Duplicate mutations answered from the dedup table and
 calls to unknown functions are not recorded. Writes go through a bounded channel (8192 entries) to a background
@@ -1031,14 +1031,24 @@ with `_` (reserved for system crons), a zero interval, or args that don't serial
 - **Run now:** `_system/scheduler:run_cron_now { name, force? }` (admin, §4.1.2) enqueues a job due immediately and
   makes it the cron's `lastRun` / `lastJob` (`nextRun` unchanged); the no-pile-up rule applies unless `force`.
 
-**Retention.** Finished jobs (`success`, `failed`, `canceled`) are deleted `retention` (7 days; `None` keeps them)
-after they finished, by a built-in cleanup that runs at startup and every `cleanup_interval` (1h).
-`App::cleanup_scheduled_jobs()` runs it now.
+**History and retention.** Finished jobs (`success`, `failed`, `canceled`) stay in `_scheduled_jobs` for
+`history_after` (1h), so subscriptions and `ctx.db.get(job)` see how they ended. Then they **move to the job history**
+in `aux.db` (table `_job_history`: the whole document as JSON, by id), outside `data.db`: backups and replication
+snapshots don't grow with the number of jobs run. Each batch is committed to the history before it is deleted from
+`_scheduled_jobs` (a crash in between writes the same row again next time). The last job of every cron stays in
+`_scheduled_jobs` (the Scheduler page shows its state). Jobs, in either place, are deleted `retention` (7 days;
+`None` keeps them) after they finished, as are finished workflows (with their steps). `history_after: None` keeps
+finished jobs in `_scheduled_jobs` until `retention`. A built-in cleanup does all this at startup and every
+`cleanup_interval` (1h); `App::cleanup_scheduled_jobs()` runs it now. The history is read with
+`App::job_history(HistoryFilter { state, path, limit, before_completed_at, before_id })` (most recently finished
+first; pass the `completedAt` and id of a page's last job for the next one) and `App::job_history_get(id)`, and over
+HTTP (§4.2). It is not reactive, and it is in a backup only with `--with-aux`.
 
 ```rust
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {          // AppOptions::scheduler; RxFerrix::scheduler(opts) keeps declared crons and workpools
     pub concurrency: usize,            // 10
+    pub history_after: Option<Duration>, // Some(1 hour): finished jobs then move to the job history (aux.db)
     pub retention: Option<Duration>,   // Some(7 days)
     pub cleanup_interval: Duration,    // 1 hour
     pub retry_backoff: Duration,       // 1 second
@@ -1049,7 +1059,9 @@ pub struct SchedulerOptions {          // AppOptions::scheduler; RxFerrix::sched
 impl App {
     pub async fn start_scheduler(&self) -> Result<()>;      // `rxferrix serve` calls it; idempotent
     pub async fn run_due_jobs(&self) -> Result<usize>;      // run what is due now, until nothing is (tests)
-    pub async fn cleanup_scheduled_jobs(&self) -> Result<usize>;
+    pub async fn cleanup_scheduled_jobs(&self) -> Result<usize>;   // jobs moved or deleted from _scheduled_jobs
+    pub async fn job_history(&self, filter: HistoryFilter) -> Result<Vec<Doc<ScheduledJob>>>;
+    pub async fn job_history_get(&self, id: Id<ScheduledJob>) -> Result<Option<Doc<ScheduledJob>>>;
 }
 // Database::clock(): Clock { now_ms(), advance(Duration), offset() }, the wall clock plus an offset that only grows.
 // Mutations' `now()` and the scheduler read it.
@@ -2297,7 +2309,7 @@ args, lastRun, nextRun, lastJob }`, indexes `by_name` and `by_next_run`. Names s
 | `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin?, pool?, onComplete?, backoff? }` → job id. `ctx.scheduler` in actions. |
 | `cancel_pool` | internal mutation | `{ pool, reason }` → how many were canceled. `ctx.scheduler.cancel_pool` in actions. |
 | `cancel` | internal mutation | `{ id, reason? }` → `"canceled" \| "alreadyFinished"`. `ctx.scheduler.cancel` in actions. |
-| `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. |
+| `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. Finished jobs are listed until they move to the job history (§1.7; `GET /api/admin/job-history`, §4.2). |
 | `cancel_job` | mutation (admin) | `{ id }` → `"canceled" \| "alreadyFinished"`. Pending jobs and **actions in progress** (signaled, then aborted after `cancel_grace`; §1.7); `error` = `"Canceled from the dashboard by admin:<id>"` (+ `" (while running)"`, then how the action ended). |
 | `run_job_now` | mutation (admin) | `{ id }` → the id of the job that will run: a pending job becomes due now (same id); a finished one is run again as a new job (same path and args, origin `dashboard`). `running` for an action in progress. |
 | `crons` | query (admin) | `{}` → `[{ _id, name, schedule, timezone, system, path, args, lastRun, nextRun, lastJob, lastJobState }]`: the app's crons by name, then the system crons (`system: true`, e.g. `_storage_sweep`). Live. |
@@ -2507,7 +2519,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `GET /api/admin/olap` | `{ enabled: false }` without `--olap`, else `{ enabled: true, ...OlapStatus }` = `{ state ("building" \| "ready" \| "failed"), detail, appliedTs, latestTs, appliedTime, lagMs, tables: [{ name, rows, columns: [{ name, typeName }] }], sizeBytes, rowsApplied, rebuilds }` (§1.11). |
 | `POST /api/admin/olap/rebuild` | 202 `{ rebuilding: true }`: every table of the analytics copy is rebuilt from a snapshot in the background (audited `olap_rebuild`); 404 `olap_off` without `--olap`. |
 | `POST /api/admin/olap/query` | Body `{ sql, params?: Json[], format?: "json" \| "csv" \| "parquet" }`: one SELECT over the analytics copy in the sandbox of `ctx.olap` (§1.11). `json` (default): an `OlapResult` `{ columns: [{ name, typeName }], rows, asOfTs }` (at most `max_result_rows`; audited `olap_query`). `csv` / `parquet`: the whole result as a download (`query.csv`, RFC 4180 with a header, nested values as JSON; `query.parquet`, zstd, DuckDB's types nested), headers `x-rxferrix-rows` and `x-rxferrix-as-of-ts`, at most `max_export_rows` (10M) rows within `export_timeout` (5 min); written to a temporary file in the data directory by rxferrix (DuckDB itself has no file access), streamed, then deleted (audited `olap_export`). 400 `olap_query_failed` / `olap_timeout` / `olap_unavailable`, 404 `olap_off`. |
-| `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
+| `GET /api/admin/replication` | `{ enabled: false }` without `--replicate-to`, else `{ enabled: true, ...ReplicationStatus }` = `{ target, everyMs, jobsEveryMs, snapshotEveryMs, keepMs, generation, currentTs, currentTime, shippedTs, shippedTime, lagCommits, lagMs (age of the oldest unshipped commit; 0 when caught up), pendingBytes, maxPendingBytes, journaling, lastSegment: { name, from, to, entries, bytes, shippedAt } \| null, lastSnapshot: SnapshotInfo \| null, nextSnapshotAt, segmentsShipped, snapshotsTaken, lastSuccessAt, lastError, lastErrorAt, failures, generations: [{ id, createdAt, current, snapshots: SnapshotInfo[], segments, fromTs, toTs, fromTime, toTime }] }`, `SnapshotInfo` = `{ name, ts, createdAt, bytes }`. Built from memory and one reader snapshot (no call to the target). |
 | `POST /api/admin/replication/snapshot` | 201 `SnapshotInfo`: a snapshot of the current generation now (after shipping), then retention. 404 `replication_off`. Audited (`replication_snapshot`). |
 | `DELETE /api/admin/restore` | Cancel the staged restore → `{ canceled: true }`; 404 `not_found` if none. Audited (`restore_cancel`). |
 | `POST /api/admin/restore/restart` | 202 `{ restarting: true, exitCode }`, then a graceful shutdown and exit with `--restart-exit-code`, for the supervisor (systemd, Docker) to start the server again, which applies the restore. 400 `restart_unavailable` without `--restart-exit-code`; 409 `no_pending_restore`; 400 `invalid_backup` when the staged restore has an `error`. Audited (`restore_restart`). |
@@ -2515,6 +2527,8 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `POST /api/admin/import/{table}?mode=insert\|upsert\|replace&format=jsonl\|csv` | Body: JSONL, or CSV with `format=csv` (as exported: a header row, RFC 4180; cells typed with the table's shape, §4.4) (≤ 256 MiB, else 413 `too_large`) → `ImportReport` = `{ tables: [{ table, documents, replaced, deleted, droppedFields }], files, missingFiles, remappedIds }`. App tables only (400 `read_only_table` for `_`-prefixed ones; 404 `not_found` for unknown tables). Every line is parsed and validated before anything is written (400 `import_failed` with up to 20 `<line>: <error>` messages); then batches of 500 documents per transaction through the normal write path, so the dashboard's live views update. `insert` (default) refuses ids that exist; `upsert` replaces them; `replace` deletes every document of the table first. Ids and `_creationTime` are kept; lines without `_id` get a new one. Fields the table doesn't define (also inside nested structs, not in open ones or JSON fields) are left out and listed in `droppedFields` by path (`notes`, `address.zip`, `items[].extra`). |
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/rxferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`, `excludeBackground` (leave out scheduled jobs, crons and workflow steps, and the functions they call). 400 `invalid_request` for malformed ones. |
+| `GET /api/admin/job-history?<HistoryFilter>` | `{ jobs: Doc<"_scheduled_jobs">[] }`: the job history (§1.7), most recently finished first. Query parameters: `state` (`success`, `failed`, `canceled`), `path` (exactly this function), `limit` (50, ≤ 500), and `beforeCompletedAt` with `beforeId` (the last job of the previous page; 400 `invalid_request` with only one). |
+| `POST /api/admin/job-history/retry` | Body `{ id }` → `{ id }`: run a job of the history again as a new job due now (same path, args, pool, attempts, `onComplete` and backoff; origin `dashboard`), like `run_job_now` for a finished job. 404 `not_found` when the history has no such job. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
 | `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>&excludeBackground=<bool>` | `{ since, functions: FunctionStats[], olap: OlapStatus \| null, overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, cachedQueries, cacheBytes, cacheHits, cacheMisses, metricsEnabled } }`. With `excludeBackground`, `functions` leaves out background work, as for the logs. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns; `cachedQueries` / `cacheBytes` / `cacheHits` / `cacheMisses` describe the cache of unwatched query results. `olap` is as for `GET /api/admin/olap` (null without `--olap`). `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
@@ -2644,7 +2658,7 @@ for the supervisor to start it again (`deploy/rxferrix.service` sets 75 with `Re
 `--restart unless-stopped`). Without the flag nothing restarts by itself: the restore waits for the next start.
 
 **Continuous replication** (`crate::ops::replicate`, `crate::db::journal`; `serve --replicate-to <dir | file:///dir |
-s3://bucket/prefix> [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d] [--replicate-max-pending 1GB]`,
+s3://bucket/prefix> [--replicate-every 1s] [--replicate-jobs-every 60s] [--snapshot-every 24h] [--replicate-keep 7d] [--replicate-max-pending 1GB]`,
 env `RXFERRIX_REPLICATE_TO`; `AppOptions::ops.replication`). *Journal*: with replication configured the database opens
 with journaling on, and every write transaction that commits documents inserts one row into the raw SQLite table
 `_journal (ts INTEGER PRIMARY KEY, time REAL, changes TEXT)` when it finishes, in the same SQLite transaction as its
@@ -2659,7 +2673,15 @@ blobs) and `generations/<g>/journal/<from ts>-<to ts>.zst` (ts zero-padded to 20
 and SHA-256 of the body) and one `<ts>\t<time>\t<changes>` line per commit (at most 10 000 commits or ~16 MiB per
 segment). *Shipping*: every `--replicate-every` the rows after the shipped ts are read on a reader snapshot, uploaded
 as a segment, and only then released, with `_meta.replication_shipped_ts` (and `_generation`, `_shipped_time`)
-updated in the same transaction. *Consumers*: the analytics copy (§1.11) reads the same journal; each consumer
+updated in the same transaction. While every unshipped commit is scheduler bookkeeping (`JournalEntry::
+is_scheduler_bookkeeping`: each change is a `_crons` row, or a `_scheduled_jobs` row that was deleted, is past
+`pending`, or is pending with origin `cron:…` or `onComplete:…`), shipping waits until the oldest of them is
+`--replicate-jobs-every` old (`ReplicationOptions::jobs_every`, 60s; `0s` disables the wait): a busy scheduler on an
+otherwise idle app ships about once a minute instead of every second. Any other commit (app writes, a job scheduled by
+app code) ships within `--replicate-every` with everything before it; a full segment, a due snapshot, a graceful
+shutdown and `POST /api/admin/replication/snapshot` ship everything. A point-in-time restore after losing the server
+may then miss up to that long of job progress: those jobs are pending again (mutations that wrote nothing run again;
+actions may run again) or in progress (marked failed at start). *Consumers*: the analytics copy (§1.11) reads the same journal; each consumer
 records its position (`replication_shipped_ts`, `olap_applied_ts`) and a row is deleted once every active one has
 released it (`journal::release`). With the copy on, journaling stays on when the replicator gives up on an unreachable
 target (only rows the copy no longer needs are dropped). An upload whose answer is lost is retried and may overlap the earlier segment;

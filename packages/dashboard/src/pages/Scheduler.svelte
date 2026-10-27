@@ -1,12 +1,14 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { RxFerrixError } from "@rxferrix/client";
   import { useMutation, usePaginatedQuery, useQuery } from "@rxferrix/svelte";
-  import { scheduler, type CronSummary, type JobState, type ScheduledJob } from "../lib/api.js";
+  import { fetchJobHistory, retryFromHistory } from "../lib/admin.js";
+  import { scheduler, type CronSummary, type JobHistoryFilter, type JobState, type ScheduledJob } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
-  import { formatRelative, formatTime, pretty, prettyArgs } from "../lib/format.js";
-  import { href, link, router, type Route } from "../lib/router.svelte.js";
+  import { formatRelative, formatTime } from "../lib/format.js";
+  import { href, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
-  import IdLink from "../components/IdLink.svelte";
+  import JobDetail from "../components/JobDetail.svelte";
 
   let { route }: { route: Route } = $props();
   const ctx = dashboardContext();
@@ -91,8 +93,54 @@
     }
   }
 
-  function prettyResult(result: string | null): string {
-    return result === null ? "" : prettyArgs(result);
+  // The job history (aux.db): finished jobs moved out of `_scheduled_jobs`. Read over HTTP, not live.
+  type HistoryState = NonNullable<JobHistoryFilter["state"]>;
+  const historyFilters: { state: HistoryState | null; label: string }[] = [
+    { state: null, label: "All" },
+    { state: "success", label: "Success" },
+    { state: "failed", label: "Failed" },
+    { state: "canceled", label: "Canceled" },
+  ];
+  const historyPage = 50;
+  let historyState = $state<HistoryState | null>(null);
+  let history = $state<ScheduledJob[]>([]);
+  let historyMore = $state(false);
+  let historyLoading = $state(false);
+  let historyError = $state<string | null>(null);
+  let historyOpen = $state<string | null>(null);
+  // Only the latest request's answer is shown (the filter may change while one is in flight).
+  let historyRequest = 0;
+
+  async function loadHistory(reset: boolean) {
+    const request = ++historyRequest;
+    const last = reset ? undefined : history.at(-1);
+    const cursor = last ? { beforeCompletedAt: last.completedAt ?? last.scheduledAt, beforeId: last._id } : {};
+    historyLoading = true;
+    historyError = null;
+    try {
+      const jobs = await fetchJobHistory(ctx.auth, { state: historyState, limit: historyPage, ...cursor });
+      if (request !== historyRequest) return;
+      history = reset ? jobs : [...history, ...jobs];
+      historyMore = jobs.length === historyPage;
+    } catch (e) {
+      if (request === historyRequest) historyError = e instanceof RxFerrixError ? e.message : String(e);
+    } finally {
+      if (request === historyRequest) historyLoading = false;
+    }
+  }
+
+  $effect(() => {
+    void historyState;
+    untrack(() => loadHistory(true));
+  });
+
+  async function runAgain(job: ScheduledJob) {
+    try {
+      await retryFromHistory(ctx.auth, job._id);
+      ctx.toast("Scheduled a new run of the job");
+    } catch (e) {
+      ctx.toast(e instanceof RxFerrixError ? e.message : String(e), "error");
+    }
   }
 </script>
 
@@ -198,43 +246,7 @@
               </tr>
               {#if open === job._id}
                 <tr class="detail">
-                  <td colspan="7">
-                    <div class="detail-grid">
-                      <div>
-                        <h3>Args</h3>
-                        <pre>{pretty(job.args)}</pre>
-                      </div>
-                      {#if job.error}
-                        <div>
-                          <h3>Error</h3>
-                          <pre class="error-text">{job.error}</pre>
-                        </div>
-                      {/if}
-                      {#if job.result !== null}
-                        <div>
-                          <h3>Result</h3>
-                          <pre>{prettyResult(job.result)}</pre>
-                        </div>
-                      {/if}
-                      <div class="times">
-                        <h3>Timeline</h3>
-                        <dl>
-                          <dt>Scheduled</dt><dd>{formatTime(job.scheduledAt)}</dd>
-                          <dt>Due</dt><dd>{formatTime(job.runAt)}</dd>
-                          <dt>Started</dt><dd>{job.startedAt ? formatTime(job.startedAt) : "—"}</dd>
-                          <dt>Finished</dt><dd>{job.completedAt ? formatTime(job.completedAt) : "—"}</dd>
-                          {#if job.pool}<dt>Workpool</dt><dd class="mono">{job.pool}</dd>{/if}
-                          {#if job.onComplete}<dt>On complete</dt><dd class="mono">{job.onComplete.path}</dd>{/if}
-                          {#if job.origin?.startsWith("workflow:")}
-                            <dt>Workflow</dt>
-                            <dd><a href={href("workflows", [], { id: job.origin.slice("workflow:".length) })} onclick={link}>{job.origin.slice("workflow:".length)}</a></dd>
-                          {/if}
-                          <dt>Document</dt><dd><IdLink id={job._id} /></dd>
-                        </dl>
-                        <a href={href("logs")} onclick={link}>Execution logs</a>
-                      </div>
-                    </div>
-                  </td>
+                  <td colspan="7"><JobDetail {job} /></td>
                 </tr>
               {/if}
             {/each}
@@ -242,6 +254,62 @@
         </table>
         <div class="more">
           {#if jobs.status === "CanLoadMore"}<button onclick={() => jobs.loadMore(50)}>Load more</button>{/if}
+        </div>
+      {/if}
+    </section>
+
+    <section aria-labelledby="history-heading">
+      <div class="jobs-head">
+        <h2 id="history-heading">History</h2>
+        <div class="filters" role="group" aria-label="Filter the history by state">
+          {#each historyFilters as f (f.label)}
+            <button class="small" class:active={historyState === f.state} aria-pressed={historyState === f.state} onclick={() => (historyState = f.state)}>
+              {f.label}
+            </button>
+          {/each}
+        </div>
+        <button class="small refresh" onclick={() => loadHistory(true)} disabled={historyLoading}>Refresh</button>
+      </div>
+      <p class="muted pad small-text">
+        Finished jobs move here from the list above once they are an hour old (<code class="mono">SchedulerOptions::history_after</code>), into
+        <code class="mono">aux.db</code>, so <code class="mono">data.db</code> and its backups don't grow with every job run. Kept 7 days by default. Not live: refresh to see newer ones.
+      </p>
+      {#if historyError}
+        <div class="alert" role="alert">{historyError}</div>
+      {:else if historyLoading && history.length === 0}
+        <Empty title="Loading…" />
+      {:else if history.length === 0}
+        <Empty title={historyState ? `No ${stateLabels[historyState]} jobs in the history` : "The history is empty"} />
+      {:else}
+        <table class="grid" data-testid="job-history">
+          <thead>
+            <tr><th>Function</th><th>State</th><th>Finished</th><th>Attempts</th><th>Origin</th><th></th></tr>
+          </thead>
+          <tbody>
+            {#each history as job (job._id)}
+              <tr onclick={() => (historyOpen = historyOpen === job._id ? null : job._id)} class:selected={historyOpen === job._id} aria-expanded={historyOpen === job._id}>
+                <td>
+                  <span class="badge {job.kind}">{job.kind}</span> <span class="mono">{job.path}</span>
+                  {#if job.pool}<span class="badge pool" title="Workpool">{job.pool}</span>{/if}
+                </td>
+                <td><span class="badge state {job.state}">{stateLabels[job.state]}</span></td>
+                <td title={job.completedAt ? formatTime(job.completedAt) : ""}>{job.completedAt ? formatRelative(job.completedAt, now) : ""}</td>
+                <td>{job.attempts}{job.maxAttempts > 1 ? ` / ${job.maxAttempts}` : ""}</td>
+                <td class="mono faint">{job.origin ?? ""}</td>
+                <td class="actions" onclick={(e) => e.stopPropagation()}>
+                  <button class="small" onclick={() => runAgain(job)}>Retry</button>
+                </td>
+              </tr>
+              {#if historyOpen === job._id}
+                <tr class="detail">
+                  <td colspan="6"><JobDetail {job} inHistory /></td>
+                </tr>
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+        <div class="more">
+          {#if historyMore}<button onclick={() => loadHistory(false)} disabled={historyLoading}>Load more</button>{/if}
         </div>
       {/if}
     </section>
@@ -327,28 +395,8 @@
     max-width: none;
     padding: 8px 16px 14px;
   }
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 16px;
-  }
-  .detail-grid pre {
-    max-height: 240px;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  dl {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 2px 12px;
-    margin: 0 0 8px;
-  }
-  dt {
-    color: var(--muted);
-  }
-  dd {
-    margin: 0;
+  .refresh {
+    margin-top: 6px;
   }
   .more {
     padding: 12px 20px;

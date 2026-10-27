@@ -26,7 +26,8 @@ administrator with the `/_/setup#token=…` link that `serve` prints at startup 
   drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
 - **Workflows**: workflows by state, an open one's steps (args, outcome, duration, job), and cancel.
 - **Scheduler**: crons with their schedule, time zone, last and next run, and "run now" (system crons last);
-  scheduled jobs live, by state, with cancel (running actions too), run now and retry.
+  scheduled jobs live, by state, with cancel (running actions too), run now and retry; and the job history (finished
+  jobs moved to `aux.db` after an hour), by state, with retry.
 - **Migrations**: every `#[migration]` in run order with its dependencies, live progress, errors linking to the failing
   document, the schema check,
   run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.

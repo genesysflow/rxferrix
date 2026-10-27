@@ -34,7 +34,7 @@ pub struct OpsServeArgs {
     /// s3://bucket/prefix (credentials from the AWS_* variables). Default: <dir>/backups.
     #[arg(long, env = "RXFERRIX_BACKUP_TO", value_name = "LOCATION")]
     pub backup_to: Option<String>,
-    /// Include aux.db (the execution log) in scheduled backups.
+    /// Include aux.db (the execution log and the job history) in scheduled backups.
     #[arg(long)]
     pub backup_with_aux: bool,
     /// Include the blobs of stored files (local storage only) in scheduled backups.
@@ -48,6 +48,10 @@ pub struct OpsServeArgs {
     /// With --replicate-to: ship new commits this often (e.g. `1s`, `10s`).
     #[arg(long, value_name = "DURATION", default_value = "1s", value_parser = super::parse_duration)]
     pub replicate_every: Duration,
+    /// With --replicate-to: while the only new commits are the scheduler's own progress (crons firing, jobs running
+    /// and finishing), ship them at most this often (e.g. `60s`, `5m`; `0s` ships them like any other commit).
+    #[arg(long, value_name = "DURATION", default_value = "60s", value_parser = super::parse_duration)]
+    pub replicate_jobs_every: Duration,
     /// With --replicate-to: take a snapshot this often (e.g. `24h`, `6h`).
     #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = super::parse_duration)]
     pub snapshot_every: Duration,
@@ -130,6 +134,7 @@ impl OpsServeArgs {
         if let Some(to) = self.replicate_to.clone().filter(|t| !t.trim().is_empty()) {
             let mut replication = super::replicate::ReplicationOptions::new(to);
             replication.every = self.replicate_every.max(Duration::from_millis(10));
+            replication.jobs_every = self.replicate_jobs_every;
             replication.snapshot_every = self.snapshot_every.max(Duration::from_secs(60));
             replication.keep = self.replicate_keep;
             replication.max_pending_bytes = self.replicate_max_pending;
@@ -228,7 +233,7 @@ pub struct BackupArgs {
     /// Store the archive in a directory, file:///dir or s3://bucket/prefix instead.
     #[arg(long, value_name = "LOCATION")]
     pub to: Option<String>,
-    /// Include aux.db (the execution log).
+    /// Include aux.db (the execution log and the job history).
     #[arg(long)]
     pub with_aux: bool,
     /// Include the blobs of stored files (local storage only).
@@ -619,6 +624,8 @@ mod tests {
             "s3://b/r",
             "--replicate-every",
             "10s",
+            "--replicate-jobs-every",
+            "5m",
             "--snapshot-every",
             "6h",
             "--replicate-keep",
@@ -635,10 +642,16 @@ mod tests {
             ("s3://b/r", Duration::from_secs(10), Duration::from_secs(6 * 3600), Duration::from_secs(3 * 86400))
         );
         assert_eq!(r.max_pending_bytes, 200 << 20);
+        assert_eq!(r.jobs_every, Duration::from_secs(300));
         let defaults = parse(&["--replicate-to", "/r"]).unwrap();
         assert_eq!(
-            (defaults.replicate_every, defaults.snapshot_every, defaults.replicate_keep),
-            (Duration::from_secs(1), Duration::from_secs(86400), Duration::from_secs(7 * 86400))
+            (defaults.replicate_every, defaults.replicate_jobs_every, defaults.snapshot_every, defaults.replicate_keep),
+            (
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+                Duration::from_secs(86400),
+                Duration::from_secs(7 * 86400)
+            )
         );
     }
 }

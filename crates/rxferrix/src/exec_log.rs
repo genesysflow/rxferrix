@@ -9,6 +9,9 @@
 //! Retention ([`LogRetention`], from [`AppOptions`](crate::AppOptions)): rows older than `max_age`, and the oldest
 //! rows beyond `max_rows`, are deleted at startup and then every `trim_interval`.
 //!
+//! `aux.db` also holds the scheduler's job history (`crate::scheduler::history`), written through the same writer
+//! thread ([`Logs::write_with`]).
+//!
 //! The dashboard reads it through [`App::logs`](crate::App::logs): [`Logs::query`] (filtered, newest first,
 //! paginated by id), [`Logs::subscribe`] (live tail), [`Logs::stats`] (per-function calls, errors, p50/p95) and
 //! [`Logs::timeseries`] (the same aggregates per time bucket, for the dashboard's charts). Each can leave out background
@@ -306,8 +309,13 @@ pub struct TimePoint {
     pub max_us: u64,
 }
 
+/// Work run on the writer thread's connection ([`Logs::write_with`]).
+type WriteFn = Box<dyn FnOnce(&mut Connection) + Send>;
+
 enum Msg {
     Entry(Box<LogEntry>),
+    /// Run on the writer's connection (it replies itself).
+    Write(WriteFn),
     /// Reply once everything sent before this message is written.
     Flush(oneshot::Sender<()>),
     /// Trim now, then reply.
@@ -347,6 +355,7 @@ impl Logs {
         // the file stays that size after the WAL restarts (112 MB after an hour of heavy traffic).
         conn.pragma_update(None, "journal_size_limit", 16i64 << 20)?;
         conn.execute_batch(DDL)?;
+        conn.execute_batch(crate::scheduler::history::DDL)?;
         trim(&conn, &retention)?;
 
         let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -401,7 +410,25 @@ impl Logs {
         done_rx.await.map_err(|_| anyhow::anyhow!("execution log writer stopped"))
     }
 
-    async fn with_reader<R: Send + 'static>(
+    /// Run `f` on the writer thread's connection (between batches of entries) and return its result. Unlike
+    /// [`Logs::record`], this waits for room in the queue: the work is never dropped.
+    pub(crate) async fn write_with<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> anyhow::Result<R> + Send + 'static,
+    ) -> anyhow::Result<R> {
+        let (done_tx, done_rx) = oneshot::channel();
+        let work: WriteFn = Box::new(move |conn| {
+            let _ = done_tx.send(f(conn));
+        });
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || tx.send(Msg::Write(work)))
+            .await?
+            .map_err(|_| anyhow::anyhow!("execution log writer stopped"))?;
+        done_rx.await.map_err(|_| anyhow::anyhow!("execution log writer stopped"))?
+    }
+
+    /// Run `f` on the shared read-only connection.
+    pub(crate) async fn with_reader<R: Send + 'static>(
         &self,
         f: impl FnOnce(&Connection) -> anyhow::Result<R> + Send + 'static,
     ) -> anyhow::Result<R> {
@@ -465,6 +492,7 @@ fn writer_loop(mut conn: Connection, rx: Receiver<Msg>, shared: Arc<Shared>, ret
         while let Some(msg) = next {
             match msg {
                 Msg::Entry(e) => batch.push(*e),
+                Msg::Write(work) => work(&mut conn),
                 Msg::Flush(reply) => replies.push((reply, false)),
                 Msg::Trim(reply) => replies.push((reply, true)),
             }

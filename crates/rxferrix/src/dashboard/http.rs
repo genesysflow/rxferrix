@@ -1,5 +1,5 @@
-//! Admin-only HTTP endpoints for data that lives outside the reactive database: the execution log (`aux.db`) and
-//! server stats.
+//! Admin-only HTTP endpoints for data that lives outside the reactive database: the execution log and the job
+//! history (`aux.db`), and server stats.
 //!
 //! - `GET /api/admin/logs?<LogFilter>`: history, newest first. `{ "entries": [LogEntry] }`.
 //! - `GET /api/admin/logs/stream?<LogFilter>`: live tail as Server-Sent Events (`event: ready`, then one
@@ -12,6 +12,13 @@
 //!   calls, errors and p50/p95/max duration per time bucket for one function (or every app function without `path`),
 //!   oldest first, only buckets with executions: `{ path, bucket, since, until, points: [TimePoint] }`. Defaults: the
 //!   last hour in 1-minute buckets; at most 1500 buckets (400 `invalid_request` otherwise).
+//! - `GET /api/admin/job-history?<HistoryFilter>`: finished jobs moved out of `_scheduled_jobs`
+//!   (`crate::scheduler::history`), most recently finished first: `{ "jobs": [Doc<ScheduledJob>] }`. Query parameters:
+//!   `state` (`success|failed|canceled`), `path`, `limit` (50, at most 500), and `beforeCompletedAt` with `beforeId`
+//!   (the last job of the previous page).
+//! - `POST /api/admin/job-history/retry` with `{ "id": "<job id>" }`: schedule a job from the history again, due now,
+//!   as `_system/scheduler:run_job_now` does for a finished job in `_scheduled_jobs`: `{ "id": "<new job id>" }`; 404
+//!   `not_found` when the history has no such job.
 //!
 //! `excludeBackground` (here and in `LogFilter`) leaves out scheduled jobs (crons and workflow steps included) and the
 //! functions they call: what is left is what clients ran.
@@ -45,7 +52,9 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::auth::{AuthFailure, Authenticated, SessionWatch};
 use crate::exec_log::LogFilter;
+use crate::id::Id;
 use crate::runtime::App;
+use crate::scheduler::{HistoryFilter, ScheduledJob};
 
 /// The `/api/admin/*` routes, merged into the main router by `server::router`.
 pub fn routes() -> Router<App> {
@@ -54,6 +63,8 @@ pub fn routes() -> Router<App> {
         .route("/api/admin/logs/stream", get(logs_stream))
         .route("/api/admin/stats", get(stats))
         .route("/api/admin/stats/timeseries", get(timeseries))
+        .route("/api/admin/job-history", get(job_history))
+        .route("/api/admin/job-history/retry", axum::routing::post(retry_from_history))
         .route("/api/admin/client-ip", get(client_ip))
         .route("/api/admin/impersonate", axum::routing::post(super::impersonate::impersonate))
 }
@@ -114,6 +125,73 @@ async fn logs(
             tracing::error!("admin logs query failed: {e:#}");
             AuthFailure::new(500, "server_error", "Server Error").into_response()
         }
+    }
+}
+
+async fn job_history(
+    State(app): State<App>,
+    headers: HeaderMap,
+    filter: Result<Query<HistoryFilter>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    if let Err(failure) = require_admin(&app, &headers).await {
+        return failure.into_response();
+    }
+    let Query(filter) = match filter {
+        Ok(f) => f,
+        Err(e) => return bad_query(e),
+    };
+    if filter.before_completed_at.is_some() != filter.before_id.is_some() {
+        return bad_query("pass both `beforeCompletedAt` and `beforeId`, or neither");
+    }
+    match app.job_history(filter).await {
+        Ok(jobs) => (no_store(), axum::Json(json!({ "jobs": jobs }))).into_response(),
+        Err(e) => {
+            tracing::error!("admin job history query failed: {e:#}");
+            AuthFailure::new(500, "server_error", "Server Error").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RetryRequest {
+    id: String,
+}
+
+async fn retry_from_history(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<axum::Json<RetryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(failure) = require_admin(&app, &headers).await {
+        return failure.into_response();
+    }
+    let not_found =
+        |id: &str| AuthFailure::new(404, "not_found", format!("The job history has no job {id}")).into_response();
+    let id = match body {
+        Ok(axum::Json(r)) => r.id,
+        Err(e) => return AuthFailure::new(400, "invalid_request", format!("Invalid body: {e}")).into_response(),
+    };
+    let Ok(job_id) = id.parse::<Id<ScheduledJob>>() else { return not_found(&id) };
+    let result: crate::Result<Option<Id<ScheduledJob>>> = async {
+        let Some(job) = app.job_history_get(job_id).await? else { return Ok(None) };
+        let now = app.db().clock().now_ms();
+        let new = crate::scheduler::store::write(&app, |db| async move {
+            crate::scheduler::store::insert(&db, crate::scheduler::rerun(job.value, now)?, now).await
+        })
+        .await?;
+        Ok(Some(new))
+    }
+    .await;
+    match result {
+        Ok(Some(new)) => (no_store(), axum::Json(json!({ "id": new.to_string() }))).into_response(),
+        Ok(None) => not_found(&id),
+        Err(e) => match e.downcast_ref::<crate::UserError>() {
+            Some(user) => AuthFailure::new(400, &user.code, user.message.clone()).into_response(),
+            None => {
+                tracing::error!("retrying a job from the history failed: {e:#}");
+                AuthFailure::new(500, "server_error", "Server Error").into_response()
+            }
+        },
     }
 }
 

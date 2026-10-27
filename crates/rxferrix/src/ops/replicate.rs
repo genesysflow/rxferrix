@@ -21,6 +21,12 @@
 //!   body) and one `<ts>\t<time>\t<changes>` line per commit. Shipped rows are deleted locally only after the upload
 //!   succeeded (with the shipped ts recorded in `_meta` in the same transaction); an upload that is retried after a
 //!   crash may overlap an earlier segment, which restores tolerate.
+//! - **Scheduler bookkeeping waits** (`--replicate-jobs-every`, 60s): while every unshipped commit only records the
+//!   scheduler's progress (`JournalEntry::is_scheduler_bookkeeping`: cron runs, jobs starting and finishing, finished
+//!   jobs moving to the job history), shipping waits until the oldest of them is that old, so a busy scheduler on an
+//!   otherwise idle app doesn't upload a segment every second. Any other commit ships within `--replicate-every`,
+//!   with everything before it (segments are always a prefix). The cost: a point-in-time restore of the newest commit
+//!   after losing the server may miss up to that long of job progress (such jobs run again, or are marked failed).
 //! - **Retention** (`--replicate-keep`): every snapshot taken within the window is kept, plus the newest one before it
 //!   (the base for the start of the window), and the segments after the oldest kept snapshot of each generation;
 //!   everything else, whole generations included, is deleted ([`plan_retention`]).
@@ -67,6 +73,8 @@ const SEGMENT_EXTENSION: &str = ".zst";
 
 /// Default `--replicate-every`.
 pub const DEFAULT_EVERY: Duration = Duration::from_secs(1);
+/// Default `--replicate-jobs-every`.
+pub const DEFAULT_JOBS_EVERY: Duration = Duration::from_secs(60);
 /// Default `--snapshot-every`.
 pub const DEFAULT_SNAPSHOT_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// Default `--replicate-keep`.
@@ -89,6 +97,9 @@ pub struct ReplicationOptions {
     pub store: Option<BackupTarget>,
     /// How often unshipped commits are shipped (`--replicate-every`, default 1s).
     pub every: Duration,
+    /// How long commits that only record the scheduler's progress may wait while nothing else is unshipped
+    /// (`--replicate-jobs-every`, default 60s; zero ships them like any other commit). See the module docs.
+    pub jobs_every: Duration,
     /// How often a snapshot is taken (`--snapshot-every`, default 24h).
     pub snapshot_every: Duration,
     /// How far back point-in-time restores must reach (`--replicate-keep`, default 7 days).
@@ -113,6 +124,7 @@ impl ReplicationOptions {
             target: target.into(),
             store: None,
             every: DEFAULT_EVERY,
+            jobs_every: DEFAULT_JOBS_EVERY,
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             keep: DEFAULT_KEEP,
             max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
@@ -535,6 +547,8 @@ pub struct GenerationSummary {
 pub struct ReplicationStatus {
     pub target: String,
     pub every_ms: f64,
+    /// How long commits of scheduler bookkeeping alone may wait (`ReplicationOptions::jobs_every`).
+    pub jobs_every_ms: f64,
     pub snapshot_every_ms: f64,
     pub keep_ms: f64,
     /// The generation being shipped (`None` until the first contact with the target, or after the journal was
@@ -751,8 +765,9 @@ impl Replicator {
         if self.state().generation.is_none() {
             self.begin(app).await?;
         }
-        self.ship(app).await?;
-        if self.snapshot_due(app) {
+        let snapshot_due = self.snapshot_due(app);
+        self.ship(app, !snapshot_due).await?;
+        if snapshot_due {
             self.snapshot(app).await?;
         }
         Ok(())
@@ -761,7 +776,7 @@ impl Replicator {
     /// Ship what is unshipped without taking snapshots (graceful shutdown).
     pub async fn flush(&self, app: &App) -> crate::Result<()> {
         let _one = self.running.lock().await;
-        if self.state().generation.is_some() { self.ship(app).await } else { Ok(()) }
+        if self.state().generation.is_some() { self.ship(app, false).await } else { Ok(()) }
     }
 
     /// Take a snapshot now (in the current generation, starting one if needed), then apply retention.
@@ -770,7 +785,7 @@ impl Replicator {
         if self.state().generation.is_none() {
             self.begin(app).await?;
         }
-        self.ship(app).await?;
+        self.ship(app, false).await?;
         self.snapshot(app).await
     }
 
@@ -944,8 +959,10 @@ impl Replicator {
         Ok(())
     }
 
-    /// Ship every unshipped commit, one segment at a time.
-    async fn ship(&self, app: &App) -> crate::Result<()> {
+    /// Ship every unshipped commit, one segment at a time. With `lazy`, nothing is shipped while every unshipped
+    /// commit is scheduler bookkeeping younger than `jobs_every` (see the module docs).
+    async fn ship(&self, app: &App, lazy: bool) -> crate::Result<()> {
+        let mut first_segment = true;
         loop {
             let (generation, shipped) = {
                 let st = self.state();
@@ -957,6 +974,17 @@ impl Replicator {
             let entries = snapshot.with_conn(|c| journal::read_after(c, shipped, max_entries, max_bytes))?;
             drop(snapshot);
             let (Some(first), Some(last)) = (entries.first(), entries.last()) else { return Ok(()) };
+            if lazy && first_segment {
+                // A full segment ships anyway: there is a lot to ship, and it may hide other commits after it.
+                let full =
+                    entries.len() >= max_entries || entries.iter().map(|e| e.changes.len()).sum::<usize>() >= max_bytes;
+                let jobs_every_ms = self.options.jobs_every.as_secs_f64() * 1000.0;
+                let young = app.db().clock().now_ms() - first.time < jobs_every_ms;
+                if !full && young && entries.iter().all(JournalEntry::is_scheduler_bookkeeping) {
+                    return Ok(());
+                }
+            }
+            first_segment = false;
             if first.ts != shipped + 1 {
                 // The journal no longer continues the generation (it can't happen while journaling stays on): start over.
                 self.state().generation = None;
@@ -1089,6 +1117,7 @@ impl Replicator {
         ReplicationStatus {
             target: self.target.location.clone(),
             every_ms: self.options.every.as_secs_f64() * 1000.0,
+            jobs_every_ms: self.options.jobs_every.as_secs_f64() * 1000.0,
             snapshot_every_ms: self.options.snapshot_every.as_secs_f64() * 1000.0,
             keep_ms: self.options.keep.as_secs_f64() * 1000.0,
             next_snapshot_at: last_snapshot

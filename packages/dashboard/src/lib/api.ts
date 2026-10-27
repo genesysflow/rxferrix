@@ -236,6 +236,17 @@ export interface ScheduledJob {
   backoff: { initialMs: number; base: number } | null;
 }
 
+/** `GET /api/admin/job-history` (lib/admin.ts): finished jobs moved from `_scheduled_jobs` to `aux.db`. */
+export interface JobHistoryFilter {
+  state?: "success" | "failed" | "canceled" | null;
+  /** Exactly this function. */
+  path?: string;
+  limit?: number;
+  /** The `completedAt` and `_id` of the last job of the previous page (both or neither). */
+  beforeCompletedAt?: number;
+  beforeId?: string;
+}
+
 export interface CronSummary {
   _id: string;
   name: string;
@@ -920,6 +931,8 @@ export interface ReplicationGeneration {
 export interface ReplicationStatus {
   target: string;
   everyMs: number;
+  /** How long commits of scheduler bookkeeping alone may wait (`--replicate-jobs-every`; absent from older servers). */
+  jobsEveryMs?: number;
   snapshotEveryMs: number;
   keepMs: number;
   generation: string | null;

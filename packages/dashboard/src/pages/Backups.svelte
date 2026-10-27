@@ -363,7 +363,7 @@
       <div class="head row">
         <h2 id="b-head">Backups</h2>
         <span class="spacer"></span>
-        <label class="inline"><input type="checkbox" bind:checked={includeAux} /> include the execution log (aux.db)</label>
+        <label class="inline"><input type="checkbox" bind:checked={includeAux} /> include the execution log and job history (aux.db)</label>
         <label class="inline"><input type="checkbox" bind:checked={includeFiles} /> include stored files</label>
         <button class="primary" onclick={create} disabled={creating}>{creating ? "Backing up…" : "Create backup"}</button>
       </div>
@@ -549,8 +549,8 @@
             {/if}
           </dd>
           <dt>Schedule</dt>
-          <dd>
-            ships every {formatSeconds(r.everyMs / 1000)}, a snapshot every {formatSeconds(r.snapshotEveryMs / 1000)}, restorable
+          <dd data-testid="replication-schedule">
+            ships every {formatSeconds(r.everyMs / 1000)}{r.jobsEveryMs ? ` (the scheduler's own progress alone: every ${formatSeconds(r.jobsEveryMs / 1000)})` : ""}, a snapshot every {formatSeconds(r.snapshotEveryMs / 1000)}, restorable
             for {formatSeconds(r.keepMs / 1000)}
           </dd>
         </dl>

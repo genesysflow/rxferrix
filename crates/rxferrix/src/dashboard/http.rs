@@ -254,8 +254,7 @@ async fn stats(
         let functions = app.logs().stats(since, q.exclude_background).await?;
         let snapshot = app.db().snapshot().await?;
         let (ts, commit_time) = (snapshot.ts, snapshot.time);
-        let documents: i64 =
-            snapshot.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?))?;
+        let documents = snapshot.with_conn(crate::db::storage::count_all_documents)?;
         drop(snapshot);
         let dir = app.dir();
         let files: Vec<_> = ["data.db", "data.db-wal", "aux.db", "aux.db-wal"]

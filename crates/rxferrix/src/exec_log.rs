@@ -607,11 +607,16 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
+/// The rows [`stats`] aggregates, grouped by path. `+path` keeps SQLite from ordering by walking `_logs_by_path`,
+/// which reads every row of the log (with a table lookup each) to keep the few in the window; this way it searches
+/// `_logs_by_timestamp` and sorts only those.
+fn stats_sql(exclude_background: bool) -> String {
     let filter = if exclude_background { NOT_BACKGROUND } else { "" };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1{filter} ORDER BY path"
-    ))?;
+    format!("SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1{filter} ORDER BY +path")
+}
+
+fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
+    let mut stmt = conn.prepare(&stats_sql(exclude_background))?;
     let mut rows = stmt.query([since])?;
     let mut out: Vec<(FunctionStats, Vec<u64>)> = Vec::new();
     while let Some(r) = rows.next()? {
@@ -753,6 +758,19 @@ mod tests {
         assert_eq!((percentile(&v, 0.5), percentile(&v, 0.95)), (50, 95));
         assert_eq!((percentile(&[7], 0.5), percentile(&[7], 0.95)), (7, 7));
         assert_eq!(percentile(&[], 0.5), 0);
+    }
+
+    /// Whatever the log holds, the stats read only the window: through `_logs_by_timestamp`, never a walk of
+    /// `_logs_by_path`.
+    #[test]
+    fn stats_search_the_timestamp_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap();
+        for exclude_background in [false, true] {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", stats_sql(exclude_background))).unwrap();
+            let plan: Vec<String> = stmt.query_map([0], |r| r.get(3)).unwrap().map(Result::unwrap).collect();
+            assert!(plan[0].starts_with("SEARCH _logs USING INDEX _logs_by_timestamp"), "{plan:?}");
+        }
     }
 
     #[tokio::test]

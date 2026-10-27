@@ -319,6 +319,7 @@ describe("Backups page", () => {
   const replication = {
     target: "s3://bucket/replica",
     everyMs: 1000,
+    jobsEveryMs: 60_000,
     snapshotEveryMs: 86_400_000,
     keepMs: 604_800_000,
     generation: "20261010T120000.000Z-0000beef",
@@ -402,6 +403,7 @@ describe("Backups page", () => {
     expect(text("replication-target")).toBe("s3://bucket/replica");
     expect(text("replication-health")).toContain("healthy");
     expect(text("replication-lag")).toContain("3 commits behind");
+    expect(text("replication-schedule")).toContain("the scheduler's own progress alone: every 1m");
     expect(text("replication-lag")).toContain("117");
     expect(text("replication-last-segment")).toContain("110–117");
     expect(text("replication-last-snapshot")).toContain("ts100.tar.zst");

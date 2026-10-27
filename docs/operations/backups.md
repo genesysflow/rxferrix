@@ -4,7 +4,7 @@
 
 `todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
 snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus
-the execution log, local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
+`aux.db` (the execution log and the history of finished scheduled jobs), local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
 can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
 in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
 schedule (the cron `rxferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones. The same schedule
@@ -34,14 +34,18 @@ it replaces everything else, administrators and sessions included: whoever is si
 loses at most about a second of commits and can restore any moment of the last week:
 
 ```sh
-todo-server serve --replicate-to s3://bucket/replica [--replicate-every 1s] [--snapshot-every 24h] [--replicate-keep 7d]
+todo-server serve --replicate-to s3://bucket/replica [--replicate-every 1s] [--replicate-jobs-every 60s] [--snapshot-every 24h] [--replicate-keep 7d]
 todo-server restore --from s3://bucket/replica --list                          # generations and restorable ranges
 todo-server restore --from s3://bucket/replica --to-time 2026-10-09T12:00:00Z  # or --to-ts N; default: the newest
 ```
 
 Every commit writes its document changes to a journal table in `data.db` *in the same SQLite transaction* (so the
 journal never misses a commit nor holds a rolled-back one); every `--replicate-every` the new entries are shipped as a
-checksummed, compressed segment named by its ts range, then deleted locally. A snapshot (an ordinary backup archive)
+checksummed, compressed segment named by its ts range, then deleted locally. Commits that only record the
+scheduler's own progress (crons firing, jobs starting and finishing) wait up to `--replicate-jobs-every` while nothing
+else is unshipped, so an app whose only activity is its scheduled jobs uploads about once a minute rather than every
+second; restoring the newest point after losing the server may then miss up to a minute of job progress (those jobs
+run again, or are marked failed). A snapshot (an ordinary backup archive)
 is taken when a generation starts and every `--snapshot-every`; snapshots and segments older than `--replicate-keep`
 are deleted, except what the oldest restorable point still needs. A restore takes the newest snapshot before the
 point and replays the journal up to it through the normal write path (indexes, search and vector indexes are
@@ -62,7 +66,7 @@ per second in a sequential benchmark (docs/CONTRACT.md §4.4).
 Litestream works too, as an alternative: `data.db` is a normal SQLite database in WAL mode, so
 [Litestream](https://litestream.io) can replicate its pages next to the server (`litestream replicate
 fx_data/data.db s3://bucket/data.db`; `litestream restore` into an empty data directory before starting the server).
-Replicate `data.db` only (`aux.db` is the execution log), with the same caveats for blobs and `auth_secret.key`.
+Replicate `data.db` only (`aux.db` is the execution log and the job history), with the same caveats for blobs and `auth_secret.key`.
 Archive backups, `--replicate-to` and Litestream can be combined.
 
 ## Export and import

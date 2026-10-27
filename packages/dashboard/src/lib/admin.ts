@@ -1,5 +1,5 @@
 /**
- * Admin-only HTTP endpoints (`/api/admin/*`): the execution log and stats live in `aux.db`, outside the reactive
+ * Admin-only HTTP endpoints (`/api/admin/*`): the execution log, the job history and stats live in `aux.db`, outside the reactive
  * database, so they are read over HTTP with the admin's bearer token instead of through the sync protocol; so are
  * backups, export and import, and impersonation (docs/CONTRACT.md §4.2).
  */
@@ -12,6 +12,7 @@ import type {
   Impersonation,
   ImportMode,
   ImportReport,
+  JobHistoryFilter,
   Json,
   LogEntry,
   LogFilter,
@@ -19,6 +20,7 @@ import type {
   OlapStatus,
   ReplicationSnapshot,
   ReplicationStatus,
+  ScheduledJob,
   Stats,
   Timeseries,
 } from "./api.js";
@@ -54,6 +56,27 @@ export async function adminFetch(auth: RxFerrixAuth, path: string, init: Request
 export async function fetchLogs(auth: RxFerrixAuth, filter: LogFilter): Promise<LogEntry[]> {
   const res = await adminFetch(auth, `/api/admin/logs${filterQuery(filter)}`);
   return ((await res.json()) as { entries: LogEntry[] }).entries;
+}
+
+/** `GET /api/admin/job-history`: finished jobs moved out of `_scheduled_jobs`, most recently finished first. */
+export async function fetchJobHistory(auth: RxFerrixAuth, filter: JobHistoryFilter): Promise<ScheduledJob[]> {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(filter)) {
+    if (v !== undefined && v !== null && v !== "") p.set(k, String(v));
+  }
+  const s = p.toString();
+  const res = await adminFetch(auth, `/api/admin/job-history${s ? `?${s}` : ""}`);
+  return ((await res.json()) as { jobs: ScheduledJob[] }).jobs;
+}
+
+/** `POST /api/admin/job-history/retry`: run a job from the history again (a new job, due now). Its id. */
+export async function retryFromHistory(auth: RxFerrixAuth, id: string): Promise<string> {
+  const res = await adminFetch(auth, "/api/admin/job-history/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  return ((await res.json()) as { id: string }).id;
 }
 
 /** `GET /api/admin/stats`; the per-function stats without background work with `excludeBackground`. */

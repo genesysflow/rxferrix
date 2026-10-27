@@ -254,6 +254,32 @@ impl JournalEntry {
     }
 }
 
+impl JournalEntry {
+    /// Whether the commit only records the scheduler's own progress, so shipping it may wait a little
+    /// (`ReplicationOptions::jobs_every`): every change is a `_crons` row, or a `_scheduled_jobs` row that was deleted
+    /// (moved to the job history), is past `pending` (in progress, finished), or is a pending job a cron or an
+    /// `on_complete` created. A job scheduled by app code (`run_after`, a retry) is new intent: not bookkeeping.
+    /// Unreadable changes count as not bookkeeping.
+    pub fn is_scheduler_bookkeeping(&self) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Job<'a> {
+            state: &'a str,
+            #[serde(borrow)]
+            origin: Option<std::borrow::Cow<'a, str>>,
+        }
+        let Ok(changes) = self.parse_raw_changes() else { return false };
+        changes.iter().all(|c| match (c.table.as_str(), &c.doc) {
+            ("_crons", _) | ("_scheduled_jobs", None) => true,
+            ("_scheduled_jobs", Some(doc)) => match serde_json::from_str::<Job>(doc) {
+                Ok(job) if job.state != "pending" => true,
+                Ok(job) => job.origin.is_some_and(|o| o.starts_with("cron:") || o.starts_with("onComplete:")),
+                Err(_) => false,
+            },
+            _ => false,
+        })
+    }
+}
+
 pub(crate) fn insert(conn: &Connection, ts: u64, time: f64, changes: &str) -> anyhow::Result<()> {
     conn.prepare_cached("INSERT INTO _journal (ts, time, changes) VALUES (?1, ?2, ?3)")?
         .execute(params![ts as i64, time, changes])?;
@@ -339,6 +365,34 @@ pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_bookkeeping_is_only_the_schedulers_own_progress() {
+        let id = DocId::new_random(1).encode();
+        let entry = |changes: Value| JournalEntry { ts: 1, time: 0.0, changes: changes.to_string() };
+        let job =
+            |state: &str, origin: Option<&str>| serde_json::json!({ "state": state, "origin": origin, "path": "a:b" });
+        let bookkeeping = [
+            serde_json::json!([["_scheduled_jobs", id, job("success", Some("todos:add"))]]),
+            serde_json::json!([["_scheduled_jobs", id, job("inProgress", None)]]),
+            serde_json::json!([["_scheduled_jobs", id, null]]),
+            serde_json::json!([["_crons", id, {}], ["_scheduled_jobs", id, job("pending", Some("cron:tick"))]]),
+            serde_json::json!([["_scheduled_jobs", id, job("pending", Some("onComplete:x"))]]),
+        ];
+        for changes in bookkeeping {
+            assert!(entry(changes.clone()).is_scheduler_bookkeeping(), "{changes}");
+        }
+        let not = [
+            serde_json::json!([["_scheduled_jobs", id, job("pending", Some("todos:add"))]]),
+            serde_json::json!([["_scheduled_jobs", id, job("pending", None)]]),
+            serde_json::json!([["_scheduled_jobs", id, job("success", None)], ["todos", id, {}]]),
+            serde_json::json!([["_scheduled_jobs", id, { "nope": 1 }]]),
+        ];
+        for changes in not {
+            assert!(!entry(changes.clone()).is_scheduler_bookkeeping(), "{changes}");
+        }
+        assert!(!JournalEntry { ts: 1, time: 0.0, changes: "not json".into() }.is_scheduler_bookkeeping());
+    }
 
     #[test]
     fn rows_go_once_every_active_consumer_released_them() {

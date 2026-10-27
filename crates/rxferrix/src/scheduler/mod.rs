@@ -4,6 +4,7 @@
 //!   workpools: `pool(name)` (bounded parallelism per pool, [`Workpool`]), `on_complete::<F>(context)` (a mutation
 //!   run with the outcome, [`WorkResult`]), `cancel_pool`.
 //! - [`tables`]: the system tables `_scheduled_jobs` ([`ScheduledJob`]) and `_crons` ([`Cron`]).
+//! - [`history`]: the job history in `aux.db`, where finished jobs move after [`SchedulerOptions::history_after`].
 //! - [`runner`]: the background runner (`App::start_scheduler`, started by `rxferrix serve`) and
 //!   `App::run_due_jobs` for tests. Its module docs describe the delivery guarantees: **mutations run exactly
 //!   once, actions at most once**.
@@ -19,6 +20,7 @@
 pub mod cancellation;
 pub mod context;
 pub mod cron;
+pub mod history;
 pub mod runner;
 pub mod store;
 pub mod tables;
@@ -31,6 +33,7 @@ use serde_json::Value;
 pub use cancellation::ActionAborted;
 pub use context::{ScheduleWith, Scheduler};
 pub use cron::{CronSpec, SWEEP_CRON};
+pub use history::HistoryFilter;
 pub use runner::SchedulerState;
 pub use store::{CancelOutcome, WorkResult};
 pub use tables::{Backoff, Cron, JobKind, JobState, OnComplete, ScheduledJob};
@@ -45,10 +48,14 @@ pub struct SchedulerOptions {
     /// Actions of the default pool (scheduled without [`Scheduler::pool`]) running at the same time. Mutations
     /// run one at a time anyway, and need no slot. Default 10.
     pub concurrency: usize,
-    /// Finished (success, failed, canceled) jobs are deleted this long after they finished. `None` keeps them.
-    /// Default 7 days.
+    /// Finished (success, failed, canceled) jobs move from `_scheduled_jobs` to the job history in `aux.db`
+    /// ([`history`]) this long after they finished, by the cleanup. `None` keeps them in `_scheduled_jobs` until
+    /// `retention`. Default 1 hour.
+    pub history_after: Option<Duration>,
+    /// Finished jobs (in `_scheduled_jobs` or the job history) and finished workflows are deleted this long after
+    /// they finished. `None` keeps them. Default 7 days.
     pub retention: Option<Duration>,
-    /// How often the retention cleanup runs. Default 1 hour.
+    /// How often the cleanup (history and retention) runs. Default 1 hour.
     pub cleanup_interval: Duration,
     /// Delay before the first retry of an action scheduled `with_retries(n)`; doubled for each further retry (at
     /// most 1 hour). Default 1 second.
@@ -102,6 +109,8 @@ impl Workpool {
 
 /// Default [`SchedulerOptions::concurrency`].
 pub const DEFAULT_CONCURRENCY: usize = 10;
+/// Default [`SchedulerOptions::history_after`].
+pub const DEFAULT_HISTORY_AFTER: Duration = Duration::from_secs(3600);
 /// Default [`SchedulerOptions::retention`].
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Default [`SchedulerOptions::cancel_grace`].
@@ -111,6 +120,7 @@ impl Default for SchedulerOptions {
     fn default() -> Self {
         SchedulerOptions {
             concurrency: DEFAULT_CONCURRENCY,
+            history_after: Some(DEFAULT_HISTORY_AFTER),
             retention: Some(DEFAULT_RETENTION),
             cleanup_interval: Duration::from_secs(3600),
             retry_backoff: Duration::from_secs(1),
@@ -227,6 +237,7 @@ pub async fn cancel(ctx: &MutationCtx, id: Id<ScheduledJob>, reason: Option<Stri
 
 /// Scheduled jobs, live and paginated. With `state`, only jobs in that state, through the `(state, runAt)` index:
 /// pending and in-progress jobs soonest first, finished ones most recent first. Without, every job, newest first.
+/// Finished jobs are here until they move to the job history ([`SchedulerOptions::history_after`]).
 #[query]
 pub async fn jobs(
     ctx: &QueryCtx,
@@ -275,22 +286,23 @@ pub async fn run_job_now(ctx: &MutationCtx, id: String) -> Result<String> {
             Ok(id.to_string())
         }
         JobState::InProgress => Err(user_error("running", "This job is running; try again once it has finished")),
-        _ => {
-            let kind = store::kind_of(&job.path)?;
-            let job = NewJob {
-                path: job.value.path,
-                kind,
-                args: job.value.args,
-                run_at: now,
-                max_attempts: job.value.max_attempts,
-                origin: Some("dashboard".to_string()),
-                pool: job.value.pool,
-                on_complete: job.value.on_complete,
-                backoff: job.value.backoff,
-            };
-            Ok(store::insert(&ctx.db, job, now).await?.to_string())
-        }
+        _ => Ok(store::insert(&ctx.db, rerun(job.value, now)?, now).await?.to_string()),
     }
+}
+
+/// A new job, due `now`, running the same function with the same args as the finished `job` (origin `dashboard`).
+pub(crate) fn rerun(job: ScheduledJob, now: f64) -> Result<NewJob> {
+    Ok(NewJob {
+        kind: store::kind_of(&job.path)?,
+        path: job.path,
+        args: job.args,
+        run_at: now,
+        max_attempts: job.max_attempts,
+        origin: Some("dashboard".to_string()),
+        pool: job.pool,
+        on_complete: job.on_complete,
+        backoff: job.backoff,
+    })
 }
 
 /// A declared cron with its last and next run.

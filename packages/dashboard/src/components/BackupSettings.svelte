@@ -100,7 +100,7 @@
         </div>
         <div class="row">
           <label class="inline"><input type="checkbox" bind:checked={form.includeFiles} /> include stored files</label>
-          <label class="inline"><input type="checkbox" bind:checked={form.includeAux} /> include the execution log (aux.db)</label>
+          <label class="inline"><input type="checkbox" bind:checked={form.includeAux} /> include the execution log and job history (aux.db)</label>
         </div>
         <p class="hint">Only scheduled backups are rotated; backups you create by hand are kept.</p>
       {/if}

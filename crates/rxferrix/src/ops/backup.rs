@@ -3,7 +3,7 @@
 //! **Snapshot.** `data.db` is copied with `VACUUM INTO` on a separate connection. That is one read transaction: the
 //! copy is a consistent snapshot at a single commit ts, and in WAL mode it never blocks the writer (mutations keep
 //! committing while it runs; only WAL checkpoints wait for it). The copy is compact and self-contained (no `-wal`).
-//! `aux.db` (the execution log) is copied the same way when asked for.
+//! `aux.db` (the execution log and the job history) is copied the same way when asked for.
 //!
 //! **Archive** (`rxferrix-<UTC time>.tar.zst`, `rxferrix-auto-<UTC time>.tar.zst` for scheduled ones): a zstd-compressed
 //! tar with
@@ -66,7 +66,7 @@ const SECRET_FILE: &str = "auth_secret.key";
 #[serde(rename_all = "camelCase", default)]
 #[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
 pub struct BackupSpec {
-    /// `aux.db`, the execution log.
+    /// `aux.db`: the execution log and the job history.
     pub include_aux: bool,
     /// The blobs of stored files, when they are in a local directory (S3 storage is not copied).
     pub include_files: bool,

@@ -97,6 +97,18 @@ pub mod pitr {
         ctx.db.delete(id).await
     }
 
+    /// Writes nothing: as a scheduled job, its commit only records the job's progress.
+    #[internal_mutation]
+    pub async fn pitr_noop(_ctx: &MutationCtx) -> Result<()> {
+        Ok(())
+    }
+
+    /// Schedules `pitr_noop` now: new intent from app code, shipped promptly.
+    #[internal_mutation]
+    pub async fn pitr_schedule_noop(ctx: &MutationCtx) -> Result<Id<rxferrix::scheduler::ScheduledJob>> {
+        ctx.scheduler.run_after::<pitr_noop>(std::time::Duration::ZERO, ()).await
+    }
+
     #[internal_query]
     pub async fn pitr_all(ctx: &QueryCtx) -> Result<Vec<Doc<Note>>> {
         ctx.db.query::<Note>().collect().await
@@ -413,6 +425,51 @@ async fn ships_segments_to_a_directory() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ships_segments_to_an_object_store() {
     ships_to(store_target(Arc::new(InMemory::new()), "replica/one")).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_bookkeeping_waits_unless_other_commits_are_unshipped() {
+    let target_dir = tempfile::tempdir().unwrap();
+    let t = replicated(options(dir_target(target_dir.path()))).await;
+    let r = rep(&t);
+    r.sync_now(t.app()).await.unwrap();
+    let lag = || async { r.status(t.app()).await.lag_commits };
+    assert_eq!(lag().await, 0);
+    assert_eq!(r.status(t.app()).await.jobs_every_ms, 60_000.0);
+
+    // A job scheduled by app code is new intent: shipped at once.
+    t.mutation::<pitr_schedule_noop>(()).await.unwrap();
+    r.sync_now(t.app()).await.unwrap();
+    assert_eq!(lag().await, 0);
+    // Running it only records its progress: that waits...
+    assert_eq!(t.run_due_jobs().await.unwrap(), 1);
+    r.sync_now(t.app()).await.unwrap();
+    assert_eq!(lag().await, 1, "a lone bookkeeping commit waits");
+    t.app().db().clock().advance(Duration::from_secs(30));
+    r.sync_now(t.app()).await.unwrap();
+    assert_eq!(lag().await, 1);
+    // ... until it is `jobs_every` old.
+    t.app().db().clock().advance(Duration::from_secs(31));
+    r.sync_now(t.app()).await.unwrap();
+    assert_eq!(lag().await, 0);
+
+    // Bookkeeping followed by any other commit ships at once, as one prefix.
+    t.mutation::<pitr_schedule_noop>(()).await.unwrap();
+    r.sync_now(t.app()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    r.sync_now(t.app()).await.unwrap();
+    assert_eq!(lag().await, 1);
+    let (_, ts) = op(&t, "insert", None, 1, "note", 1).await;
+    r.sync_now(t.app()).await.unwrap();
+    let st = r.status(t.app()).await;
+    assert_eq!((st.lag_commits, st.shipped_ts), (0, ts));
+
+    // A graceful shutdown ships everything.
+    t.mutation::<pitr_schedule_noop>(()).await.unwrap();
+    r.sync_now(t.app()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    r.flush(t.app()).await.unwrap();
+    assert_eq!(lag().await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

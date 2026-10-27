@@ -39,7 +39,7 @@ use super::cron::{self, ParsedCron};
 use std::collections::BTreeMap;
 
 use super::store::{self, WorkResult};
-use super::tables::{JobKind, JobState, ScheduledJob};
+use super::tables::{Cron, JobKind, JobState, ScheduledJob};
 use super::{IN_JOB, SchedulerOptions, Workpool};
 use crate::Table;
 use crate::db::Clock;
@@ -52,7 +52,7 @@ use crate::schema::Doc;
 
 /// Due jobs read per round.
 const BATCH: usize = 128;
-/// Finished jobs deleted per transaction by the retention cleanup.
+/// Finished jobs deleted (or moved to the job history) per transaction by the cleanup.
 const CLEANUP_BATCH: usize = 256;
 /// The background loop re-checks at least this often (a safety net; it normally wakes exactly when needed).
 const MAX_SLEEP: Duration = Duration::from_secs(60);
@@ -243,7 +243,9 @@ impl App {
         Ok(())
     }
 
-    /// Delete finished jobs older than the retention period now (it also runs periodically). Returns how many.
+    /// Run the scheduler's cleanup now (it also runs periodically): move finished jobs older than
+    /// `SchedulerOptions::history_after` to the job history, and delete finished jobs and workflows older than the
+    /// retention period. Returns how many jobs were moved or deleted from `_scheduled_jobs`.
     pub async fn cleanup_scheduled_jobs(&self) -> crate::Result<usize> {
         let now = self.db().clock().now_ms();
         cleanup(self, now).await
@@ -308,22 +310,89 @@ async fn maybe_cleanup(app: &App, now: f64) -> crate::Result<()> {
         }
         *last = Some(now);
     }
-    let deleted = cleanup(app, now).await?;
-    if deleted > 0 {
-        tracing::info!("deleted {deleted} finished scheduled job(s) past their retention");
-    }
+    cleanup(app, now).await?;
     Ok(())
 }
 
 /// Delete success, failed and canceled jobs that finished more than `retention` ago (and finished workflows, with
-/// their steps).
+/// their steps), move those that finished more than `history_after` ago to the job history, and delete history rows
+/// past the retention. Returns how many jobs left `_scheduled_jobs`.
 async fn cleanup(app: &App, now: f64) -> crate::Result<usize> {
-    let Some(retention) = app.scheduler_state().options.retention else { return Ok(0) };
-    let cutoff = now - retention.as_secs_f64() * 1000.0;
-    let workflows = crate::workflow::cleanup(app, cutoff).await?;
-    if workflows > 0 {
-        tracing::info!("deleted {workflows} finished workflow(s) past their retention");
+    let options = &app.scheduler_state().options;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let retention_cutoff = options.retention.map(|r| now - ms(r));
+    let mut total = 0;
+    if let Some(cutoff) = retention_cutoff {
+        let workflows = crate::workflow::cleanup(app, cutoff).await?;
+        if workflows > 0 {
+            tracing::info!("deleted {workflows} finished workflow(s) past their retention");
+        }
+        let deleted = delete_finished(app, cutoff).await?;
+        if deleted > 0 {
+            tracing::info!("deleted {deleted} finished scheduled job(s) past their retention");
+        }
+        total += deleted;
     }
+    if let Some(after) = options.history_after {
+        let moved = move_to_history(app, now - ms(after)).await?;
+        if moved > 0 {
+            tracing::info!("moved {moved} finished scheduled job(s) to the job history");
+        }
+        total += moved;
+    }
+    if let Some(cutoff) = retention_cutoff {
+        let trimmed = app.logs().write_with(move |conn| super::history::trim(conn, cutoff)).await?;
+        if trimmed > 0 {
+            tracing::info!("deleted {trimmed} job(s) past their retention from the job history");
+        }
+    }
+    Ok(total)
+}
+
+/// Move the jobs that finished before `cutoff` from `_scheduled_jobs` to the job history, a batch at a time: each
+/// batch is committed to the history first, then deleted from `_scheduled_jobs` (see [`super::history`]). The last
+/// job of every cron stays, so the cron's state is still known. Returns how many.
+async fn move_to_history(app: &App, cutoff: f64) -> crate::Result<usize> {
+    let mut total = 0;
+    loop {
+        let (batch, more) = store::read(app, |db| async move {
+            let keep: std::collections::BTreeSet<_> =
+                db.query::<Cron>().collect().await?.into_iter().filter_map(|c| c.value.last_job).collect();
+            // Fetching past the kept jobs guarantees a full batch whenever there is more to move.
+            let limit = CLEANUP_BATCH + keep.len();
+            let old = db
+                .query::<ScheduledJob>()
+                .with_index(ScheduledJob::by_completed_at, |q| {
+                    q.gt(ScheduledJob::completed_at, None).lt(ScheduledJob::completed_at, Some(cutoff))
+                })
+                .take(limit)
+                .await?;
+            let more = old.len() == limit;
+            Ok((old.into_iter().filter(|job| !keep.contains(&job.id)).collect::<Vec<_>>(), more))
+        })
+        .await?;
+        if !batch.is_empty() {
+            let ids: Vec<Id<ScheduledJob>> = batch.iter().map(|job| job.id).collect();
+            total += batch.len();
+            app.logs().write_with(move |conn| super::history::insert(conn, &batch)).await?;
+            store::write(app, |db| async move {
+                for id in ids {
+                    if db.get(id).await?.is_some() {
+                        db.delete(id).await?;
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        }
+        if !more {
+            return Ok(total);
+        }
+    }
+}
+
+/// Delete the jobs that finished before `cutoff` from `_scheduled_jobs`. Returns how many.
+async fn delete_finished(app: &App, cutoff: f64) -> crate::Result<usize> {
     let mut total = 0;
     loop {
         let deleted = store::write(app, |db| async move {

@@ -4,6 +4,7 @@ import {
   cancelRestore,
   createBackup,
   exportTable,
+  fetchJobHistory,
   fetchStats,
   fetchTimeseries,
   filenameFromDisposition,
@@ -14,6 +15,7 @@ import {
   listBackups,
   replicationSnapshot,
   restartServer,
+  retryFromHistory,
   saveBlob,
   stagePointInTime,
   stageRestore,
@@ -50,6 +52,26 @@ describe("filenameFromDisposition", () => {
     expect(filenameFromDisposition('attachment; filename="../../etc/passwd"', "x")).toBe(".._.._etc_passwd");
     expect(filenameFromDisposition(null, "fallback.csv")).toBe("fallback.csv");
     expect(filenameFromDisposition("attachment", "fallback.csv")).toBe("fallback.csv");
+  });
+});
+
+describe("job history", () => {
+  it("lists with the filter and cursor in the query string, and retries by id", async () => {
+    const job = { _id: "j1", state: "failed", completedAt: 5 };
+    const fetch = mockFetch(
+      new Response(JSON.stringify({ jobs: [job] })),
+      new Response(JSON.stringify({ jobs: [] })),
+      new Response(JSON.stringify({ id: "j2" })),
+    );
+    expect(await fetchJobHistory(fakeAuth(), { state: "failed", limit: 50 })).toEqual([job]);
+    expect(fetch.mock.calls[0]![0]).toBe("/api/admin/job-history?state=failed&limit=50");
+    await fetchJobHistory(fakeAuth(), { state: null, beforeCompletedAt: 5, beforeId: "j1" });
+    expect(fetch.mock.calls[1]![0]).toBe("/api/admin/job-history?beforeCompletedAt=5&beforeId=j1");
+    expect(await retryFromHistory(fakeAuth(), "j1")).toBe("j2");
+    const [url, init] = fetch.mock.calls[2]!;
+    expect(url).toBe("/api/admin/job-history/retry");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ id: "j1" });
   });
 });
 

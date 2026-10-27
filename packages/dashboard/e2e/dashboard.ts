@@ -8,7 +8,7 @@
 // watches a todo inserted over the HTTP API appear live in the data grid, edits a document in the side panel, runs
 // todos:add from the function runner, sees executions arrive in the live logs tail, uploads files on the Files page
 // (picker and drag and drop, previews, delete), checks the Scheduler page (the example's cron, a job from
-// todos:add_later appearing live, "Run now", "Cancel"), and checks that anonymous callers can't use the system
+// todos:add_later appearing live, "Run now", "Cancel", the job history), and checks that anonymous callers can't use the system
 // functions. Then the operations pages: settings (a non-secret edit, the SMTP password round trip without ever
 // showing it, a field locked by a command-line flag, inline validation), the audit log, backups (create, download,
 // delete; the scheduled backup cron), export and import (2000 seeded todos), the virtualized grid scrolled to the
@@ -409,12 +409,19 @@ try {
     const r2 = await call(base, "mutation", "todos:add_later", { text: "never", delaySeconds: 3600 });
     await row.first().getByRole("button", { name: "Cancel" }).click();
     await page.getByText("Job canceled").waitFor();
-    await page.getByRole("button", { name: "Canceled", exact: true }).click();
+    await page.getByRole("group", { name: "Filter jobs by state" }).getByRole("button", { name: "Canceled", exact: true }).click();
     await jobs.locator("tbody tr").filter({ hasText: "canceled" }).first().waitFor();
     if (new URL(page.url()).searchParams.get("state") !== "canceled") throw new Error("the filter is not in the URL");
     const canceled = await call(base, "query", "_system/scheduler:jobs", { state: "canceled", paginationOpts: { numItems: 5, cursor: null } });
     if (canceled.status !== 400 || canceled.body.errorData?.code !== "unauthenticated") throw new Error("scheduler functions are not admin-only");
     if (!r2.body.value || jobId === r2.body.value) throw new Error("expected two distinct jobs");
+    // The job history (aux.db): nothing has finished an hour ago yet; its filters read it again.
+    const history = page.getByRole("region", { name: "History" });
+    await history.getByText("The history is empty").waitFor();
+    await history.getByRole("group", { name: "Filter the history by state" }).getByRole("button", { name: "Failed", exact: true }).click();
+    await history.getByText("No failed jobs in the history").waitFor();
+    const anonymous = await fetch(`${base}/api/admin/job-history`);
+    if (anonymous.status !== 401) throw new Error(`the job history is not admin-only (${anonymous.status})`);
   });
 
   // 6c. "Run now" on a cron; the time zone column; system crons grouped last.

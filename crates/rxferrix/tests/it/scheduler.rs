@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use rxferrix::auth::AuthConfig;
-use rxferrix::scheduler::{CancelOutcome, JobState, ScheduledJob, SchedulerOptions};
+use rxferrix::scheduler::{CancelOutcome, HistoryFilter, JobState, ScheduledJob, SchedulerOptions};
 use rxferrix::storage::StorageConfig;
 use rxferrix::testing::TestApp;
 use rxferrix::{AppOptions, Doc, FunctionRef, Id, LogFilter};
@@ -687,7 +687,7 @@ async fn invalid_crons_fail_startup() {
 }
 
 #[tokio::test]
-async fn finished_jobs_are_deleted_after_the_retention_period() {
+async fn finished_jobs_move_to_the_history_then_are_deleted_after_the_retention_period() {
     // Without the storage sweep's system cron, whose jobs would run (and be kept) over these days too.
     let storage = rxferrix::storage::StorageConfig::default().sweep_interval(None);
     let t = TestApp::with_options(AppOptions { dev: true, storage, ..Default::default() }).await.unwrap();
@@ -696,14 +696,75 @@ async fn finished_jobs_are_deleted_after_the_retention_period() {
     let failed = t.mutation::<schedule_failing>(()).await.unwrap();
     let far = t.mutation::<add_and_schedule>(("far".to_string(), 30 * 24 * 3600 * 1000, false)).await.unwrap();
     t.run_due_jobs().await.unwrap();
-    assert_eq!(t.advance_time(Duration::from_secs(6 * 24 * 3600)).await.unwrap(), 0);
-    assert_eq!(t.query::<all_jobs>(()).await.unwrap().len(), 4, "kept for 7 days");
-    t.advance_time(Duration::from_secs(2 * 24 * 3600)).await.unwrap();
+    let history = |filter: HistoryFilter| {
+        let app = t.app().clone();
+        async move { app.job_history(filter).await.unwrap() }
+    };
+
+    // For the first hour, finished jobs stay in `_scheduled_jobs`.
+    assert_eq!(t.advance_time(Duration::from_secs(30 * 60)).await.unwrap(), 0);
+    assert_eq!(t.query::<all_jobs>(()).await.unwrap().len(), 4);
+    assert!(history(HistoryFilter::default()).await.is_empty());
+
+    // Then they move to the job history, whole.
+    t.advance_time(Duration::from_secs(2 * 3600)).await.unwrap();
     let left: Vec<_> = t.query::<all_jobs>(()).await.unwrap().into_iter().map(|j| j.id).collect();
     assert_eq!(left, vec![far], "only the pending job is left");
     for id in [done, canceled, failed] {
         assert!(t.query::<get_job>((id,)).await.unwrap().is_none());
     }
+    let moved = history(HistoryFilter::default()).await;
+    let mut ids: Vec<_> = moved.iter().map(|j| j.id).collect();
+    ids.sort();
+    let mut expected = vec![done, canceled, failed];
+    expected.sort();
+    assert_eq!(ids, expected);
+    let failed_job = t.app().job_history_get(failed).await.unwrap().expect("in the history");
+    assert_eq!(failed_job.state, JobState::Failed);
+    assert!(failed_job.error.is_some() && failed_job.completed_at.is_some());
+    let by_state = history(HistoryFilter { state: Some(JobState::Canceled), ..Default::default() }).await;
+    assert_eq!(by_state.iter().map(|j| j.id).collect::<Vec<_>>(), vec![canceled]);
+    assert!(history(HistoryFilter { path: Some("nope:nope".into()), ..Default::default() }).await.is_empty());
+
+    // Pages, most recently finished first.
+    let first = history(HistoryFilter { limit: Some(2), ..Default::default() }).await;
+    assert_eq!(first.len(), 2);
+    let last = first.last().unwrap();
+    let rest = history(HistoryFilter {
+        before_completed_at: last.completed_at,
+        before_id: Some(last.id.to_string()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(rest.len(), 1);
+    let paged: Vec<_> = first.iter().chain(&rest).map(|j| j.id).collect();
+    assert_eq!(paged, moved.iter().map(|j| j.id).collect::<Vec<_>>());
+
+    // Past the retention (7 days after they finished), they leave the history too.
+    t.advance_time(Duration::from_secs(6 * 24 * 3600)).await.unwrap();
+    assert_eq!(history(HistoryFilter::default()).await.len(), 3, "kept for 7 days");
+    t.advance_time(Duration::from_secs(24 * 3600)).await.unwrap();
+    assert!(history(HistoryFilter::default()).await.is_empty());
+    assert_eq!(t.query::<all_jobs>(()).await.unwrap().len(), 1, "the pending job stays");
+}
+
+#[tokio::test]
+async fn the_last_job_of_a_cron_stays_in_scheduled_jobs() {
+    let options = SchedulerOptions::default().interval::<cron_tick>("hourly", Duration::from_secs(3600), ("h".into(),));
+    let t = TestApp::with_options(crons_options(options)).await.unwrap();
+    for _ in 0..3 {
+        t.advance_time(Duration::from_secs(3600)).await.unwrap();
+    }
+    t.advance_time(Duration::from_secs(2 * 3600)).await.unwrap();
+    t.app().cleanup_scheduled_jobs().await.unwrap();
+    let last_job = cron_rows(&t).await[0]["lastJob"].as_str().unwrap().to_string();
+    let jobs: Vec<_> = t.query::<all_jobs>(()).await.unwrap();
+    let cron_jobs: Vec<_> = jobs.iter().filter(|j| j.origin.as_deref() == Some("cron:hourly")).collect();
+    assert_eq!(cron_jobs.len(), 1, "{jobs:?}");
+    assert_eq!(cron_jobs[0].id.to_string(), last_job);
+    assert_eq!(cron_jobs[0].state, JobState::Success);
+    let moved = t.app().job_history(HistoryFilter::default()).await.unwrap();
+    assert!(moved.len() >= 3 && moved.iter().all(|j| j.id.to_string() != last_job), "{moved:?}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -718,6 +779,15 @@ struct Http {
 impl Http {
     async fn post(&self, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
         let mut req = self.client.post(format!("{}{path}", self.base)).json(&body);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let res = req.send().await.unwrap();
+        (res.status().as_u16(), res.json().await.unwrap_or(Value::Null))
+    }
+
+    async fn get(&self, path: &str, token: Option<&str>) -> (u16, Value) {
+        let mut req = self.client.get(format!("{}{path}", self.base));
         if let Some(t) = token {
             req = req.bearer_auth(t);
         }
@@ -824,6 +894,57 @@ async fn dashboard_functions_are_admin_only_and_manage_jobs() {
     assert_eq!(code_of(&b), "invalid_id");
     let (_, b) = http.call("mutation", "run_job_now", json!({ "id": "nonsense" }), Some(&admin)).await;
     assert_eq!(code_of(&b), "invalid_id");
+}
+
+#[tokio::test]
+async fn the_job_history_is_admin_only_over_http_and_its_jobs_can_run_again() {
+    let scheduler = SchedulerOptions { history_after: Some(Duration::ZERO), ..Default::default() };
+    let options =
+        AppOptions { dev: true, auth: AuthConfig::password().rate_limits(None), scheduler, ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    let app = t.app().clone();
+    let addr: SocketAddr = t.serve().await.unwrap();
+    let http = Http { client: reqwest::Client::new(), base: format!("http://{addr}") };
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let (_, admin) = http
+        .post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+        .await;
+    let (_, user) =
+        http.post("/api/auth/signup", None, json!({ "email": "user@example.com", "password": "user password" })).await;
+    let (admin, user) =
+        (admin["accessToken"].as_str().unwrap().to_string(), user["accessToken"].as_str().unwrap().to_string());
+
+    let failed = t.mutation::<schedule_failing>(()).await.unwrap();
+    let done = t.mutation::<add_and_schedule>(("h".to_string(), 0, false)).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    app.cleanup_scheduled_jobs().await.unwrap();
+    assert!(t.query::<get_job>((failed,)).await.unwrap().is_none(), "moved out of _scheduled_jobs");
+
+    for (token, status) in [(None, 401), (Some(user.as_str()), 403)] {
+        assert_eq!(http.get("/api/admin/job-history", token).await.0, status);
+        assert_eq!(http.post("/api/admin/job-history/retry", token, json!({ "id": failed })).await.0, status);
+    }
+    let (s, b) = http.get("/api/admin/job-history?state=failed", Some(&admin)).await;
+    assert_eq!(s, 200, "{b}");
+    let jobs = b["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!((&jobs[0]["_id"], &jobs[0]["state"]), (&json!(failed), &json!("failed")));
+    let (_, b) = http.get("/api/admin/job-history", Some(&admin)).await;
+    assert_eq!(b["jobs"].as_array().unwrap().len(), 2);
+    let (s, _) = http.get(&format!("/api/admin/job-history?beforeId={done}"), Some(&admin)).await;
+    assert_eq!(s, 400, "a cursor needs both parts");
+
+    // Run a job from the history again: a new pending job with the same function and args.
+    let (s, b) = http.post("/api/admin/job-history/retry", Some(&admin), json!({ "id": failed })).await;
+    assert_eq!(s, 200, "{b}");
+    let retry: Id<ScheduledJob> = b["id"].as_str().unwrap().parse().unwrap();
+    let retried = job(&t, retry).await;
+    assert_eq!(
+        (retried.state, retried.origin.as_deref(), retried.path.as_str()),
+        (JobState::Pending, Some("dashboard"), failing_add::path().as_str())
+    );
+    let (s, b) = http.post("/api/admin/job-history/retry", Some(&admin), json!({ "id": retry })).await;
+    assert_eq!((s, code_of(&b)), (404, "not_found"), "{b}");
 }
 
 #[tokio::test]

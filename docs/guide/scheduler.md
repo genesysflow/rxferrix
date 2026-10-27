@@ -28,7 +28,8 @@ Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see
 **exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
 interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
 them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
-finished jobs are deleted after 7 days. In a time zone, a run in the hour skipped by a spring-forward change runs
+finished jobs move to the job history in `aux.db` an hour after they finish (`SchedulerOptions::history_after`), so
+`data.db` and its backups don't grow with every job run; they are deleted after 7 days (`retention`). In a time zone, a run in the hour skipped by a spring-forward change runs
 later by the length of the gap (usually an hour), and a time of day in the repeated fall-back hour runs once. In tests, `TestApp::advance_time(d)` / `run_due_jobs()` run due jobs
 deterministically. Details: [docs/CONTRACT.md](../CONTRACT.md) §1.7.
 

@@ -16,7 +16,7 @@ The data directory (`--dir`, default `fx_data`) holds everything the server keep
 | Path | What |
 |---|---|
 | `data.db` | The database. |
-| `aux.db` | The execution log (what the dashboard's logs and charts show). |
+| `aux.db` | The execution log (what the dashboard's logs and charts show) and the scheduler's job history. |
 | `storage/` | Uploaded files, unless they go to S3. |
 | `auth_secret.key` | The key that signs sessions and encrypts secrets. Keep a copy somewhere safe. |
 | `backups/` | Backups, unless they go elsewhere. |

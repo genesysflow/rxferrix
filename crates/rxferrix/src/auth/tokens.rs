@@ -198,7 +198,7 @@ impl AccessClaims {
 /// Claims of a second-factor token: the first step of a sign-in (password, magic link, OAuth, ...) succeeded for
 /// an account that has two-factor authentication, and the session starts once a code is presented with it
 /// (`POST /api/auth/mfa/verify`). Short-lived; it grants nothing by itself. `{ iss: "rxferrix", typ: "mfa", sub,
-/// adm?, mth, iat, exp }`.
+/// adm?, mth, pwd?, iat, exp }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MfaClaims {
     pub iss: String,
@@ -211,13 +211,17 @@ pub struct MfaClaims {
     /// `on_sign_in` hook of the session it ends up starting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mth: Option<String>,
+    /// A password reset's new password hash, sealed (`super::secretbox`) for the user: it is set once the second
+    /// factor is checked, so a reset email alone can't change the password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pwd: Option<String>,
     pub iat: u64,
     pub exp: u64,
 }
 
 impl MfaClaims {
     pub fn new(sub: String, adm: bool, mth: Option<String>, now_s: u64, ttl_s: u64) -> Self {
-        MfaClaims { iss: ISSUER.into(), typ: MFA_TYPE.into(), sub, adm, mth, iat: now_s, exp: now_s + ttl_s }
+        MfaClaims { iss: ISSUER.into(), typ: MFA_TYPE.into(), sub, adm, mth, pwd: None, iat: now_s, exp: now_s + ttl_s }
     }
 }
 

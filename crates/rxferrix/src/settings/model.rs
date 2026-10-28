@@ -123,6 +123,11 @@ pub struct TrustedProxy {
     /// original client but anyone can forge it; the rightmost is the one the last proxy added.
     #[serde(default)]
     pub use_leftmost_ip: bool,
+    /// The proxy's addresses, IPs or CIDR ranges (`10.0.0.0/8`): the headers count only on requests from one of
+    /// them. None or empty: from any address (then the server must be reachable only through the proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub proxies: Option<Vec<String>>,
 }
 
 /// Request rate limits per client IP (`super::rate_limits`).

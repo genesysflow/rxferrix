@@ -55,6 +55,8 @@ pub struct AuthConfig {
     pub(crate) dev_mailer: Option<Arc<dyn Mailer>>,
     pub(crate) rate_limits: Option<RateLimits>,
     pub(crate) trust_proxy: bool,
+    /// The proxy's addresses ([`AuthConfig::trusted_proxies`]), checked when the server starts.
+    pub(crate) trusted_proxies: Vec<String>,
     /// External JWT issuers whose tokens are accepted (`super::jwt`).
     pub(crate) jwt: Vec<super::jwt::JwtProvider>,
     /// How long `_audit_log` entries are kept.
@@ -101,6 +103,7 @@ impl Default for AuthConfig {
             dev_mailer: None,
             rate_limits: Some(RateLimits::default()),
             trust_proxy: false,
+            trusted_proxies: Vec::new(),
             jwt: Vec::new(),
             audit_retention: Duration::from_secs(90 * 24 * 3600),
             impersonation: true,
@@ -132,6 +135,7 @@ impl fmt::Debug for AuthConfig {
             .field("dev_mailer", &self.dev_mailer.as_ref().map(|_| "<custom>"))
             .field("rate_limits", &self.rate_limits)
             .field("trust_proxy", &self.trust_proxy)
+            .field("trusted_proxies", &self.trusted_proxies)
             .field("jwt", &self.jwt)
             .field("audit_retention", &self.audit_retention)
             .field("impersonation", &self.impersonation)
@@ -377,6 +381,16 @@ impl AuthConfig {
     /// the `trustedProxy` setting (dashboard: Settings → IP proxy headers) decides which headers are trusted.
     pub fn trust_proxy(mut self, trust: bool) -> Self {
         self.trust_proxy = trust;
+        self
+    }
+
+    /// The reverse proxy's addresses: IPs or CIDR ranges, e.g. `["10.0.0.0/8", "127.0.0.1"]`. The trusted proxy
+    /// headers ([`Self::trust_proxy`], or the `trustedProxy` setting) then count only on requests that come from
+    /// one of them; a request from anywhere else is taken at its peer address, so a client that reaches the server
+    /// directly can't pick its IP. Replaces the addresses of the setting. Empty (the default): headers are trusted
+    /// from any address, so the server must be reachable only through the proxy. An invalid entry fails the start.
+    pub fn trusted_proxies(mut self, addresses: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.trusted_proxies = addresses.into_iter().map(Into::into).collect();
         self
     }
 

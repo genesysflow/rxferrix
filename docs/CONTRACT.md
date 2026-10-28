@@ -607,7 +607,8 @@ log lines; `Email { to, subject, body, html: Option<String> }`, built with `Emai
 an HTML version is sent as `multipart/alternative`; apps send their own email through the same mailer with
 `ActionCtx::send_email`), `rate_limits(Option<RateLimits>)` (`credential_*` per client IP and, for password
 sign-ins, per account; `email_*` per IP and per address; `refresh_*` per IP, shared by sign-out; `None` disables
-them), `trust_proxy(bool)`,
+them), `trust_proxy(bool)`, `trusted_proxies([..])` (the proxy's IPs or CIDR ranges: proxy headers count only on
+requests from them; an invalid entry fails the start),
 `jwt(JwtProvider)` (external tokens, below), `audit_retention(Duration)` (`_audit_log`, 90 days),
 `impersonation(bool)` (`POST /api/admin/impersonate`, default true), `on_sign_in(|app: App, sign_in: SignIn| async
 { .. })` (after each successful user sign-in that starts a session, awaited before the response; `SignIn { user,
@@ -618,7 +619,7 @@ public URL's host, else `RxFerrix`), `before_sign_up(|app: App, attempt: SignUpA
 and `allowed_emails([..])` / `allowed_domains([..])` (the sign-up check, below).
 CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-redirect-url` (repeatable;
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
-`--trust-proxy`. Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
+`--trust-proxy`, `--trust-proxy-from` (repeatable; `RXFERRIX_TRUST_PROXY_FROM`, comma-separated). Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted), `admin disable-2fa <email>` (removes an administrator's second factor).
 
 **Sign-up check.** Before a sign-up creates an account (password sign-up; the first sign-in by magic link or code, or
@@ -2388,7 +2389,7 @@ until the secret is entered again.
 | Path `_system/settings:…` | Kind | Args → result |
 |---|---|---|
 | `get` | action | `{}` → `SettingsView` |
-| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, trustedProxy?, rateLimits?, emailTemplates?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings, `emailTemplates` all the templates. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; `trustedProxy` header names that are valid HTTP header names (trimmed, deduplicated case-insensitively, at most 10; none left clears the key); `rateLimits` rules with a valid label (below; trimmed), `maxRequests` 1–1,000,000, `intervalSecs` 1–86,400, no label listed twice for the same `audience`, at most 50 (off with no rules clears the key); `emailTemplates` (trimmed; nothing left clears the key): an `appName` of at most 100 characters on one line, and per template a subject of 1–200 characters on one line and an HTML body of up to 64 KiB that contains `{code}` or `{link}`, with no `{name}` (lowercase letters and `_`) other than the placeholders; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
+| `update` | action | `{ oauth?, smtp?, redirectUrls?, signups?, accessTokenTtlSecs?, sessionTtlSecs?, corsOrigins?, backups?, trustedProxy?, rateLimits?, emailTemplates?, clear? }` → `SettingsView`. Omitted fields are unchanged; `clear: ["smtp", …]` resets keys to their defaults; `oauth` replaces the list of providers kept in settings, `emailTemplates` all the templates. Validated as a whole before anything is written (`invalid_settings` with a message): provider ids `[a-z0-9_-]{1,40}`, unique; `kind` `github` / `google` / `discord` / `apple` / `oidc` (`oidc` needs an https `issuer`, http only for loopback or in `--dev`; `apple` needs `teamId` and `keyId` (letters and digits) and its secret is the `.p8` private key, which must parse as a P-256 PKCS#8 key, up to 4 KiB); a client id; a secret to be enabled; scopes without spaces; SMTP `smtp://` / `smtps://` URL with a host and a valid `from` mailbox (lettre must accept the transport); absolute http(s) redirect URLs; `accessTokenTtlSecs` 30 s–24 h, `sessionTtlSecs` 60 s–400 days; CORS entries that are bare origins (`https://app.example.com`) or `*`; `trustedProxy` header names that are valid HTTP header names (trimmed, deduplicated case-insensitively, at most 10; none left clears the key) and `proxies` that are IP addresses or CIDR ranges (at most 64); `rateLimits` rules with a valid label (below; trimmed), `maxRequests` 1–1,000,000, `intervalSecs` 1–86,400, no label listed twice for the same `audience`, at most 50 (off with no rules clears the key); `emailTemplates` (trimmed; nothing left clears the key): an `appName` of at most 100 characters on one line, and per template a subject of 1–200 characters on one line and an HTML body of up to 64 KiB that contains `{code}` or `{link}`, with no `{name}` (lowercase letters and `_`) other than the placeholders; at most 20 providers and 50 list entries. Writes the rows and an `_audit_log` entry (`settings_update`, masked before/after of the changed keys, `details.keys`) in one transaction, then swaps in the new configuration before returning. |
 | `test_backup_destination` | action | `{ backups?: BackupsInput }` → the destination's location (`/var/backups/app`, `s3://bucket/prefix`). Writes a small `.rxferrix-probe-*` object there, reads it back (`HEAD`) and deletes it; without `backups`, the destination in effect. `invalid_settings` with the store's error. |
 | `send_test_email` | action | `{ to, smtp? }` → `null`. Sends a test email through the mailer in effect, or through the given (unsaved) `SmtpInput` (a missing password means the stored one). `email_not_configured`, or `email_failed` with the transport's error (the password is masked out of it). 30 s timeout. |
 
@@ -2408,6 +2409,7 @@ type SettingsView = {
   emailTemplateDefaults: EmailTemplates; // the built-in emails as templates (each one set, appName null)
   locked: string[];      // fields the configuration fixes: "signups" | "accessTokenTtlSecs" | "sessionTtlSecs" | "redirectUrls" | "smtp" | "oauth.<id>"
                          // | "trustedProxy" (with AuthConfig::trust_proxy / --trust-proxy)
+                         // | "trustedProxy.proxies" (with AuthConfig::trusted_proxies / --trust-proxy-from)
                          // | "backups.schedule" | "backups.destination"
   effective: { signups: boolean; accessTokenTtlSecs: number; sessionTtlSecs: number; redirectUrls: string[];
                oauthProviders: string[]; emailConfigured: boolean; corsOrigins: string[] | null /* null: any */;
@@ -2425,8 +2427,10 @@ type EmailTemplate = { subject: string; html: string };
 // The headers a reverse proxy puts the client IP in, trusted in order: the first one that holds an IP address wins
 // (else the peer address). In a list (`client, proxy1, proxy2`, over every line of the header) the rightmost entry is
 // taken, or the leftmost with useLeftmostIp. `AuthConfig::trust_proxy` / `--trust-proxy` means
-// `{ headers: ["x-forwarded-for"], useLeftmostIp: false }` and wins over the setting.
-type TrustedProxy = { headers: string[]; useLeftmostIp: boolean };
+// `{ headers: ["x-forwarded-for"], useLeftmostIp: false }` and wins over the setting. With `proxies` (IPs or CIDR
+// ranges, normalized to `10.0.0.0/8` form, at most 64), the headers count only on requests whose peer is one of them;
+// `AuthConfig::trusted_proxies` / `--trust-proxy-from` replace them. Absent: trusted from any peer.
+type TrustedProxy = { headers: string[]; useLeftmostIp: boolean; proxies?: string[] };
 // Request rate limits per client IP (as `trustedProxy` resolves it; IPv6 clients by their /64). Off: kept, not applied.
 // Each rule is a token bucket per client: bursts of up to maxRequests, refilled evenly over intervalSecs. A label is
 // - a path prefix (`/api/`, `/api/storage/upload`, an app route, static files): HTTP requests, counted by a middleware

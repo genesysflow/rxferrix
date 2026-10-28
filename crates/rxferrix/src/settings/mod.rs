@@ -47,6 +47,8 @@ use model::{
 const MAX_LIST: usize = 50;
 const MAX_PROVIDERS: usize = 20;
 const MAX_PROXY_HEADERS: usize = 10;
+/// Addresses (IPs or CIDR ranges) of the trusted proxy, at most.
+const MAX_PROXY_ADDRESSES: usize = 64;
 const MAX_APP_NAME: usize = 100;
 const MAX_SUBJECT: usize = 200;
 const MAX_TEMPLATE_HTML: usize = 64 * 1024;
@@ -401,6 +403,7 @@ fn view(app: &App, stored: &StoredSettings) -> SettingsView {
             trusted_proxy: TrustedProxy {
                 headers: e.proxy.headers.iter().map(|h| h.as_str().to_string()).collect(),
                 use_leftmost_ip: e.proxy.leftmost,
+                proxies: (!e.proxy.from.is_empty()).then(|| e.proxy.from.iter().map(|n| n.to_string()).collect()),
             },
             app_name: e.app_name.clone(),
         },
@@ -478,7 +481,21 @@ fn trusted_proxy_from_input(input: TrustedProxy) -> Result<Option<TrustedProxy>>
     if headers.len() > MAX_PROXY_HEADERS {
         return Err(invalid(format!("at most {MAX_PROXY_HEADERS} trusted proxy headers")));
     }
-    Ok((!headers.is_empty()).then_some(TrustedProxy { headers, use_leftmost_ip: input.use_leftmost_ip }))
+    let mut proxies: Vec<String> = Vec::new();
+    for a in input.proxies.iter().flatten().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        let Some(net) = crate::auth::effective::parse_proxy_address(a) else {
+            return Err(invalid(format!("trusted proxy address `{a}` is not an IP address or CIDR range")));
+        };
+        let net = net.to_string();
+        if !proxies.contains(&net) {
+            proxies.push(net);
+        }
+    }
+    if proxies.len() > MAX_PROXY_ADDRESSES {
+        return Err(invalid(format!("at most {MAX_PROXY_ADDRESSES} trusted proxy addresses")));
+    }
+    let proxies = (!proxies.is_empty()).then_some(proxies);
+    Ok((!headers.is_empty()).then_some(TrustedProxy { headers, use_leftmost_ip: input.use_leftmost_ip, proxies }))
 }
 
 /// The email templates, trimmed and checked; `None` when nothing is left (the built-in emails, no app name).
@@ -810,6 +827,7 @@ mod tests {
         let input = |headers: &[&str]| TrustedProxy {
             headers: headers.iter().map(|h| h.to_string()).collect(),
             use_leftmost_ip: true,
+            proxies: None,
         };
         let p = trusted_proxy_from_input(input(&[" CF-Connecting-IP ", "", "cf-connecting-ip", "X-Forwarded-For"]))
             .unwrap()
@@ -819,6 +837,17 @@ mod tests {
         assert_eq!(trusted_proxy_from_input(input(&[" "])).unwrap(), None);
         assert!(trusted_proxy_from_input(input(&["X Forwarded For"])).is_err());
         assert!(trusted_proxy_from_input(input(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"])).is_err());
+
+        // The proxy's addresses: IPs and ranges, normalized; anything else is refused.
+        let with = |proxies: &[&str]| TrustedProxy {
+            proxies: Some(proxies.iter().map(|a| a.to_string()).collect()),
+            ..input(&["X-Forwarded-For"])
+        };
+        let p = trusted_proxy_from_input(with(&[" 10.1.2.3/8 ", "", "10.0.0.0/8", "2001:db8::1", "127.0.0.1"]));
+        assert_eq!(p.unwrap().unwrap().proxies.unwrap(), ["10.0.0.0/8", "2001:db8::1/128", "127.0.0.1/32"]);
+        assert_eq!(trusted_proxy_from_input(with(&[" "])).unwrap().unwrap().proxies, None);
+        assert!(trusted_proxy_from_input(with(&["proxy.internal"])).is_err());
+        assert!(trusted_proxy_from_input(with(&["10.0.0.0/33"])).is_err());
     }
 
     #[test]

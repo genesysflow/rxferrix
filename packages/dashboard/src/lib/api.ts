@@ -453,6 +453,8 @@ export interface TrustedProxy {
   headers: string[];
   /** Take the leftmost IP of a list (the original client, but forgeable) instead of the rightmost. */
   useLeftmostIp: boolean;
+  /** The proxy's addresses (IPs or CIDR ranges): the headers count only on requests from them. Absent: any address. */
+  proxies?: string[] | null;
 }
 
 /** Which callers a rate limit rule applies to. */

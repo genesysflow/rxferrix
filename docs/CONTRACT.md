@@ -2637,7 +2637,9 @@ scheduled ones beyond `keep`; manual archives are never rotated.
 **Restore** (`rxferrix restore <archive | s3://bucket/key>`, offline) takes `<dir>/rxferrix.lock` (held by `serve` and
 `import`, so it refuses while a server runs), extracts next to the data, checks entries against the manifest
 (unexpected, missing or altered entries are refused), runs `PRAGMA integrity_check`, opens the database with the
-binary's tables (schema check) and runs `verify_indexes` (`--skip-verify` skips the last two). Only then are
+binary's tables (schema check, as `serve` does it: a table whose documents predate a changed type passes while a
+migration for it is declared) and runs `verify_indexes` (`--skip-verify` skips the last two, for an archive and for a
+point in time with `--from` alike). Only then are
 `data.db`(`-wal`, `-shm`), `aux.db` (when the archive has one), persisted HNSW indexes (`vector_index_<id>.hnsw`) and, if restored,
 `auth_secret.key` moved to `<dir>/pre-restore-<time>/` and the restored files put in place; blobs are added to the
 storage directory. A database with a trigger or a view (rxferrix creates neither) is refused. While a restore is staged

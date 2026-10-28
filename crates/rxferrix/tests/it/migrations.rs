@@ -529,6 +529,18 @@ async fn old_schema_documents_start_with_the_migration_pending_and_pass_the_chec
     assert!(format!("{err:#}").contains("does not match table `mig_tasks`"), "{err:#}");
     t.mutation::<add_task>(("new".to_string(), 2)).await.unwrap();
 
+    // A backup taken now, before the migration ran, restores: it is checked the way `serve` opens it, with the table
+    // migrating.
+    {
+        use rxferrix::ops::backup::{self, BackupSpec, BackupTarget, RestoreOptions};
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = BackupTarget::parse(target_dir.path().to_str().unwrap(), t.dir()).unwrap();
+        let info = backup::create(&app, &BackupSpec::default(), &target, false).await.unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        let archive = target_dir.path().join(&info.name);
+        backup::restore(&archive, restored.path(), &RestoreOptions::default()).await.unwrap();
+    }
+
     // Migration writes go through the normal write path: subscriptions update.
     let mut client = Client::new(&app).await;
     let first = client.subscribe(1, &priorities::path(), json!({})).await.unwrap();

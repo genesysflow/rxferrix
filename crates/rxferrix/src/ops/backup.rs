@@ -730,21 +730,30 @@ fn extract(archive: &Path, staging: &Path) -> crate::Result<Manifest> {
     Ok(manifest)
 }
 
-/// Open the restored database with this binary's tables and check every index. Leaves no `-wal`/`-shm` behind.
+/// Open the restored database with this binary's tables and check every index. Leaves no `-wal`/`-shm` behind. Opened
+/// as `serve` would: a table whose documents predate a changed type opens if a migration for it is declared (a backup
+/// taken before the migration ran).
 pub(crate) async fn verify(staging: &Path) -> crate::Result<()> {
     let tables = crate::runtime::registered_tables();
+    let migrations = crate::migrations::declared(&tables)?;
     let dir = staging.to_path_buf();
-    let db = tokio::task::spawn_blocking(move || crate::db::Database::open_with(&dir, &tables, &Default::default()))
-        .await?
-        .context("the backup can't be opened by this binary")?;
+    let db = tokio::task::spawn_blocking(move || {
+        crate::db::Database::open_with_migrations(&dir, &tables, &Default::default(), &migrations)
+    })
+    .await?
+    .context("the backup can't be opened by this binary")?;
     let problems = db.verify_indexes().await?;
     drop(db);
     if !problems.is_empty() {
         bail!("the backup's indexes are inconsistent: {}", problems.join("; "));
     }
-    // Fold anything left in the WAL back into data.db before it moves. The vector index thread of the dropped database
-    // (`db::search::ann`) may hold its reader for a moment longer, and leaving WAL mode needs every other connection
-    // gone (SQLite doesn't wait for that): retry for a while.
+    close_wal(staging).await
+}
+
+/// Fold anything left in the staged database's WAL back into data.db and leave WAL mode, before it moves.
+pub(crate) async fn close_wal(staging: &Path) -> crate::Result<()> {
+    // The vector index thread of a database just dropped (`db::search::ann`) may hold its reader for a moment longer,
+    // and leaving WAL mode needs every other connection gone (SQLite doesn't wait for that): retry for a while.
     let path = staging.join("data.db");
     tokio::task::spawn_blocking(move || -> crate::Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

@@ -186,7 +186,7 @@ pub async fn stage_point_in_time(
     let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
     let (target, point, scratch_path) = (target.clone(), point.clone(), scratch.path().to_path_buf());
     let marker = stage_with(dir, "point in time", staged_by, |work| async move {
-        let (manifest, info) = super::replicate::prepare_point_in_time(&target, &scratch_path, &work, &point)
+        let (manifest, info) = super::replicate::prepare_point_in_time(&target, &scratch_path, &work, &point, false)
             .await
             .map_err(|e| match e.chain().find_map(|c| c.downcast_ref::<UserError>()) {
                 Some(u) => crate::Error::from(u.clone()),

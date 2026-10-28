@@ -983,6 +983,9 @@ fn serve(
         if let Some(report) =
             tokio::task::spawn_blocking(move || crate::ops::restore::apply_pending(&dir, storage_dir)).await??
         {
+            // A takeover checked the database it copied; this one replaced it (staged on the old server meanwhile,
+            // and checked by that binary): check it again.
+            options.prechecked_schema = None;
             tracing::warn!(
                 ts = report.manifest.ts,
                 previous = ?report.previous,

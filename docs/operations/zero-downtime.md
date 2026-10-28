@@ -14,6 +14,8 @@ write is lost, and the switch pauses requests for well under a second.
 5. The new version applies the last writes, swaps the copy in and starts serving.
 
 Steps 4 and 5 take about 0.2–0.5 s under write load in our tests. During that time requests wait rather than fail.
+If writes come in faster than the new version can replay them, step 3 stops after 30 s and the rest is replayed in
+step 5, so the pause is longer but the takeover still ends.
 The old server interrupts a backup or replication snapshot it is taking, and lets go of the data directory only once
 every connection to the database is closed, so the swap never moves a file it still uses.
 A mutation that a reconnecting client sends again still runs only once. The previous database is kept in

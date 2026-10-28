@@ -1181,6 +1181,9 @@ impl Workflows {
 - **Errors.** A failed step is an `Err` the body can handle (compensate, try something else); `?` lets it end the
   workflow as `failed` with that error. A step that can't be scheduled (e.g. an unknown pool) fails the same way. A
   body that returns `Err`, panics, or waits on anything that isn't a step fails the workflow. At most 10 000 steps.
+  The engine itself runs as mutation jobs (`_system/workflow:advance`, `step_done`, `wake`); if one fails (e.g. query
+  steps that together outlast the mutation timeout), the workflow fails with "the workflow engine's `<path>` job
+  failed: <error>" rather than staying `running`.
 - **Events.** `send_event(id, name, value)` completes the oldest step waiting for `name`, or is kept on the workflow
   (`events`) for the next `wait_for_event(name)`; each event is taken once. `not_found` for an unknown workflow,
   `finished` for a finished one.

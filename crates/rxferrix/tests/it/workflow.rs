@@ -240,6 +240,23 @@ mod app {
         }
     }
 
+    /// A query that outlasts the test's mutation timeout (query steps run inside the engine's `advance` mutation).
+    #[query]
+    pub async fn slow_count(ctx: &QueryCtx) -> Result<usize> {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(ctx.db.query::<LogLine>().collect().await?.len())
+    }
+
+    #[workflow]
+    pub async fn stalls_the_engine(step: &WorkflowCtx) -> Result<usize> {
+        step.run_query::<slow_count>(()).await
+    }
+
+    #[mutation]
+    pub async fn start_stalling(ctx: &MutationCtx) -> Result<Id<Workflow>> {
+        ctx.workflows.start::<stalls_the_engine>(()).await
+    }
+
     #[mutation]
     pub async fn send(ctx: &MutationCtx, id: Id<Workflow>, name: String, value: String) -> Result<()> {
         ctx.workflows.send_event(id, &name, value).await
@@ -455,6 +472,19 @@ async fn broken_bodies_fail_their_workflow() {
     let wf = workflow(&t, id).await;
     let result = wf.result.clone().unwrap();
     assert!(result.as_str().unwrap().starts_with("handled: no workpool is named `nope`"), "{wf:?}");
+}
+
+#[tokio::test]
+async fn a_failing_engine_job_fails_its_workflow() {
+    let _serial = SERIAL.lock().await;
+    let t =
+        TestApp::with_options(AppOptions { mutation_timeout: Duration::from_millis(100), ..options() }).await.unwrap();
+    let id = t.mutation::<start_stalling>(()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    let wf = workflow(&t, id).await;
+    assert_eq!(wf.state, WorkflowState::Failed, "not left running: {wf:?}");
+    let error = wf.error.as_deref().unwrap();
+    assert!(error.contains("the workflow engine's `_system/workflow:advance` job failed"), "{error}");
 }
 
 #[tokio::test]

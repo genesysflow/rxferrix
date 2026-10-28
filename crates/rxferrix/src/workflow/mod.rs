@@ -288,6 +288,41 @@ pub async fn wake(ctx: &MutationCtx, step: Id<WorkflowStep>) -> Result<()> {
     engine::step_done(ctx, step, WorkResult::Success { return_value: Value::Null }).await
 }
 
+/// A job of the workflow engine (`advance`, `step_done`, `wake`: mutations, which are never retried) failed, e.g. on
+/// the mutation timeout. Nothing would advance its workflow again, so it ends as failed with that error instead of
+/// staying `running`. The scheduler calls this after recording the job's failure; other jobs are ignored.
+pub(crate) async fn engine_job_failed(app: &App, path: &str, args: &Value, error: &str) -> crate::Result<()> {
+    let step_key = if path == step_done::path() {
+        "context"
+    } else if path == wake::path() {
+        "step"
+    } else if path != advance::path() {
+        return Ok(());
+    } else {
+        ""
+    };
+    let (path, args, error) = (path.to_string(), args.clone(), error.to_string());
+    store::write(app, |db| async move {
+        let workflow = if step_key.is_empty() {
+            serde_json::from_value::<Id<Workflow>>(args["workflow"].clone()).ok()
+        } else {
+            match serde_json::from_value::<Id<WorkflowStep>>(args[step_key].clone()) {
+                Ok(step) => db.get(step).await?.map(|s| s.workflow),
+                Err(_) => None,
+            }
+        };
+        let Some(wf) = workflow else { return Ok(()) };
+        let Some(wf) = db.get(wf).await? else { return Ok(()) };
+        if wf.state.is_finished() {
+            return Ok(());
+        }
+        let now = app.db().clock().now_ms();
+        let ending = engine::Ending::Failed(format!("the workflow engine's `{path}` job failed: {error}"));
+        engine::finish(&db, now, wf, ending).await
+    })
+    .await
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Behind `ctx.workflows` in actions
 // ---------------------------------------------------------------------------------------------------------------------

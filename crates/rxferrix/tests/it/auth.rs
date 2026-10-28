@@ -620,6 +620,46 @@ async fn email_verification_password_reset_and_magic_link() {
 }
 
 #[tokio::test]
+async fn new_codes_keep_the_guess_budget() {
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    let email = "kim@example.com";
+    http.sign_up(email, "correct horse").await;
+    let mut sent = 1;
+    let mut request = async || {
+        http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "http://app.test/reset" })).await;
+        sent += 1;
+        wait_for_email(&mailer, email, sent).await
+    };
+    let guess = async |code: &str| {
+        let body = json!({ "email": email, "code": code, "password": "new password!" });
+        http.post("/api/auth/reset/confirm", body).await
+    };
+    let wrong = |good: &str| if good == "000000" { "000001".to_string() } else { "000000".to_string() };
+
+    // 4 wrong guesses, then a new code: the 4 still count (10 an hour per email and purpose).
+    let first = email_code(&request().await.body);
+    for _ in 0..4 {
+        assert_eq!(code_of(&guess(&wrong(&first)).await.1), "invalid_code");
+    }
+    // 5 more burn the second code (5 per code).
+    let second = email_code(&request().await.body);
+    for _ in 0..5 {
+        assert_eq!(code_of(&guess(&wrong(&second)).await.1), "invalid_code");
+    }
+    assert_eq!(guess(&second).await.0, 400, "the second code is burned");
+    // The 10th failure in the hour: a fresh code is refused even when it's right, but its link still works.
+    let third = request().await;
+    let code = email_code(&third.body);
+    assert_eq!(code_of(&guess(&wrong(&code)).await.1), "invalid_code");
+    assert_eq!(guess(&code).await.0, 400, "no more codes for this email this hour");
+    let token = email_token(&third.body, "rxferrix_reset_token");
+    let (s, b) = http.post("/api/auth/reset/confirm", json!({ "token": token, "password": "new password!" })).await;
+    assert_eq!(s, 200, "{b}");
+}
+
+#[tokio::test]
 async fn required_email_verification_and_disabled_signups() {
     let mailer = MemoryMailer::new();
     let t = TestApp::with_auth(config(&mailer).require_email_verification(true)).await.unwrap();

@@ -88,7 +88,7 @@ async fn upload(
     body: Body,
 ) -> Response {
     let service = app.storage().clone();
-    if let Err(retry) = check_upload_rate(&service, &caller.ip) {
+    if let Err(retry) = check_upload_rate(&service, &caller.rate_limit_key()) {
         let mut failure = AuthFailure::new(429, "rate_limited", "Too many uploads; try again later");
         failure.retry_after = Some(retry);
         return failure.into_response();
@@ -496,7 +496,7 @@ async fn serve_thumbnail(
     let bytes = match service.cached_thumbnail(&id, &variant).await {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
-            if let Err(retry) = super::service::check_thumbnail_rate(&service, &caller.ip) {
+            if let Err(retry) = super::service::check_thumbnail_rate(&service, &caller.rate_limit_key()) {
                 let failure = AuthFailure {
                     status: 429,
                     error: crate::UserError::new("rate_limited", "Too many thumbnails requested; try again later"),

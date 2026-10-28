@@ -105,10 +105,16 @@ async fn admin_token(t: &TestApp, http: &Http) -> String {
 
 #[tokio::test]
 async fn user_enrolls_and_signs_in_with_a_code_or_a_recovery_code() {
-    let (_t, http, _) = setup().await;
+    let (_t, http, mailer) = setup().await;
     let (s, signed_up) =
         http.post("/api/auth/signup", None, json!({ "email": "u@example.com", "password": "correct horse" })).await;
     assert_eq!(s, 200, "{signed_up}");
+    let token = str(&signed_up["accessToken"]);
+
+    // Only once the email is verified (an unverified account goes to whoever proves the inbox).
+    let (s, b) = http.post("/api/auth/mfa/totp/setup", Some(&token), json!({ "password": "correct horse" })).await;
+    assert_eq!((s, code_of(&b)), (403, "email_not_verified"), "{b}");
+    verify_email(&http, &mailer, "u@example.com").await;
     let token = str(&signed_up["accessToken"]);
 
     // Nothing yet.
@@ -239,9 +245,10 @@ async fn user_enrolls_and_signs_in_with_a_code_or_a_recovery_code() {
 
 #[tokio::test]
 async fn wrong_codes_lock_the_factor() {
-    let (_t, http, _) = setup().await;
+    let (_t, http, mailer) = setup().await;
     let (_, signed_up) =
         http.post("/api/auth/signup", None, json!({ "email": "u@example.com", "password": "correct horse" })).await;
+    verify_email(&http, &mailer, "u@example.com").await;
     let token = str(&signed_up["accessToken"]);
     let (secret, recovery) = http.enroll(&token, "correct horse").await;
     let (_, b) =
@@ -276,6 +283,7 @@ async fn every_sign_in_method_goes_through_the_second_factor() {
     let (t, http, mailer) = setup().await;
     let (_, signed_up) =
         http.post("/api/auth/signup", None, json!({ "email": "u@example.com", "password": "correct horse" })).await;
+    verify_email(&http, &mailer, "u@example.com").await;
     let token = str(&signed_up["accessToken"]);
     let (secret, _) = http.enroll(&token, "correct horse").await;
 
@@ -287,13 +295,22 @@ async fn every_sign_in_method_goes_through_the_second_factor() {
     let (s, b) =
         http.post("/api/auth/reset/confirm", None, json!({ "token": reset_token, "password": "battery staple" })).await;
     assert_eq!((s, &b["mfaRequired"]), (200, &json!(true)), "{b}");
+    // Nor does it change the password or end sessions before the second factor is checked.
+    let (s, _) = http.call("query", "_system/auth:me", json!({}), Some(&token)).await;
+    assert_eq!(s, 200, "sessions stay until the code is accepted");
+    let old = json!({ "email": "u@example.com", "password": "correct horse" });
+    let (s, signed_in) = http.post("/api/auth/signin", None, old.clone()).await;
+    assert_eq!((s, &signed_in["mfaRequired"]), (200, &json!(true)), "the old password still works: {signed_in}");
     let (s, b) = http
         .post("/api/auth/mfa/verify", None, json!({ "mfaToken": b["mfaToken"], "code": code_now(&secret, 1) }))
         .await;
     assert_eq!(s, 200, "{b}");
-    // The reset ended the other sessions as usual.
+    // The reset ended the other sessions as usual, and the new password replaced the old one.
     let (s, _) = http.call("query", "_system/auth:me", json!({}), Some(&token)).await;
     assert_eq!(s, 401);
+    assert_eq!(http.post("/api/auth/signin", None, old).await.0, 401);
+    let new = json!({ "email": "u@example.com", "password": "battery staple" });
+    assert_eq!(http.post("/api/auth/signin", None, new).await.1["mfaRequired"], json!(true));
 
     // A magic link too.
     let (s, _) = http.post("/api/auth/magic/request", None, json!({ "email": "u@example.com" })).await;
@@ -323,10 +340,11 @@ async fn every_sign_in_method_goes_through_the_second_factor() {
 
 #[tokio::test]
 async fn admins_enroll_too_and_the_dashboard_shows_and_resets_factors() {
-    let (t, http, _) = setup().await;
+    let (t, http, mailer) = setup().await;
     let admin = admin_token(&t, &http).await;
     let (_, signed_up) =
         http.post("/api/auth/signup", None, json!({ "email": "u@example.com", "password": "correct horse" })).await;
+    verify_email(&http, &mailer, "u@example.com").await;
     let user_token = str(&signed_up["accessToken"]);
     let user_id = str(&signed_up["userId"]);
 
@@ -433,6 +451,14 @@ async fn admins_enroll_too_and_the_dashboard_shows_and_resets_factors() {
     assert!(b["accessToken"].is_string(), "{b}");
     let _ = admin_recovery;
     assert_eq!(app.db().verify_indexes().await.unwrap(), Vec::<String>::new());
+}
+
+/// Verify `email` with the link of its sign-up's verification email (#1).
+async fn verify_email(http: &Http, mailer: &MemoryMailer, email: &str) {
+    let mail = wait_for_email(mailer, email, 1).await;
+    let token = fragment_token(&mail.body, "rxferrix_verify_token");
+    let (s, b) = http.post("/api/auth/verify-email/confirm", None, json!({ "token": token })).await;
+    assert_eq!(s, 200, "{b}");
 }
 
 /// The `count`-th email sent to `to`.

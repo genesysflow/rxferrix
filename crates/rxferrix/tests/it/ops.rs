@@ -906,20 +906,21 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
 #[tokio::test]
 async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
     let t = TestApp::new().await.unwrap();
-    let pair = || {
+    let pair = |names: &[&str]| {
         let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().self_signed(&key).unwrap();
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let cert = rcgen::CertificateParams::new(names).unwrap().self_signed(&key).unwrap();
         (cert, key)
     };
-    let (first, first_key) = pair();
-    let (second, second_key) = pair();
+    let (first, first_key) = pair(&["localhost"]);
+    let (second, second_key) = pair(&["localhost", "renewed.test"]);
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
     std::fs::write(&cert_path, first.pem()).unwrap();
     std::fs::write(&key_path, first_key.serialize_pem()).unwrap();
     let listen = Listen::CertFiles {
         https: "127.0.0.1:0".parse().unwrap(),
-        redirect: None,
+        redirect: Some("127.0.0.1:0".parse().unwrap()),
         cert: cert_path.clone(),
         key: key_path.clone(),
         reload_every: Some(Duration::from_millis(50)),
@@ -927,6 +928,14 @@ async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
     let server =
         tls::start(rxferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
     let addr = server.addr;
+    let redirect = server.redirect_addr.unwrap();
+    let redirected_to = async |host: &str| {
+        let plain = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let r = plain.get(format!("http://{redirect}/")).header("host", host).send().await.unwrap();
+        r.headers()["location"].to_str().unwrap().to_string()
+    };
+    let port = addr.port();
+    assert_eq!(redirected_to("renewed.test").await, format!("https://localhost:{port}/"), "not a name yet");
     let url = format!("https://localhost:{}/api/health", addr.port());
     // Trusts both certificates and reports the one the server presented.
     let client = || {
@@ -962,6 +971,7 @@ async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(swapped, "the new certificate was never served");
+    assert_eq!(redirected_to("renewed.test").await, format!("https://renewed.test:{port}/"), "its names too");
     assert_eq!(presented(&kept_alive, &url).await, first.der().to_vec(), "the kept-alive connection was not dropped");
 
     // Garbage in the files: still the second certificate.

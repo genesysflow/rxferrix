@@ -226,6 +226,25 @@ mod app {
         ctx.scheduler.run_after::<hang>(Duration::ZERO, ()).await
     }
 
+    /// For the restart test of an action with retries: its first run waits until released, later ones return.
+    pub static RETRY_HANG_STARTED: Notify = Notify::const_new();
+    pub static RETRY_HANG_RELEASE: Notify = Notify::const_new();
+    pub static RETRY_HANG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    #[internal_action]
+    pub async fn retry_hang(_ctx: &ActionCtx) -> Result<()> {
+        if RETRY_HANG_ARMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            RETRY_HANG_STARTED.notify_one();
+            RETRY_HANG_RELEASE.notified().await;
+        }
+        Ok(())
+    }
+
+    #[mutation]
+    pub async fn schedule_retry_hang(ctx: &MutationCtx) -> Result<Id<ScheduledJob>> {
+        ctx.scheduler.with_retries(1).run_after::<retry_hang>(Duration::ZERO, ()).await
+    }
+
     /// The same for the cron pile-up test.
     pub static CRON_HANG_STARTED: Notify = Notify::const_new();
     pub static CRON_HANG_RELEASE: Notify = Notify::const_new();
@@ -508,6 +527,35 @@ async fn actions_run_at_most_once_and_are_failed_by_a_restart() {
     HANG_RELEASE.notify_one();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(job(&t, id).await.state, JobState::Failed);
+}
+
+#[tokio::test]
+async fn an_interrupted_action_with_retries_left_runs_again_after_a_restart() {
+    let t = TestApp::new().await.unwrap();
+    let id = t.mutation::<schedule_retry_hang>(()).await.unwrap();
+    let app = t.app().clone();
+    let runner = tokio::spawn(async move { app.run_due_jobs().await });
+    tokio::time::timeout(Duration::from_secs(5), RETRY_HANG_STARTED.notified()).await.expect("action started");
+    runner.abort();
+    let _ = runner.await;
+    let t = t.restart().await.unwrap();
+    let interrupted = job(&t, id).await;
+    assert_eq!((interrupted.state, interrupted.attempts), (JobState::Pending, 1), "retried, not failed");
+    assert_eq!(interrupted.error.as_deref(), Some(rxferrix::scheduler::runner::INTERRUPTED));
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0, "after the backoff");
+    assert_eq!(t.advance_time(Duration::from_millis(1100)).await.unwrap(), 1);
+    let done = job(&t, id).await;
+    assert_eq!((done.state, done.attempts), (JobState::Success, 2));
+    RETRY_HANG_RELEASE.notify_one();
+}
+
+#[tokio::test]
+async fn a_draining_server_starts_no_scheduled_jobs() {
+    let t = TestApp::new().await.unwrap();
+    let id = t.mutation::<schedule_action>(("late".to_string(), false)).await.unwrap();
+    t.app().begin_drain();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 0);
+    assert_eq!(job(&t, id).await.state, JobState::Pending, "left for the next server");
 }
 
 #[tokio::test]

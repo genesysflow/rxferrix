@@ -994,14 +994,17 @@ error `ActionAborted` ("canceled: the action was aborted 5s after its job was ca
   times, result) right before the commit, so the job's writes and its completion commit together. A failing mutation
   is rolled back and a separate transaction marks the job `failed` (no automatic retry). A crash before the commit
   leaves the job `pending` with none of its writes, so it runs once after the restart.
-- **Actions: at most once.** The job is committed as `inProgress` (attempts + 1) before the action starts; the outcome
-  is recorded afterwards. At startup, jobs still `inProgress` become `failed` with the error `server restarted while
-  running`. With `with_retries(n)`, an action that *returns an error* goes back to `pending` up to `n` times, after
-  `retry_backoff` (1s) doubled per retry (at most 1h); an interrupted one is never retried.
+- **Actions: at most once per attempt.** The job is committed as `inProgress` (attempts + 1) before the action
+  starts; the outcome is recorded afterwards. With `with_retries(n)`, an action that *returns an error* goes back to
+  `pending` up to `n` times, after `retry_backoff` (1s) doubled per retry (at most 1h). A server that stops (or hands
+  over) starts no job once it drains and waits up to 10 s for running actions to finish. At startup, jobs still
+  `inProgress` count as an attempt that failed with the error `server restarted while running`: retried like an
+  error if attempts are left, else `failed`. Without `with_retries`, an action therefore never runs twice.
 - **Ordering:** due jobs start in `(runAt, scheduledAt)` order (`scheduledAt` is the job's strictly increasing
   `_creationTime`) within mutations and within each pool, so jobs due at the same time run in scheduling order. Each
-  dispatch round runs the due mutation jobs first, one at a time, in that order (they serialize on the single writer
-  anyway), then starts each pool's due actions; actions run concurrently.
+  dispatch round fires due crons, then runs the due mutation jobs, one at a time, in that order (they serialize on the
+  single writer anyway), then starts each pool's due actions; actions run concurrently. Rounds repeat while jobs are
+  due, and crons fire in every round, so a long queue doesn't delay them.
 - **Concurrency:** at most `SchedulerOptions::concurrency` (10) actions of the default pool run at once; workpools
   have their own slots and mutations need none (see Workpools below).
 - **Waking:** the background loop sleeps until the next job or cron is due (at most 60s) and wakes as soon as a commit

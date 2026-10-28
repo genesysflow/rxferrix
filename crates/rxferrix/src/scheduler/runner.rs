@@ -171,6 +171,26 @@ impl App {
         Ok(())
     }
 
+    /// Wait up to `grace` for the scheduled actions still running to finish (the server is stopping: nothing new
+    /// starts once it drains). One still running then is left `inProgress`; the next start retries it if it has
+    /// attempts left (`recover_interrupted`).
+    pub(crate) async fn finish_running_actions(&self, grace: Duration) {
+        let st = self.scheduler_state();
+        let pools = st.all_slots();
+        let all = async {
+            // Holding every slot of every pool means every running action has finished.
+            let mut held = Vec::new();
+            for (_, slots) in &pools {
+                held.extend(slots.semaphore.acquire_many(slots.size).await.ok());
+            }
+        };
+        if tokio::time::timeout(grace, all).await.is_err() {
+            tracing::warn!(
+                "scheduled actions still running {grace:?} after shutdown; they are retried at the next start"
+            );
+        }
+    }
+
     /// Run every job (and cron) that is due now, wait for them to finish, and repeat until nothing is due (jobs may
     /// schedule more jobs). Returns how many jobs ran. Initializes the scheduler first if needed.
     pub async fn run_due_jobs(&self) -> crate::Result<usize> {
@@ -252,8 +272,10 @@ impl App {
     }
 }
 
-/// Jobs left `inProgress` (actions that were running when the process stopped) become `failed`.
+/// Jobs left `inProgress` (actions that were running when the process stopped) are retried if they have attempts
+/// left (scheduled `with_retries`, so they are meant to run again after a failure), and become `failed` otherwise.
 async fn recover_interrupted(app: &App, now: f64) -> crate::Result<usize> {
+    let backoff_base = app.scheduler_state().options.retry_backoff;
     store::write(app, |db| async move {
         let running = db
             .query::<ScheduledJob>()
@@ -262,10 +284,16 @@ async fn recover_interrupted(app: &App, now: f64) -> crate::Result<usize> {
             .await?;
         for job in &running {
             let mut value = job.value.clone();
-            value.state = JobState::Failed;
             value.error = Some(INTERRUPTED.to_string());
-            value.completed_at = Some(now);
-            store::finished(&db, job.id, &value, WorkResult::Failed { error: INTERRUPTED.to_string() }, now).await?;
+            if value.attempts < value.max_attempts {
+                value.state = JobState::Pending;
+                value.run_at = now + retry_delay(&value, backoff_base).as_secs_f64() * 1000.0;
+            } else {
+                value.state = JobState::Failed;
+                value.completed_at = Some(now);
+                store::finished(&db, job.id, &value, WorkResult::Failed { error: INTERRUPTED.to_string() }, now)
+                    .await?;
+            }
             db.replace(job.id, value).await?;
         }
         Ok(running.len())
@@ -416,19 +444,23 @@ async fn delete_finished(app: &App, cutoff: f64) -> crate::Result<usize> {
     }
 }
 
-/// One dispatch round: fire due crons, then run the due mutation jobs and start the due actions of every pool with
-/// free slots, until nothing more is due (or every pool with due actions is full). Returns how many jobs were
-/// started.
+/// One dispatch: rounds of firing due crons, then running the due mutation jobs and starting the due actions of
+/// every pool with free slots, until nothing more is due (or every pool with due actions is full). Crons fire (and
+/// the cleanup runs) every round, so a long queue of due jobs doesn't hold them back. Returns how many jobs were
+/// started. Starts nothing once the server is draining (shutting down or handing over).
 async fn dispatch(app: &App) -> crate::Result<usize> {
     let st = app.scheduler_state();
     let _one_dispatcher = st.dispatch.lock().await;
     let clock = app.db().clock();
-    if let Err(e) = maybe_cleanup(app, clock.now_ms()).await {
-        tracing::error!("scheduled job cleanup failed: {e:#}");
-    }
-    cron::fire_due(app, &st.crons(), clock.now_ms()).await?;
     let mut started = 0;
     loop {
+        if app.is_draining() {
+            return Ok(started);
+        }
+        if let Err(e) = maybe_cleanup(app, clock.now_ms()).await {
+            tracing::error!("scheduled job cleanup failed: {e:#}");
+        }
+        cron::fire_due(app, &st.crons(), clock.now_ms()).await?;
         let mut round = run_due_mutations(app).await?;
         for (pool, slots) in st.all_slots() {
             round += start_due_actions(app, pool, &slots).await?;
@@ -785,6 +817,11 @@ async fn run_loop(app: App) {
     let mut commits = app.db().write_log().subscribe();
     let mut seen = *commits.borrow_and_update();
     loop {
+        // A draining server starts nothing more (`dispatch`): this loop is done, rather than waking for jobs that
+        // stay due until the next server takes them.
+        if app.is_draining() {
+            return;
+        }
         let wait = match dispatch(&app).await {
             Ok(_) => match next_wake(&app).await {
                 Ok(Some(at)) => {

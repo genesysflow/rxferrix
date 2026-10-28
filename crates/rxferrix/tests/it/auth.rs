@@ -620,6 +620,46 @@ async fn email_verification_password_reset_and_magic_link() {
 }
 
 #[tokio::test]
+async fn new_codes_keep_the_guess_budget() {
+    let mailer = MemoryMailer::new();
+    let t = TestApp::with_auth(config(&mailer)).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    let email = "kim@example.com";
+    http.sign_up(email, "correct horse").await;
+    let mut sent = 1;
+    let mut request = async || {
+        http.post("/api/auth/reset/request", json!({ "email": email, "redirectTo": "http://app.test/reset" })).await;
+        sent += 1;
+        wait_for_email(&mailer, email, sent).await
+    };
+    let guess = async |code: &str| {
+        let body = json!({ "email": email, "code": code, "password": "new password!" });
+        http.post("/api/auth/reset/confirm", body).await
+    };
+    let wrong = |good: &str| if good == "000000" { "000001".to_string() } else { "000000".to_string() };
+
+    // 4 wrong guesses, then a new code: the 4 still count (10 an hour per email and purpose).
+    let first = email_code(&request().await.body);
+    for _ in 0..4 {
+        assert_eq!(code_of(&guess(&wrong(&first)).await.1), "invalid_code");
+    }
+    // 5 more burn the second code (5 per code).
+    let second = email_code(&request().await.body);
+    for _ in 0..5 {
+        assert_eq!(code_of(&guess(&wrong(&second)).await.1), "invalid_code");
+    }
+    assert_eq!(guess(&second).await.0, 400, "the second code is burned");
+    // The 10th failure in the hour: a fresh code is refused even when it's right, but its link still works.
+    let third = request().await;
+    let code = email_code(&third.body);
+    assert_eq!(code_of(&guess(&wrong(&code)).await.1), "invalid_code");
+    assert_eq!(guess(&code).await.0, 400, "no more codes for this email this hour");
+    let token = email_token(&third.body, "rxferrix_reset_token");
+    let (s, b) = http.post("/api/auth/reset/confirm", json!({ "token": token, "password": "new password!" })).await;
+    assert_eq!(s, 200, "{b}");
+}
+
+#[tokio::test]
 async fn required_email_verification_and_disabled_signups() {
     let mailer = MemoryMailer::new();
     let t = TestApp::with_auth(config(&mailer).require_email_verification(true)).await.unwrap();
@@ -894,14 +934,16 @@ async fn claiming_an_unverified_account_removes_its_linked_providers() {
     let auth = config(&mailer).oauth(Oidc::new("mock", format!("http://{mock_addr}"), "client-1", "secret-1"));
     let t = TestApp::with_auth(auth).await.unwrap();
     let http = Http::new(t.serve().await.unwrap());
-    async fn link(t: &TestApp, user: &str, sub: &str) {
+    async fn import(t: &TestApp, table: &str, row: Value) {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("_accounts.jsonl");
-        let row = json!({ "user": user, "provider": "mock", "providerAccountId": sub });
+        let file = dir.path().join(format!("{table}.jsonl"));
         std::fs::write(&file, format!("{row}\n")).unwrap();
         let import =
             ImportOptions { mode: ImportMode::Upsert, batch_size: 10, allow_system_tables: true, format: None };
-        export::import_path(t.app(), &file, Some("_accounts"), &import).await.unwrap();
+        export::import_path(t.app(), &file, Some(table), &import).await.unwrap();
+    }
+    async fn link(t: &TestApp, user: &str, sub: &str) {
+        import(t, "_accounts", json!({ "user": user, "provider": "mock", "providerAccountId": sub })).await;
     }
     let signed_in_as = |profile: Value| async {
         let f = fragment(&oauth_flow(&http, &mock, profile, "http://app.test/", true).await);
@@ -927,6 +969,24 @@ async fn claiming_an_unverified_account_removes_its_linked_providers() {
     assert_eq!(http.post("/api/auth/verify-email/confirm", json!({ "token": vt })).await.0, 200);
     let back = signed_in_as(json!({ "sub": "u-attacker-2", "email_verified": false })).await;
     assert_ne!(back, sam);
+
+    // Claimed through a password reset: a second factor the previous holder set up goes too (enrolling needs a
+    // verified email, so it's imported here, like one enrolled before that rule).
+    let lee = token(&http.sign_up("lee@example.com", "attacker pass").await, "userId");
+    let factor = json!({
+        "user": lee, "admin": null, "kind": "totp", "secretEncrypted": "x", "confirmed": true,
+        "recoveryCodeHashes": [], "lastUsedStep": null, "failedAttempts": 0, "lockedUntil": null,
+    });
+    import(&t, "_mfa_factors", factor).await;
+    let (s, b) = http.sign_in("lee@example.com", "attacker pass").await;
+    assert_eq!((s, &b["mfaRequired"]), (200, &json!(true)), "{b}");
+    http.post("/api/auth/reset/request", json!({ "email": "lee@example.com" })).await;
+    let reset = wait_for_email(&mailer, "lee@example.com", 2).await;
+    let rt = email_token(&reset.body, "rxferrix_reset_token");
+    let (s, b) = http.post("/api/auth/reset/confirm", json!({ "token": rt, "password": "owner password" })).await;
+    assert_eq!(s, 200, "{b}");
+    assert!(b["accessToken"].is_string(), "the previous holder's second factor is gone: {b}");
+    assert_eq!(http.sign_in("lee@example.com", "attacker pass").await.0, 401);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

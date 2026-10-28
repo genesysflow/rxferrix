@@ -1,7 +1,7 @@
 //! Password hashing with argon2id (the `argon2` crate's defaults: m = 19 MiB, t = 2, p = 1, per OWASP). Hashing runs
 //! on the blocking pool, never inside a mutation (which would hold the writer lock).
 //!
-//! **Imported hashes.** Verification also accepts bcrypt hashes (`$2a$`, `$2b$`, `$2y$`: Pocketbase, Laravel, Devise, Supabase,
+//! **Imported hashes.** Verification also accepts bcrypt hashes (`$2a$`, `$2b$`, `$2y$`: Laravel, Devise, Supabase,
 //! ...), so users imported from another system keep their passwords. A successful user sign-in with one replaces it
 //! with an argon2id hash ([`needs_rehash`]). Until then, a bcrypt account answers in bcrypt's time instead of argon2's,
 //! so timing tells it apart from an unknown email.
@@ -36,8 +36,15 @@ pub fn check_password_policy(password: &str) -> Result<(), UserError> {
     Ok(())
 }
 
+/// How many password hashes (or verifications) run at once: one per core. Each takes about 19 MiB and a core for
+/// tens of milliseconds, so a flood of sign-ins queues here instead of filling the blocking pool (512 threads) and
+/// gigabytes of memory.
+static HASHING: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get())));
+
 /// Hash a password into an argon2id PHC string.
 pub async fn hash(password: String) -> crate::Result<String> {
+    let _permit = HASHING.acquire().await?;
     tokio::task::spawn_blocking(move || hash_blocking(&password)).await?
 }
 
@@ -51,6 +58,7 @@ pub fn hash_blocking(password: &str) -> crate::Result<String> {
 /// Verify `password` against a stored PHC string. With `stored = None` (unknown account), a dummy hash is verified
 /// instead, so the response time doesn't reveal whether the account exists.
 pub async fn verify(password: String, stored: Option<String>) -> bool {
+    let Ok(_permit) = HASHING.acquire().await else { return false };
     tokio::task::spawn_blocking(move || {
         let (phc, real) = match &stored {
             Some(s) => (s.as_str(), true),

@@ -124,6 +124,15 @@ impl Caller {
     pub fn client(&self) -> ClientInfo {
         ClientInfo { user_agent: self.user_agent.clone(), ip: Some(self.ip.clone()) }
     }
+
+    /// The key RxFerrix rate-limits this caller by: its address, an IPv6 one by its /64 (one subscriber usually
+    /// gets a whole /64, so per-address buckets would be free to multiply).
+    pub fn rate_limit_key(&self) -> String {
+        match self.ip.parse() {
+            Ok(ip) => crate::settings::rate_limits::client_key(ip).to_string(),
+            Err(_) => self.ip.clone(),
+        }
+    }
 }
 
 impl FromRequestParts<App> for Caller {
@@ -252,7 +261,7 @@ async fn sign_up(State(app): State<App>, caller: Caller, body: Bytes) -> Respons
         redirect_to: Option<String>,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         let redirect_to = b.redirect_to.as_deref();
         match app.auth().sign_up(&app, &b.email, b.password, b.name, redirect_to, caller.client()).await? {
@@ -266,7 +275,7 @@ async fn sign_up(State(app): State<App>, caller: Caller, body: Bytes) -> Respons
 
 async fn sign_in(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Credentials = parse(&body)?;
         app.auth().sign_in(&app, &b.email, b.password, caller.client()).await
     }
@@ -281,7 +290,7 @@ async fn refresh(State(app): State<App>, caller: Caller, body: Bytes) -> Respons
         refresh_token: String,
     }
     let result = async {
-        app.auth().limit(Limit::Refresh, &caller.ip)?;
+        app.auth().limit(Limit::Refresh, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         app.auth().refresh(&app, &b.refresh_token, caller.client()).await
     }
@@ -297,7 +306,7 @@ async fn sign_out(State(app): State<App>, caller: Caller, headers: HeaderMap, bo
     }
     let result = async {
         // Unauthenticated and it can end in a write: budgeted like refreshes.
-        app.auth().limit(Limit::Refresh, &caller.ip)?;
+        app.auth().limit(Limit::Refresh, &caller.rate_limit_key())?;
         let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
         app.auth().sign_out(&app, b.refresh_token.as_deref(), bearer_token(&headers)).await?;
         Ok(json!({}))
@@ -308,7 +317,7 @@ async fn sign_out(State(app): State<App>, caller: Caller, headers: HeaderMap, bo
 
 async fn verify_email_request(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Email, &caller.ip)?;
+        app.auth().limit(Limit::Email, &caller.rate_limit_key())?;
         let b: EmailBody = parse(&body)?;
         app.auth().request_email_verification(&app, &b.email, b.redirect_to.as_deref()).await?;
         Ok(json!({}))
@@ -319,7 +328,7 @@ async fn verify_email_request(State(app): State<App>, caller: Caller, body: Byte
 
 async fn verify_email_confirm(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: CodeBody = parse(&body)?;
         app.auth().confirm_email_verification(&app, b.proof()?).await?;
         Ok(json!({}))
@@ -336,7 +345,7 @@ async fn change_password(State(app): State<App>, caller: Caller, headers: Header
         new_password: String,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         let token = require_bearer(&headers)?;
         app.auth().change_password(&app, token, b.current_password, b.new_password).await?;
@@ -348,7 +357,7 @@ async fn change_password(State(app): State<App>, caller: Caller, headers: Header
 
 async fn reset_request(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Email, &caller.ip)?;
+        app.auth().limit(Limit::Email, &caller.rate_limit_key())?;
         let b: EmailBody = parse(&body)?;
         app.auth().request_password_reset(&app, &b.email, b.redirect_to.as_deref()).await?;
         Ok(json!({}))
@@ -366,7 +375,7 @@ async fn reset_confirm(State(app): State<App>, caller: Caller, body: Bytes) -> R
         password: String,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         app.auth().confirm_password_reset(&app, b.proof.proof()?, b.password, caller.client()).await
     }
@@ -376,7 +385,7 @@ async fn reset_confirm(State(app): State<App>, caller: Caller, body: Bytes) -> R
 
 async fn magic_request(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Email, &caller.ip)?;
+        app.auth().limit(Limit::Email, &caller.rate_limit_key())?;
         let b: EmailBody = parse(&body)?;
         app.auth().request_magic_link(&app, &b.email, b.redirect_to.as_deref()).await?;
         Ok(json!({}))
@@ -387,7 +396,7 @@ async fn magic_request(State(app): State<App>, caller: Caller, body: Bytes) -> R
 
 async fn magic_verify(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: CodeBody = parse(&body)?;
         app.auth().verify_magic_link(&app, b.proof()?, caller.client()).await
     }
@@ -397,7 +406,7 @@ async fn magic_verify(State(app): State<App>, caller: Caller, body: Bytes) -> Re
 
 async fn admin_sign_in(State(app): State<App>, caller: Caller, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Credentials = parse(&body)?;
         app.auth().admin_sign_in(&app, &b.email, b.password, caller.client()).await
     }
@@ -417,7 +426,7 @@ async fn admin_setup(State(app): State<App>, caller: Caller, body: Bytes) -> Res
         password: String,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         app.auth().complete_setup(&app, &b.token, &b.email, b.password, caller.client()).await
     }
@@ -447,7 +456,7 @@ async fn mfa_verify(State(app): State<App>, caller: Caller, body: Bytes) -> Resp
         code: String,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = parse(&body)?;
         app.auth().mfa_verify(&app, &b.mfa_token, &b.code, caller.client()).await
     }
@@ -461,7 +470,7 @@ async fn mfa_totp_setup(State(app): State<App>, caller: Caller, headers: HeaderM
         password: Option<String>,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
         app.auth().mfa_setup(&app, require_bearer(&headers)?, b.password).await
     }
@@ -471,7 +480,7 @@ async fn mfa_totp_setup(State(app): State<App>, caller: Caller, headers: HeaderM
 
 async fn mfa_totp_confirm(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: MfaCode = parse(&body)?;
         app.auth().mfa_confirm(&app, require_bearer(&headers)?, &b.code).await
     }
@@ -485,7 +494,7 @@ async fn mfa_disable(State(app): State<App>, caller: Caller, headers: HeaderMap,
         code: Option<String>,
     }
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: Body = if body.is_empty() { Body::default() } else { parse(&body)? };
         app.auth().mfa_disable(&app, require_bearer(&headers)?, b.code.as_deref()).await?;
         Ok(json!({}))
@@ -496,7 +505,7 @@ async fn mfa_disable(State(app): State<App>, caller: Caller, headers: HeaderMap,
 
 async fn mfa_recovery_codes(State(app): State<App>, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
     let result = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let b: MfaCode = parse(&body)?;
         app.auth().mfa_regenerate_recovery_codes(&app, require_bearer(&headers)?, &b.code).await
     }
@@ -534,7 +543,7 @@ async fn oauth_start(
     Query(q): Query<StartQuery>,
 ) -> Response {
     let result: AuthResult<(String, String)> = async {
-        app.auth().limit(Limit::Credentials, &caller.ip)?;
+        app.auth().limit(Limit::Credentials, &caller.rate_limit_key())?;
         let auth = app.auth();
         let provider =
             auth.oauth_provider(&provider_id).ok_or_else(|| AuthFailure::not_found("This OAuth provider"))?;
@@ -760,6 +769,16 @@ mod tests {
         assert_eq!(client_ip(&p, &h, from("::1")).0, from("198.51.100.9"));
         assert_eq!(client_ip(&p, &h, from("203.0.113.1")), (from("203.0.113.1"), None), "not from the proxy");
         assert_eq!(client_ip(&p, &h, None), (None, None));
+    }
+
+    #[test]
+    fn rate_limit_keys_group_ipv6_by_64() {
+        let key = |ip: &str| Caller { ip: ip.into(), user_agent: None }.rate_limit_key();
+        assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:bbbb::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("unknown"), "unknown");
     }
 
     fn proxy(names: &[&'static str], leftmost: bool) -> ProxyHeaders {

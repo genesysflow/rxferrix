@@ -18,6 +18,11 @@ use crate::schema::Doc;
 
 /// Failed attempts allowed per numeric code before it is burned.
 pub const MAX_CODE_ATTEMPTS: u32 = 5;
+/// Failed attempts allowed at the numeric codes of one email and purpose per [`CODE_FAILURE_WINDOW_MS`], across
+/// re-issued codes. Past it, codes for that email can only be used through their link until the window ends.
+pub const MAX_CODE_FAILURES: u32 = 10;
+/// The window [`MAX_CODE_FAILURES`] counts over.
+pub const CODE_FAILURE_WINDOW_MS: f64 = 3600.0 * 1000.0;
 /// Digits of numeric codes.
 pub const CODE_DIGITS: u32 = 6;
 
@@ -159,6 +164,19 @@ pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Res
             u.value.email_verified = true;
             db.replace(user, u.value).await?;
             unlink_accounts(&db, user).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A password reset proved the inbox: if `user`'s email is still unverified, whoever set the account up (maybe not
+/// the inbox owner) loses its password, sessions, linked providers and second factor, as on the other ways of
+/// claiming it.
+pub(crate) async fn strip_if_unverified(app: &App, user: Id<User>) -> crate::Result<()> {
+    write(app, |db| async move {
+        if db.get(user).await?.is_some_and(|u| !u.email_verified) {
+            strip_unverified_account(&db, user).await?;
         }
         Ok(())
     })
@@ -366,6 +384,8 @@ fn signups_disabled() -> UserError {
 /// Remove the password, sessions and linked accounts of an account whose email was never verified: whoever set it
 /// up (maybe not the inbox owner) loses every way back in, including the OAuth account that created it.
 async fn strip_unverified_account(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
+    // A second factor too: whoever set it up could otherwise lock the inbox owner out, or keep a step of their own.
+    crate::auth::mfa::remove_factor_in(db, Principal::User(user)).await?;
     if let Some(c) = credential_of(db, user).await? {
         db.delete(c.id).await?;
     }
@@ -629,7 +649,8 @@ pub(crate) async fn rotate_refresh_token(
 // Verification codes
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Create a code for `(email, purpose)`, replacing earlier ones. Returns `(numeric code, link token)`.
+/// Create a code for `(email, purpose)`, replacing earlier ones. Returns `(numeric code, link token)`. The failure
+/// window of the code it replaces carries over ([`MAX_CODE_FAILURES`]).
 pub(crate) async fn create_code(
     app: &App,
     keys: &Keys,
@@ -641,7 +662,8 @@ pub(crate) async fn create_code(
 ) -> crate::Result<(String, String)> {
     let code = random_code(CODE_DIGITS);
     let token = random_token();
-    let row = VerificationCode {
+    let now = crate::auth::service::now_ms();
+    let mut row = VerificationCode {
         email: email.clone(),
         purpose: purpose.to_string(),
         user,
@@ -650,9 +672,17 @@ pub(crate) async fn create_code(
         token_hash: keys.hash_token(&token),
         expires_at,
         attempts: 0,
+        recent_failures: None,
+        failures_since: None,
     };
     write(app, |db| async move {
         for old in codes_for(&db, &email, purpose).await? {
+            if let Some(since) = old.failures_since.filter(|since| now - since < CODE_FAILURE_WINDOW_MS) {
+                let failures = old.recent_failures.unwrap_or(0);
+                if failures >= row.recent_failures.unwrap_or(0) {
+                    (row.recent_failures, row.failures_since) = (Some(failures), Some(since));
+                }
+            }
             db.delete(old.id).await?;
         }
         db.insert(row).await
@@ -686,7 +716,7 @@ pub(crate) async fn consume_token(
             .first()
             .await?;
         let Some(row) = row else { return Ok(None) };
-        if row.purpose != purpose || !ct_eq(&row.token_hash, &hash) {
+        if row.purpose != purpose || !ct_eq(&row.token_hash, &hash) || row.attempts >= MAX_CODE_ATTEMPTS {
             return Ok(None);
         }
         db.delete(row.id).await?;
@@ -696,7 +726,9 @@ pub(crate) async fn consume_token(
 }
 
 /// Check a numeric code for `(email, purpose)`. A wrong code counts an attempt; after [`MAX_CODE_ATTEMPTS`] the code
-/// is deleted. Returns the row when the code matched (and deletes it).
+/// is burned, and after [`MAX_CODE_FAILURES`] in the window no code for the email is checked until the window ends.
+/// Returns the row when the code matched (and deletes it). Burned and expired rows stay until a new code replaces
+/// them, so their failure window isn't lost.
 pub(crate) async fn consume_code(
     app: &App,
     keys: &Keys,
@@ -708,8 +740,9 @@ pub(crate) async fn consume_code(
     let hash = keys.hash_token(code.trim());
     write(app, |db| async move {
         let Some(row) = codes_for(&db, &email, purpose).await?.into_iter().next() else { return Ok(None) };
-        if row.expires_at <= now {
-            db.delete(row.id).await?;
+        let window_open = row.failures_since.is_some_and(|since| now - since < CODE_FAILURE_WINDOW_MS);
+        let recent = if window_open { row.recent_failures.unwrap_or(0) } else { 0 };
+        if row.expires_at <= now || row.attempts >= MAX_CODE_ATTEMPTS || recent >= MAX_CODE_FAILURES {
             return Ok(None);
         }
         if ct_eq(&row.code_hash, &hash) {
@@ -718,11 +751,11 @@ pub(crate) async fn consume_code(
         }
         let mut updated = row.value;
         updated.attempts += 1;
-        if updated.attempts >= MAX_CODE_ATTEMPTS {
-            db.delete(row.id).await?;
-        } else {
-            db.replace(row.id, updated).await?;
+        updated.recent_failures = Some(recent + 1);
+        if !window_open {
+            updated.failures_since = Some(now);
         }
+        db.replace(row.id, updated).await?;
         Ok(None)
     })
     .await

@@ -733,7 +733,7 @@ account id; for external JWTs the provider is the issuer URL), `_sessions` (user
 refresh token, sliding `expires_at`, user agent, ip, `last_used_at`, and `impersonated_by: Option<Id<Admin>>` on
 impersonation sessions, whose expiry is fixed), `_used_refresh_tokens` (rotated refresh token hashes, for reuse
 detection; deleted with their session), `_verification_codes` (keyed hashes of a 6-digit code and a link token, purpose,
-expiry, attempts, and for sign-in codes the `redirectTo` app URL, for the sign-up check), `_admins` (email, argon2id hash), `_mfa_factors` (`MfaFactor`: `user` or `admin`, `kind: "totp"`,
+expiry, attempts (per code, and per email and purpose over the last hour), and for sign-in codes the `redirectTo` app URL, for the sign-up check), `_admins` (email, argon2id hash), `_mfa_factors` (`MfaFactor`: `user` or `admin`, `kind: "totp"`,
 `secretEncrypted`, `confirmed`, `recoveryCodeHashes`, `lastUsedStep`, `failedAttempts`, `lockedUntil`; at most one
 per owner, deleted with the user). The auth code reads and writes them directly through `QueryDb` /
 `MutationDb` (not through registered functions), so hashes never appear in function args or the execution log.

@@ -163,6 +163,14 @@ impl App {
     /// Start the scheduler: recover jobs interrupted by a restart, reconcile `_crons`, then run due jobs and crons
     /// in a background task for as long as the process lives. `rxferrix serve` calls this; calling it again does
     /// nothing. (Tests usually drive the scheduler by hand instead: `TestApp::run_due_jobs`, `advance_time`.)
+    pub async fn start_scheduler(&self) -> crate::Result<()> {
+        self.init_scheduler().await?;
+        if !self.scheduler_state().started.swap(true, Ordering::SeqCst) {
+            tokio::spawn(run_loop(self.clone()));
+        }
+        Ok(())
+    }
+
     /// Wait up to `grace` for the scheduled actions still running to finish (the server is stopping: nothing new
     /// starts once it drains). One still running then is left `inProgress`; the next start retries it if it has
     /// attempts left (`recover_interrupted`).
@@ -181,14 +189,6 @@ impl App {
                 "scheduled actions still running {grace:?} after shutdown; they are retried at the next start"
             );
         }
-    }
-
-    pub async fn start_scheduler(&self) -> crate::Result<()> {
-        self.init_scheduler().await?;
-        if !self.scheduler_state().started.swap(true, Ordering::SeqCst) {
-            tokio::spawn(run_loop(self.clone()));
-        }
-        Ok(())
     }
 
     /// Run every job (and cron) that is due now, wait for them to finish, and repeat until nothing is due (jobs may
@@ -817,6 +817,11 @@ async fn run_loop(app: App) {
     let mut commits = app.db().write_log().subscribe();
     let mut seen = *commits.borrow_and_update();
     loop {
+        // A draining server starts nothing more (`dispatch`): this loop is done, rather than waking for jobs that
+        // stay due until the next server takes them.
+        if app.is_draining() {
+            return;
+        }
         let wait = match dispatch(&app).await {
             Ok(_) => match next_wake(&app).await {
                 Ok(Some(at)) => {

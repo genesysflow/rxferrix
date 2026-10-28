@@ -136,7 +136,11 @@ async fn sync_handler(
 ) -> Response {
     // The client IP the connection's mutations and actions are rate limited by.
     let ip = rate_limits::request_ip(&app, &extensions, &headers);
-    ws.on_upgrade(move |socket| handle_socket(app, socket, ip))
+    // The transport's own limit is a backstop at twice the protocol's, so that a message over `MAX_MESSAGE_BYTES` (but
+    // under the backstop) is read and refused with a reason (`handle_socket`); past the backstop the socket just closes.
+    ws.max_message_size(2 * worker::MAX_MESSAGE_BYTES)
+        .max_frame_size(2 * worker::MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(app, socket, ip))
 }
 
 /// Wire a socket to a sync worker: a reader loop parses frames into the worker's input; a writer task serializes the
@@ -185,6 +189,9 @@ async fn handle_socket(app: App, socket: WebSocket, ip: Option<std::net::IpAddr>
     let reader = async {
         while let Some(frame) = stream.next().await {
             let inbound = match frame {
+                Ok(Message::Text(text)) if text.len() > worker::MAX_MESSAGE_BYTES => {
+                    Inbound::Malformed(format!("messages may be at most {} MiB", worker::MAX_MESSAGE_BYTES >> 20))
+                }
                 Ok(Message::Text(text)) => match serde_json::from_str::<ClientMessage>(text.as_str()) {
                     Ok(m) => Inbound::Message(m),
                     Err(e) => Inbound::Malformed(e.to_string()),

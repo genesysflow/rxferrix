@@ -314,7 +314,7 @@ async fn mutation_user_error_and_bad_messages() {
     c.recv_type("FatalError").await;
     c.expect_closed().await;
 
-    // A message over 2 MiB is refused before it's read in full.
+    // A message over 2 MiB is refused with a reason.
     let mut d = Ws::connect(addr).await;
     let big = "x".repeat(2 * 1024 * 1024);
     d.send(json!({ "type": "Mutation", "requestId": 1, "udfPath": todos::add::path(), "args": { "text": big } })).await;

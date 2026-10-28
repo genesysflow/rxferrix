@@ -202,7 +202,7 @@ So that no client can grow the server's memory without bound:
 - At most 8 MiB of arguments (as JSON) over all live queries of a socket (`MAX_QUERY_ARGS_BYTES`): an `Add` past it
   is a `FatalError`.
 - Messages of at most 2 MiB (`MAX_MESSAGE_BYTES`, like the HTTP API's request bodies): a larger one is a
-  `FatalError`, sent before the rest of it is read.
+  `FatalError`; past 4 MiB the socket closes without reading the rest.
 - At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server holds the next one and
   stops reading the socket until one finishes (later messages queue in the client and TCP rather than in the server,
   and keep their order). Meanwhile it goes on sending Transitions and Pings and ending the socket on token expiry or

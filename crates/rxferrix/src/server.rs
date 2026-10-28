@@ -136,8 +136,10 @@ async fn sync_handler(
 ) -> Response {
     // The client IP the connection's mutations and actions are rate limited by.
     let ip = rate_limits::request_ip(&app, &extensions, &headers);
-    ws.max_message_size(worker::MAX_MESSAGE_BYTES)
-        .max_frame_size(worker::MAX_MESSAGE_BYTES)
+    // The transport's own limit is a backstop at twice the protocol's, so that a message over `MAX_MESSAGE_BYTES` (but
+    // under the backstop) is read and refused with a reason (`handle_socket`); past the backstop the socket just closes.
+    ws.max_message_size(2 * worker::MAX_MESSAGE_BYTES)
+        .max_frame_size(2 * worker::MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| handle_socket(app, socket, ip))
 }
 
@@ -187,16 +189,15 @@ async fn handle_socket(app: App, socket: WebSocket, ip: Option<std::net::IpAddr>
     let reader = async {
         while let Some(frame) = stream.next().await {
             let inbound = match frame {
+                Ok(Message::Text(text)) if text.len() > worker::MAX_MESSAGE_BYTES => {
+                    Inbound::Malformed(format!("messages may be at most {} MiB", worker::MAX_MESSAGE_BYTES >> 20))
+                }
                 Ok(Message::Text(text)) => match serde_json::from_str::<ClientMessage>(text.as_str()) {
                     Ok(m) => Inbound::Message(m),
                     Err(e) => Inbound::Malformed(e.to_string()),
                 },
                 Ok(Message::Binary(_)) => Inbound::Malformed("binary frames are not supported".into()),
                 Ok(Message::Ping(_) | Message::Pong(_)) => continue,
-                // Over `MAX_MESSAGE_BYTES`: the client hears why before the socket closes.
-                Err(e) if e.to_string().contains("too long") => {
-                    Inbound::Malformed(format!("messages may be at most {} MiB", worker::MAX_MESSAGE_BYTES >> 20))
-                }
                 Ok(Message::Close(_)) | Err(_) => break,
             };
             let malformed = matches!(inbound, Inbound::Malformed(_));

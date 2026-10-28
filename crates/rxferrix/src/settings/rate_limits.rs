@@ -261,7 +261,7 @@ impl IntoResponse for RateLimited {
 }
 
 /// The bucket key of a client: its address, IPv6 ones by their /64 (what one subscriber usually gets).
-fn client_key(ip: IpAddr) -> IpAddr {
+pub(crate) fn client_key(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
         IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & !((1u128 << 64) - 1))),
         v4 => v4,

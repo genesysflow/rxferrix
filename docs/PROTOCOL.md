@@ -269,7 +269,8 @@ endpoints' error shape, without `logLines`).
 
 JSON bodies with camelCase keys. Success: the JSON object below. Failure: `{ "status": "error", "errorMessage",
 "errorData": { "code", "data": null } }` with an HTTP status. Responses carry `Cache-Control: no-store`. Endpoints
-that check credentials or send email are rate limited per client IP (429 `rate_limited` with `Retry-After`); email
+that check credentials or send email are rate limited per client IP, IPv6 clients by their /64 (429 `rate_limited`
+with `Retry-After`); email
 sending is also limited per address, and password sign-ins (users and administrators) per account, so a guess rate
 spread over many addresses still meets the same budget. Sign-out shares the refresh budget. `Tokens` = `{ accessToken, refreshToken, expiresIn, userId? | adminId? }`.
 

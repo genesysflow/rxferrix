@@ -10,7 +10,7 @@
 //! Read-your-writes: when a mutation commits at ts M and the client has not seen M yet, the worker asks the manager to
 //! cover M; the manager then sends an update (possibly empty) at a ts >= M.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +32,11 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 pub const SILENCE_LIMIT: Duration = Duration::from_secs(45);
 /// The most query subscriptions one connection may have.
 pub const MAX_QUERIES: usize = 1024;
+/// The most bytes of arguments (as JSON) the live queries of one connection may hold in all, so that 1024 queries
+/// with large arguments can't hold gigabytes of the server's memory.
+pub const MAX_QUERY_ARGS_BYTES: usize = 8 * 1024 * 1024;
+/// The largest WebSocket message a client may send, like the HTTP API's request bodies (axum's default).
+pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 /// The most mutations and actions one connection may have running. Past it, the worker parks the next one and reads
 /// nothing more from the client until a slot frees up (so its messages wait, in order, in the socket), while it goes
 /// on sending query updates and pings and enforcing token expiry and revocation.
@@ -73,8 +78,11 @@ pub struct SyncWorker {
     query_set: u64,
     /// The latest identity version the client asked for.
     identity_version: u64,
-    /// The client's live query ids (to reject duplicates and ignore removals of unknown ids).
-    live: BTreeSet<QueryId>,
+    /// The client's live query ids (to reject duplicates and ignore removals of unknown ids), with the size of their
+    /// arguments as JSON.
+    live: BTreeMap<QueryId, usize>,
+    /// The sum of `live`'s argument sizes ([`MAX_QUERY_ARGS_BYTES`]).
+    live_args_bytes: usize,
     identity: Identity,
     /// From `Connect`; with each mutation's requestId it makes the idempotency key.
     session_id: Option<String>,
@@ -144,7 +152,8 @@ async fn run_from(
         sent: StateVersion::default(),
         query_set: 0,
         identity_version: 0,
-        live: BTreeSet::new(),
+        live: BTreeMap::new(),
+        live_args_bytes: 0,
         identity: Identity::default(),
         session_id: None,
         diffs: false,
@@ -277,19 +286,30 @@ impl SyncWorker {
                 let mut forwarded = Vec::with_capacity(modifications.len());
                 for m in modifications {
                     match &m {
-                        QuerySetModification::Add { query_id, .. } => {
-                            if self.live.len() >= MAX_QUERIES && !self.live.contains(query_id) {
+                        QuerySetModification::Add { query_id, args, .. } => {
+                            if self.live.contains_key(query_id) {
+                                return Err(Fatal(format!("duplicate queryId {query_id}")));
+                            }
+                            if self.live.len() >= MAX_QUERIES {
                                 let error = format!("too many queries on one connection (at most {MAX_QUERIES})");
                                 return Err(Fatal(error));
                             }
-                            if !self.live.insert(*query_id) {
-                                return Err(Fatal(format!("duplicate queryId {query_id}")));
+                            let size = serde_json::to_vec(args).map_or(0, |a| a.len());
+                            if self.live_args_bytes + size > MAX_QUERY_ARGS_BYTES {
+                                let error = format!(
+                                    "the live queries of one connection may hold at most {} MiB of arguments",
+                                    MAX_QUERY_ARGS_BYTES >> 20
+                                );
+                                return Err(Fatal(error));
                             }
+                            self.live.insert(*query_id, size);
+                            self.live_args_bytes += size;
                             forwarded.push(m);
                         }
                         QuerySetModification::Remove { query_id } => {
                             // Removing an id that isn't live is harmless (e.g. a client racing a reconnect); ignore it.
-                            if self.live.remove(query_id) {
+                            if let Some(size) = self.live.remove(query_id) {
+                                self.live_args_bytes -= size;
                                 forwarded.push(m);
                             }
                         }

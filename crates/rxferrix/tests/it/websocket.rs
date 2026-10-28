@@ -313,6 +313,32 @@ async fn mutation_user_error_and_bad_messages() {
     c.send(json!({ "type": "Bogus" })).await;
     c.recv_type("FatalError").await;
     c.expect_closed().await;
+
+    // A message over 2 MiB is refused before it's read in full.
+    let mut d = Ws::connect(addr).await;
+    let big = "x".repeat(2 * 1024 * 1024);
+    d.send(json!({ "type": "Mutation", "requestId": 1, "udfPath": todos::add::path(), "args": { "text": big } })).await;
+    assert!(d.recv_type("FatalError").await["error"].as_str().unwrap().contains("at most 2 MiB"));
+    d.expect_closed().await;
+
+    // The live queries' arguments are bounded per connection (8 MiB in all), whatever their number.
+    let mut e = Ws::connect(addr).await;
+    let arg = "x".repeat(1024 * 1024);
+    for i in 0..7 {
+        e.subscribe(i, i, &todos::list::path(), json!({ "pad": arg })).await;
+    }
+    e.send(json!({ "type": "ModifyQuerySet", "baseVersion": 7, "newVersion": 8, "modifications": [
+        { "type": "Add", "queryId": 7, "udfPath": todos::list::path(), "args": { "pad": arg } },
+    ] }))
+    .await;
+    let fatal = loop {
+        let v = e.recv().await;
+        if v["type"] == "FatalError" {
+            break v;
+        }
+    };
+    assert!(fatal["error"].as_str().unwrap().contains("8 MiB of arguments"), "{fatal}");
+    e.expect_closed().await;
 }
 
 #[tokio::test]

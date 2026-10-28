@@ -136,7 +136,9 @@ async fn sync_handler(
 ) -> Response {
     // The client IP the connection's mutations and actions are rate limited by.
     let ip = rate_limits::request_ip(&app, &extensions, &headers);
-    ws.on_upgrade(move |socket| handle_socket(app, socket, ip))
+    ws.max_message_size(worker::MAX_MESSAGE_BYTES)
+        .max_frame_size(worker::MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(app, socket, ip))
 }
 
 /// Wire a socket to a sync worker: a reader loop parses frames into the worker's input; a writer task serializes the
@@ -191,6 +193,10 @@ async fn handle_socket(app: App, socket: WebSocket, ip: Option<std::net::IpAddr>
                 },
                 Ok(Message::Binary(_)) => Inbound::Malformed("binary frames are not supported".into()),
                 Ok(Message::Ping(_) | Message::Pong(_)) => continue,
+                // Over `MAX_MESSAGE_BYTES`: the client hears why before the socket closes.
+                Err(e) if e.to_string().contains("too long") => {
+                    Inbound::Malformed(format!("messages may be at most {} MiB", worker::MAX_MESSAGE_BYTES >> 20))
+                }
                 Ok(Message::Close(_)) | Err(_) => break,
             };
             let malformed = matches!(inbound, Inbound::Malformed(_));

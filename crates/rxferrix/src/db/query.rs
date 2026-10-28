@@ -192,6 +192,27 @@ impl Deref for MutationDb {
     }
 }
 
+/// Every key of a patch must be a field of the table (by JSON name), unless its shape is open (a `#[serde(flatten)]`
+/// map, or a field whose JSON name the macro couldn't tell). Keys starting with `_` are left to the system-field
+/// check.
+fn check_patch_keys(table: &super::catalog::TableInfo, patch: &Map<String, Value>) -> anyhow::Result<()> {
+    let Some(def) = &table.def else { return Ok(()) };
+    let crate::shape::Shape::Struct(shape) = (def.shape)() else { return Ok(()) };
+    if shape.open {
+        return Ok(());
+    }
+    let known = |key: &str| key.starts_with('_') || shape.fields.iter().any(|(name, _)| name == key);
+    if let Some(key) = patch.keys().find(|k| !known(k)) {
+        let fields: Vec<&str> = shape.fields.iter().map(|(name, _)| name.as_str()).collect();
+        bail!(
+            "`{key}` is not a field of table `{}` (its fields: {}); nothing was written",
+            table.name,
+            fields.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The document about to be written must deserialize as `Doc<T>`.
 fn check_doc<T: Table>(doc: &Map<String, Value>, what: &str) -> anyhow::Result<()> {
     use serde::Deserialize as _;
@@ -236,12 +257,15 @@ impl MutationDb {
         self.txn.with_state(|s| s.replace(&table, id.doc_id(), fields, |doc| check_doc::<T>(doc, "replaced")))
     }
 
-    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. The merged
-    /// document must still deserialize as `Doc<T>`; otherwise the patch is rejected and nothing is written.
+    /// Shallow-merge `patch` (a JSON object) into the document. A `null` value sets the field to null. Keys must be
+    /// fields of `T` by their JSON names (`"completedAt"` for `completed_at`): a key that isn't is an error, since the
+    /// merged document would still deserialize (serde ignores unknown keys) while the field meant stays unchanged.
+    /// The merged document must deserialize as `Doc<T>`; otherwise the patch is rejected and nothing is written.
     pub async fn patch<T: Table>(&self, id: Id<T>, patch: Value) -> crate::Result<()> {
         let table = self.table::<T>()?.clone();
         self.check_id(&table, id)?;
         let Value::Object(patch) = patch else { bail!("patch must be a JSON object") };
+        check_patch_keys(&table, &patch)?;
         self.txn.with_state(|s| s.patch(&table, id.doc_id(), patch, |merged| check_doc::<T>(merged, "patched")))
     }
 
@@ -271,11 +295,21 @@ impl MutationDb {
         self.txn.with_state(|s| s.replace(&table, id, fields, |doc| check_raw(&table, validate, doc, "replaced")))
     }
 
-    /// Untyped [`MutationDb::patch`]: shallow-merge the JSON object `patch` into the document `id` (any table).
+    /// Untyped [`MutationDb::patch`]: shallow-merge the JSON object `patch` into the document `id` (any table). Keys
+    /// must be fields of the table, as for `patch`.
     pub async fn patch_raw(&self, id: &str, patch: Value) -> crate::Result<()> {
+        self.patch_raw_with(id, patch, true).await
+    }
+
+    /// [`MutationDb::patch_raw`], optionally without the key check: a migration may set fields the table's current
+    /// type doesn't have (yet, or any more).
+    pub(crate) async fn patch_raw_with(&self, id: &str, patch: Value, check_keys: bool) -> crate::Result<()> {
         let (table, id) = self.resolve_raw_id(id)?;
         let validate = raw_validator(&table)?;
         let Value::Object(patch) = patch else { bail!("patch must be a JSON object") };
+        if check_keys {
+            check_patch_keys(&table, &patch)?;
+        }
         self.txn.with_state(|s| s.patch(&table, id, patch, |doc| check_raw(&table, validate, doc, "patched")))
     }
 

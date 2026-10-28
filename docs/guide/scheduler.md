@@ -25,8 +25,9 @@ Canceling works on running actions too: the action sees `ctx.is_canceled()` (or 
 `select!`) and should stop; after a 5 second grace period it is aborted at its next `.await`. Mutations it already
 ran stay committed. Admins can run a cron immediately with `_system/scheduler:run_cron_now`.
 Jobs live in the `_scheduled_jobs` table (so the dashboard and subscriptions see them live). Scheduled mutations run
-**exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** (an action
-interrupted by a restart is marked failed). Scheduled functions run with no user identity; the execution log shows
+**exactly once** (the job's completion commits with the mutation's writes); actions run **at most once** per attempt (an
+action interrupted by a restart is marked failed, or retried if it was scheduled `with_retries`; a server that stops
+waits a few seconds for running actions first). Scheduled functions run with no user identity; the execution log shows
 them as `scheduler`. Missed cron runs run once at startup, a cron whose previous run is still going is skipped, and
 finished jobs move to the job history in `aux.db` an hour after they finish (`SchedulerOptions::history_after`), so
 `data.db` and its backups don't grow with every job run; they are deleted after 7 days (`retention`). In a time zone, a run in the hour skipped by a spring-forward change runs

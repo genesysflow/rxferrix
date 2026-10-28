@@ -1105,8 +1105,9 @@ fn serve(
                 app.begin_close();
             })
             .await?;
-        // Services end on `begin_close`; they may still write, and must let go of what they hold before the next server.
-        app.stop_tasks(SERVICES_GRACE).await;
+        // Services end on `begin_close`, and running scheduled actions finish; they may still write, and must let go
+        // of what they hold before the next server.
+        tokio::join!(app.stop_tasks(SERVICES_GRACE), app.finish_running_actions(SERVICES_GRACE));
         if !handed_over.load(std::sync::atomic::Ordering::SeqCst) {
             // The last commits reach the replication target before the process exits. (After a handover the
             // journal goes to the new process, which ships them.)

@@ -629,7 +629,8 @@ async fn run_mutation_job(app: &App, job: &Doc<ScheduledJob>) -> crate::Result<b
         Err(e) if e.is::<NotPending>() => Ok(false),
         Err(e) => {
             let error = store::truncate(format!("{e:#}"));
-            store::write(app, |db| async move {
+            let failed = error.clone();
+            let recorded = store::write(app, |db| async move {
                 let Some(current) = db.get(job.id).await? else { return Ok(false) };
                 if current.state != JobState::Pending {
                     return Ok(false);
@@ -645,7 +646,12 @@ async fn run_mutation_job(app: &App, job: &Doc<ScheduledJob>) -> crate::Result<b
                 db.replace(job.id, value).await?;
                 Ok(true)
             })
-            .await
+            .await?;
+            // In a transaction of its own: if ending the workflow fails too, the job stays failed (logged).
+            if recorded && let Err(e) = crate::workflow::engine_job_failed(app, &job.path, &job.args, &failed).await {
+                tracing::error!(job = %job.id, "could not end the workflow of a failed engine job: {e:#}");
+            }
+            Ok(recorded)
         }
     }
 }

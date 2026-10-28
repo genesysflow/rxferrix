@@ -95,7 +95,7 @@ user through a short-lived, audited session. Details: [docs/PROTOCOL.md](../PROT
 
 **Users from another system.** Import `_users` and `_credentials` with `<app> import --mode insert` (system tables
 can be imported from the command line). Besides argon2id, `_credentials.passwordHash` may hold a bcrypt hash
-(`$2a$`, `$2b$`, `$2y$`: PocketBase, Laravel, Devise, Supabase, ...): those users sign in with their old password,
+(`$2a$`, `$2b$`, `$2y$`: Laravel, Devise, Supabase, ...): those users sign in with their old password,
 and the hash is replaced with an argon2id one on that sign-in.
 
 **Email templates.** The verification, password reset and sign-in emails are plain text by default. In the

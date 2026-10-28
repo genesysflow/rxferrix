@@ -628,6 +628,8 @@ struct SharedQuery {
     ranges: Vec<(IndexId, Interval)>,
     /// Queued or running, since a generation at this ts.
     in_flight: Option<u64>,
+    /// The sequence number of that job.
+    job: Option<u64>,
     /// Moving average of its run time, µs.
     cost_us: u64,
     /// Set while nobody subscribes to it (see the module docs, Query cache).
@@ -731,6 +733,10 @@ enum Event {
 struct JobQueue {
     generation: u64,
     lanes: [VecDeque<(SharedId, u64, Job)>; 2],
+    /// Jobs of dropped queries, by sequence number: runners skip them when they come up (finding them in a lane to
+    /// remove them would cost the queue's length per dropped query). A job already running when its query was dropped
+    /// is taken off when its result comes in.
+    cancelled: std::collections::HashSet<u64>,
 }
 
 /// Reports the end of a runner task (and the job it was running, if it panicked).
@@ -867,7 +873,11 @@ impl Manager {
             need_round: false,
             retry: false,
             generation: 0,
-            queue: Arc::new(Mutex::new(JobQueue { generation: 0, lanes: [VecDeque::new(), VecDeque::new()] })),
+            queue: Arc::new(Mutex::new(JobQueue {
+                generation: 0,
+                lanes: [VecDeque::new(), VecDeque::new()],
+                cancelled: Default::default(),
+            })),
             runners: [0, 0],
             max_runners: app.db().readers().min(threads).max(1),
             max_slow: (app.db().readers().min(threads) / 2).max(1),
@@ -1147,14 +1157,9 @@ impl Manager {
     /// queue without bound); one that is already running finishes, and its result is ignored.
     fn drop_query(&mut self, id: SharedId) {
         let Some(q) = self.queries.remove(&id) else { return };
-        if q.in_flight.is_some() {
-            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            for lane in &mut queue.lanes {
-                if let Some(at) = lane.iter().position(|(job, ..)| *job == id) {
-                    let (_, seq, _) = lane.remove(at).expect("found");
-                    self.in_flight.remove(&seq);
-                }
-            }
+        if let Some(seq) = q.job {
+            self.in_flight.remove(&seq);
+            self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.insert(seq);
         }
         if let Some(idle) = &q.idle {
             self.idle.remove(&idle.seq);
@@ -1248,6 +1253,7 @@ impl Manager {
             deps: AuthDeps::None,
             ranges: Vec::new(),
             in_flight: None,
+            job: None,
             cost_us: 0,
             idle: None,
             reads_clock: false,
@@ -1372,6 +1378,7 @@ impl Manager {
             q.in_flight = Some(self.ts);
             let seq = self.next_job;
             self.next_job += 1;
+            q.job = Some(seq);
             self.in_flight.insert(seq, self.ts);
             let lane = if q.cost_us >= SLOW_RUN_US { SLOW } else { FAST };
             queue.lanes[lane].push_back((id, seq, q.job()));
@@ -1391,18 +1398,29 @@ impl Manager {
         match event {
             Event::Ran { id, seq, run, elapsed } => {
                 self.in_flight.remove(&seq);
-                if let Some(q) = self.queries.get_mut(&id) {
-                    let us = elapsed.as_micros() as u64;
-                    q.cost_us = if q.cost_us == 0 { us } else { (q.cost_us * 3 + us) / 4 };
+                match self.queries.get_mut(&id) {
+                    Some(q) => {
+                        let us = elapsed.as_micros() as u64;
+                        q.cost_us = if q.cost_us == 0 { us } else { (q.cost_us * 3 + us) / 4 };
+                        self.finish_run(id, run);
+                    }
+                    // Dropped while it ran: its job was marked cancelled, and is done now.
+                    None => {
+                        self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.remove(&seq);
+                    }
                 }
-                self.finish_run(id, run);
             }
             Event::Lost { id, seq } => {
                 tracing::error!("a query execution task stopped early");
                 self.in_flight.remove(&seq);
-                if let Some(q) = self.queries.get_mut(&id) {
-                    q.in_flight = None;
-                    self.launch([id]);
+                match self.queries.get_mut(&id) {
+                    Some(q) => {
+                        (q.in_flight, q.job) = (None, None);
+                        self.launch([id]);
+                    }
+                    None => {
+                        self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.remove(&seq);
+                    }
                 }
             }
             Event::RunnerDone { generation, lane } => {
@@ -1585,7 +1603,15 @@ impl Manager {
             loop {
                 let next = {
                     let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
-                    if queue.generation == generation { queue.lanes[lane].pop_front() } else { None }
+                    loop {
+                        if queue.generation != generation {
+                            break None;
+                        }
+                        match queue.lanes[lane].pop_front() {
+                            Some((_, seq, _)) if queue.cancelled.remove(&seq) => continue,
+                            next => break next,
+                        }
+                    }
                 };
                 let Some((id, seq, (path, args, identity))) = next else { break };
                 guard.job = Some((id, seq));
@@ -1635,11 +1661,18 @@ impl Manager {
                 }
             }
             Some(entries) => {
-                // In ts order, so the first hit of a query is the commit that ends its version.
-                let mut hits = Vec::new();
+                // In ts order, so the first hit of a query is the commit that ends its version. One hit per query, and
+                // none for queries no longer current: a burst of writes over a range thousands of queries read would
+                // otherwise collect writes × queries entries.
+                let mut hits: HashMap<SharedId, u64> = HashMap::new();
+                let queries = &self.queries;
                 for entry in &entries {
                     for (index_id, key) in &entry.writes {
-                        self.index.stab(*index_id, key, |id| hits.push((id, entry.ts)));
+                        self.index.stab(*index_id, key, |id| {
+                            if !hits.contains_key(&id) && queries.get(&id).is_some_and(SharedQuery::is_current) {
+                                hits.insert(id, entry.ts);
+                            }
+                        });
                     }
                 }
                 for (id, ts) in hits {
@@ -1793,7 +1826,7 @@ impl Manager {
         });
         q.deps = run.auth_deps;
         q.reads_clock = run.read_set.reads_clock();
-        q.in_flight = None;
+        (q.in_flight, q.job) = (None, None);
         if ranges != q.ranges {
             for (index_id, interval) in &q.ranges {
                 self.index.remove(*index_id, interval, id);

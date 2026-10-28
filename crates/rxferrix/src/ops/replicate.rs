@@ -609,7 +609,7 @@ pub struct Replicator {
     options: ReplicationOptions,
     target: BackupTarget,
     state: Mutex<State>,
-    /// One step (ship, retention, a snapshot it takes inline) at a time.
+    /// One step (ship, retention, a snapshot it takes inline) at a time. Taken before `snapshotting` when both are.
     running: tokio::sync::Mutex<()>,
     /// One snapshot at a time. The background loop takes them next to shipping, not inside a step: copying and
     /// uploading a large database takes minutes, and commits keep shipping meanwhile.
@@ -827,14 +827,14 @@ impl Replicator {
     /// Take a snapshot now (in the current generation, starting one if needed), then apply retention. Shipping goes
     /// on while it is taken.
     pub async fn snapshot_now(&self, app: &App) -> crate::Result<SnapshotInfo> {
+        // `running` before `snapshotting`, as in a step that snapshots inline: the other order could deadlock with it.
+        let one = self.running.lock().await;
         let _snapshot = self.snapshotting.lock().await;
-        {
-            let _one = self.running.lock().await;
-            if self.state().generation.is_none() {
-                self.begin(app).await?;
-            }
-            self.ship(app, false).await?;
+        if self.state().generation.is_none() {
+            self.begin(app).await?;
         }
+        self.ship(app, false).await?;
+        drop(one);
         self.snapshot(app).await
     }
 

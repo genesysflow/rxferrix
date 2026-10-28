@@ -400,11 +400,12 @@
                 way can be trusted.
               </div>
             </div>
+            {#if isLocked(v, "trustedProxy.proxies")}
+              <span>Proxy addresses</span>
+              <div>{@render lockedNote("The proxy address list", (v.effective.trustedProxy.proxies ?? []).join(", "))}</div>
+            {:else}
             <label for="proxy-addresses">Proxy addresses</label>
             <div>
-              {#if isLocked(v, "trustedProxy.proxies")}
-                {@render lockedNote("The proxy address list", (v.effective.trustedProxy.proxies ?? []).join(", "))}
-              {:else}
               <input
                 id="proxy-addresses"
                 class="mono wide"
@@ -418,8 +419,8 @@
                 address.
               </div>
               {@render fieldError(err("proxyAddresses"))}
-              {/if}
             </div>
+            {/if}
           </div>
         {/if}
       </section>

@@ -2703,11 +2703,14 @@ records its position (`replication_shipped_ts`, `olap_applied_ts`) and a row is 
 released it (`journal::release`). With the copy on, journaling stays on when the replicator gives up on an unreachable
 target (only rows the copy no longer needs are dropped). An upload whose answer is lost is retried and may overlap the earlier segment;
 restores pick the segments that reach furthest and verify the overlap is identical. *Generations*: at start the
-replicator resumes the generation in `_meta` only if the target has it, holds nothing beyond this database's ts, and
-the journal holds every commit after the shipped ts (adopting a segment uploaded right before a crash); otherwise it
+replicator resumes the generation in `_meta` only if the target has it, holds nothing beyond this database's ts nor
+ends before the shipped ts (segments deleted or lost on the target would leave later ones unchainable), and the
+journal holds every commit after the shipped ts (adopting a segment uploaded right before a crash); otherwise it
 starts a new generation with a snapshot (journaling is on first, so every commit after the snapshot's ts is
 journaled). Backups and restored databases carry no journal or replication state, so a restored database always starts
-a new generation. *Snapshots* every `--snapshot-every` (also `POST /api/admin/replication/snapshot`). *Retention*
+a new generation. *Snapshots* every `--snapshot-every` (also `POST /api/admin/replication/snapshot`), taken beside
+the shipping steps: segments keep shipping while a large database is copied and uploaded, and a snapshot that fails
+is retried after a minute (doubling, up to `--snapshot-every`) without slowing shipping. *Retention*
 after each snapshot: every snapshot taken within `--replicate-keep`, plus the newest one before that window (across
 generations), and per generation the segments whose last ts is after its oldest kept snapshot; everything else,
 whole generations included, is deleted. *Failure*: errors are retried with exponential backoff (up to a minute),

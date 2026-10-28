@@ -140,15 +140,23 @@ impl Journal {
 /// needs. Run under the writer lock. Returns the bytes of changes removed (also taken off the pending count).
 pub(crate) fn release(conn: &Connection, journal: &Journal, consumer: Consumer, ts: u64) -> anyhow::Result<u64> {
     crate::db::storage::write_meta(conn, consumer.meta_key(), rusqlite::types::Value::Integer(ts as i64))?;
-    let mut floor = ts;
-    for other in CONSUMERS {
-        if other != consumer && journal.is_consumer(other) {
-            floor = floor.min(crate::db::storage::read_meta_u64(conn, other.meta_key())?);
-        }
-    }
+    let floor = others_floor(conn, journal, consumer)?.map_or(ts, |f| f.min(ts));
     let removed = trim(conn, floor)?;
     journal.sub_pending_bytes(removed);
     Ok(removed)
+}
+
+/// The lowest position of the active consumers other than `consumer` (rows up to it are no longer needed by them);
+/// `None` when no other consumer is active.
+pub(crate) fn others_floor(conn: &Connection, journal: &Journal, consumer: Consumer) -> anyhow::Result<Option<u64>> {
+    let mut floor = None;
+    for other in CONSUMERS {
+        if other != consumer && journal.is_consumer(other) {
+            let at = crate::db::storage::read_meta_u64(conn, other.meta_key())?;
+            floor = Some(floor.map_or(at, |f: u64| f.min(at)));
+        }
+    }
+    Ok(floor)
 }
 
 /// The changes a write transaction collects while journaling: the final state of each document it wrote.
@@ -365,6 +373,24 @@ pub fn scrub(conn: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_floor_is_the_lowest_position_of_the_other_active_consumers() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE _meta (k TEXT PRIMARY KEY, v);").unwrap();
+        let at = |c: Consumer, ts: i64| crate::db::storage::write_meta(&conn, c.meta_key(), ts.into()).unwrap();
+        at(Consumer::Replication, 50);
+        at(Consumer::Olap, 10);
+        at(Consumer::Takeover, 30);
+        let journal = Journal::default();
+        assert_eq!(others_floor(&conn, &journal, Consumer::Replication).unwrap(), None, "nobody else reads");
+        // A stale position of an inactive consumer (analytics off) doesn't hold rows back, nor let them go early.
+        journal.set_consumer(Consumer::Takeover, true);
+        assert_eq!(others_floor(&conn, &journal, Consumer::Replication).unwrap(), Some(30));
+        journal.set_consumer(Consumer::Olap, true);
+        assert_eq!(others_floor(&conn, &journal, Consumer::Replication).unwrap(), Some(10));
+        assert_eq!(others_floor(&conn, &journal, Consumer::Olap).unwrap(), Some(30), "itself excluded");
+    }
 
     #[test]
     fn scheduler_bookkeeping_is_only_the_schedulers_own_progress() {

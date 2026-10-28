@@ -1297,13 +1297,15 @@ fn seed_tables(db: &Path, tables: &BTreeMap<u32, String>) -> crate::Result<()> {
 }
 
 /// Restore the state of `point` from the replication `target` into the empty directory `staging`, using `scratch`
-/// for downloads, and check it (see the module docs). Leaves `staging` as [`backup::prepare`] does, ready for
-/// [`backup::apply_staged`]. Doesn't touch any data directory: safe while a server runs.
+/// for downloads, and check it (see the module docs; `skip_verify` skips opening it with this binary's tables, as
+/// for an archive). Leaves `staging` as [`backup::prepare`] does, ready for [`backup::apply_staged`]. Doesn't touch
+/// any data directory: safe while a server runs.
 pub async fn prepare_point_in_time(
     target: &BackupTarget,
     scratch: &Path,
     staging: &Path,
     point: &PointInTime,
+    skip_verify: bool,
 ) -> crate::Result<(Manifest, PointInTimeInfo)> {
     let generations = list_generations(target).await?;
     let plan = plan_restore(&generations, point)?;
@@ -1379,7 +1381,11 @@ pub async fn prepare_point_in_time(
         }
     }
     drop(db);
-    backup::verify(staging).await.context("the restored point fails the checks")?;
+    if skip_verify {
+        backup::close_wal(staging).await?;
+    } else {
+        backup::verify(staging).await.context("the restored point fails the checks")?;
+    }
     let path = staging.join("data.db");
     let restored_ts = tokio::task::spawn_blocking(move || -> crate::Result<u64> {
         let conn = Connection::open(path)?;
@@ -1432,7 +1438,7 @@ pub async fn restore_point_in_time(
     let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
     let staging = scratch.path().join("staged");
     std::fs::create_dir_all(&staging)?;
-    let (manifest, info) = prepare_point_in_time(target, scratch.path(), &staging, point).await?;
+    let (manifest, info) = prepare_point_in_time(target, scratch.path(), &staging, point, options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
     let report = backup::apply_staged(&staging, dir, manifest, options.storage_dir.clone(), &previous)?;
     Ok((report, info))

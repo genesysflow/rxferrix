@@ -598,6 +598,9 @@ struct State {
     last_error_at: Option<f64>,
     failures: u32,
     last_warned_at: f64,
+    /// Background snapshots that failed in a row, and when the last one did: the next waits (`snapshot_due`).
+    snapshot_failures: u32,
+    snapshot_failed_at: Option<f64>,
 }
 
 /// The background replicator of an app (`App::replication`). Started by `App::open` when
@@ -606,8 +609,11 @@ pub struct Replicator {
     options: ReplicationOptions,
     target: BackupTarget,
     state: Mutex<State>,
-    /// One step (ship, snapshot, retention) at a time.
+    /// One step (ship, retention, a snapshot it takes inline) at a time.
     running: tokio::sync::Mutex<()>,
+    /// One snapshot at a time. The background loop takes them next to shipping, not inside a step: copying and
+    /// uploading a large database takes minutes, and commits keep shipping meanwhile.
+    snapshotting: Arc<tokio::sync::Mutex<()>>,
     wake: tokio::sync::Notify,
 }
 
@@ -627,6 +633,7 @@ pub(crate) fn start(app: &App, weak: WeakApp) -> crate::Result<Option<Arc<Replic
         target,
         state: Mutex::new(State::default()),
         running: tokio::sync::Mutex::new(()),
+        snapshotting: Arc::new(tokio::sync::Mutex::new(())),
         wake: tokio::sync::Notify::new(),
     });
     if replicator.options.background {
@@ -646,9 +653,21 @@ async fn run(replicator: Arc<Replicator>, weak: WeakApp) {
         // it waits for another one.
         let one = replicator.running.lock().await;
         let Some(app) = weak.upgrade() else { return };
-        let ok = replicator.sync_locked(&app).await.is_ok();
-        drop(app);
+        let ok = replicator.sync_locked(&app, false).await.is_ok();
         drop(one);
+        // A due snapshot is taken beside the steps (unless one is running already): shipping goes on meanwhile, and
+        // its failures don't slow shipping down.
+        if ok
+            && replicator.snapshot_due(&app)
+            && let Ok(guard) = replicator.snapshotting.clone().try_lock_owned()
+        {
+            let (replicator, app) = (replicator.clone(), app.clone());
+            tokio::spawn(async move {
+                replicator.background_snapshot(&app).await;
+                drop(guard);
+            });
+        }
+        drop(app);
         let every = replicator.options.every.max(Duration::from_millis(10));
         delay = if ok {
             every
@@ -715,11 +734,12 @@ impl Replicator {
     /// the status; past `max_pending_bytes` the journal is dropped (see the module docs).
     pub async fn sync_now(&self, app: &App) -> crate::Result<()> {
         let _one = self.running.lock().await;
-        self.sync_locked(app).await
+        self.sync_locked(app, true).await
     }
 
-    async fn sync_locked(&self, app: &App) -> crate::Result<()> {
-        let result = self.step(app).await;
+    /// A step, with a due snapshot taken inline (`sync_now`) or left to the caller (the background loop).
+    async fn sync_locked(&self, app: &App, inline_snapshot: bool) -> crate::Result<()> {
+        let result = self.step(app, inline_snapshot).await;
         let now = app.db().clock().now_ms();
         match &result {
             Ok(()) => {
@@ -761,16 +781,41 @@ impl Replicator {
         result
     }
 
-    async fn step(&self, app: &App) -> crate::Result<()> {
+    async fn step(&self, app: &App, inline_snapshot: bool) -> crate::Result<()> {
         if self.state().generation.is_none() {
             self.begin(app).await?;
         }
         let snapshot_due = self.snapshot_due(app);
         self.ship(app, !snapshot_due).await?;
-        if snapshot_due {
+        if snapshot_due && inline_snapshot {
+            let _one = self.snapshotting.lock().await;
             self.snapshot(app).await?;
         }
         Ok(())
+    }
+
+    /// Take a due snapshot outside the steps (the background loop). A failure is logged and delays the next attempt
+    /// (a minute, doubling up to `snapshot_every`); shipping isn't affected.
+    async fn background_snapshot(&self, app: &App) {
+        match self.snapshot(app).await {
+            Ok(_) => {
+                let mut st = self.state();
+                (st.snapshot_failures, st.snapshot_failed_at) = (0, None);
+            }
+            Err(e) => {
+                let failures = {
+                    let mut st = self.state();
+                    st.snapshot_failures += 1;
+                    st.snapshot_failed_at = Some(app.db().clock().now_ms());
+                    st.snapshot_failures
+                };
+                tracing::warn!(
+                    target = %self.target.location,
+                    failures,
+                    "replication: taking a snapshot failed (commits keep shipping; retrying later): {e:#}"
+                );
+            }
+        }
     }
 
     /// Ship what is unshipped without taking snapshots (graceful shutdown).
@@ -779,20 +824,32 @@ impl Replicator {
         if self.state().generation.is_some() { self.ship(app, false).await } else { Ok(()) }
     }
 
-    /// Take a snapshot now (in the current generation, starting one if needed), then apply retention.
+    /// Take a snapshot now (in the current generation, starting one if needed), then apply retention. Shipping goes
+    /// on while it is taken.
     pub async fn snapshot_now(&self, app: &App) -> crate::Result<SnapshotInfo> {
-        let _one = self.running.lock().await;
-        if self.state().generation.is_none() {
-            self.begin(app).await?;
+        let _snapshot = self.snapshotting.lock().await;
+        {
+            let _one = self.running.lock().await;
+            if self.state().generation.is_none() {
+                self.begin(app).await?;
+            }
+            self.ship(app, false).await?;
         }
-        self.ship(app, false).await?;
         self.snapshot(app).await
     }
 
     fn snapshot_due(&self, app: &App) -> bool {
         let st = self.state();
+        let now = app.db().clock().now_ms();
+        let every_ms = self.options.snapshot_every.as_secs_f64() * 1000.0;
+        if let Some(failed_at) = st.snapshot_failed_at {
+            let wait = (60_000.0 * 2f64.powi(st.snapshot_failures.saturating_sub(1).min(16) as i32)).min(every_ms);
+            if now < failed_at + wait {
+                return false;
+            }
+        }
         match &st.last_snapshot {
-            Some(s) => s.created_at + self.options.snapshot_every.as_secs_f64() * 1000.0 <= app.db().clock().now_ms(),
+            Some(s) => s.created_at + every_ms <= now,
             None => true,
         }
     }
@@ -824,6 +881,14 @@ impl Replicator {
                 }
                 let mut shipped = storage::read_meta_u64(conn, journal::META_SHIPPED_TS)?;
                 let mut shipped_time = storage::read_meta_f64(conn, journal::META_SHIPPED_TIME)?;
+                if *remote_ts < shipped {
+                    // Segments shipped earlier are gone (deleted by hand or a lifecycle rule, or lost by a target
+                    // that didn't sync them): later ones couldn't be chained to a restore.
+                    return Ok(Resume::NewGeneration(format!(
+                        "the target's generation {generation} ends at ts {remote_ts}, but ts {shipped} was shipped: \
+                         its newest segments are missing"
+                    )));
+                }
                 if *remote_ts > shipped {
                     // Uploaded, but the trim didn't happen (a crash in between).
                     let time: Option<f64> =
@@ -921,6 +986,10 @@ impl Replicator {
         tracing::info!(generation, name = snapshot.name, ts = snapshot.ts, "replication: snapshot stored");
         {
             let mut st = self.state();
+            if st.generation.as_ref() != Some(&generation) {
+                // A new generation started while it was taken (shipping went on): it belongs to the old one.
+                return Ok(snapshot);
+            }
             if let Some(g) = st.generations.iter_mut().find(|g| g.id == generation) {
                 g.snapshots.push(snapshot.clone());
                 g.snapshots.sort_by(|a, b| (a.ts, &a.name).cmp(&(b.ts, &b.name)));
@@ -1036,9 +1105,8 @@ impl Replicator {
             .db()
             .with_writer(move |conn| {
                 switch.set_consumer(journal::Consumer::Replication, false);
-                if switch.others_active(journal::Consumer::Replication) {
-                    let olap = storage::read_meta_u64(conn, journal::META_OLAP_TS)?;
-                    let removed = journal::trim(conn, olap)?;
+                if let Some(floor) = journal::others_floor(conn, &switch, journal::Consumer::Replication)? {
+                    let removed = journal::trim(conn, floor)?;
                     switch.sub_pending_bytes(removed);
                     return Ok(switch.pending_bytes());
                 }

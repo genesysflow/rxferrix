@@ -588,6 +588,28 @@ async fn a_gap_in_the_journal_starts_a_new_generation() {
     assert_eq!(gens.iter().map(|g| g.id.clone()).collect::<Vec<_>>(), [first, second]);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_segments_on_the_target_start_a_new_generation() {
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = dir_target(target_dir.path());
+    let t = replicated(options(target.clone())).await;
+    rep(&t).sync_now(t.app()).await.unwrap();
+    let first = rep(&t).status(t.app()).await.generation.unwrap();
+    for i in 0..3 {
+        op(&t, "insert", None, i, "shipped", i).await;
+        rep(&t).sync_now(t.app()).await.unwrap();
+    }
+    // The newest segment disappears from the target (a lifecycle rule, a write the target lost).
+    let journal = target_dir.path().join("generations").join(&first).join("journal");
+    let mut segments: Vec<_> = std::fs::read_dir(&journal).unwrap().map(|e| e.unwrap().path()).collect();
+    segments.sort();
+    std::fs::remove_file(segments.last().unwrap()).unwrap();
+    let t = t.restart().await.unwrap();
+    rep(&t).sync_now(t.app()).await.unwrap();
+    let second = rep(&t).status(t.app()).await.generation.unwrap();
+    assert_ne!(first, second, "later segments couldn't be chained to the generation's snapshot");
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Point-in-time restores
 // ---------------------------------------------------------------------------------------------------------------------

@@ -283,7 +283,7 @@ spread over many addresses still meets the same budget. Sign-out shares the refr
 | `POST /api/auth/verify-email/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). Emails unverified users. |
 | `POST /api/auth/verify-email/confirm` | `{ token }` or `{ email, code }` | `{}`. 400 `invalid_code`. |
 | `POST /api/auth/reset/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). |
-| `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens` or `MfaRequired`. Ends all other sessions of the user and marks the email verified. |
+| `POST /api/auth/reset/confirm` | `{ token }` or `{ email, code }`, plus `password` | `Tokens` or `MfaRequired`. Ends all other sessions of the user and marks the email verified. With `MfaRequired`, none of that happens (the password included) until `POST /api/auth/mfa/verify` accepts a code: the inbox alone doesn't change the password. |
 | `POST /api/auth/password/change` | `{ currentPassword, newPassword }`, with the user's `Authorization: Bearer` access token | `{}`. Ends the user's other sessions; this one stays. `invalid_current_password` (400), `weak_password` (400), `unauthenticated` / `invalid_token` (401), `forbidden` (403, admin tokens). A user without a password sets one through a reset. |
 | `POST /api/auth/magic/request` | `{ email, redirectTo? }` | `{}` always. Sends a link and a 6-digit code (15 minutes). |
 | `POST /api/auth/magic/verify` | `{ token }` or `{ email, code }` | `Tokens` or `MfaRequired`. Creates the user (email verified) on first sign-in when sign-ups are allowed. |
@@ -295,14 +295,15 @@ spread over many addresses still meets the same budget. Sign-out shares the refr
 | `POST /api/auth/admin/setup` | `{ token, email, password }` | `Tokens`. Creates the first admin with the one-time setup token that `serve` prints as `/_/setup#token=…` when no admin exists (401 `invalid_setup_token`, 400 `setup_done`). The link opens the dashboard's setup page. |
 | `POST /api/auth/mfa/verify` | `{ mfaToken, code }` | `Tokens`: the second step of a sign-in. `code` is a TOTP code from the authenticator app, or a recovery code (case, spaces and dashes are ignored). 400 `invalid_mfa_code` (wrong, or a TOTP code already used), 429 `mfa_locked` with `Retry-After` (5 wrong codes in a row lock the factor for 5 minutes), 401 `invalid_mfa_token` (expired after 5 minutes, malformed, or the factor was removed meanwhile: sign in again). |
 | `GET /api/auth/mfa` | `Authorization: Bearer` (user or admin) | `{ enabled, pending, recoveryCodesLeft, methods: ["totp"] }`. |
-| `POST /api/auth/mfa/totp/setup` | `{ password? }`, with `Authorization: Bearer` | `{ secret (base32), uri (otpauth://), qrSvg (<svg>) }`: starts (or restarts) an unconfirmed TOTP enrollment. Accounts with a password must give it: 400 `password_required` / `invalid_current_password`; 400 `mfa_already_enabled`. |
+| `POST /api/auth/mfa/totp/setup` | `{ password? }`, with `Authorization: Bearer` | `{ secret (base32), uri (otpauth://), qrSvg (<svg>) }`: starts (or restarts) an unconfirmed TOTP enrollment. Accounts with a password must give it: 400 `password_required` / `invalid_current_password`; 400 `mfa_already_enabled`; 403 `email_not_verified` for a user whose email isn't verified. |
 | `POST /api/auth/mfa/totp/confirm` | `{ code }`, with `Authorization: Bearer` | `{ recoveryCodes: [8 × "xxxxx-xxxxx"] }`: the authenticator's first code confirms the factor; from then on sign-ins need a code. The recovery codes are shown only here. 400 `invalid_mfa_code`, `mfa_not_pending`. |
 | `POST /api/auth/mfa/disable` | `{ code? }`, with `Authorization: Bearer` | `{}`. A confirmed factor needs a current TOTP or recovery code; a pending setup is dropped without one. 400 `invalid_mfa_code`, `mfa_not_enabled`. |
 | `POST /api/auth/mfa/recovery-codes` | `{ code }`, with `Authorization: Bearer` | `{ recoveryCodes }`: new codes (the old ones stop working). |
 
 `MfaRequired` = `{ mfaRequired: true, mfaToken, methods: ["totp"] }`: the first step succeeded for an account that has
 two-factor authentication; no session exists until `POST /api/auth/mfa/verify`. The second-factor token is a JWT like
-the access token (`typ: "mfa"`, `sub`, `adm?`, `mth`: the sign-in method, 5 minutes) that grants nothing by itself:
+the access token (`typ: "mfa"`, `sub`, `adm?`, `mth`: the sign-in method, `pwd?`: a password reset's new password
+hash, sealed with the server's key, 5 minutes) that grants nothing by itself:
 it is refused wherever an access token is expected. Factors are per user or admin (`_mfa_factors`): the TOTP secret
 (RFC 6238, SHA1, 6 digits, 30-second steps, one step of drift accepted) is stored sealed with the server's settings
 key, recovery codes as keyed hashes; a TOTP code is accepted once (the step of the last accepted code is kept). The
@@ -321,7 +322,8 @@ complete a sign-in: it doesn't know the value).
 An email the provider didn't verify is never trusted: it can't claim an existing account (`email_in_use`), and a user
 created from such a profile starts without an email (whatever the provider; GitHub's unverified primary address
 included). A verified provider email that matches a user whose address was never verified (a password sign-up that
-may be someone else's) takes the account over: its password, sessions and provider links are removed. Confirming the
+may be someone else's) takes the account over: its password, sessions, provider links and second factor are removed
+(a magic link or a password reset claims it the same way). Confirming the
 address through the verification link removes stale provider links the same way.
 
 Codes are 6 digits (5 wrong attempts burn a code); link tokens are 256-bit. Both are stored as keyed hashes and work

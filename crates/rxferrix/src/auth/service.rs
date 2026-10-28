@@ -254,6 +254,11 @@ pub const MAX_IMPERSONATION_TTL: Duration = Duration::from_secs(3600);
 /// The default lifetime of an impersonation session.
 pub const DEFAULT_IMPERSONATION_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// What a pending reset password is sealed for: one user, and nothing else sealed with the settings key.
+fn pending_password_aad(user: Id<User>) -> String {
+    format!("mfa-reset-password:{user}")
+}
+
 pub(crate) fn now_ms() -> f64 {
     crate::db::wall_clock_ms()
 }
@@ -559,24 +564,31 @@ impl AuthService {
         method: Option<SignInMethod>,
     ) -> AuthResult<SignInOutcome> {
         if super::mfa::has_confirmed_factor(app, principal).await? {
-            let (sub, adm) = match principal {
-                Principal::User(u) => (u.to_string(), false),
-                Principal::Admin(a) => (a.to_string(), true),
-            };
-            let claims = super::tokens::MfaClaims::new(
-                sub,
-                adm,
-                method.map(|m| m.to_string()),
-                now_s(),
-                super::mfa::MFA_TOKEN_TTL.as_secs(),
-            );
-            return Ok(SignInOutcome::MfaRequired {
-                mfa_required: true,
-                mfa_token: self.keys.sign_mfa(&claims),
-                methods: vec!["totp"],
-            });
+            return Ok(self.mfa_challenge(principal, method, None));
         }
         Ok(SignInOutcome::Tokens(self.start_session(app, principal, client, method).await?))
+    }
+
+    /// The second-factor step of a sign-in, carrying a reset's sealed new password hash (`pending_password`).
+    fn mfa_challenge(
+        &self,
+        principal: Principal,
+        method: Option<SignInMethod>,
+        pending_password: Option<String>,
+    ) -> SignInOutcome {
+        let (sub, adm) = match principal {
+            Principal::User(u) => (u.to_string(), false),
+            Principal::Admin(a) => (a.to_string(), true),
+        };
+        let mut claims = super::tokens::MfaClaims::new(
+            sub,
+            adm,
+            method.map(|m| m.to_string()),
+            now_s(),
+            super::mfa::MFA_TOKEN_TTL.as_secs(),
+        );
+        claims.pwd = pending_password;
+        SignInOutcome::MfaRequired { mfa_required: true, mfa_token: self.keys.sign_mfa(&claims), methods: vec!["totp"] }
     }
 
     /// Start the session a second-factor token stands for, once its code was accepted (`super::mfa`).
@@ -892,7 +904,10 @@ impl AuthService {
     }
 
     /// Set a new password with a reset code. Ends every other session, marks the email verified (the user proved
-    /// they read it) and signs in (through the second factor, if the user has one: a reset email doesn't bypass it).
+    /// they read it) and signs in. A user with a second factor gets its step first, and the password changes only
+    /// once the code is accepted ([`Self::mfa_verify`]): a reset email doesn't bypass the factor, nor change the
+    /// password and end the user's sessions without it. An unverified account is claimed: whatever its previous
+    /// holder set up (password, sessions, providers, second factor) is removed first.
     pub async fn confirm_password_reset(
         &self,
         app: &App,
@@ -905,9 +920,26 @@ impl AuthService {
         let row = self.consume(app, Purpose::ResetPassword, proof).await?;
         let user = row.user.ok_or_else(AuthFailure::invalid_code)?;
         let hash = password::hash(new_password).await?;
+        store::strip_if_unverified(app, user).await?;
+        let principal = Principal::User(user);
+        if super::mfa::has_confirmed_factor(app, principal).await? {
+            let sealed = self.keys.secret_box().seal(&pending_password_aad(user), hash.as_bytes());
+            return Ok(self.mfa_challenge(principal, Some(SignInMethod::PasswordReset), Some(sealed)));
+        }
+        self.apply_reset(app, user, hash).await?;
+        self.finish_sign_in(app, principal, client, Some(SignInMethod::PasswordReset)).await
+    }
+
+    /// The effect of a password reset: the new password (ending every session) and a verified email.
+    pub(crate) async fn apply_reset(&self, app: &App, user: Id<User>, hash: String) -> crate::Result<()> {
         store::set_password(app, user, hash).await?;
-        store::mark_email_verified(app, user).await?;
-        self.finish_sign_in(app, Principal::User(user), client, Some(SignInMethod::PasswordReset)).await
+        store::mark_email_verified(app, user).await
+    }
+
+    /// The new password hash a reset's second-factor token carries ([`super::tokens::MfaClaims::pwd`]).
+    pub(crate) fn open_pending_password(&self, user: Id<User>, sealed: &str) -> crate::Result<String> {
+        let hash = self.keys.secret_box().open(&pending_password_aad(user), sealed)?;
+        Ok(String::from_utf8(hash)?)
     }
 
     /// Change the password of the user signed in with `access_token`, who proves it's them with `current`. The user's

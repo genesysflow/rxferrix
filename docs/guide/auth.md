@@ -52,7 +52,8 @@ sign-in only. The key is a secret: keep it out of source control (the dashboard 
 
 **Two-factor authentication.** Any user (and any administrator) can add an authenticator app (TOTP: Google
 Authenticator, 1Password, Authy, …) to their account; from then on every sign-in method stops at a second step until
-a code (or one of the 8 recovery codes shown at setup) is entered. Nothing to configure on the server (optionally
+a code (or one of the 8 recovery codes shown at setup) is entered. A user with an email address verifies it first
+(`email_not_verified` otherwise). Nothing to configure on the server (optionally
 `.totp_issuer("My App")`, the name the authenticator shows; the public URL's host by default):
 
 ```ts

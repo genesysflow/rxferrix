@@ -252,7 +252,9 @@ impl AuthService {
 
     /// Start a TOTP enrollment for the account of `access_token`: a fresh secret, stored unconfirmed (replacing a
     /// pending one) until [`AuthService::mfa_confirm`] gets its first code. `mfa_already_enabled` if a confirmed
-    /// factor exists (disable it first). `password` is required for accounts that have one.
+    /// factor exists (disable it first). `password` is required for accounts that have one. A user whose email isn't
+    /// verified can't enroll (`email_not_verified`): an unverified account goes to whoever proves the inbox, and a
+    /// factor set up by someone else would lock them out.
     pub async fn mfa_setup(&self, app: &App, access_token: &str, password: Option<String>) -> AuthResult<MfaSetup> {
         let principal = self.mfa_principal(app, access_token).await?;
         self.confirm_password(app, principal, password).await?;
@@ -263,6 +265,15 @@ impl AuthService {
             Principal::Admin(a) => (None, Some(a)),
         };
         let account = store::write(app, |db| async move {
+            if let Principal::User(u) = principal
+                && db.get(u).await?.is_some_and(|u| u.email.is_some() && !u.email_verified)
+            {
+                return Ok(Err(AuthFailure::new(
+                    403,
+                    "email_not_verified",
+                    "Verify your email address before setting up two-factor authentication",
+                )));
+            }
             if factor_in(&db, principal).await?.is_some_and(|f| f.confirmed) {
                 return Ok(Err(AuthFailure::new(
                     400,
@@ -405,6 +416,11 @@ impl AuthService {
             "mfa_not_enabled" => invalid_mfa_token(),
             _ => e,
         })?;
+        if let (Some(sealed), Principal::User(user)) = (&claims.pwd, principal) {
+            // A password reset waited for the second factor (`confirm_password_reset`).
+            let hash = self.open_pending_password(user, sealed).map_err(|_| invalid_mfa_token())?;
+            self.apply_reset(app, user, hash).await?;
+        }
         let method = claims.mth.as_deref().and_then(SignInMethod::parse);
         self.start_session_after_mfa(app, principal, client, method).await
     }

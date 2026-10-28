@@ -165,6 +165,19 @@ pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Res
     .await
 }
 
+/// A password reset proved the inbox: if `user`'s email is still unverified, whoever set the account up (maybe not
+/// the inbox owner) loses its password, sessions, linked providers and second factor, as on the other ways of
+/// claiming it.
+pub(crate) async fn strip_if_unverified(app: &App, user: Id<User>) -> crate::Result<()> {
+    write(app, |db| async move {
+        if db.get(user).await?.is_some_and(|u| !u.email_verified) {
+            strip_unverified_account(&db, user).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Delete every OAuth / external account link of `user`.
 async fn unlink_accounts(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
     for a in db.query::<Account>().with_index(Account::by_user, |q| q.eq(Account::user, user)).collect().await? {
@@ -366,6 +379,8 @@ fn signups_disabled() -> UserError {
 /// Remove the password, sessions and linked accounts of an account whose email was never verified: whoever set it
 /// up (maybe not the inbox owner) loses every way back in, including the OAuth account that created it.
 async fn strip_unverified_account(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
+    // A second factor too: whoever set it up could otherwise lock the inbox owner out, or keep a step of their own.
+    crate::auth::mfa::remove_factor_in(db, Principal::User(user)).await?;
     if let Some(c) = credential_of(db, user).await? {
         db.delete(c.id).await?;
     }

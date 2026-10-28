@@ -330,12 +330,13 @@ pub(crate) fn coverage(
 ) -> crate::Result<schema_check::Migrations> {
     let mut states: BTreeMap<String, String> = BTreeMap::new();
     if let Ok(table) = catalog.table(<MigrationRecord as crate::Table>::NAME) {
-        for (_, json) in crate::db::storage::table_documents(conn, table.number)? {
-            let row: Value = serde_json::from_str(&json)?;
+        crate::db::storage::for_each_document(conn, table.number, |_, json| {
+            let row: Value = serde_json::from_str(json)?;
             if let (Some(name), Some(state)) = (row["name"].as_str(), row["state"].as_str()) {
                 states.insert(name.to_string(), state.to_string());
             }
-        }
+            Ok(())
+        })?;
     }
     let mut out = schema_check::Migrations::default();
     for (name, table) in declared {

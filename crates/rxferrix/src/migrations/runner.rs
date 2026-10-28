@@ -151,7 +151,7 @@ async fn apply(db: &MutationDb, id: &str, doc: &Value, change: DocChange) -> cra
         DocChange::Keep => Ok(false),
         DocChange::Patch(Value::Object(patch)) if patch.is_empty() => Ok(false),
         DocChange::Patch(patch @ Value::Object(_)) => {
-            db.patch_raw(id, patch).await?;
+            db.patch_raw_with(id, patch, false).await?;
             Ok(true)
         }
         DocChange::Replace(Value::Object(fields)) => {

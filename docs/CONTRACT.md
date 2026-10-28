@@ -228,6 +228,10 @@ impl MutationDb {   // MutationDb: Deref<Target = QueryDb>, so reads work identi
 // deserialize as Doc<T>. For patch this catches wrong types and nulled required fields; for insert/replace it
 // catches a Serialize impl that doesn't round-trip through Deserialize. Failure: an error
 // "<patched|inserted|replaced> document <id> does not match table `<name>`; nothing was written: <serde error>".
+// A patch (and patch_raw) must also name only fields of the table, by JSON name ("completedAt", not "completed_at"):
+// serde would ignore any other key, so the write would succeed without changing the field meant. Failure: "`<key>`
+// is not a field of table `<name>` (its fields: ...); nothing was written". Tables whose shape is open (a
+// `#[serde(flatten)]` map) accept any key; keys starting with `_` get the system-field error.
 impl<'a, T: Table> Query<'a, T> {
     pub fn with_index(self, index: Index<T>, range: impl FnOnce(IndexRange<T>) -> IndexRange<T>) -> Self; // default: by_creation_time, full range
     pub fn order(self, order: Order) -> Self;                                   // default Asc
@@ -1552,7 +1556,8 @@ pub struct MigrationReport {   // camelCase JSON
   transaction, the internal system mutation `_system/migrations:run_batch` (so it gets the mutation timeout, panic
   handling and an execution log entry): it reads the cursor from the row, pages through the table's
   `by_creation_time` index (`query_table(..).paginate`, `batch` documents after the cursor), calls the migration on
-  each document, applies the change with `patch_raw` / `replace_raw` / `delete_raw` (the normal write path: indexes,
+  each document, applies the change with `patch_raw` (without its field-name check: a migration may set fields the
+  current type doesn't have) / `replace_raw` / `delete_raw` (the normal write path: indexes,
   search, write log, so **subscriptions update**), and stores the new cursor and counts in the same transaction.
   Each document is therefore processed **exactly once per run**, also across crashes and with concurrent runners.
   Documents inserted during a run (by the app, or by the migration into its own table) come after the cursor and are

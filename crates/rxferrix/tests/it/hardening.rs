@@ -67,6 +67,12 @@ pub mod fns {
         ctx.db.patch(id, json!({ "text": null })).await
     }
 
+    /// A patch naming a field by its Rust name instead of its JSON name.
+    #[mutation]
+    pub async fn typo_patch(ctx: &MutationCtx, id: Id<Todo>) -> Result<()> {
+        ctx.db.patch(id, json!({ "created_by": "me" })).await
+    }
+
     #[mutation]
     pub async fn good_patch(ctx: &MutationCtx, id: Id<Todo>) -> Result<()> {
         ctx.db.patch(id, json!({ "createdBy": "me" })).await
@@ -252,6 +258,9 @@ async fn writes_are_validated_against_the_table_type() {
     assert!(msg.contains("invalid type: string \"yes\", expected a boolean"), "{msg}");
     let err = t.mutation::<fns::null_patch>((id,)).await.unwrap_err();
     assert!(format!("{err:#}").contains("invalid type: null, expected a string"), "{err:#}");
+    let err = t.mutation::<fns::typo_patch>((id,)).await.unwrap_err();
+    assert!(format!("{err:#}").contains("`created_by` is not a field of table `todos`"), "{err:#}");
+    assert!(format!("{err:#}").contains("createdBy"), "the fields are listed: {err:#}");
     let doc = t.query::<todos::get>((id,)).await.unwrap().unwrap();
     assert_eq!((doc.text.as_str(), doc.done, doc.created_by.clone()), ("a", false, None), "nothing was written");
 

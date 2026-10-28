@@ -130,7 +130,12 @@ Either terminate TLS in a reverse proxy (pass `--public-url https://…`), or le
 port 443, cached in `<dir>/acme`; try `--acme-staging` first) and redirects port 80 to HTTPS. `--tls-cert cert.pem
 --tls-key key.pem` uses your own certificate, re-read every 30 s (`--tls-reload-every`): renewed files are picked up
 without a restart or dropped connections, and a bad pair keeps the current certificate (logged). Addresses: `--https-addr` (default `0.0.0.0:443`), `--http-redirect`
-(default `0.0.0.0:80` with `--https`, none with `--tls-cert`; `off` turns it off).
+(default `0.0.0.0:80` with `--https`, none with `--tls-cert`; `off` turns it off). The redirect goes to the requested
+host only if it is one of the `--https` domains or the certificate's names, else to the first of them. HTTPS
+responses carry `Strict-Transport-Security: max-age=31536000`, so browsers stop trying plain HTTP; `--no-hsts`
+(`RXFERRIX_NO_HSTS`) leaves it out, for a certificate browsers don't trust (a self-signed one in a test setup). Set
+`--public-url` with `--tls-cert`: without it, links and OAuth callbacks use `http://<--http address>` (the server
+warns at startup).
 
 ## Client IP behind a proxy
 

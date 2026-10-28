@@ -165,6 +165,12 @@ pub(crate) async fn mark_email_verified(app: &App, user: Id<User>) -> crate::Res
     .await
 }
 
+/// A profile picture URL from a provider or an external token, kept only if it is https and at most 2048 bytes: it
+/// ends up in `<img src>` in apps and the dashboard.
+fn profile_image(url: Option<String>) -> Option<String> {
+    url.filter(|u| u.starts_with("https://") && u.len() <= 2048)
+}
+
 /// Delete every OAuth / external account link of `user`.
 async fn unlink_accounts(db: &MutationDb, user: Id<User>) -> crate::Result<()> {
     for a in db.query::<Account>().with_index(Account::by_user, |q| q.eq(Account::user, user)).collect().await? {
@@ -252,7 +258,7 @@ pub(crate) async fn oauth_user(
                     user.value.name = profile.name.clone();
                 }
                 if user.image.is_none() {
-                    user.value.image = profile.image.clone();
+                    user.value.image = profile_image(profile.image.clone());
                 }
                 db.replace(user.id, user.value.clone()).await?;
             }
@@ -267,7 +273,12 @@ pub(crate) async fn oauth_user(
         // this account's data. Whatever the provider, such users start without an email.
         let email = email.filter(|_| profile.email_verified);
         let user = db
-            .insert(User { email_verified: email.is_some(), email, name: profile.name, image: profile.image })
+            .insert(User {
+                email_verified: email.is_some(),
+                email,
+                name: profile.name,
+                image: profile_image(profile.image),
+            })
             .await?;
         db.insert(Account { user, provider, provider_account_id: account_id }).await?;
         Ok(Ok(user))
@@ -345,7 +356,7 @@ pub(crate) async fn external_user(app: &App, claims: &super::jwt::ExternalClaims
         {
             email = None;
         }
-        let image = claims.picture.filter(|p| p.starts_with("https://") && p.len() <= 2048);
+        let image = profile_image(claims.picture);
         let name = claims.name.map(|n| n.chars().take(200).collect());
         let user = db.insert(User { email_verified: email.is_some(), email, name, image }).await?;
         db.insert(Account { user, provider, provider_account_id: subject }).await?;

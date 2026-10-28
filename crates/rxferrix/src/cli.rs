@@ -931,6 +931,14 @@ fn serve(
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let exit_code = rt.block_on(async move {
         let explicit = explicit_public_url(&args, &auth);
+        if !explicit && !args.dev && (args.ops.tls_cert.is_some() || auth.oauth.iter().any(|p| p.is_configured())) {
+            // The default `http://<--http address>` is wrong for every link and OAuth callback.
+            tracing::warn!(
+                "no public URL set (--public-url / RXFERRIX_PUBLIC_URL): email links, file URLs and OAuth callbacks \
+                 use http://{}, which browsers outside this machine can't reach",
+                args.http
+            );
+        }
         let auth = auth_config(&args, auth);
         let storage = storage_config(&args, storage, explicit)?;
         let public_url = auth.public_url.clone().unwrap_or_default();
@@ -1019,8 +1027,11 @@ fn serve(
                 );
             }
         }
-        let server =
-            crate::ops::tls::start_with(crate::ops::web::router(app.clone(), &web), &listen, inherited).await?;
+        let mut router = crate::ops::web::router(app.clone(), &web);
+        if listen.is_tls() && !args.ops.no_hsts {
+            router = crate::ops::tls::with_hsts(router);
+        }
+        let server = crate::ops::tls::start_with(router, &listen, inherited).await?;
         // A later version can take over from this process (`serve --takeover`, `crate::ops::takeover`).
         #[cfg(unix)]
         let control = match crate::ops::takeover::Control::start(

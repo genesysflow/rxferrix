@@ -861,8 +861,8 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
         key: key_path.clone(),
         reload_every: None,
     };
-    let server =
-        tls::start(rxferrix::ops::web::router(t.app().clone(), &WebOptions::default()), &listen).await.unwrap();
+    let router = tls::with_hsts(rxferrix::ops::web::router(t.app().clone(), &WebOptions::default()));
+    let server = tls::start(router, &listen).await.unwrap();
     let (addr, redirect) = (server.addr, server.redirect_addr.unwrap());
     assert!(server.https);
 
@@ -872,6 +872,7 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
         .build()
         .unwrap();
     let r = trusted.get(format!("https://localhost:{}/api/health", addr.port())).send().await.unwrap();
+    assert_eq!(r.headers()["strict-transport-security"], "max-age=31536000");
     assert_eq!(r.json::<Value>().await.unwrap(), json!({ "status": "ok" }));
     // A client that doesn't trust the certificate can't connect.
     let untrusted = reqwest::Client::builder().resolve("localhost", addr).build().unwrap();
@@ -882,6 +883,9 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     let r = plain.get(format!("http://{redirect}/some/path?x=1")).header("host", "localhost").send().await.unwrap();
     assert_eq!(r.status(), 308);
     assert_eq!(r.headers()["location"], format!("https://localhost:{}/some/path?x=1", addr.port()).as_str());
+    // To a name of the certificate, not to whatever host the request names.
+    let r = plain.get(format!("http://{redirect}/p")).header("host", "evil.test").send().await.unwrap();
+    assert_eq!(r.headers()["location"], format!("https://localhost:{}/p", addr.port()).as_str());
 
     // A key that doesn't match the certificate is refused at startup.
     let other = rcgen::KeyPair::generate().unwrap();
@@ -983,6 +987,25 @@ async fn acme_redirect_targets_the_configured_domain() {
     );
     let r = client.post(format!("http://{addr}/x")).header("host", "evil.test").send().await.unwrap();
     assert_eq!(r.headers()["location"], "https://example.com/x");
+
+    // Wildcard names (from a certificate) match one label; a list of wildcards only refuses other hosts.
+    let wild = tls::redirect_router(8443, vec!["*.example.com".into(), "example.com".into()]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, wild).await });
+    let location = async |host: &str| {
+        let r = client.get(format!("http://{addr}/")).header("host", host).send().await.unwrap();
+        r.headers().get("location").map(|l| l.to_str().unwrap().to_string())
+    };
+    assert_eq!(location("app.example.com").await.as_deref(), Some("https://app.example.com:8443/"));
+    assert_eq!(location("a.b.example.com").await.as_deref(), Some("https://example.com:8443/"));
+    assert_eq!(location("evil.test").await.as_deref(), Some("https://example.com:8443/"));
+    let only = tls::redirect_router(443, vec!["*.example.com".into()]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, only).await });
+    let r = client.get(format!("http://{addr}/")).header("host", "evil.test").send().await.unwrap();
+    assert_eq!(r.status(), 400);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

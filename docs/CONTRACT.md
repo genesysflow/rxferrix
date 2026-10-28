@@ -2741,7 +2741,10 @@ comes back as `null`. Errors name the CSV line a record starts on.
 **TLS certificate files** (`--tls-cert`/`--tls-key`) are re-read every `--tls-reload-every` (default `30s`, `0`: never);
 a changed pair that loads replaces the certificate for new handshakes (the rustls config is swapped atomically; open
 connections keep theirs), a pair that doesn't (a half-written renewal, a mismatched key) is ignored with one error in
-the log per change.
+the log per change. The HTTP→HTTPS redirect (`--http-redirect`) keeps the requested host when it is one of the
+`--https` domains or of the certificate's DNS names (a `*.` name matches one label), else uses the first of them that
+isn't a wildcard (400 if none); with no names at all, the requested host. Every HTTPS response gets
+`Strict-Transport-Security: max-age=31536000` unless it sets its own (`--no-hsts` turns it off).
 
 **Logs**: `serve --log-format json|pretty|compact` (`RXFERRIX_LOG_FORMAT`; default `pretty` on a terminal, `json`
 otherwise) formats the server's `tracing` output on stdout. `json` writes one object per line: `timestamp` (RFC 3339),

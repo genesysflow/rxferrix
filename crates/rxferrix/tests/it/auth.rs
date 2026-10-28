@@ -824,6 +824,14 @@ async fn oauth_with_mock_oidc_provider() {
         (&Value::Null, &json!(false), &json!("Sky"))
     );
     assert_eq!(mock.lock().unwrap().token_requests, 5, "the replayed callback never reached the provider");
+
+    // A picture that isn't an https URL isn't kept (it ends up in <img src>).
+    let odd =
+        json!({ "sub": "u-pic", "email": "lou@example.com", "email_verified": true, "picture": "javascript:alert(1)" });
+    let access =
+        fragment(&oauth_flow(&http, &mock, odd, "http://app.test/", true).await)["rxferrix_access_token"].clone();
+    let (_, me) = http.call("query", "_system/auth:me", json!({}), Some(&access)).await;
+    assert_eq!(me["value"]["image"], Value::Null);
 }
 
 /// `before_sign_up` and the allowlists for OAuth: they run only when the callback would create an account, see the

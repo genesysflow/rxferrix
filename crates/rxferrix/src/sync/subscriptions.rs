@@ -67,7 +67,9 @@
 //! marked *starving*, and while a starving connection has a query in flight, no new generation starts: the frontier
 //! stays put, every query queued meanwhile runs at it and finishes valid at it, so within at most two runs of each of
 //! its queries the connection has all of them valid at the frontier and gets its update. (Other connections wait for
-//! that hold too, so it is a last resort: a single slow query is served by updates at its runs' ts instead.)
+//! that hold too, so it is a last resort: a single slow query is served by updates at its runs' ts instead.) A hold
+//! lasts at most `HOLD_MAX` (2 s); then generations go on, and those connections get no hold for `HOLD_COOLDOWN`
+//! (5 s), so expensive queries a client keeps re-subscribing can't stall everyone else for long.
 //!
 //! ## Commands and ordering
 //!
@@ -141,6 +143,12 @@ const PER_SNAPSHOT_MIN: usize = 4;
 const VERSIONS_KEPT: usize = 8;
 
 use crate::read_lanes::SLOW_RUN_US;
+
+/// The longest a hold for starving connections lasts (see the module docs, Liveness): every other connection waits
+/// for it, and a starving connection's queries may each take up to the query timeout.
+const HOLD_MAX: Duration = Duration::from_secs(2);
+/// How long a connection whose hold reached [`HOLD_MAX`] gets no new one.
+const HOLD_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Job lanes: queries known to be slow wait in a lane of their own, so they never hold up the others (see
 /// `Manager::pump`).
@@ -690,6 +698,8 @@ struct Conn {
     updates: u64,
     /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
     starving: bool,
+    /// After a hold for it reached [`HOLD_MAX`]: no new hold for it before then.
+    no_hold_until: Option<Instant>,
 }
 
 impl Conn {
@@ -708,6 +718,7 @@ impl Conn {
             deferred: VecDeque::new(),
             updates: 0,
             starving: false,
+            no_hold_until: None,
         }
     }
 }
@@ -773,6 +784,8 @@ struct Manager {
     starving: BTreeSet<ConnId>,
     /// New generations are held for them.
     holding: bool,
+    /// Since when ([`HOLD_MAX`]).
+    hold_since: Option<Instant>,
     subscriptions: u64,
     /// Commits (or a `Cover` ts) not covered by the frontier yet: a new generation is due.
     need_round: bool,
@@ -863,6 +876,7 @@ impl Manager {
             covering: BTreeSet::new(),
             starving: BTreeSet::new(),
             holding: false,
+            hold_since: None,
             subscriptions: 0,
             need_round: false,
             retry: false,
@@ -889,6 +903,7 @@ impl Manager {
 
     async fn run(mut self) {
         loop {
+            let hold_ends = self.hold_since.map(|since| since + HOLD_MAX);
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
                     Some(cmd) => self.handle(cmd),
@@ -903,6 +918,8 @@ impl Manager {
                     self.need_round = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.retry => self.retry = false,
+                // A hold that reached its limit ends even when nothing else happens (`update_hold`).
+                _ = tokio::time::sleep_until(hold_ends.unwrap_or_else(Instant::now).into()), if hold_ends.is_some() => {}
                 // Idle queries expire, and the write log is trimmed, even when nothing else happens.
                 _ = tokio::time::sleep(Duration::from_secs(30)) => self.write_log.trim(),
             }
@@ -1458,8 +1475,10 @@ impl Manager {
                             continue 'pump;
                         }
                         Some(snapshot) => {
-                            // Nothing committed since the frontier.
+                            // Nothing committed since the frontier, as of the snapshot. A commit that landed since was
+                            // just marked seen, so no notice of it will wake the loop: retry soon instead.
                             self.need_round = *self.commits.borrow_and_update() > self.ts;
+                            self.retry |= self.need_round;
                             if self.gen_snapshot.is_none() && self.queued(FAST) + self.queued(SLOW) > 0 {
                                 self.gen_snapshot = Some(snapshot);
                             }
@@ -1737,15 +1756,36 @@ impl Manager {
         }
     }
 
-    /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness).
+    /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness), for at
+    /// most [`HOLD_MAX`] at a time: then those connections get no hold for [`HOLD_COOLDOWN`], and generations go on.
     fn update_hold(&mut self) {
+        let now = Instant::now();
         let conns = &self.conns;
         let queries = &self.queries;
-        let holding = self.starving.iter().any(|c| {
-            conns.get(c).is_some_and(|conn| {
-                conn.subs.values().any(|sub| queries.get(&sub.shared).is_some_and(|q| q.in_flight.is_some()))
+        let holding_for: Vec<ConnId> = self
+            .starving
+            .iter()
+            .filter(|c| {
+                conns.get(c).is_some_and(|conn| {
+                    conn.no_hold_until.is_none_or(|t| t <= now)
+                        && conn.subs.values().any(|sub| queries.get(&sub.shared).is_some_and(|q| q.in_flight.is_some()))
+                })
             })
-        });
+            .copied()
+            .collect();
+        let mut holding = !holding_for.is_empty();
+        if holding && now.duration_since(*self.hold_since.get_or_insert(now)) >= HOLD_MAX {
+            // Every other connection has waited long enough for these.
+            for c in holding_for {
+                if let Some(conn) = self.conns.get_mut(&c) {
+                    conn.no_hold_until = Some(now + HOLD_COOLDOWN);
+                }
+            }
+            holding = false;
+        }
+        if !holding {
+            self.hold_since = None;
+        }
         if holding && !self.holding {
             self.metrics.record_hold();
         }

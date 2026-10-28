@@ -18,6 +18,11 @@ use crate::schema::Doc;
 
 /// Failed attempts allowed per numeric code before it is burned.
 pub const MAX_CODE_ATTEMPTS: u32 = 5;
+/// Failed attempts allowed at the numeric codes of one email and purpose per [`CODE_FAILURE_WINDOW_MS`], across
+/// re-issued codes. Past it, codes for that email can only be used through their link until the window ends.
+pub const MAX_CODE_FAILURES: u32 = 10;
+/// The window [`MAX_CODE_FAILURES`] counts over.
+pub const CODE_FAILURE_WINDOW_MS: f64 = 3600.0 * 1000.0;
 /// Digits of numeric codes.
 pub const CODE_DIGITS: u32 = 6;
 
@@ -629,7 +634,8 @@ pub(crate) async fn rotate_refresh_token(
 // Verification codes
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Create a code for `(email, purpose)`, replacing earlier ones. Returns `(numeric code, link token)`.
+/// Create a code for `(email, purpose)`, replacing earlier ones. Returns `(numeric code, link token)`. The failure
+/// window of the code it replaces carries over ([`MAX_CODE_FAILURES`]).
 pub(crate) async fn create_code(
     app: &App,
     keys: &Keys,
@@ -641,7 +647,8 @@ pub(crate) async fn create_code(
 ) -> crate::Result<(String, String)> {
     let code = random_code(CODE_DIGITS);
     let token = random_token();
-    let row = VerificationCode {
+    let now = crate::auth::service::now_ms();
+    let mut row = VerificationCode {
         email: email.clone(),
         purpose: purpose.to_string(),
         user,
@@ -650,9 +657,17 @@ pub(crate) async fn create_code(
         token_hash: keys.hash_token(&token),
         expires_at,
         attempts: 0,
+        recent_failures: None,
+        failures_since: None,
     };
     write(app, |db| async move {
         for old in codes_for(&db, &email, purpose).await? {
+            if let Some(since) = old.failures_since.filter(|since| now - since < CODE_FAILURE_WINDOW_MS) {
+                let failures = old.recent_failures.unwrap_or(0);
+                if failures >= row.recent_failures.unwrap_or(0) {
+                    (row.recent_failures, row.failures_since) = (Some(failures), Some(since));
+                }
+            }
             db.delete(old.id).await?;
         }
         db.insert(row).await
@@ -686,7 +701,7 @@ pub(crate) async fn consume_token(
             .first()
             .await?;
         let Some(row) = row else { return Ok(None) };
-        if row.purpose != purpose || !ct_eq(&row.token_hash, &hash) {
+        if row.purpose != purpose || !ct_eq(&row.token_hash, &hash) || row.attempts >= MAX_CODE_ATTEMPTS {
             return Ok(None);
         }
         db.delete(row.id).await?;
@@ -696,7 +711,9 @@ pub(crate) async fn consume_token(
 }
 
 /// Check a numeric code for `(email, purpose)`. A wrong code counts an attempt; after [`MAX_CODE_ATTEMPTS`] the code
-/// is deleted. Returns the row when the code matched (and deletes it).
+/// is burned, and after [`MAX_CODE_FAILURES`] in the window no code for the email is checked until the window ends.
+/// Returns the row when the code matched (and deletes it). Burned and expired rows stay until a new code replaces
+/// them, so their failure window isn't lost.
 pub(crate) async fn consume_code(
     app: &App,
     keys: &Keys,
@@ -708,8 +725,9 @@ pub(crate) async fn consume_code(
     let hash = keys.hash_token(code.trim());
     write(app, |db| async move {
         let Some(row) = codes_for(&db, &email, purpose).await?.into_iter().next() else { return Ok(None) };
-        if row.expires_at <= now {
-            db.delete(row.id).await?;
+        let window_open = row.failures_since.is_some_and(|since| now - since < CODE_FAILURE_WINDOW_MS);
+        let recent = if window_open { row.recent_failures.unwrap_or(0) } else { 0 };
+        if row.expires_at <= now || row.attempts >= MAX_CODE_ATTEMPTS || recent >= MAX_CODE_FAILURES {
             return Ok(None);
         }
         if ct_eq(&row.code_hash, &hash) {
@@ -718,11 +736,11 @@ pub(crate) async fn consume_code(
         }
         let mut updated = row.value;
         updated.attempts += 1;
-        if updated.attempts >= MAX_CODE_ATTEMPTS {
-            db.delete(row.id).await?;
-        } else {
-            db.replace(row.id, updated).await?;
+        updated.recent_failures = Some(recent + 1);
+        if !window_open {
+            updated.failures_since = Some(now);
         }
+        db.replace(row.id, updated).await?;
         Ok(None)
     })
     .await

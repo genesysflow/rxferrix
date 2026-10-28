@@ -97,8 +97,13 @@ pub struct VerificationCode {
     /// Keyed hash of the link token.
     pub token_hash: String,
     pub expires_at: f64,
-    /// Failed attempts at the numeric code.
+    /// Failed attempts at this numeric code.
     pub attempts: u32,
+    /// Failed attempts at any numeric code for this email and purpose since `failures_since`. Carried over to the
+    /// code that replaces this one, so asking for a new code doesn't reset the guess budget.
+    pub recent_failures: Option<u32>,
+    /// When the window counted by `recent_failures` started.
+    pub failures_since: Option<f64>,
     /// The app URL a sign-in code's link goes to, for `AuthConfig::before_sign_up` (`"sign_in"` codes only).
     pub redirect_to: Option<String>,
 }

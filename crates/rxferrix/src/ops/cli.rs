@@ -109,6 +109,10 @@ pub struct OpsServeArgs {
     /// changed (renewals without a restart; a pair that doesn't load is ignored and logged). `0` turns it off.
     #[arg(long, value_name = "DURATION", default_value = "30s", value_parser = super::parse_duration)]
     pub tls_reload_every: Duration,
+    /// With --https or --tls-cert: don't send `Strict-Transport-Security` (sent by default, for a year, so browsers
+    /// stop trying plain HTTP). For a certificate browsers don't trust, such as a self-signed one in a test setup.
+    #[arg(long, env = "RXFERRIX_NO_HSTS")]
+    pub no_hsts: bool,
     /// Let administrators restart the server to apply a restore staged from the dashboard: it shuts down gracefully
     /// and exits with CODE, for a supervisor to start it again (systemd: `Restart=on-failure` or
     /// `RestartForceExitStatus=CODE`; Docker: a restart policy). Without it, staged restores wait for a manual restart.

@@ -134,6 +134,13 @@ pub enum Listen {
     },
 }
 
+impl Listen {
+    /// Whether this serves HTTPS.
+    pub fn is_tls(&self) -> bool {
+        !matches!(self, Listen::Http(_))
+    }
+}
+
 /// A digest of the certificate and key files' contents.
 fn files_digest(cert: &Path, key: &Path) -> std::io::Result<[u8; 32]> {
     use sha2::Digest;
@@ -149,6 +156,7 @@ fn files_digest(cert: &Path, key: &Path) -> std::io::Result<[u8; 32]> {
 /// Re-read `cert` and `key` every `every` until `stop`; swap in a changed, valid pair (see the module docs).
 fn spawn_cert_reloader(
     rustls: axum_server::tls_rustls::RustlsConfig,
+    redirect_hosts: RedirectHosts,
     cert: PathBuf,
     key: PathBuf,
     every: Duration,
@@ -167,15 +175,15 @@ fn spawn_cert_reloader(
                 _ = ticks.tick() => {}
             }
             let (c, k) = (cert.clone(), key.clone());
-            let attempt =
-                tokio::task::spawn_blocking(move || -> (Option<[u8; 32]>, crate::Result<Arc<ServerConfig>>) {
-                    match files_digest(&c, &k) {
-                        Ok(d) => (Some(d), server_config_from_pem(&c, &k)),
-                        Err(e) => (None, Err(anyhow::Error::from(e).context("reading the certificate files"))),
-                    }
-                })
-                .await;
-            let Ok((digest, config)) = attempt else { continue };
+            let attempt = tokio::task::spawn_blocking(move || {
+                let config = match files_digest(&c, &k) {
+                    Ok(d) => (Some(d), server_config_from_pem(&c, &k)),
+                    Err(e) => (None, Err(anyhow::Error::from(e).context("reading the certificate files"))),
+                };
+                (config, cert_dns_names(&c))
+            })
+            .await;
+            let Ok(((digest, config), names)) = attempt else { continue };
             if digest.is_some() && digest == loaded {
                 failed = None;
                 continue;
@@ -183,6 +191,8 @@ fn spawn_cert_reloader(
             match config {
                 Ok(config) => {
                     rustls.reload_from_config(config);
+                    // A renewal may name other hosts: the redirect follows.
+                    *redirect_hosts.write().unwrap_or_else(|e| e.into_inner()) = names;
                     loaded = digest;
                     failed = None;
                     tracing::info!(cert = %cert.display(), "tls: loaded the new certificate");
@@ -220,6 +230,37 @@ pub fn server_config_from_pem(cert: &Path, key: &Path) -> crate::Result<Arc<Serv
     Ok(Arc::new(config))
 }
 
+/// `Strict-Transport-Security` on every response that doesn't set its own: for a year, so browsers go straight to
+/// HTTPS (`includeSubDomains` is left to the operator: other hosts of the domain may not serve HTTPS).
+pub fn with_hsts(router: Router) -> Router {
+    router.layer(axum::middleware::map_response(|mut res: axum::response::Response| async move {
+        res.headers_mut()
+            .entry(axum::http::header::STRICT_TRANSPORT_SECURITY)
+            .or_insert(axum::http::HeaderValue::from_static("max-age=31536000"));
+        res
+    }))
+}
+
+/// The DNS names of a PEM certificate file's leaf certificate (its subject alternative names, lowercase), for the
+/// HTTP→HTTPS redirect; empty when the file can't be read or has none.
+fn cert_dns_names(cert: &Path) -> Vec<String> {
+    let Some(Ok(leaf)) = CertificateDer::pem_file_iter(cert).ok().and_then(|mut certs| certs.next()) else {
+        return Vec::new();
+    };
+    let Ok(leaf) = webpki::EndEntityCert::try_from(&leaf) else { return Vec::new() };
+    leaf.valid_dns_names().map(str::to_ascii_lowercase).collect()
+}
+
+/// Whether `host` is `name`, or matches it as a wildcard (`*.example.com` matches `a.example.com`, one label).
+fn host_matches(name: &str, host: &str) -> bool {
+    match name.strip_prefix("*.") {
+        Some(parent) => {
+            host.split_once('.').is_some_and(|(label, rest)| !label.is_empty() && rest.eq_ignore_ascii_case(parent))
+        }
+        None => name.eq_ignore_ascii_case(host),
+    }
+}
+
 /// A host name from a `Host` header (port removed), if it only has host name characters.
 fn host_of(headers: &HeaderMap) -> Option<String> {
     let host = headers.get(axum::http::header::HOST)?.to_str().ok()?;
@@ -231,25 +272,33 @@ fn host_of(headers: &HeaderMap) -> Option<String> {
         .then_some(name)
 }
 
-/// The plain-HTTP router that redirects everything to HTTPS (308, same path and query). With `domains`, the target
-/// host is the requested one if it is in the list, else the first; without, the requested host.
+/// The host names the HTTP→HTTPS redirect may target: the `--https` domains, or the names of the `--tls-cert`
+/// certificate (replaced when a reload brings a new one).
+type RedirectHosts = Arc<std::sync::RwLock<Vec<String>>>;
+
+/// The plain-HTTP router that redirects everything to HTTPS (308, same path and query). With `domains` (the
+/// `--https` domains, or the certificate's names; `*.` wildcards match one label), the target host is the requested
+/// one if it is in the list, else the first name that isn't a wildcard; without, the requested host.
 pub fn redirect_router(https_port: u16, domains: Vec<String>) -> Router {
-    let domains = Arc::new(domains);
+    redirect_router_with(https_port, Arc::new(std::sync::RwLock::new(domains)))
+}
+
+fn redirect_router_with(https_port: u16, hosts: RedirectHosts) -> Router {
     Router::new().fallback(move |headers: HeaderMap, uri: Uri| {
-        let domains = domains.clone();
+        let domains = hosts.read().unwrap_or_else(|e| e.into_inner()).clone();
         async move {
             let requested = host_of(&headers);
-            let host = match (domains.first(), requested) {
-                (Some(first), Some(h)) => {
-                    if domains.iter().any(|d| d.eq_ignore_ascii_case(&h)) {
-                        h
-                    } else {
-                        first.clone()
-                    }
-                }
-                (Some(first), None) => first.clone(),
-                (None, Some(h)) => h,
-                (None, None) => return (axum::http::StatusCode::BAD_REQUEST, "missing Host header").into_response(),
+            let fallback = domains.iter().find(|d| !d.starts_with("*.")).cloned();
+            let host = match requested {
+                _ if domains.is_empty() => match requested {
+                    Some(h) => h,
+                    None => return (axum::http::StatusCode::BAD_REQUEST, "missing Host header").into_response(),
+                },
+                Some(h) if domains.iter().any(|d| host_matches(d, &h)) => h,
+                _ => match fallback {
+                    Some(name) => name,
+                    None => return (axum::http::StatusCode::BAD_REQUEST, "unknown host").into_response(),
+                },
             };
             let port = if https_port == 443 { String::new() } else { format!(":{https_port}") };
             let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -556,7 +605,8 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
                 .acceptor(NoDelay(acceptor))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-            start_tls(serve, handle, addr, *redirect, acme.domains.clone(), stop, pause, fd, inherited).await
+            let hosts = Arc::new(std::sync::RwLock::new(acme.domains.clone()));
+            start_tls(serve, handle, addr, *redirect, hosts, stop, pause, fd, inherited).await
         }
         Listen::CertFiles { https, redirect, cert, key, reload_every } => {
             let config = server_config_from_pem(cert, key)?;
@@ -570,15 +620,16 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
             #[cfg(not(unix))]
             let fd = ();
             let rustls = axum_server::tls_rustls::RustlsConfig::from_config(config);
+            let hosts = Arc::new(std::sync::RwLock::new(cert_dns_names(cert)));
             if let Some(every) = reload_every.filter(|d| !d.is_zero()) {
-                spawn_cert_reloader(rustls.clone(), cert.clone(), key.clone(), every, stop.clone());
+                spawn_cert_reloader(rustls.clone(), hosts.clone(), cert.clone(), key.clone(), every, stop.clone());
             }
             let handle = axum_server::Handle::new();
             let serve = axum_server::from_tcp(listener)?
                 .acceptor(NoDelay(axum_server::tls_rustls::RustlsAcceptor::new(rustls)))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-            start_tls(serve, handle, addr, *redirect, Vec::new(), stop, pause, fd, inherited).await
+            start_tls(serve, handle, addr, *redirect, hosts, stop, pause, fd, inherited).await
         }
     }
 }
@@ -590,7 +641,7 @@ async fn start_tls(
     handle: axum_server::Handle<SocketAddr>,
     addr: SocketAddr,
     redirect: Option<SocketAddr>,
-    domains: Vec<String>,
+    domains: RedirectHosts,
     stop: Stop,
     pause: Arc<watch::Sender<Accepting>>,
     #[cfg(unix)] main_fd: std::os::fd::RawFd,
@@ -606,7 +657,8 @@ async fn start_tls(
             #[cfg(unix)]
             fds.push(("redirect".to_string(), fd_of(&listener)));
             let bound = listener.local_addr()?;
-            tasks.push(spawn_plain(listener, redirect_router(addr.port(), domains), stop.clone(), pause.subscribe()));
+            let router = redirect_router_with(addr.port(), domains);
+            tasks.push(spawn_plain(listener, router, stop.clone(), pause.subscribe()));
             Some(bound)
         }
         None => None,

@@ -149,11 +149,15 @@ impl FromRequestParts<App> for Caller {
 
 /// The client IP of a request and the trusted header it came from: the first of `proxy.headers` that holds an IP
 /// address (the leftmost or rightmost entry of a comma-separated list, over all lines of the header), else `peer`.
+/// Headers count only on requests from the proxy's addresses, when those are set ([`ProxyHeaders::trusts`]).
 pub(crate) fn client_ip<'a>(
     proxy: &'a ProxyHeaders,
     headers: &HeaderMap,
     peer: Option<IpAddr>,
 ) -> (Option<IpAddr>, Option<&'a HeaderName>) {
+    if !proxy.trusts(peer) {
+        return (peer, None);
+    }
     for name in &proxy.headers {
         let mut entries = headers
             .get_all(name)
@@ -754,6 +758,20 @@ mod tests {
     }
 
     #[test]
+    fn proxy_headers_count_only_from_the_proxy() {
+        let h = headers(&[("x-forwarded-for", "198.51.100.9")]);
+        let mut p = proxy(&["x-forwarded-for"], false);
+        let from = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+        assert_eq!(client_ip(&p, &h, from("203.0.113.1")).0, from("198.51.100.9"), "no addresses: any peer");
+        p.from = vec!["10.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()];
+        assert_eq!(client_ip(&p, &h, from("10.2.3.4")).0, from("198.51.100.9"));
+        assert_eq!(client_ip(&p, &h, from("::ffff:10.2.3.4")).0, from("198.51.100.9"), "IPv4-mapped peer");
+        assert_eq!(client_ip(&p, &h, from("::1")).0, from("198.51.100.9"));
+        assert_eq!(client_ip(&p, &h, from("203.0.113.1")), (from("203.0.113.1"), None), "not from the proxy");
+        assert_eq!(client_ip(&p, &h, None), (None, None));
+    }
+
+    #[test]
     fn rate_limit_keys_group_ipv6_by_64() {
         let key = |ip: &str| Caller { ip: ip.into(), user_agent: None }.rate_limit_key();
         assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:bbbb::9"));
@@ -764,7 +782,7 @@ mod tests {
     }
 
     fn proxy(names: &[&'static str], leftmost: bool) -> ProxyHeaders {
-        ProxyHeaders { headers: names.iter().map(|n| HeaderName::from_static(n)).collect(), leftmost }
+        ProxyHeaders { headers: names.iter().map(|n| HeaderName::from_static(n)).collect(), leftmost, from: Vec::new() }
     }
 
     #[test]

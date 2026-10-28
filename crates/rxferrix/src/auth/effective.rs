@@ -51,6 +51,21 @@ pub(crate) struct ProxyHeaders {
     pub headers: Vec<HeaderName>,
     /// Take the leftmost entry of a list rather than the rightmost.
     pub leftmost: bool,
+    /// The proxy's addresses: the headers count only on requests from one of them. Empty: from any address.
+    pub from: Vec<ipnet::IpNet>,
+}
+
+impl ProxyHeaders {
+    /// Whether a request from `peer` may carry the client IP in the headers.
+    pub(crate) fn trusts(&self, peer: Option<std::net::IpAddr>) -> bool {
+        self.from.is_empty() || peer.is_some_and(|p| self.from.iter().any(|net| net.contains(&p.to_canonical())))
+    }
+}
+
+/// A trusted proxy address: an IP (`10.0.0.2`, `2001:db8::1`) or a CIDR range (`10.0.0.0/8`, `2001:db8::/32`).
+pub(crate) fn parse_proxy_address(s: &str) -> Option<ipnet::IpNet> {
+    let s = s.trim();
+    s.parse().ok().or_else(|| s.parse::<std::net::IpAddr>().ok().map(ipnet::IpNet::from)).map(|net| net.trunc())
 }
 
 impl Effective {
@@ -109,16 +124,33 @@ impl Effective {
             oauth.insert(p.id.clone(), provider);
         }
         let cors_origins = stored.cors_origins.clone().filter(|o| !o.is_empty() && !o.iter().any(|x| x == "*"));
-        let proxy = match &stored.trusted_proxy {
-            _ if config.trust_proxy => {
-                ProxyHeaders { headers: vec![HeaderName::from_static("x-forwarded-for")], leftmost: false }
-            }
+        let mut config_from = Vec::new();
+        for address in &config.trusted_proxies {
+            let Some(net) = parse_proxy_address(address) else {
+                anyhow::bail!("trusted proxy address `{address}` is not an IP address or CIDR range");
+            };
+            config_from.push(net);
+        }
+        let stored_from = |p: &crate::settings::model::TrustedProxy| -> Vec<ipnet::IpNet> {
+            p.proxies.iter().flatten().filter_map(|a| parse_proxy_address(a)).collect()
+        };
+        let mut proxy = match &stored.trusted_proxy {
+            _ if config.trust_proxy => ProxyHeaders {
+                headers: vec![HeaderName::from_static("x-forwarded-for")],
+                leftmost: false,
+                from: Vec::new(),
+            },
             Some(p) => ProxyHeaders {
                 headers: p.headers.iter().filter_map(|h| HeaderName::from_bytes(h.as_bytes()).ok()).collect(),
                 leftmost: p.use_leftmost_ip,
+                from: stored_from(p),
             },
             None => ProxyHeaders::default(),
         };
+        // Addresses the configuration gives apply to whichever headers are in effect.
+        if !config_from.is_empty() {
+            proxy.from = config_from;
+        }
         let rate_limits = RateLimitRules::build(stored.rate_limits.as_ref());
         let email_templates = stored.email_templates.clone().unwrap_or_default();
         // The sender of the SMTP mailer in use (a custom mailer has none we know of).
@@ -168,6 +200,9 @@ pub(crate) fn locked_fields(config: &AuthConfig) -> Vec<String> {
     }
     if config.trust_proxy {
         out.push("trustedProxy".into());
+    }
+    if !config.trusted_proxies.is_empty() {
+        out.push("trustedProxy.proxies".into());
     }
     out.extend(config.oauth.iter().filter(|p| p.is_configured()).map(|p| format!("oauth.{}", p.id)));
     out

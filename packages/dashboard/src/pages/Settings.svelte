@@ -361,11 +361,11 @@
         </div>
         <p class="muted small">
           If that isn't your real IP, set the header your proxy uses. To keep clients from forging their IP, trust only
-          headers the proxy always sets (overwriting what the client sent), and make sure the server can only be
-          reached through the proxy. Leave the field empty when there is no proxy.
+          headers the proxy always sets (overwriting what the client sent), and either list the proxy's addresses or
+          make sure the server can only be reached through the proxy. Leave the field empty when there is no proxy.
         </p>
         {#if isLocked(v, "trustedProxy")}
-          {@render lockedNote("The trusted proxy header", `${v.effective.trustedProxy.headers.join(", ")} (rightmost IP)`)}
+          {@render lockedNote("The trusted proxy header", `${v.effective.trustedProxy.headers.join(", ")} (rightmost IP)${v.effective.trustedProxy.proxies?.length ? `, from ${v.effective.trustedProxy.proxies.join(", ")}` : ""}`)}
         {:else}
           <div class="field">
             <label for="proxy-headers">Trusted headers</label>
@@ -400,6 +400,27 @@
                 way can be trusted.
               </div>
             </div>
+            {#if isLocked(v, "trustedProxy.proxies")}
+              <span>Proxy addresses</span>
+              <div>{@render lockedNote("The proxy address list", (v.effective.trustedProxy.proxies ?? []).join(", "))}</div>
+            {:else}
+            <label for="proxy-addresses">Proxy addresses</label>
+            <div>
+              <input
+                id="proxy-addresses"
+                class="mono wide"
+                placeholder="any: the server is reachable only through the proxy"
+                bind:value={form.proxyAddresses}
+                aria-invalid={err("proxyAddresses") ? "true" : undefined}
+              />
+              <div class="faint small">
+                Comma-separated IPs or CIDR ranges, such as <span class="mono">10.0.0.0/8, 127.0.0.1</span>. The headers then
+                count only on requests from these addresses; a client that reaches the server directly is seen at its own
+                address.
+              </div>
+              {@render fieldError(err("proxyAddresses"))}
+            </div>
+            {/if}
           </div>
         {/if}
       </section>

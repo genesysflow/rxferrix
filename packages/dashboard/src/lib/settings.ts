@@ -28,6 +28,8 @@ export const SESSION_TTL_RANGE = [60, 400 * 24 * 3600] as const;
 export const MAX_PROVIDERS = 20;
 export const MAX_LIST = 50;
 export const MAX_PROXY_HEADERS = 10;
+/** Proxy addresses (IPs or CIDR ranges), at most (the server's limit). */
+export const MAX_PROXY_ADDRESSES = 64;
 /** Rate limit bounds (crates/rxferrix/src/settings/rate_limits.rs). */
 export const MAX_RATE_LIMIT_RULES = 50;
 export const MAX_REQUESTS = 1_000_000;
@@ -105,6 +107,8 @@ export interface SettingsForm {
   /** Comma-separated header names; empty: not behind a proxy (the peer address). */
   proxyHeaders: string;
   useLeftmostIp: boolean;
+  /** Comma-separated IPs or CIDR ranges of the proxy; empty: headers are trusted from any address. */
+  proxyAddresses: string;
   rateLimits: { enabled: boolean; rules: RateLimitRuleForm[] };
   /** A template left null: the built-in plain-text email. */
   emailTemplates: { appName: string } & Record<EmailKind, EmailTemplate | null>;
@@ -164,6 +168,7 @@ export function formFromView(view: SettingsView): SettingsForm {
     })),
     proxyHeaders: (view.trustedProxy?.headers ?? []).join(", "),
     useLeftmostIp: view.trustedProxy?.useLeftmostIp ?? false,
+    proxyAddresses: (view.trustedProxy?.proxies ?? []).join(", "),
     rateLimits: {
       enabled: view.rateLimits?.enabled ?? false,
       rules: (view.rateLimits?.rules ?? []).map((r) => ({
@@ -314,6 +319,11 @@ export function validate(form: SettingsForm, view: SettingsView): Record<string,
     const bad = headers.find((h) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(h));
     if (bad) errors.trustedProxy = `\`${bad}\` is not a valid header name`;
     else if (headers.length > MAX_PROXY_HEADERS) errors.trustedProxy = `At most ${MAX_PROXY_HEADERS} headers`;
+    const addresses = isLocked(view, "trustedProxy.proxies") ? [] : lines(form.proxyAddresses);
+    const badAddress = addresses.find((a) => !/^[0-9A-Fa-f:.]+(\/\d{1,3})?$/.test(a) || !/[.:]/.test(a));
+    if (badAddress) errors.proxyAddresses = `\`${badAddress}\` is not an IP address or CIDR range`;
+    else if (addresses.length > MAX_PROXY_ADDRESSES) errors.proxyAddresses = `At most ${MAX_PROXY_ADDRESSES} addresses`;
+    else if (addresses.length && !headers.length) errors.proxyAddresses = "Set the trusted headers first";
   }
 
   const rules = form.rateLimits.rules;
@@ -438,7 +448,9 @@ export function buildUpdate(view: SettingsView, form: SettingsForm): { update: S
   }
   if (!isLocked(view, "trustedProxy")) {
     const headers = lines(form.proxyHeaders);
-    const want = headers.length ? { headers, useLeftmostIp: form.useLeftmostIp } : null;
+    // Addresses the configuration fixes stay as stored (the configured ones apply either way).
+    const proxies = isLocked(view, "trustedProxy.proxies") ? (view.trustedProxy?.proxies ?? []) : lines(form.proxyAddresses);
+    const want = headers.length ? { headers, useLeftmostIp: form.useLeftmostIp, ...(proxies.length ? { proxies } : {}) } : null;
     if (JSON.stringify(want) !== JSON.stringify(view.trustedProxy)) set("trustedProxy", want);
   }
   {

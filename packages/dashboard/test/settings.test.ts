@@ -229,6 +229,31 @@ describe("settings form", () => {
 
     edit.proxyHeaders = "X Forwarded For";
     expect(validate(edit, saved).trustedProxy).toContain("not a valid header name");
+
+    // The proxy's addresses go with the headers; checked, and needing a header.
+    const addr = formFromView(saved);
+    addr.proxyAddresses = "10.0.0.0/8, 127.0.0.1";
+    expect(validate(addr, saved)).toEqual({});
+    expect(buildUpdate(saved, addr).update).toEqual({
+      trustedProxy: { headers: ["CF-Connecting-IP"], useLeftmostIp: false, proxies: ["10.0.0.0/8", "127.0.0.1"] },
+    });
+    const withAddresses = view({ trustedProxy: { headers: ["CF-Connecting-IP"], useLeftmostIp: false, proxies: ["10.0.0.0/8"] } });
+    expect(formFromView(withAddresses).proxyAddresses).toBe("10.0.0.0/8");
+    expect(buildUpdate(withAddresses, formFromView(withAddresses)).changed).toEqual([]);
+    addr.proxyAddresses = "proxy.internal";
+    expect(validate(addr, saved).proxyAddresses).toContain("not an IP address or CIDR range");
+    addr.proxyAddresses = "10.0.0.1";
+    addr.proxyHeaders = "";
+    expect(validate(addr, saved).proxyAddresses).toBe("Set the trusted headers first");
+    // Fixed by the configuration: the stored addresses are kept, whatever the field says.
+    const lockedAddresses = view({ ...withAddresses, locked: ["trustedProxy.proxies"] });
+    const keep = formFromView(lockedAddresses);
+    keep.proxyAddresses = "garbage";
+    keep.useLeftmostIp = true;
+    expect(validate(keep, lockedAddresses)).toEqual({});
+    expect(buildUpdate(lockedAddresses, keep).update).toEqual({
+      trustedProxy: { headers: ["CF-Connecting-IP"], useLeftmostIp: true, proxies: ["10.0.0.0/8"] },
+    });
     // Fixed by the configuration: neither validated nor sent.
     const locked = view({ locked: ["trustedProxy"] });
     expect(validate(edit, locked)).toEqual({});

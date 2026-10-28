@@ -139,8 +139,10 @@ audit log would all see its address. Tell the server which request header carrie
 **Settings → IP proxy headers** (e.g. `CF-Connecting-IP` behind Cloudflare, `Fly-Client-IP` on Fly, `X-Forwarded-For`
 or `X-Real-IP` behind NGINX or Caddy; the first header present wins, and the panel shows your IP as the server
 resolves it), or with `--trust-proxy` (`RXFERRIX_TRUST_PROXY`), which trusts the last `X-Forwarded-For` entry and wins
-over the setting. Only trust a header your proxy always sets or overwrites, and keep the server reachable only
-through the proxy; otherwise clients can pick their own IP.
+over the setting. Only trust a header your proxy always sets or overwrites. Then either list the proxy's addresses
+(the **Proxy addresses** field, or `--trust-proxy-from 10.0.0.0/8` / `RXFERRIX_TRUST_PROXY_FROM`, repeatable or
+comma-separated, which wins over the field), so the headers count only on requests that come from the proxy, or keep
+the server reachable only through the proxy; otherwise clients that reach it directly can pick their own IP.
 
 ## Rate limits
 

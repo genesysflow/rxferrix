@@ -305,8 +305,43 @@ async fn trusted_proxy_headers_decide_the_client_ip() {
     let r = client_ip(proxied).await;
     assert_eq!((&r["ip"], &r["header"]), (&json!("203.0.113.9"), &json!("x-forwarded-for")));
 
+    // Only from the proxy's addresses, when set: this test client (127.0.0.1) isn't one, then is.
+    let from = |proxies: Value| json!({ "trustedProxy": { "headers": ["CF-Connecting-IP"], "proxies": proxies } });
+    let (s, b) = update(&http, &admin, from(json!(["proxy.internal"]))).await;
+    assert_eq!((s, code_of(&b)), (400, "invalid_settings"), "{b}");
+    let view = http.ok("action", "_system/settings:update", from(json!(["10.0.0.0/8"])), &admin).await;
+    assert_eq!(view["effective"]["trustedProxy"]["proxies"], json!(["10.0.0.0/8"]));
+    let r = client_ip(proxied).await;
+    assert_eq!((&r["ip"], &r["header"]), (&json!("127.0.0.1"), &Value::Null), "not from the proxy: {r}");
+    let view = http.ok("action", "_system/settings:update", from(json!(["127.0.0.1", "::1"])), &admin).await;
+    assert_eq!(view["trustedProxy"]["proxies"], json!(["127.0.0.1/32", "::1/128"]));
+    assert_eq!(client_ip(proxied).await["ip"], "198.51.100.7");
+
     http.ok("action", "_system/settings:update", json!({ "clear": ["trustedProxy"] }), &admin).await;
     assert_eq!(client_ip(proxied).await["ip"], "127.0.0.1");
+}
+
+#[tokio::test]
+async fn proxy_addresses_in_the_configuration_apply_to_the_stored_headers() {
+    let (_t, http, admin) = setup(AuthConfig::password().trusted_proxies(["192.0.2.0/24"])).await;
+    let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
+    let locked = view["locked"].as_array().unwrap();
+    assert!(locked.contains(&json!("trustedProxy.proxies")) && !locked.contains(&json!("trustedProxy")), "{view}");
+    let headers = json!({ "trustedProxy": { "headers": ["CF-Connecting-IP"], "proxies": ["127.0.0.1"] } });
+    let view = http.ok("action", "_system/settings:update", headers, &admin).await;
+    assert_eq!(view["effective"]["trustedProxy"]["proxies"], json!(["192.0.2.0/24"]), "the configuration wins");
+    let r: Value = http
+        .client
+        .get(format!("{}/api/admin/client-ip", http.base))
+        .bearer_auth(&admin)
+        .header("cf-connecting-ip", "198.51.100.7")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["ip"], "127.0.0.1", "this client isn't the configured proxy: {r}");
 }
 
 #[tokio::test]

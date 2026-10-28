@@ -233,6 +233,10 @@ struct ServeArgs {
     /// the trusted proxy headers set in the dashboard.
     #[arg(long, env = "RXFERRIX_TRUST_PROXY")]
     trust_proxy: bool,
+    /// The reverse proxy's address (an IP or a CIDR range such as 10.0.0.0/8; repeatable, or comma-separated): proxy
+    /// headers count only on requests from it, so clients reaching the server directly can't pick their IP.
+    #[arg(long, env = "RXFERRIX_TRUST_PROXY_FROM", value_name = "ADDRESS", value_delimiter = ',')]
+    trust_proxy_from: Vec<String>,
     /// Roll back mutations still running after this long, e.g. `5s`, `500ms`, `2m` (a bare number is seconds).
     /// Only enforced at `.await` points.
     #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
@@ -864,6 +868,9 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     }
     if args.trust_proxy {
         auth.trust_proxy = true;
+    }
+    if !args.trust_proxy_from.is_empty() {
+        auth.trusted_proxies = args.trust_proxy_from.clone();
     }
     auth
 }

@@ -14,12 +14,19 @@ write is lost, and the switch pauses requests for well under a second.
 5. The new version applies the last writes, swaps the copy in and starts serving.
 
 Steps 4 and 5 take about 0.2–0.5 s under write load in our tests. During that time requests wait rather than fail.
+The old server interrupts a backup or replication snapshot it is taking, and lets go of the data directory only once
+every connection to the database is closed, so the swap never moves a file it still uses.
 A mutation that a reconnecting client sends again still runs only once. The previous database is kept in
 `<data dir>/takeover/previous/`.
 
 ::: tip If the new version can't read your data
 Say a field's type changed and existing documents don't fit, with no migration for it. The new version notices in
 step 2, prints which documents don't fit, and exits. The old server keeps serving and never notices.
+
+It also checks, before the old server hands over, that it can listen as configured (the TLS certificate files load,
+the `--https` domains are valid) and that `--replicate-to` names a usable target. What runs only after the handover
+isn't covered: an `on_start` hook that fails, or a storage backend that can't be reached, stops the new version with
+the old one already gone. Test those before deploying.
 
 To find out before deploying, run `my-app check --dir <data dir>`. It does step 2 on a copy while the server runs,
 and is handy in CI.

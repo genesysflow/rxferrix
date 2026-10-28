@@ -114,6 +114,16 @@ impl Listen {
             }
         }
     }
+
+    /// Check what [`start_with`] would fail on without binding anything: the certificate files load, the ACME domains
+    /// are valid. A takeover checks before the running server hands over.
+    pub fn check(&self) -> crate::Result<()> {
+        match self {
+            Listen::Http(_) => Ok(()),
+            Listen::Acme { acme, .. } => acme.prepare(),
+            Listen::CertFiles { cert, key, .. } => server_config_from_pem(cert, key).map(drop),
+        }
+    }
 }
 
 /// How the server listens.

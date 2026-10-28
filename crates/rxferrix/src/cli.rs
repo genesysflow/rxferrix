@@ -936,7 +936,13 @@ fn serve(
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let exit_code = rt.block_on(async move {
+    // The data directory's lock, set once taken. It outlives the runtime: dropping the runtime waits for its blocking
+    // tasks and drops every task, so all connections to the database are closed before a next server (a takeover
+    // waiting for this lock) moves `data.db` and its WAL.
+    let mut dir_lock = None;
+    let lock_slot = &mut dir_lock;
+    let outcome = rt.block_on(async move {
+        let dir_lock = lock_slot;
         let explicit = explicit_public_url(&args, &auth);
         if !explicit && !args.dev && (args.ops.tls_cert.is_some() || auth.oauth.iter().any(|p| p.is_configured())) {
             // The default `http://<--http address>` is wrong for every link and OAuth callback.
@@ -982,7 +988,13 @@ fn serve(
             }
             None => false,
         };
-        let (_lock, inherited) = if takeover {
+        let (lock, inherited) = if takeover {
+            // What can be checked before the running server hands over is checked now: after the handover, a
+            // failure leaves nothing serving.
+            listen.check().context("--takeover: this server couldn't listen as configured")?;
+            if let Some(replication) = &options.ops.replication {
+                replication.build_target(&args.dir).context("--takeover: --replicate-to")?;
+            }
             let incoming = crate::ops::takeover::take_over(&args.dir, &listen.addrs()).await?;
             options.prechecked_schema = incoming.migrating;
             tracing::info!(from = incoming.from_pid, "took over the data directory");
@@ -992,6 +1004,8 @@ fn serve(
             crate::ops::takeover::recover(&args.dir)?;
             (lock, Vec::new())
         };
+        // Released only once the runtime is gone (below), with every connection to the database closed.
+        *dir_lock = Some(lock);
         // A restore staged from the dashboard replaces the database now, before anything opens it.
         let storage_dir = crate::ops::backup::local_storage_dir(&args.dir, &options.storage.backend);
         let dir = args.dir.clone();
@@ -1114,6 +1128,8 @@ fn serve(
                 }
                 tokio::time::sleep(DRAIN_GRACE).await;
                 app.begin_close();
+                // A backup or replication snapshot still copying the database would hold it open long after this.
+                crate::ops::backup::interrupt_snapshots();
             })
             .await?;
         // Services end on `begin_close`; they may still write, and must let go of what they hold before the next server.
@@ -1129,13 +1145,14 @@ fn serve(
         tracing::info!(ts = last_ts, "stopped");
         let wait = handed_over.load(std::sync::atomic::Ordering::SeqCst) && args.after_handover == AfterHandover::Wait;
         Ok::<_, crate::Error>((restart.is_requested().then(|| restart.exit_code()).flatten(), wait))
-    })?;
-    let (exit_code, wait) = exit_code;
+    });
+    drop(rt);
+    drop(dir_lock);
+    let (exit_code, wait) = outcome?;
     if wait {
-        // Everything is released with the runtime (lock, sockets, database, control socket): our port refuses
-        // connections, so health checks fail and a proxy retries elsewhere what it sends here, but this process stays
-        // alive until it is told to go, so an orchestrator doesn't start it again (it would take over from the new one).
-        drop(rt);
+        // Everything is released (lock, sockets, database, control socket): our port refuses connections, so health
+        // checks fail and a proxy retries elsewhere what it sends here, but this process stays alive until it is told
+        // to go, so an orchestrator doesn't start it again (it would take over from the new one).
         tracing::info!("handed over to the new process; waiting for SIGTERM");
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1145,7 +1162,6 @@ fn serve(
     }
     // An administrator asked for a restart (`--restart-exit-code`): the supervisor starts the server again.
     if let Some(code) = exit_code {
-        drop(rt);
         std::process::exit(code);
     }
     Ok(())

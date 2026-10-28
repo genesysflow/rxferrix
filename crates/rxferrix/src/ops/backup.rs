@@ -166,12 +166,52 @@ fn open_existing(path: &Path) -> crate::Result<Connection> {
     Ok(conn)
 }
 
+/// The `VACUUM INTO` copies running in this process, by id, so that a shutdown can interrupt them
+/// ([`interrupt_snapshots`]).
+static SNAPSHOTS: std::sync::Mutex<Vec<(u64, rusqlite::InterruptHandle)>> = std::sync::Mutex::new(Vec::new());
+
 /// Copy the database at `src` to `dest` (which must not exist) as a consistent snapshot, with `VACUUM INTO`.
 pub fn snapshot_db(src: &Path, dest: &Path) -> crate::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    struct Running(u64);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _)| *id != self.0);
+        }
+    }
     let conn = open_existing(src)?;
     let dest_str = dest.to_str().context("backup path is not valid UTF-8")?;
+    let running = Running(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).push((running.0, conn.get_interrupt_handle()));
     conn.execute("VACUUM INTO ?1", [dest_str]).with_context(|| format!("snapshotting {}", src.display()))?;
+    drop(running);
     Ok(())
+}
+
+/// Interrupt every [`snapshot_db`] running in this process (they fail with "interrupted"); copies started later aren't
+/// affected. A server that stops calls it: a copy of a large database could otherwise keep its connection to
+/// `data.db` open for minutes after the server let go of the data directory, and a new server may already have moved
+/// that file. SQLite ignores an interrupt that comes before the statement starts, so a thread repeats it until each
+/// of these copies has ended (for at most a minute).
+pub fn interrupt_snapshots() {
+    let targets: Vec<u64> = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, _)| *id).collect();
+    if targets.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            {
+                let running = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+                let mut left = running.iter().filter(|(id, _)| targets.contains(id)).peekable();
+                if left.peek().is_none() {
+                    return;
+                }
+                left.for_each(|(_, handle)| handle.interrupt());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
 }
 
 /// A reader that hashes what passes through it.
@@ -875,6 +915,28 @@ pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> cr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_snapshot_can_be_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("big.db");
+        let conn = Connection::open(&src).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (x BLOB); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
+             INSERT INTO t SELECT randomblob(500) FROM n;",
+        )
+        .unwrap();
+        drop(conn);
+        let dest = dir.path().join("copy.db");
+        let copy = std::thread::spawn(move || snapshot_db(&src, &dest));
+        while SNAPSHOTS.lock().unwrap().is_empty() && !copy.is_finished() {
+            std::thread::yield_now();
+        }
+        interrupt_snapshots();
+        let result = copy.join().unwrap();
+        assert!(result.is_err_and(|e| format!("{e:#}").contains("interrupt")), "the copy was interrupted");
+        assert!(SNAPSHOTS.lock().unwrap().is_empty(), "and unregistered");
+    }
 
     #[test]
     fn names() {

@@ -383,7 +383,8 @@ pub async fn take_over_with(
     tokio::time::timeout(EXIT_WAIT, conn.closed())
         .await
         .map_err(|_| anyhow::anyhow!("the old server (pid {from_pid}) didn't exit within {EXIT_WAIT:?}"))??;
-    let lock = DirLock::acquire_waiting(dir, Duration::from_secs(30)).await?;
+    // The old process lets go of the lock once all of its connections to the database are closed.
+    let lock = DirLock::acquire_waiting(dir, EXIT_WAIT).await?;
     let copy_migrating = staged.migrating.clone();
     // The old server is gone: from here on, nothing may stop this process from serving. If finishing fails, the
     // database is as the old server left it (or the swap is completed, if it had begun), and it opens normally.

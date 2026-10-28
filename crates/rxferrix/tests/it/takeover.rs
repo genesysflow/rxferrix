@@ -315,3 +315,74 @@ async fn a_takeover_keeps_a_pending_migration_pending_and_reads_working() {
     assert_eq!(r.schema_check.as_deref(), Some("passed"));
     assert!(!new.app.db().catalog().is_migrating("mig_notes"));
 }
+
+/// The journal moves with the data: commits made before and during the takeover that weren't replicated yet ship from
+/// the new process, in the same generation, with no gap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unshipped_commits_ship_from_the_new_process() {
+    use rxferrix::ops::OpsOptions;
+    use rxferrix::ops::backup::BackupTarget;
+    use rxferrix::ops::replicate::{self, ReplicationOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = BackupTarget::parse(target_dir.path().to_str().unwrap(), dir.path()).unwrap();
+    let replication = || {
+        let mut r = ReplicationOptions::with_target(target.clone());
+        r.background = false;
+        Some(r)
+    };
+    let options = |prechecked_schema| AppOptions {
+        dev: true,
+        prechecked_schema,
+        ops: OpsOptions { replication: replication(), ..Default::default() },
+        ..Default::default()
+    };
+    let lock = DirLock::acquire(dir.path()).unwrap();
+    let app = App::open(dir.path(), options(None)).await.unwrap();
+    let old = serve(dir.path(), lock, app, Listen::Http("127.0.0.1:0".parse().unwrap()), Vec::new()).await;
+    old.app.replication().unwrap().sync_now(&old.app).await.unwrap();
+    let generation = old.app.replication().unwrap().status(&old.app).await.generation.unwrap();
+    let client = reqwest::Client::new();
+    for i in 0..5 {
+        add(&client, old.addr, &format!("before {i}")).await.unwrap();
+    }
+    // Writes keep coming while the new process copies and catches up.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (client, addr, stop) = (client.clone(), old.addr, stop.clone());
+        tokio::spawn(async move {
+            let mut n = 0;
+            while !stop.load(Ordering::SeqCst) {
+                if add(&client, addr, &format!("during {n}")).await.is_ok() {
+                    n += 1;
+                }
+            }
+        })
+    };
+    let addr = old.addr;
+    let incoming =
+        takeover::take_over_with(dir.path(), &[("main".to_string(), addr)], rxferrix::runtime::registered_tables())
+            .await
+            .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    old.stopped.await.unwrap();
+    let app = App::open(dir.path(), options(incoming.migrating)).await.unwrap();
+    let new = serve(dir.path(), incoming.lock, app, Listen::Http(addr), incoming.listeners).await;
+    // Its last request may wait in the handed-over socket for the new server.
+    tokio::time::timeout(Duration::from_secs(30), writer).await.expect("the writer finishes").unwrap();
+    let rep = new.app.replication().unwrap();
+    rep.sync_now(&new.app).await.unwrap();
+    let status = rep.status(&new.app).await;
+    assert_eq!(status.generation.as_deref(), Some(generation.as_str()), "the same generation goes on");
+    let latest = new.app.db().write_log().latest();
+    assert_eq!((status.shipped_ts, status.lag_commits), (latest, 0));
+    let gens = replicate::list_generations(&target).await.unwrap();
+    assert_eq!(gens.len(), 1);
+    let g = &gens[0];
+    let mut next = g.snapshots[0].ts + 1;
+    for seg in &g.segments {
+        assert!(seg.from <= next && seg.to >= next - 1, "no gap before ts {next}: {:?}", g.segments);
+        next = next.max(seg.to + 1);
+    }
+    assert_eq!(next, latest + 1, "every commit shipped");
+}

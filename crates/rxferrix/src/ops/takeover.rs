@@ -53,6 +53,9 @@ const SWAP_MARKER: &str = "swapping";
 const EXIT_WAIT: Duration = Duration::from_secs(60);
 /// Catch up in rounds of this many journal rows; the handover happens once a round finds fewer.
 const ROUND: usize = 256;
+/// Catching up doesn't go on longer than this before the handover: under writes faster than the replay, it would never
+/// end. The rest is replayed after the handover, with the old server stopped (a longer pause, but a bounded one).
+const CATCH_UP_LIMIT: Duration = Duration::from_secs(30);
 /// `_meta` keys that follow the data rather than the binary: replication and analytics positions.
 const CARRIED_META: [&str; 5] = [
     journal::META_GENERATION,
@@ -362,7 +365,16 @@ pub async fn take_over_with(
         migrating = ?staged.migrating,
         "takeover: the copy opens with this version; catching up"
     );
-    while staged.catch_up(dir, false).await.map_err(abort)? >= ROUND {}
+    let catching_up = Instant::now();
+    while staged.catch_up(dir, false).await.map_err(abort)? >= ROUND {
+        if catching_up.elapsed() >= CATCH_UP_LIMIT {
+            tracing::warn!(
+                "takeover: still catching up after {CATCH_UP_LIMIT:?} (writes outpace the replay); handing over now \
+                 and replaying the rest with the old server stopped"
+            );
+            break;
+        }
+    }
 
     if !same_netns {
         tracing::info!("takeover: the running server is in another network namespace; listening on our own sockets");
@@ -419,6 +431,9 @@ struct Staged {
     db: Option<Database>,
     dir: PathBuf,
     migrating: Vec<String>,
+    /// The newest journal row the copy came with (0: none). Rows up to it are the old database's, unchanged; only
+    /// the rows after it are copied over at the end ([`Staged::finish`]).
+    journal_copied_to: u64,
 }
 
 impl Staged {
@@ -430,9 +445,13 @@ impl Staged {
             let _ = std::fs::remove_dir_all(&staging);
             std::fs::create_dir_all(&staging)?;
             crate::ops::backup::snapshot_db(&dir.join("data.db"), &staging.join("data.db"))?;
+            let journal_copied_to = {
+                let copy = open_source(&staging.join("data.db"))?;
+                journal_max(&copy)?
+            };
             let db = open_staged(&staging, &tables)?;
             let migrating = db.catalog().migrating_tables();
-            Ok(Staged { db: Some(db), dir: staging, migrating })
+            Ok(Staged { db: Some(db), dir: staging, migrating, journal_copied_to })
         })
         .await?
     }
@@ -466,8 +485,9 @@ impl Staged {
         let old_ts = storage::read_meta_u64(&source, storage::META_TS)?;
         let ts = self.db().snapshot().await?.ts;
         anyhow::ensure!(ts == old_ts, "the copy is at ts {ts} but the database at ts {old_ts}");
-        let carried = carried_state(&source)?;
+        let carried = carried_state(&source, self.journal_copied_to)?;
         drop(source);
+        let copied_to = self.journal_copied_to;
         self.db()
             .with_writer(move |c| {
                 for [session, request, created, response] in &carried.dedup {
@@ -488,8 +508,14 @@ impl Staged {
                 c.execute("DELETE FROM _meta WHERE k = ?1", [journal::META_TAKEOVER_TS])?;
                 let last = storage::read_meta_f64(c, storage::META_LAST_CREATION_TIME)?.max(carried.last_creation_time);
                 storage::write_meta(c, storage::META_LAST_CREATION_TIME, rusqlite::types::Value::Real(last))?;
-                // The journal goes along for replication and the analytics copy; rows no remaining consumer needs go.
-                c.execute("DELETE FROM _journal", [])?;
+                // The journal goes along for replication and the analytics copy. The copy already has the old rows (up
+                // to `copied_to`, minus those the old server trimmed since); the ones written after the copy come over,
+                // in place of any the replay wrote. Then rows no remaining consumer needs go.
+                c.execute("DELETE FROM _journal WHERE ts > ?1", [copied_to as i64])?;
+                match carried.journal_from {
+                    Some(from) => c.execute("DELETE FROM _journal WHERE ts < ?1", [from as i64])?,
+                    None => c.execute("DELETE FROM _journal", [])?,
+                };
                 for (ts, time, changes) in &carried.journal {
                     journal::insert(c, *ts, *time, changes)?;
                 }
@@ -511,12 +537,30 @@ struct Carried {
     dedup: Vec<[rusqlite::types::Value; 4]>,
     meta: Vec<(&'static str, Option<rusqlite::types::Value>)>,
     last_creation_time: f64,
+    /// The old database's journal rows written after the copy.
     journal: Vec<(u64, f64, String)>,
+    /// The oldest journal row the old database still has (`None`: none at all).
+    journal_from: Option<u64>,
     /// Journal rows up to this ts are no consumer's any more.
     journal_floor: u64,
 }
 
-fn carried_state(source: &rusqlite::Connection) -> crate::Result<Carried> {
+/// The newest row of a database's journal; 0 when it has none (or no journal table).
+fn journal_max(conn: &rusqlite::Connection) -> crate::Result<u64> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_journal')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        return Ok(0);
+    }
+    let max: Option<i64> = conn.query_row("SELECT MAX(ts) FROM _journal", [], |r| r.get(0))?;
+    Ok(max.unwrap_or(0) as u64)
+}
+
+/// What to carry from the old database; of its journal, the rows after `journal_copied_to` only.
+fn carried_state(source: &rusqlite::Connection, journal_copied_to: u64) -> crate::Result<Carried> {
     use rusqlite::OptionalExtension;
     let mut dedup = Vec::new();
     let mut stmt = source.prepare("SELECT session_id, request_id, created_ms, response FROM _mutation_dedup")?;
@@ -532,11 +576,13 @@ fn carried_state(source: &rusqlite::Connection) -> crate::Result<Carried> {
     }
     let last_creation_time = storage::read_meta_f64(source, storage::META_LAST_CREATION_TIME)?;
     let mut journal_rows = Vec::new();
-    let mut stmt = source.prepare("SELECT ts, time, changes FROM _journal ORDER BY ts")?;
-    let mut rows = stmt.query([])?;
+    let mut stmt = source.prepare("SELECT ts, time, changes FROM _journal WHERE ts > ?1 ORDER BY ts")?;
+    let mut rows = stmt.query([journal_copied_to as i64])?;
     while let Some(r) = rows.next()? {
         journal_rows.push((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?));
     }
+    let journal_from: Option<i64> = source.query_row("SELECT MIN(ts) FROM _journal", [], |r| r.get(0))?;
+    let journal_from = journal_from.map(|t| t as u64);
     // A consumer that has a position keeps the rows after it; with none, every row was only for this takeover.
     let positions: Vec<u64> = [journal::META_SHIPPED_TS, journal::META_OLAP_TS]
         .into_iter()
@@ -547,7 +593,7 @@ fn carried_state(source: &rusqlite::Connection) -> crate::Result<Carried> {
         })
         .collect();
     let journal_floor = positions.into_iter().min().unwrap_or(u64::MAX);
-    Ok(Carried { dedup, meta, last_creation_time, journal: journal_rows, journal_floor })
+    Ok(Carried { dedup, meta, last_creation_time, journal: journal_rows, journal_from, journal_floor })
 }
 
 /// Open a copy of the database with `tables`: what a takeover does to its copy, and `check`.

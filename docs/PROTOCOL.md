@@ -326,7 +326,8 @@ address through the verification link removes stale provider links the same way.
 
 Codes are 6 digits (5 wrong attempts burn a code); link tokens are 256-bit. Both are stored as keyed hashes and work
 once. Asking for a new code doesn't reset the guess budget: after 10 wrong codes for one email and purpose within an
-hour, codes for it are refused until the hour is over, and only the link works. Verification codes last 24 hours, reset codes 30 minutes, sign-in codes 15 minutes.
+hour, codes for it are refused until the hour is over, and only the link works. Verification codes last 24 hours,
+reset codes 30 minutes, sign-in codes 15 minutes.
 
 **Redirects.** `redirectTo` / `redirect_to` must match the allowlist (`--auth-redirect-url`): same scheme, host and
 port as an entry, and, when the entry has a path, that path or one below it. In `--dev`, any `http://localhost` or

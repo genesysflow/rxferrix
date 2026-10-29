@@ -14,7 +14,8 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 
 ```rust
 use rxferrix::prelude::*;
-// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
+// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, OrUserError,
+//           bail_user!, ensure_user!, Bytes,
 //           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, Aggregate, DocChange,
 //           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
 //           workflow, WorkflowCtx, json!, RxFerrix
@@ -86,6 +87,10 @@ impl UserError {
     pub fn with_data(self, data: serde_json::Value) -> Self;
 }
 impl std::error::Error for UserError {}   // + Display = message. Detected at the boundary via anyhow downcast_ref.
+impl UserError { pub fn of(err: &Error) -> Option<&UserError>; }  // the UserError in err's chain (tests)
+// bail_user!(code, "fmt", args..)        = return Err(UserError::new(code, format!(..)).into())
+// ensure_user!(cond, code, "fmt", ..)    = if !cond { bail_user!(..) }
+// option.or_user(code, message)?         = option.ok_or_else(|| UserError::new(code, message).into())?  (OrUserError)
 
 /// Typed document id. String form: 26-char lowercase Crockford base32 of 16 bytes:
 /// [table_number: u32 big-endian][12 random bytes]. Serializes as a JSON string.

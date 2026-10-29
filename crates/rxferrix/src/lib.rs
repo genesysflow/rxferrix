@@ -69,7 +69,7 @@ pub use db::dedup::IdempotencyKey;
 pub use db::pagination::{PaginationOpts, PaginationResult};
 pub use db::query::{IndexRange, MutationDb, Query, QueryDb, RawIndexRange, RawQuery};
 pub use db::search::{RawSearchQuery, SearchFilter, SearchQuery, VectorFilter, VectorSearchOpts};
-pub use error::{Error, MutationTimeout, QueryTimeout, Result, UserError};
+pub use error::{Error, MutationTimeout, OrUserError, QueryTimeout, Result, UserError};
 pub use exec_log::{FunctionStats, LogEntry, LogFilter, LogOutcome, LogRetention, Logs, TimePoint, TimeseriesSpec};
 pub use guard::{Guard, GuardCtx, GuardedFunction};
 pub use id::Id;
@@ -130,9 +130,9 @@ pub mod prelude {
     pub use crate::migrations::DocChange;
     pub use crate::workflow::WorkflowCtx;
     pub use crate::{
-        ActionCtx, Bytes, Doc, Error, Field, Id, Index, MutationCtx, Order, QueryCtx, Result, RxFerrix, UserError,
-        action, internal_action, internal_mutation, internal_query, json, migration, mutation, object, query, table,
-        workflow,
+        ActionCtx, Bytes, Doc, Error, Field, Id, Index, MutationCtx, OrUserError, Order, QueryCtx, Result, RxFerrix,
+        UserError, action, bail_user, ensure_user, internal_action, internal_mutation, internal_query, json, migration,
+        mutation, object, query, table, workflow,
     };
     pub use crate::{Aggregate, SearchIndex, VectorFilter, VectorIndex, VectorSearchOpts};
     pub use crate::{PaginationOpts, PaginationResult};

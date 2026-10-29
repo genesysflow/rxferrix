@@ -34,3 +34,5 @@ export class RxFerrixError extends Error {
 /** Code used for client-side failures (lost connection, client closed). */
 export const CONNECTION_LOST = "ConnectionLost";
 export const CLIENT_CLOSED = "ClientClosed";
+/** A mutation sent before a connection was lost couldn't be sent again safely: it may or may not have run. */
+export const OUTCOME_UNKNOWN = "OutcomeUnknown";

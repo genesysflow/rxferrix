@@ -61,3 +61,17 @@ pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: Paginat
 mutations) marks a function for development (seeding, reading a dev inbox): the server refuses it outside `--dev`,
 and codegen puts it in `devApi` instead of `api`. In `--dev` without SMTP, auth emails are printed to the log by
 `DevLogMailer`; `AuthConfig::dev_mailer(m)` replaces it (and can forward to it).
+
+## Errors for the client
+
+Return a `UserError` for anything the client should handle: its `code` and `message` reach the caller as they are,
+even outside `--dev` (any other error is a generic "Server Error" there). The prelude has shorthands:
+
+```rust
+ensure_user!(!text.trim().is_empty(), "empty_text", "A todo needs some text");
+let todo = ctx.db.get(id).await?.or_user("not_found", "This todo no longer exists")?;
+if todo.locked { bail_user!("locked", "{} is locked", todo.text); }
+```
+
+In tests, `UserError::of(&err)` finds the `UserError` in an error returned by `TestApp`.
+

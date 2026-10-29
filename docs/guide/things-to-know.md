@@ -16,6 +16,9 @@
   const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();
   send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: id, _creationTime: now, …args } }));
   ```
+- **Query results are read-only** (frozen): the client applies the server's next diff to them, so changing one in
+  place would corrupt every later update. Copy before you change: `[...todos].sort(…)` or `todos.toSorted(…)`, and in
+  an optimistic update `store.setQuery(q, args, [item, ...current])` rather than `current.push(item)`.
 - **Scheduled functions (and crons) run without an identity**, whoever scheduled them: pass the user as an argument to
   an internal function, e.g. `ctx.scheduler.run_after::<deliver_reminder>(delay, (channel, user, text))`.
 - **`ctx.now()` in a query is the snapshot's time, not a reactive clock.** A query reruns when its data changes, not

@@ -16,6 +16,20 @@ export class TransitionVersionMismatch extends Error {
   }
 }
 
+/**
+ * Freezes `value` and everything in it not frozen yet, and returns it. Query results are frozen: they are the base the
+ * server's next diff applies to, and they are shared with every caller (`useQuery`, `getQuery` in optimistic updates),
+ * so changing one in place (`results.sort()`, `store.getQuery(q).push(x)`) would silently corrupt every later update.
+ * Freezing makes that a `TypeError` instead. A diff reuses the unchanged parts of the previous result (frozen already),
+ * so only what it built is walked. Typed arrays (`Bytes`) can't be frozen and are left as they are.
+ */
+export function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value) || ArrayBuffer.isView(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
+}
+
 export interface TransitionResult {
   /** Queries whose server result changed (updated, failed or removed). */
   changed: QueryId[];
@@ -66,7 +80,7 @@ export class RemoteQuerySet {
         case "QueryUpdated":
           this.results.set(queryId, {
             status: "success",
-            value: "diff" in modification ? diffed.get(modification) : modification.value,
+            value: deepFreeze("diff" in modification ? diffed.get(modification) : modification.value),
           });
           break;
         case "QueryFailed":

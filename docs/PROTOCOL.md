@@ -220,7 +220,10 @@ So that no client can grow the server's memory without bound:
   `Authenticate` if it has a token, then one `ModifyQuerySet` adding every live query (new queryIds are fine), then
   re-sends every mutation that does not yet have a `MutationResponse`, with its original `requestId` (see guarantee
   7: the server runs each `(sessionId, requestId)` at most once). Actions in flight when the socket drops are
-  rejected with a "connection lost" error, because actions are not idempotent.
+  rejected with a "connection lost" error, because actions are not idempotent. A mutation is not re-sent, and its
+  promise rejects with code `OutcomeUnknown` (it may or may not have run), when it was first sent more than 9 minutes
+  ago (the server recognizes re-sends for 10) or from another identity than the socket's now (the server never
+  matches a re-send across identities).
 - **Resolving a mutation**: a mutation's promise resolves only once BOTH its `MutationResponse(success, ts=M)` has
   arrived AND the client has applied a Transition with `endVersion.ts >= M`. Its optimistic update is dropped at
   that same moment. On failure, the promise rejects and the optimistic update is dropped immediately.

@@ -16,6 +16,22 @@ pub mod notes {
     use rxferrix::auth::User;
     use rxferrix::prelude::*;
 
+    #[mutation]
+    pub async fn remove(ctx: &MutationCtx, id: Id<Note>) -> Result<()> {
+        ctx.db.delete(id).await
+    }
+
+    /// The user error helpers of the prelude: `ensure_user!`, `.or_user(..)` and `bail_user!`.
+    #[mutation]
+    pub async fn rename_note(ctx: &MutationCtx, id: Id<Note>, body: String) -> Result<()> {
+        ensure_user!(!body.trim().is_empty(), "empty", "a note needs some text");
+        let note = ctx.db.get(id).await?.or_user("not_found", "this note no longer exists")?;
+        if note.body == body {
+            bail_user!("unchanged", "the note already says {body:?}");
+        }
+        ctx.db.patch(id, json!({ "body": body })).await
+    }
+
     #[table(name = "dx_notes")]
     #[index(by_board = [board])]
     #[derive(PartialEq)]
@@ -389,4 +405,22 @@ async fn test_users() {
         .tokens()
         .expect("no second factor: a session");
     assert!(tokens.user_id.is_some());
+}
+
+#[tokio::test]
+async fn user_error_helpers() {
+    use rxferrix::UserError;
+    let t = TestApp::new().await.unwrap();
+    let id = t.mutation::<notes::add>(("b".to_string(), "hello".to_string())).await.unwrap();
+    let code = |err: rxferrix::Error| UserError::of(&err).map(|e| (e.code.clone(), e.message.clone()));
+    let err = t.mutation::<notes::rename_note>((id, " ".to_string())).await.unwrap_err();
+    assert_eq!(code(err), Some(("empty".into(), "a note needs some text".into())));
+    let err = t.mutation::<notes::rename_note>((id, "hello".to_string())).await.unwrap_err();
+    assert_eq!(code(err), Some(("unchanged".into(), "the note already says \"hello\"".into())));
+    t.mutation::<notes::rename_note>((id, "bye".to_string())).await.unwrap();
+    t.mutation::<notes::remove>((id,)).await.unwrap();
+    let err = t.mutation::<notes::rename_note>((id, "again".to_string())).await.unwrap_err();
+    assert_eq!(code(err).map(|c| c.0), Some("not_found".into()));
+    // Not a user error: none.
+    assert!(UserError::of(&anyhow::anyhow!("boom")).is_none());
 }

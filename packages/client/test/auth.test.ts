@@ -78,14 +78,16 @@ async function openAndDrain() {
 
 describe("RxFerrixAuth", () => {
   it("restores a stored session and authenticates the socket before subscribing", async () => {
-    storage.setItem(KEY, stored("a", Date.now() + 600_000));
+    // One stored value: built twice, the token's `exp` (in seconds) would differ across a second boundary.
+    const session = stored("a", Date.now() + 600_000);
+    storage.setItem(KEY, session);
     const { fetch, calls } = mockFetch({});
     const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
     expect(auth.state()).toMatchObject({ isLoading: true, isAuthenticated: false });
     client.watchQuery(systemApi.auth.me).onUpdate(() => {});
     const sent = await openAndDrain();
     expect(sent.map((m) => m.type)).toEqual(["Connect", "Authenticate", "ModifyQuerySet"]);
-    expect(sent[1]).toMatchObject({ token: JSON.parse(stored("a", Date.now() + 600_000)).accessToken });
+    expect(sent[1]).toMatchObject({ token: JSON.parse(session).accessToken });
     expect(sent[2]).toMatchObject({ modifications: [{ udfPath: "_system/auth:me" }] });
     expect(calls).toEqual([]);
     server.transition({ identity: 1, querySet: 1, ts: 1 });

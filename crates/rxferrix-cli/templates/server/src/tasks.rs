@@ -16,9 +16,7 @@ pub async fn list(ctx: &QueryCtx) -> Result<Vec<Doc<Task>>> {
 #[mutation]
 pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Task>> {
     let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err(UserError::new("empty_text", "A task needs some text").into());
-    }
+    ensure_user!(!text.is_empty(), "empty_text", "A task needs some text");
     ctx.db.insert(Task { text, done: false }).await
 }
 

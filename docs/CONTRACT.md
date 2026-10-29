@@ -72,7 +72,7 @@ Rules:
   the *type* namespace, so it never clashes with the fn or with local variables named `list`. Call other functions
   through the runtime with turbofish: `ctx.run_query::<list>(args)`, `ctx.run_mutation::<add>(args)`,
   `ctx.run_action::<..>(args)`, `app.query::<list>(args)`, where `args` is the generated args struct or a tuple of the
-  params (`(x,)` for one param, `()` for none).
+  params (`(x,)` or just `x` for one param, `()` for none).
 
 ### 1.1 Core types (in `rxferrix`, re-exported by the prelude)
 
@@ -2785,7 +2785,8 @@ isn't a wildcard (400 if none); with no names at all, the requested host. Every 
 certificates (`--https`) need the crate's `acme` feature (default); without it, `--https` fails at startup and
 certificate files still work.
 
-**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme` and `thumbnails` are on by default, `olap` is off.
+**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme` and `thumbnails` are on by default; `olap`, `chrono` and
+`uuid` are off.
 `default-features = false` (then `features = [...]` for the ones wanted) leaves out the dependencies of those that
 aren't needed, e.g. about 60 crates for a server behind a TLS-terminating proxy that makes no thumbnails.
 

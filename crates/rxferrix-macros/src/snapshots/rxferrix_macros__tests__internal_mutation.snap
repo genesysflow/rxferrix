@@ -25,6 +25,11 @@ impl ::core::convert::From<(i32,)> for __rxferrix_args_im {
         Self { x: __rxferrix_tuple.0 }
     }
 }
+impl ::core::convert::From<i32> for __rxferrix_args_im {
+    fn from(x: i32) -> Self {
+        Self { x }
+    }
+}
 const _: () = {
     ::rxferrix::__private::assert_wire_arg::<i32>();
     ::rxferrix::__private::assert_wire_output::<i32>();

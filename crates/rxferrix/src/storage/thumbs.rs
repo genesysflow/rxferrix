@@ -14,15 +14,24 @@
 //!   variant is generated once. Deleting the file deletes its thumbnails, and the orphan sweep removes thumbnails
 //!   whose file is gone. The ETag of a variant is `"<sha256>.t1.<W>x<H>.<fit>"` (`t1`: the thumbnailer version).
 //! - At most a few thumbnails are generated at once (a semaphore), each on a blocking thread.
+//! - Built with the crate's `thumbnails` feature (default). Without it, thumbnail requests get a 501
+//!   (`thumbnails_unavailable`).
 
 use std::fmt;
+#[cfg(feature = "thumbnails")]
 use std::io::Cursor;
 
+#[cfg(feature = "thumbnails")]
 use image::codecs::jpeg::JpegEncoder;
+#[cfg(feature = "thumbnails")]
 use image::imageops::FilterType;
+#[cfg(feature = "thumbnails")]
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use super::config::StorageConfig;
+
+/// Whether thumbnails can be rendered (the `thumbnails` feature).
+pub(crate) const AVAILABLE: bool = cfg!(feature = "thumbnails");
 
 /// Bumped when the output of [`render`] changes, so cached variants get new ETags and keys.
 pub(crate) const VERSION: &str = "t1";
@@ -120,6 +129,7 @@ pub(crate) fn content_type_of(bytes: &[u8]) -> &'static str {
 
 /// Why a thumbnail couldn't be made. The messages are safe to show to clients.
 #[derive(Debug)]
+#[cfg_attr(not(feature = "thumbnails"), allow(dead_code))]
 pub(crate) enum ThumbError {
     /// Not a JPEG, PNG, WebP or GIF.
     Unsupported,
@@ -143,6 +153,7 @@ impl fmt::Display for ThumbError {
 
 /// Decode `source` (checking its dimensions before decoding anything) and render `spec`. CPU-bound: call it on a
 /// blocking thread.
+#[cfg(feature = "thumbnails")]
 pub(crate) fn render(source: &[u8], spec: ThumbSpec, max_pixels: u64) -> Result<Vec<u8>, ThumbError> {
     let reader = || -> Result<ImageReader<Cursor<&[u8]>>, ThumbError> {
         let reader = ImageReader::new(Cursor::new(source))
@@ -193,10 +204,17 @@ pub(crate) fn render(source: &[u8], spec: ThumbSpec, max_pixels: u64) -> Result<
     Ok(out)
 }
 
+/// Without the `thumbnails` feature nothing is decoded: callers check [`AVAILABLE`] first.
+#[cfg(not(feature = "thumbnails"))]
+pub(crate) fn render(_source: &[u8], _spec: ThumbSpec, _max_pixels: u64) -> Result<Vec<u8>, ThumbError> {
+    Err(ThumbError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "thumbnails")]
     fn png(width: u32, height: u32, alpha: bool) -> Vec<u8> {
         let image = if alpha {
             DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| {
@@ -210,6 +228,7 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "thumbnails")]
     fn dims(bytes: &[u8]) -> (u32, u32) {
         image::load_from_memory(bytes).unwrap().into_rgb8().dimensions()
     }
@@ -233,6 +252,7 @@ mod tests {
         assert!(ThumbSpec::parse("65x64", None, &only).unwrap_err().contains("allowed: 64x64, 256x256"));
     }
 
+    #[cfg(feature = "thumbnails")]
     #[test]
     fn fits_and_formats() {
         let source = png(400, 200, false);

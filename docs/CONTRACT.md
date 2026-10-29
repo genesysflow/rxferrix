@@ -888,7 +888,8 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
   `image::Limits`); EXIF orientation applied; `contain` never upscales, `cover` fills exactly; PNG output when the
   image has alpha, else JPEG (quality 85). Each variant is cached at `<prefix>/_thumbs/<id>/<W>x<H>-<fit>` and has
   the ETag `"<sha256>.t1.<W>x<H>.<fit>"`. At most min(cores, 4) thumbnails are generated at once, on blocking
-  threads.
+  threads. Needs the crate's `thumbnails` feature (default); without it, thumbnail requests get 501
+  `thumbnails_unavailable`.
 - **Configuration.**
   ```rust
   pub struct StorageConfig {
@@ -2780,7 +2781,13 @@ connections keep theirs), a pair that doesn't (a half-written renewal, a mismatc
 the log per change. The HTTP→HTTPS redirect (`--http-redirect`) keeps the requested host when it is one of the
 `--https` domains or of the certificate's DNS names (a `*.` name matches one label), else uses the first of them that
 isn't a wildcard (400 if none); with no names at all, the requested host. Every HTTPS response gets
-`Strict-Transport-Security: max-age=31536000` unless it sets its own (`--no-hsts` turns it off).
+`Strict-Transport-Security: max-age=31536000` unless it sets its own (`--no-hsts` turns it off). Let's Encrypt
+certificates (`--https`) need the crate's `acme` feature (default); without it, `--https` fails at startup and
+certificate files still work.
+
+**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme` and `thumbnails` are on by default, `olap` is off.
+`default-features = false` (then `features = [...]` for the ones wanted) leaves out the dependencies of those that
+aren't needed, e.g. about 60 crates for a server behind a TLS-terminating proxy that makes no thumbnails.
 
 **Logs**: `serve --log-format json|pretty|compact` (`RXFERRIX_LOG_FORMAT`; default `pretty` on a terminal, `json`
 otherwise) formats the server's `tracing` output on stdout. `json` writes one object per line: `timestamp` (RFC 3339),

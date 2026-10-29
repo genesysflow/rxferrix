@@ -98,18 +98,18 @@ pub mod fns {
     }
 }
 
-fn env(name: &str, default: u64) -> u64 {
+pub(crate) fn env(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn percentile(sorted: &[Duration], p: f64) -> Duration {
+pub(crate) fn percentile(sorted: &[Duration], p: f64) -> Duration {
     if sorted.is_empty() {
         return Duration::ZERO;
     }
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-fn report(name: &str, receipts: &[Vec<(u64, Instant)>], commits: &[(u64, Instant)]) -> String {
+pub(crate) fn report(name: &str, receipts: &[Vec<(u64, Instant)>], commits: &[(u64, Instant)]) -> String {
     let mut latencies = Vec::new();
     let mut missing = 0;
     for r in receipts {

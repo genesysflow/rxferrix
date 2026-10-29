@@ -49,6 +49,28 @@ macro_rules! sum_fields {
 sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
 pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
 
+/// Types a function's arguments may have: they are decoded from JSON and declared in TypeScript. The function macros
+/// emit `assert_wire_arg::<Ty>()` per argument, so a type of the app's own that lacks the derives gets this hint on
+/// top of the serde and ts-rs errors.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be an argument of a rxferrix function: it must deserialize from JSON and have a TS type",
+    label = "missing `#[rxferrix::object]`?",
+    note = "for a struct or enum of your own, add `#[rxferrix::object]` to it (it derives `Serialize`, `Deserialize` and `TS`)"
+)]
+pub trait WireArg {}
+impl<T: DeserializeOwned + ts_rs::TS> WireArg for T {}
+pub const fn assert_wire_arg<T: WireArg>() {}
+
+/// Types a function may return: serialized to JSON and declared in TypeScript (see [`WireArg`]).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be returned by a rxferrix function: it must serialize to JSON and have a TS type",
+    label = "missing `#[rxferrix::object]`?",
+    note = "for a struct or enum of your own, add `#[rxferrix::object]` to it (it derives `Serialize`, `Deserialize` and `TS`)"
+)]
+pub trait WireOutput {}
+impl<T: Serialize + ts_rs::TS> WireOutput for T {}
+pub const fn assert_wire_output<T: WireOutput>() {}
+
 /// Every `#[table]` registers its `table_def` here.
 #[linkme::distributed_slice]
 pub static TABLES: [fn() -> TableDef];

@@ -1,0 +1,11 @@
+error: field `cache` can't be used in index `by_cache`: with #[serde(skip)] it isn't stored under its own key
+ --> tests/ui/table_index_unstored_field.rs:6:21
+  |
+6 | #[index(by_cache = [cache])]
+  |                     ^^^^^
+
+error: field `extra` can't be used in index `by_extra`: with #[serde(flatten)] it isn't stored under its own key
+ --> tests/ui/table_index_unstored_field.rs:7:21
+  |
+7 | #[index(by_extra = [extra])]
+  |                     ^^^^^

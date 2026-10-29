@@ -1,6 +1,6 @@
 {
   "name": "@rxferrix/svelte",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Svelte 5 (runes) bindings for RxFerrix",
   "license": "MIT",
   "homepage": "https://genesysflow.github.io/rxferrix/",

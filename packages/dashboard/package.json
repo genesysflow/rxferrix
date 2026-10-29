@@ -1,6 +1,6 @@
 {
   "name": "@rxferrix/dashboard",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "The RxFerrix admin dashboard (Svelte 5 SPA), embedded into the rxferrix crate and served at /_/",
   "type": "module",

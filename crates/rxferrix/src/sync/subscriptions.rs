@@ -618,6 +618,45 @@ impl CachedResult {
 const OPEN: u64 = u64::MAX;
 
 /// One result of a shared query: computed at `ts`, valid at every ts in `ts..=through`.
+/// A finished run, ready to be recorded: its result serialized and hashed, its read set as sorted intervals. Built in
+/// the runner task (`Prepared::new`), so the manager's single task doesn't spend O(result size) per run.
+struct Prepared {
+    ts: u64,
+    result: Arc<CachedResult>,
+    ranges: Vec<(IndexId, Interval)>,
+    auth_deps: AuthDeps,
+    reads_clock: bool,
+    /// It hit the query timeout ([`Manager::retries`]).
+    timed_out: bool,
+}
+
+impl Prepared {
+    fn new(run: QueryRun, dev: bool) -> Prepared {
+        let timed_out = run.result.as_ref().is_err_and(|e| e.chain().any(|c| c.is::<crate::error::QueryTimeout>()));
+        let log_lines = crate::log::for_client(dev, run.log_lines);
+        // Serialized here, once: the hash and every subscriber's frame use this text.
+        let outcome = run.result.map(QueryValue::new).map_err(|e| ClientError::from_anyhow(&e, dev));
+        // Log lines don't count towards the hash: a rerun with the same result sends nothing.
+        let hash = match &outcome {
+            Ok(value) => hash_bytes(b"ok", value.json().as_bytes()),
+            Err(e) => {
+                let error = serde_json::to_vec(&serde_json::json!([e.message, e.data])).unwrap_or_default();
+                hash_bytes(b"err", &error)
+            }
+        };
+        let ranges: BTreeSet<(IndexId, Interval)> =
+            run.read_set.ranges().map(|(index_id, range)| (index_id, Interval::from_range(range))).collect();
+        Prepared {
+            ts: run.ts,
+            result: Arc::new(CachedResult { hash, outcome, log_lines }),
+            ranges: ranges.into_iter().collect(),
+            auth_deps: run.auth_deps,
+            reads_clock: run.read_set.reads_clock(),
+            timed_out,
+        }
+    }
+}
+
 struct Version {
     ts: u64,
     /// The ts right before the first commit after `ts` that wrote a key in the run's read set, or [`OPEN`].
@@ -732,7 +771,7 @@ impl Conn {
 /// What runner tasks (and snapshot requests) report to the manager.
 enum Event {
     /// Job `seq` ran query `id`, in `elapsed`.
-    Ran { id: SharedId, seq: u64, run: QueryRun, elapsed: Duration },
+    Ran { id: SharedId, seq: u64, run: Prepared, elapsed: Duration },
     /// A runner stopped in the middle of job `seq` (it panicked; user code can't make it, its panics are caught).
     Lost { id: SharedId, seq: u64 },
     /// A runner of generation `generation` and lane `lane` stopped and released its snapshot.
@@ -1143,7 +1182,7 @@ impl Manager {
             return;
         }
         let id = self.create(key, args, identity);
-        self.apply_run(id, run);
+        self.apply_run(id, Prepared::new(run, self.dev));
         // Idle if still current (else dropped), then published.
         self.release(id);
         self.sync_published(id);
@@ -1629,8 +1668,8 @@ impl Manager {
     fn spawn_runner(&mut self, app: &App, snapshot: Arc<Snapshot>, lane: usize, permit: Option<OwnedSemaphorePermit>) {
         debug_assert_eq!(snapshot.ts, self.ts);
         self.runners[lane] += 1;
-        let (generation, queue, tx, app) =
-            (self.generation, self.queue.clone(), self.events_tx.clone(), app.downgrade());
+        let (generation, queue, tx, app, dev) =
+            (self.generation, self.queue.clone(), self.events_tx.clone(), app.downgrade(), self.dev);
         tokio::spawn(async move {
             let mut guard = RunnerGuard { tx: tx.clone(), generation, lane, job: None };
             loop {
@@ -1653,6 +1692,8 @@ impl Manager {
                 let run = app.query_in_snapshot(&snapshot, &path, args, &identity, crate::guard::Origin::Client).await;
                 let elapsed = started.elapsed();
                 drop(app);
+                // Serialized, hashed and its read set sorted here, not on the manager's one task.
+                let run = Prepared::new(run, dev);
                 guard.job = None;
                 if tx.send(Event::Ran { id, seq, run, elapsed }).is_err() {
                     break;
@@ -1758,7 +1799,7 @@ impl Manager {
 
     /// A run of `id` finished: record its result as the newest version, re-key it, and try to send their update to the
     /// connections it serves (at the frontier, or at the run's ts). A result that is stale already is queued again.
-    fn finish_run(&mut self, id: SharedId, run: QueryRun) {
+    fn finish_run(&mut self, id: SharedId, run: Prepared) {
         let Some(q) = self.queries.get(&id) else { return }; // dropped meanwhile
         if q.in_flight.is_none() {
             debug_assert!(false, "a result for a query that is not in flight");
@@ -1769,8 +1810,7 @@ impl Manager {
         for &(c, qid) in &q.subscribers {
             subscribers.entry(c).or_default().push(qid);
         }
-        let timed_out = run.result.as_ref().is_err_and(|e| e.chain().any(|c| c.is::<crate::error::QueryTimeout>()));
-        if timed_out {
+        if run.timed_out {
             let attempt = self.retries.get(&id).map_or(0, |&(_, n)| n + 1);
             let wait = (RETRY_FIRST * 2u32.saturating_pow(attempt.min(16))).min(RETRY_MAX);
             self.retries.insert(id, (Instant::now() + wait, attempt));
@@ -1878,24 +1918,11 @@ impl Manager {
 
     /// Record a run of `id` as its newest version. Its validity ends at the first commit after the run's ts (up to the
     /// frontier) that wrote a key in its read set.
-    fn apply_run(&mut self, id: SharedId, run: QueryRun) {
+    fn apply_run(&mut self, id: SharedId, run: Prepared) {
         let frontier = self.ts;
-        let dev = self.dev;
         let Some(q) = self.queries.get_mut(&id) else { return };
-        let log_lines = crate::log::for_client(dev, run.log_lines);
-        // Serialized here, once: the hash and every subscriber's frame use this text.
-        let outcome = run.result.map(QueryValue::new).map_err(|e| ClientError::from_anyhow(&e, dev));
-        // Log lines don't count towards the hash: a rerun with the same result sends nothing.
-        let hash = match &outcome {
-            Ok(value) => hash_bytes(b"ok", value.json().as_bytes()),
-            Err(e) => {
-                let error = serde_json::to_vec(&serde_json::json!([e.message, e.data])).unwrap_or_default();
-                hash_bytes(b"err", &error)
-            }
-        };
-        let ranges: BTreeSet<(IndexId, Interval)> =
-            run.read_set.ranges().map(|(index_id, range)| (index_id, Interval::from_range(range))).collect();
-        let ranges: Vec<(IndexId, Interval)> = ranges.into_iter().collect();
+        let Prepared { ts: _, result, ranges, auth_deps, reads_clock, timed_out: _ } = run;
+        let hash = result.hash;
         let through = if run.ts >= frontier {
             OPEN
         } else {
@@ -1914,13 +1941,9 @@ impl Manager {
         }
         debug_assert!(q.versions.back().is_none_or(|v| v.ts < run.ts), "versions in ts order");
         let changed = q.versions.back().is_none_or(|v| v.result.hash != hash);
-        q.versions.push_back(Version {
-            ts: run.ts,
-            through,
-            result: Arc::new(CachedResult { hash, outcome, log_lines }),
-        });
-        q.deps = run.auth_deps;
-        q.reads_clock = run.read_set.reads_clock();
+        q.versions.push_back(Version { ts: run.ts, through, result });
+        q.deps = auth_deps;
+        q.reads_clock = reads_clock;
         (q.in_flight, q.job) = (None, None);
         if ranges != q.ranges {
             for (index_id, interval) in &q.ranges {

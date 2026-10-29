@@ -1,5 +1,7 @@
 //! Integration tests. A single test binary so that every hand-written expansion in `common` is linked once.
 
+#[cfg(all(feature = "chrono", feature = "uuid"))]
+mod chrono_uuid;
 mod common;
 
 mod access;

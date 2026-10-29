@@ -57,6 +57,8 @@ url = "2.5.8"
 ipnet = "2.12.2"
 cron = "0.17.0"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# `Uuid` in tables and function signatures (feature `uuid`).
+uuid = { version = "1", default-features = false, features = ["serde"], optional = true }
 # Per-cron time zones (IANA database compiled in).
 chrono-tz = "0.10.4"
 # Image thumbnails (`GET /api/storage/{id}?thumb=WxH`): decoders and encoders for the formats it accepts only.
@@ -89,6 +91,11 @@ s3 = ["object_store/aws"]
 dashboard = []
 # Analytics: a columnar copy of the data in an embedded DuckDB, queried with read-only SQL from actions (`--olap`).
 olap = ["dep:duckdb", "dep:parquet"]
+# chrono's date and time types (`DateTime<Utc>`, `NaiveDate`, ...) in tables and function signatures: serde support and
+# their TypeScript type (`string`, the RFC 3339 form serde writes).
+chrono = ["chrono/serde", "ts-rs/chrono-impl"]
+# `uuid::Uuid` in tables and function signatures (a `string` in TypeScript).
+uuid = ["dep:uuid", "ts-rs/uuid-impl"]
 
 # Zero-downtime takeover (`serve --takeover`): the listening sockets are passed to the new process over a Unix socket.
 [target.'cfg(unix)'.dependencies]

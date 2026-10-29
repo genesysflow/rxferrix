@@ -201,6 +201,7 @@ pub fn generate(registry: &Registry, tables: &[TableDef]) -> crate::Result<Gener
                     dev_only: def.dev_only,
                     args_ts,
                     output_ts,
+                    docs: def.docs.to_string(),
                 }
             })
             .collect();
@@ -329,7 +330,9 @@ pub fn render(functions: &[FunctionInfo], tables: &[TableTs], types: &[TypeDecl]
         render_tree(&mut body, &dev_root, 1);
         body.push_str("} as const;\n");
     }
-    let used = identifiers(&body);
+    // Doc comments don't count (and their prose, apostrophes included, mustn't be read as code).
+    let code = without_comments(&body);
+    let used = identifiers(&code);
     let imported: Vec<&str> =
         ["Doc", "Id"].into_iter().chain(user_types.keys().copied()).filter(|n| used.contains(*n)).collect();
     let mut api = String::from(HEADER);
@@ -407,6 +410,8 @@ fn render_tree(out: &mut String, level: &BTreeMap<String, Node>, depth: usize) {
         let key = property_key(key);
         match node {
             Node::Function(f) => {
+                let docs: Vec<String> = f.docs.lines().map(|l| l.trim_end().to_string()).collect();
+                out.push_str(&jsdoc(trim_blank_lines(&docs), &pad));
                 let kind = match f.kind {
                     FunctionKind::Query => "query",
                     FunctionKind::Mutation => "mutation",
@@ -504,6 +509,25 @@ fn format_object(inner: &str, depth: usize) -> String {
     out.push_str(&"  ".repeat(depth));
     out.push('}');
     out
+}
+
+/// `ts` without its `/* .. */` comments.
+fn without_comments(ts: &str) -> String {
+    let mut out = String::with_capacity(ts.len());
+    let mut rest = ts;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        rest = rest[start + 2..].find("*/").map_or("", |end| &rest[start + 2 + end + 2..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `lines` without its leading and trailing empty lines.
+fn trim_blank_lines(lines: &[String]) -> &[String] {
+    let start = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let end = lines.iter().rposition(|l| !l.is_empty()).map_or(start, |i| i + 1);
+    &lines[start..end]
 }
 
 /// `/** text */` for one line, a `/**` / ` * line` / ` */` block otherwise; each line starts with `pad`.
@@ -669,6 +693,7 @@ mod tests {
             dev_only: false,
             args_ts: args.into(),
             output_ts: out.into(),
+            docs: String::new(),
         }
     }
 

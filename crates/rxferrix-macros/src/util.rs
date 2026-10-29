@@ -160,6 +160,29 @@ pub fn check_owned_type(ty: &syn::Type, what: &str, errors: &mut Errors) {
     V { what, errors }.visit_type(ty);
 }
 
+/// Give every `Option` field with `#[serde(skip_serializing_if = ..)]` a `#[ts(optional = nullable)]`: serde leaves the
+/// key out when it is `None`, so the TS type must say `field?: T | null`, not `field: T | null` (a `!== null` check
+/// would let `undefined` through). Fields that already have a `#[ts(optional ..)]` are left alone.
+pub fn mark_skipped_options_optional(fields: &mut syn::Fields) {
+    let syn::Fields::Named(named) = fields else { return };
+    for field in &mut named.named {
+        let skips = field.attrs.iter().filter(|a| a.path().is_ident("serde")).any(|a| {
+            attr_items(a).is_some_and(|items| items.iter().any(|i| i.key().is_some_and(|k| k == "skip_serializing_if")))
+        });
+        let optional =
+            field.attrs.iter().filter(|a| a.path().is_ident("ts")).any(|a| {
+                attr_items(a).is_some_and(|items| items.iter().any(|i| i.key().is_some_and(|k| k == "optional")))
+            });
+        let is_option = match &field.ty {
+            syn::Type::Path(p) => p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == "Option"),
+            _ => false,
+        };
+        if skips && is_option && !optional {
+            field.attrs.push(syn::parse_quote!(#[ts(optional = nullable)]));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::camel_case;

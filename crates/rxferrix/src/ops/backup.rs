@@ -888,8 +888,13 @@ pub fn apply_staged(
         let path = dir.join(&name);
         if path.exists() {
             std::fs::create_dir_all(previous)?;
-            std::fs::rename(&path, previous.join(&name)).with_context(|| format!("moving {} aside", path.display()))?;
-            moved_aside.push(name);
+            match std::fs::rename(&path, previous.join(&name)) {
+                Ok(()) => moved_aside.push(name),
+                // A `-wal` / `-shm` can vanish between the check and the rename: the last connection to the database,
+                // closing just now, deletes them. Nothing left to move.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(anyhow::Error::from(e).context(format!("moving {} aside", path.display()))),
+            }
         }
     }
     for name in ["data.db", "aux.db", SECRET_FILE] {

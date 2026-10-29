@@ -1004,6 +1004,7 @@ fn serve(
         } else {
             let lock = crate::ops::DirLock::acquire(&args.dir)?;
             crate::ops::takeover::recover(&args.dir)?;
+            crate::ops::backup::finish_interrupted_restore(&args.dir)?;
             (lock, Vec::new())
         };
         // Released only once the runtime is gone (below), with every connection to the database closed.

@@ -14,7 +14,8 @@ encrypted like the other settings secrets): it takes effect without a restart, a
 create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md §4.2). `todo-server restore
 <archive|s3://…>` is offline: it refuses while a server holds the data directory, checks the archive (checksums,
 SQLite integrity, schema, indexes) and only then swaps the database, keeping the old files in
-`<dir>/pre-restore-<time>/`.
+`<dir>/pre-restore-<time>/`; the two newest of those are kept, older ones are deleted. A restore that a crash cuts
+short is finished at the next start (or the next `restore`), so the server never opens the data half swapped.
 
 ## Restoring from the dashboard
 

@@ -2,6 +2,9 @@
 use rxferrix::prelude::*;
 use rxferrix_macros::*;
 
+// Serde derives but no TS type: what `#[rxferrix::object]` would add.
+#[derive(rxferrix::__private::serde::Serialize, rxferrix::__private::serde::Deserialize)]
+#[serde(crate = "rxferrix::__private::serde")]
 pub struct Filter {
     pub done: bool,
 }

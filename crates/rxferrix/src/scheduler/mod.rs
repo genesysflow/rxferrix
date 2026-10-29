@@ -60,6 +60,10 @@ pub struct SchedulerOptions {
     /// Delay before the first retry of an action scheduled `with_retries(n)`; doubled for each further retry (at
     /// most 1 hour). Default 1 second.
     pub retry_backoff: Duration,
+    /// How much of each retry delay is random, from 0 (none) to 1 (anywhere between no wait and the full delay):
+    /// a retry waits between `1 - retry_jitter` and 1 times its backoff. Spreads out retries of actions that failed
+    /// together. For actions that don't set their own ([`Workpool::jitter`], `ScheduleWith::jitter`). Default 0.
+    pub retry_jitter: f64,
     /// How long a canceled action may keep running after its job was canceled before it is aborted (dropped at its
     /// next `.await`). Default 5 seconds. See [`cancellation`].
     pub cancel_grace: Duration,
@@ -83,11 +87,13 @@ pub struct Workpool {
     pub retries: u32,
     /// The retry backoff of its actions. Default: the scheduler's (`SchedulerOptions::retry_backoff`, doubling).
     pub backoff: Option<Backoff>,
+    /// The retry jitter of its actions. Default: the scheduler's (`SchedulerOptions::retry_jitter`).
+    pub jitter: Option<f64>,
 }
 
 impl Workpool {
     pub fn new(name: impl Into<String>) -> Workpool {
-        Workpool { name: name.into(), max_parallelism: DEFAULT_CONCURRENCY, retries: 0, backoff: None }
+        Workpool { name: name.into(), max_parallelism: DEFAULT_CONCURRENCY, retries: 0, backoff: None, jitter: None }
     }
 
     pub fn max_parallelism(mut self, n: usize) -> Workpool {
@@ -103,6 +109,13 @@ impl Workpool {
     /// Wait `initial` before the first retry, then `base` times longer before each further one (at most an hour).
     pub fn backoff(mut self, initial: Duration, base: f64) -> Workpool {
         self.backoff = Some(Backoff { initial_ms: initial.as_secs_f64() * 1000.0, base });
+        self
+    }
+
+    /// Make each retry wait a random `1 - jitter` to 1 times its backoff (`jitter` from 0 to 1), so actions that
+    /// failed together don't all retry at once. See [`SchedulerOptions::retry_jitter`].
+    pub fn jitter(mut self, jitter: f64) -> Workpool {
+        self.jitter = Some(jitter);
         self
     }
 }
@@ -124,6 +137,7 @@ impl Default for SchedulerOptions {
             retention: Some(DEFAULT_RETENTION),
             cleanup_interval: Duration::from_secs(3600),
             retry_backoff: Duration::from_secs(1),
+            retry_jitter: 0.0,
             cancel_grace: DEFAULT_CANCEL_GRACE,
             crons: Vec::new(),
             pools: Vec::new(),
@@ -209,10 +223,11 @@ pub async fn schedule(
     pool: Option<String>,
     on_complete: Option<OnComplete>,
     backoff: Option<Backoff>,
+    jitter: Option<f64>,
 ) -> Result<Id<ScheduledJob>> {
     let kind = store::kind_of(&path)?;
     let max_attempts = if kind == JobKind::Action { max_attempts.max(1) } else { 1 };
-    let job = NewJob { path, kind, args, run_at, max_attempts, origin, pool, on_complete, backoff };
+    let job = NewJob { path, kind, args, run_at, max_attempts, origin, pool, on_complete, backoff, jitter };
     store::insert(&ctx.db, job, ctx.now()).await
 }
 
@@ -302,6 +317,7 @@ pub(crate) fn rerun(job: ScheduledJob, now: f64) -> Result<NewJob> {
         pool: job.pool,
         on_complete: job.on_complete,
         backoff: job.backoff,
+        jitter: job.jitter,
     })
 }
 

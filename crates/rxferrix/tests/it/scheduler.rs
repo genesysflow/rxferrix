@@ -1026,13 +1026,18 @@ async fn subscribers_see_the_writes_of_scheduled_mutations() {
     };
     assert_eq!(next_values().await, json!([]));
 
-    // The background runner picks the job up (woken by the commit) and the subscriber sees both writes.
+    // The background runner picks the job up (woken by the commit) and the subscriber sees both writes. On a slow
+    // machine the scheduled write can land before the first rerun, and one transition then carries both.
     t.mutation::<add_and_schedule>(("live".to_string(), 50, false)).await.unwrap();
-    let first = next_values().await;
-    assert_eq!(first.as_array().unwrap().len(), 1, "{first}");
-    let second = next_values().await;
-    let texts: Vec<_> = second.as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
-    assert_eq!(texts, vec!["live", "live (later)"]);
+    let texts = |v: &Value| -> Vec<String> {
+        v.as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect()
+    };
+    let mut seen = texts(&next_values().await);
+    if seen.len() == 1 {
+        assert_eq!(seen, vec!["live"]);
+        seen = texts(&next_values().await);
+    }
+    assert_eq!(seen, vec!["live", "live (later)"]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

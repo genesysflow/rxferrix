@@ -211,7 +211,8 @@ So that no client can grow the server's memory without bound:
   (`SILENCE_LIMIT`; the server pings every 15 s and a client answers every `Ping` with `Pong`). Time spent with a
   mutation or action held (above) doesn't count: the client's answers are waiting unread behind it. A frame that takes over 30 s to send (a client that
   stopped reading) closes the socket too.
-- A query running longer than the server's `query_timeout` (default 30 s) fails.
+- A query running longer than the server's `query_timeout` (default 30 s) fails. A subscription to it runs again
+  after 1 s, then after twice as long each time it times out again (up to a minute), for as long as it is subscribed.
 
 ## Client rules
 

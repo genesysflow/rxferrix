@@ -1424,8 +1424,8 @@ pub async fn prepare_point_in_time(
             header.to
         );
         let file = scratch.join(segment_name(seg.from, seg.to));
-        let to = file.clone();
-        tokio::task::spawn_blocking(move || std::fs::write(&to, &raw)).await??;
+        let dest = file.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(&dest, &raw)).await??;
         files.push(file);
         for e in &entries {
             if e.ts <= ts {

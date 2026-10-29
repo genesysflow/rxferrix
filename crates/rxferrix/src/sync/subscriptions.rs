@@ -617,7 +617,6 @@ impl CachedResult {
 /// [`Version::through`] of a result that no known commit has invalidated: valid at the manager's ts.
 const OPEN: u64 = u64::MAX;
 
-/// One result of a shared query: computed at `ts`, valid at every ts in `ts..=through`.
 /// A finished run, ready to be recorded: its result serialized and hashed, its read set as sorted intervals. Built in
 /// the runner task (`Prepared::new`), so the manager's single task doesn't spend O(result size) per run.
 struct Prepared {
@@ -657,6 +656,7 @@ impl Prepared {
     }
 }
 
+/// One result of a shared query: computed at `ts`, valid at every ts in `ts..=through`.
 struct Version {
     ts: u64,
     /// The ts right before the first commit after `ts` that wrote a key in the run's read set, or [`OPEN`].

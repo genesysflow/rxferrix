@@ -362,7 +362,11 @@ pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOp
   `ChannelInfo | null`, `PaginationResult<MessageView>`), and declares them in `dataModel.ts`
   (`__private::ts_output`); only table types and the generated args structs are written out as object types
   (`__private::ts_inline`). Field doc comments become JSDoc on their own lines: an object type with a documented field
-  is laid out one field per line, indented (`codegen::format_ts`); a one-line type doc becomes `/** … */`.
+  is laid out one field per line, indented (`codegen::format_ts`); a one-line type doc becomes `/** … */`. A
+  function's doc comment becomes the JSDoc of its entry in `api` / `devApi` (`FunctionDef::docs`). In `#[object]`
+  and `#[table]` types, an `Option` field with `#[serde(skip_serializing_if = ..)]` is `field?: T | null` (the key is
+  left out when `None`). `rxferrix codegen --out` defaults to `RXFERRIX_CODEGEN_OUT` (set by apps made with
+  `rxferrix new`), else `rxferrix-generated`.
 - **Clients** also have `usePaginatedQueryWithStatus` (`@rxferrix/react`): the same, but a failed page comes back as
   `error` (with the pages that did load still in `results`) instead of being thrown. (`@rxferrix/svelte`'s
   `usePaginatedQuery` always returns `error`.)

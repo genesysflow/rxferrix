@@ -55,6 +55,7 @@ static __RXFERRIX_FN_ia: ::rxferrix::__private::FunctionDef = ::rxferrix::__priv
     name: "ia",
     visibility: ::rxferrix::__private::Visibility::Internal,
     dev_only: false,
+    docs: "",
     handler: ::rxferrix::__private::Handler::Action(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
         let __rxferrix_decoded: __rxferrix_args_ia = ::rxferrix::__private::decode_args(
             "ia",

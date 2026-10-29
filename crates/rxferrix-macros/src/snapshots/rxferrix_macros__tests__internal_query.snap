@@ -45,6 +45,7 @@ static __RXFERRIX_FN_iq: ::rxferrix::__private::FunctionDef = ::rxferrix::__priv
     name: "iq",
     visibility: ::rxferrix::__private::Visibility::Internal,
     dev_only: false,
+    docs: "",
     handler: ::rxferrix::__private::Handler::Query(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
         let __rxferrix_decoded: __rxferrix_args_iq = ::rxferrix::__private::decode_args(
             "iq",

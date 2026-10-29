@@ -144,6 +144,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     if !strukt.generics.params.is_empty() || strukt.generics.where_clause.is_some() {
         errors.error(&strukt.generics, "#[table] structs cannot be generic");
     }
+    crate::util::mark_skipped_options_optional(&mut strukt.fields);
     let named = match &strukt.fields {
         syn::Fields::Named(n) => Some(n),
         syn::Fields::Unnamed(u) => {

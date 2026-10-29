@@ -229,6 +229,8 @@ pub struct FunctionDef {
     /// `#[query(dev_only)]` (etc.): refused unless the app runs in dev mode (`--dev`), and generated into `devApi`
     /// instead of `api`.
     pub dev_only: bool,
+    /// The fn's doc comment (lines joined by `\n`; empty without one): the JSDoc of its entry in the generated `api`.
+    pub docs: &'static str,
     pub handler: Handler,
     /// TS signature for codegen: (args TS type, output TS type).
     pub ts: fn() -> (String, String),

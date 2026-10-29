@@ -304,6 +304,20 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
             quote_spanned!(ty.span()=> ::rxferrix::__private::assert_wire_output::<#ty>();)
         }))
         .collect();
+    // The fn's doc comment (one line per `#[doc]`), for the JSDoc of its entry in the generated `api`.
+    let docs = func
+        .attrs
+        .iter()
+        .filter_map(|a| match &a.meta {
+            syn::Meta::NameValue(nv) if nv.path.is_ident("doc") => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(s.value()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .map(|line| line.strip_prefix(' ').map(str::to_string).unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     let name_str = name.unraw().to_string();
     let args_ident = format_ident!("__rxferrix_args_{}", name, span = name.span());
     let static_ident = format_ident!("__RXFERRIX_FN_{}", name, span = name.span());
@@ -390,6 +404,7 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
                 name: #name_str,
                 visibility: ::rxferrix::__private::Visibility::#visibility,
                 dev_only: #dev_only,
+                docs: #docs,
                 handler: ::rxferrix::__private::Handler::#variant(#body),
                 ts: #ts,
             };

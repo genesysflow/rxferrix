@@ -340,6 +340,22 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
     });
     let arg_idents: Vec<_> = args.iter().map(|a| &a.ident).collect();
     let arg_types: Vec<_> = args.iter().map(|a| &a.ty).collect();
+    // One parameter: the value itself converts too (`t.mutation::<add>("hi".to_string())`, not only `(x,)`). It can't
+    // overlap the tuple impl: `A` and `(A,)` are different types.
+    let single_from = match args.as_slice() {
+        [only] => {
+            let (ty, ident) = (&only.ty, &only.ident);
+            quote! {
+                #(#cfgs)*
+                impl ::core::convert::From<#ty> for #args_ident {
+                    fn from(#ident: #ty) -> Self {
+                        Self { #ident }
+                    }
+                }
+            }
+        }
+        _ => quote!(),
+    };
     let tuple_var = syn::Ident::new("__rxferrix_tuple", Span::mixed_site());
     let from_param = if args.is_empty() { quote!(_) } else { quote!(#tuple_var) };
     let from_fields = args.iter().enumerate().map(|(i, a)| {
@@ -435,6 +451,8 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
                 Self { #(#from_fields),* }
             }
         }
+
+        #single_from
 
         #(#cfgs)*
         const _: () = {

@@ -418,7 +418,8 @@ async fn user_error_helpers() {
     let err = t.mutation::<notes::rename_note>((id, "hello".to_string())).await.unwrap_err();
     assert_eq!(code(err), Some(("unchanged".into(), "the note already says \"hello\"".into())));
     t.mutation::<notes::rename_note>((id, "bye".to_string())).await.unwrap();
-    t.mutation::<notes::remove>((id,)).await.unwrap();
+    // One parameter: the value itself, not a one-element tuple.
+    t.mutation::<notes::remove>(id).await.unwrap();
     let err = t.mutation::<notes::rename_note>((id, "again".to_string())).await.unwrap_err();
     assert_eq!(code(err).map(|c| c.0), Some("not_found".into()));
     // Not a user error: none.

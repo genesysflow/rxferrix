@@ -1,127 +1,105 @@
-# Deploys with no downtime
+# Update a running app
 
-The usual way to deploy a new version is to stop the old server and start the new one. For a few seconds, requests
-fail. With RxFerrix, the new version starts **next to** the running one and takes over from it. No request fails, no
-write is lost, and the switch pauses requests for well under a second.
+Use `serve --takeover` to prepare a new version while the old one continues serving. The new process builds and validates a copy of the database, catches up with writes, then replaces the old process.
 
-## How it works
+This reduces interruption during an update. It still involves a short handover pause and WebSocket reconnects. The supplied proxy configurations retry connections during the switch; arbitrary deployment setups do not automatically get that behavior.
 
-1. You start the new version on the same data directory. The old one keeps serving.
-2. The new version copies the database and opens the copy with the new code: it builds new indexes, checks every
-   table against the new types and finds pending [migrations](/guide/migrations).
-3. It catches up with what the old server wrote meanwhile, checking those documents too.
-4. The old server stops accepting requests, lets the open ones finish, and asks WebSocket clients to reconnect.
-5. The new version applies the last writes, swaps the copy in and starts serving.
+## Check the new version first
 
-Steps 4 and 5 take about 0.2–0.5 s under write load in our tests. During that time requests wait rather than fail.
-If writes come in faster than the new version can replay them, step 3 stops after 30 s and the rest is replayed in
-step 5, so the pause is longer but the takeover still ends.
-The old server interrupts a backup or replication snapshot it is taking, and lets go of the data directory only once
-every connection to the database is closed, so the swap never moves a file it still uses.
-A mutation that a reconnecting client sends again still runs only once. The previous database is kept in
-`<data dir>/takeover/previous/` until the next successful takeover replaces it (an attempt that gives up leaves it).
-
-::: tip If the new version can't read your data
-Say a field's type changed and existing documents don't fit, with no migration for it. The new version notices in
-step 2, prints which documents don't fit, and exits. The old server keeps serving and never notices.
-
-It also checks, before the old server hands over, that it can listen as configured (the TLS certificate files load,
-the `--https` domains are valid) and that `--replicate-to` names a usable target. What runs only after the handover
-isn't covered: an `on_start` hook that fails, or a storage backend that can't be reached, stops the new version with
-the old one already gone. Test those before deploying.
-
-To find out before deploying, run `my-app check --dir <data dir>`. It does step 2 on a copy while the server runs,
-and is handy in CI.
-:::
-
-## On a server with systemd
-
-[`deploy/rxferrix.service`](https://github.com/genesysflow/rxferrix/blob/master/deploy/rxferrix.service) is set up for it.
-Install the new binary over the old one, then reload:
+Run the new binary against the existing data directory:
 
 ```sh
-sudo install -m 0755 dist/my-app /usr/local/bin/my-app
-sudo systemctl reload rxferrix          # runs `my-app serve … --takeover` next to the running server
-journalctl -u rxferrix -f               # if the new version refused, this says why
+./my-app-v2 check --dir /var/lib/my-app
 ```
 
-Without systemd, start the new binary yourself with the same arguments as the running one plus `--takeover`. The
-new process takes over the listening socket, so the address doesn't change.
+`check` opens a temporary copy with the new code, prepares indexes, and validates schema compatibility. It can run while the old server is active and does not replace it.
 
-## With Docker Compose
+If stored data needs transformation, write and test a [migration](/guide/migrations). A pending migration can make startup possible, but old documents still need an on-read transformation or compatible reads until the migration reaches them.
 
-A container can't hand its process over, so the new version runs in a second container on the same volume. The
-Docker image is set up for that.
+## Start a takeover
 
-1. Start the app with [`deploy/docker/compose.yaml`](https://github.com/genesysflow/rxferrix/blob/master/deploy/docker/compose.yaml)
-   (the app behind Traefik):
+Use the same data directory and production configuration as the running server:
 
-   ```sh
-   docker build -t my-app .
-   IMAGE=my-app:latest docker compose -f deploy/docker/compose.yaml up -d
-   ```
+```sh
+./my-app-v2 serve --dir /var/lib/my-app \
+  --public-url https://app.example.com --takeover
+```
 
-2. To deploy, build the new image and run
-   [`deploy/docker/deploy.sh`](https://github.com/genesysflow/rxferrix/blob/master/deploy/docker/deploy.sh):
+Add `--migrate` if pending migrations should run after startup. Keep required auth, storage, TLS, and other deployment settings consistent.
 
-   ```sh
-   docker build -t my-app .
-   IMAGE=my-app:latest deploy/docker/deploy.sh
-   ```
+The new process prepares a database copy and follows commits from the old process. At handover, the old process drains requests and asks WebSocket clients to reconnect; the new process applies the final changes and opens the prepared database.
 
-   It starts a second container, which takes over from the first. Once the new one is healthy, it removes the old
-   one. If the new one exits instead, it removes the new one and the old one keeps serving.
+The supplied tests typically measure a 0.2–0.5 second handover under their write load. That is a measurement, not a fixed bound. If replay cannot catch up within 30 seconds, more work moves into the handover and the pause grows.
 
-## On Kubernetes
+The built-in client reconnects and restores subscriptions. Its supported mutation retry window still applies; see [Behavior and limits](/guide/things-to-know#reconnects-and-retries).
 
-[`deploy/k8s/rxferrix.yaml`](https://github.com/genesysflow/rxferrix/blob/master/deploy/k8s/rxferrix.yaml) is written for
-k3s (local-path volume, Traefik ingress). Set your image, host name and public URL in it, then:
+## Understand failure behavior
+
+A schema/index preparation failure leaves the old server serving. Before handing over, the new process also checks listener configuration, TLS inputs, and replication target configuration.
+
+Some resources are initialized only after the old process exits. A failing `on_start` hook or unavailable storage backend can stop the new process after the old one has already handed over. Test those dependencies independently.
+
+The previous database is kept at `<data dir>/takeover/previous/` until a later successful takeover replaces it. This is recovery material, not an automatic application rollback: the new server may already have accepted writes. Keep backups and plan rollback around schema and write compatibility.
+
+## Use systemd
+
+The repository's [service example](https://github.com/genesysflow/rxferrix/blob/master/deploy/rxferrix.service) runs a second process on reload. Adapt its paths and binary name, install the new binary, then:
+
+```sh
+sudo systemctl reload rxferrix
+journalctl -u rxferrix -f
+```
+
+Install new executables by replacing the file, as `install` does; do not overwrite bytes inside a running executable. A failed preparation is reported in the service log while the old process continues.
+
+## Use Docker Compose
+
+From the framework repository, the provided Compose setup runs the todo image behind Traefik:
+
+```sh
+docker build -t my-app .
+IMAGE=my-app:latest docker compose -f deploy/docker/compose.yaml up -d
+```
+
+After building a new image:
+
+```sh
+IMAGE=my-app:latest deploy/docker/deploy.sh
+```
+
+The deploy script starts a second container on the same volume, waits for its health, and removes the old container after success. If preparation fails, it removes the replacement. Adapt the image build to your actual backend before using this for another app.
+
+## Use Kubernetes
+
+The [k3s example](https://github.com/genesysflow/rxferrix/blob/master/deploy/k8s/rxferrix.yaml) uses a local-path volume and Traefik. Set its image, host, and public URL, then:
 
 ```sh
 kubectl apply -f deploy/k8s/rxferrix.yaml
-kubectl set image deployment/rxferrix app=ghcr.io/you/my-app:v2    # deploy a new version
+kubectl set image deployment/rxferrix app=ghcr.io/you/my-app:v2
 kubectl rollout status deployment/rxferrix
 ```
 
-Kubernetes starts the new pod before stopping the old one, the new pod takes over, and then the old pod is stopped.
-If the new version can't read the data, its pod keeps failing (CrashLoopBackOff) while the old pod serves; undo with
-`kubectl rollout undo deployment/rxferrix`.
+The replacement pod prepares before the old one is stopped. If preparation fails, undo the rollout while the old pod still serves. This setup keeps both pods on the same host and volume; it is not a general multi-node SQLite deployment.
 
-## Using your own setup
+## Requirements for a custom deployment
 
-The files above get these details right. If you write your own, keep to them:
+- Run both versions on the same machine with the same local data directory. They coordinate through a Unix socket in that directory.
+- In containers, keep the old process alive after handover with `RXFERRIX_AFTER_HANDOVER=wait` until the supervisor removes it. Otherwise a restart policy can start it again and trigger another takeover.
+- Route new connections to the process that accepts them and retry refused connections during the switch. The supplied Traefik setup routes through the Compose service name or Kubernetes Service cluster IP, rather than a stale per-container address list.
+- Do not give the waiting old Kubernetes pod a liveness probe that restarts it after handover.
+- With Docker 29, use Traefik 3.6 or later for Docker API compatibility.
 
-- **Same host, local disk.** Both containers (or pods) must run on the same machine and share the data directory on
-  a local volume. SQLite needs a local disk, and the two versions talk over a socket file in the data directory.
-- **Keep the old container alive.** Set `RXFERRIX_AFTER_HANDOVER=wait` (the image does). After handing over, the old
-  container idles until it is stopped. If it exited, a restart policy would start it again, and it would take the
-  data back.
-- **Route to whoever accepts.** The old container stops listening at the switch. Your proxy must send each new
-  connection to whichever container accepts it, and retry connections that are refused. With Traefik, add the
-  `retry` middleware and point the service at:
-  - the Compose service name (`http://app:8090`), not the container addresses, with Docker;
-  - the Service's cluster IP (annotation `traefik.ingress.kubernetes.io/service.nativelb: "true"`) on Kubernetes.
+## Takeover options
 
-  Pointing Traefik at the container or pod addresses doesn't work: it keeps retrying a request on the addresses it
-  knew when the request arrived, which no longer include the new server.
-- **No liveness probe** on Kubernetes. The old pod doesn't answer while it waits to be stopped, and a restart would
-  make it take over again.
-- **Use Traefik 3.6 or later** with Docker 29. Older releases can't talk to the Docker API.
+| Option | Meaning |
+| --- | --- |
+| `--takeover` or `--takeover=require` | Replace a running server; fail when none exists. |
+| `--takeover=auto` | Replace a running server, otherwise start normally. |
+| `--after-handover=exit` | Old process exits after handover; the default. |
+| `--after-handover=wait` | Old process waits without serving until stopped. |
 
-## Settings
+Environment equivalents are `RXFERRIX_TAKEOVER` and `RXFERRIX_AFTER_HANDOVER`. The repository image defaults to `auto` and `wait`.
 
-| Flag | Environment variable | Values |
-|---|---|---|
-| `--takeover` | `RXFERRIX_TAKEOVER` | `require` (the default for a bare `--takeover`): take over, fail if no server runs. `auto`: take over if a server runs, else start normally. The Docker image sets `auto`. |
-| `--after-handover` | `RXFERRIX_AFTER_HANDOVER` | `exit` (default): exit after handing over. `wait`: stay alive, serving nothing, until stopped. The Docker image sets `wait`. |
+`my-app health [url]` checks the health endpoint and exits with 0 on success. The minimal Docker image uses it instead of curl.
 
-`my-app health [url]` exits with 0 if the server's `/api/health` answers, and 1 otherwise. The image's
-`HEALTHCHECK` uses it, since the image has no curl.
-
-## How it's tested
-
-Every case above runs under write load: `bun scripts/takeover-e2e.ts` (same host and port; two ports behind a
-retrying proxy, as with containers; another network namespace), `bun scripts/docker-rollout-e2e.ts` (Docker Compose with Traefik) and
-`bun scripts/k3s-rollout-e2e.ts` (a k3s cluster in Docker). Each checks that no request fails and every
-acknowledged write is kept; the Docker and k3s tests also deploy a broken version. The protocol is specified in the
-[API contract](../CONTRACT.md) (§4.3.1).
+Framework takeover, Docker, and k3s load tests are described in [Contributing](https://github.com/genesysflow/rxferrix/blob/master/CONTRIBUTING.md#development). The [takeover reference](/CONTRACT#_4-3-1-takeover-serve-takeover-crate-ops-takeover) details the preparation and drain protocol.

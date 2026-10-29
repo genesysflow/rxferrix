@@ -1,45 +1,67 @@
-# Things to know
+# Behavior and limits
 
-- **Limits per connection and per run.** A socket may have 1024 live queries (the client refuses the 1025th with
-  `too_many_queries`) and 64 running mutations/actions;
-  queries time out after 30 s (`--query-timeout`), mutations after 5 s (`--mutation-timeout`); a client silent for 45 s (it answers pings)
-  is disconnected. They bound the server's memory whatever a client does (docs/PROTOCOL.md, Limits).
-- **Query results are cached while nothing they read changes.** Every subscriber of a query shares one result; after
-  the last one leaves it stays cached (up to 30 minutes, 64 MiB in all: `--query-cache-ttl`, `--query-cache-size`)
-  and answers the next subscriber, HTTP query or `ctx.run_query` without running, until a write touches what it read.
-  Repeated HTTP queries are cached too. A query that reads `ctx.now()` is never cached. The Overview page and
-  `/metrics` show the hit rate.
+These details affect app design even when the API is small. Use this page when deciding how to handle reconnects, time, growing lists, and write load.
 
-- **Optimistic updates are replayed** on top of every server change until the client has seen the mutation's writes (or it failed). Create ids
-  and timestamps outside the update closure (once per call), not inside it:
-  ```ts
-  const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();
-  send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: id, _creationTime: now, …args } }));
-  ```
-- **Changing a query's args shows "loading" until the new result comes**: `undefined` from `useQuery`. To keep
-  showing the previous result meanwhile (a search box, a pager), use `useQueryKeepingPrevious` in React or
-  `useQuery(ref, args, { keepPreviousData: true })` in Svelte; `isStale` tells which one it is.
-- **Query results are read-only** (frozen): the client applies the server's next diff to them, so changing one in
-  place would corrupt every later update. Copy before you change: `[...todos].sort(…)` or `todos.toSorted(…)`, and in
-  an optimistic update `store.setQuery(q, args, [item, ...current])` rather than `current.push(item)`.
-- **Scheduled functions (and crons) run without an identity**, whoever scheduled them: pass the user as an argument to
-  an internal function, e.g. `ctx.scheduler.run_after::<deliver_reminder>(delay, (channel, user, text))`.
-- **`ctx.now()` in a query is the snapshot's time, not a reactive clock.** A query reruns when its data changes, not
-  when time passes. For expiry, store the state and flip it with a scheduled mutation (`run_at`); format "5 minutes
-  ago" in the client.
-- **A query's result must depend only on its arguments and the data it reads.** In `--dev` and `TestApp`, rxferrix
-  reruns each query in the same snapshot now and then and logs a warning (also sent as a log line) if the result
-  differs: `SystemTime::now()`, random numbers or `HashMap` order. Use `ctx.now()`, and a `BTreeMap` or a sort.
-- **Invalidation is coarse**: any write to a document reruns the queries that read it, even when nothing changed.
-  Skip no-op writes, keep fast-changing fields (presence, typing, counters) in small tables of their own, read narrow
-  ranges (`eq` prefixes, `_creationTime` bounds, `take(n)`), and count with `.count()`.
-- **Each index costs every write to its table; long index keys cost reads.** An insert writes one entry per index
-  (with 32 indexes, about a sixth of the inserts per second of one); a patch rewrites only the entries of the indexes
-  whose fields it changes. Keys over 960 bytes (an indexed string of about 930 bytes) don't fit in a page of the
-  index's B-tree: scans get about 10x slower, lookups 2x, and the server logs a warning. Index a prefix or a hash of
-  such values instead. How many other indexes and entries exist doesn't slow a lookup (`bench_indexes.rs` in the
-  integration tests).
-- **Tests** (`rxferrix::testing::TestApp`, in dev mode): `t.create_user("ann@example.com", Some("password"))` makes a
-  user, `t.as_user(id).query::<list>(args)` calls as them, `t.advance_time(d)` runs due jobs.
+## Reconnects and retries
 
-More in [docs/CONTRACT.md](../CONTRACT.md) §1.10.
+The TypeScript client reconnects and restores active subscriptions. It resends unanswered mutations with the same request identity; the server retains their responses for about ten minutes and replays them rather than committing the mutation again.
+
+The client stops resending after nine minutes or when the caller's identity has changed. It then rejects with `OutcomeUnknown`: the mutation may or may not already have committed. Check application state before issuing a new operation. A new call is a new request, so it is not covered by the old request's deduplication.
+
+Actions are not automatically replayed after connection loss. An in-flight action rejects with `ConnectionLost`, and external work it already performed remains. HTTP mutations also have no request deduplication. This is a bounded reconnect guarantee, not universal exactly-once execution.
+
+The client keeps pending state in memory. A page reload or process restart is not persistent offline recovery.
+
+## Query results and caching
+
+A query result can be shared by subscribers with the same function, arguments, and relevant identity. While nothing it read changes, the server can reuse it.
+
+After the last subscriber leaves, results can remain cached for up to 30 minutes within a 64 MiB idle-cache budget (`--query-cache-ttl`, `--query-cache-size`). Repeated HTTP queries and action `run_query` calls can also use the cache. Reading `ctx.now()` or creating a time-dependent signed URL prevents idle query-cache reuse.
+
+Queries must be deterministic. In `--dev` and `TestApp`, the server sometimes reruns a query against the same snapshot and warns when results differ. Avoid system time, random results, and unstable `HashMap` iteration order; use tracked time and stable ordering.
+
+## Time is not a subscription trigger
+
+`ctx.now()` in a query is its snapshot's time. A query reruns when tracked inputs change, not when a minute passes. A signed file URL in a query also does not renew merely because it expires.
+
+For expiry, store state and schedule a mutation to change it. Format relative times such as “five minutes ago” in the client. Request a fresh signed URL when the view needs one.
+
+## Keep client results immutable
+
+Results are read-only. Copy before sorting or editing: `[...tasks].sort(...)`. Optimistic updates should build new arrays and objects, and generate IDs or timestamps once per invocation outside the replayed closure.
+
+Changing query arguments normally returns to loading. React's `useQueryKeepingPrevious` and Svelte's `{ keepPreviousData: true }` keep the last value while a new result loads; `isStale` identifies it.
+
+## Keep reads narrow and writes small
+
+An ordinary query that read a document can rerun after any write to that document, including a no-op patch. Skip unnecessary writes. Store frequently changing presence or typing data separately from widely read profiles.
+
+Use equality prefixes, index ranges, and `.take(n)` to bound reads. `.filter(...)` still reads candidates in its range. Prefer `.count()` over collecting documents just to count them, and paginate lists that can keep growing.
+
+Every index adds write work and storage. Long index keys can spill into extra B-tree pages; the server warns above 960 bytes. Index a short prefix or a suitable hash when you do not need ordering on the full value.
+
+One writer serializes all mutations. Avoid external I/O and long CPU work in mutations, and monitor their duration. The runtime does not sandbox Rust code.
+
+## Know the default limits
+
+| Limit | Default |
+| --- | --- |
+| Distinct live queries per connection | 1024; the client rejects the next with `too_many_queries`. |
+| Combined live query arguments per socket | 8 MiB. |
+| WebSocket message / ordinary HTTP API body | 2 MiB; file uploads use a separate limit. |
+| Running mutations and actions per socket | 64, with backpressure after that. |
+| Query timeout | 30 seconds (`--query-timeout`). |
+| Mutation timeout | 5 seconds (`--mutation-timeout`). |
+| File upload size | 100 MB (`--max-upload-size`). |
+
+Timeouts and cancellation take effect at await points; they cannot preempt an infinite CPU loop. The protocol also bounds socket silence and outgoing send time. See [protocol limits](/PROTOCOL#limits) for exact behavior.
+
+## Jobs have no caller identity
+
+Scheduled jobs, crons, and workflow steps do not carry the user identity that requested them. Check authorization before scheduling, pass required user IDs explicitly, and make job functions internal. Recheck current permissions when delayed work requires it.
+
+## Plan for one active server
+
+The database belongs on local disk and has one active server writer. Takeover prepares a replacement, rather than scaling writes across machines. Replication supports recovery rather than active replicas serving the app.
+
+By default, a process crash preserves committed data, while power or OS failure may lose recent commits. Use `--fsync-commits` when acknowledgement must wait for disk durability. Keep [backups](/operations/backups) and retain `auth_secret.key` independently.

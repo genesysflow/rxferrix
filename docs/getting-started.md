@@ -1,91 +1,108 @@
 # Get started
 
-## Create an app
+This walkthrough creates a task app, runs its backend and frontend, and shows the edit/restart loop you will use while developing.
 
-You need [Rust](https://rustup.rs) and [bun](https://bun.sh).
+## 1. Install the tools
 
-```sh
-cargo install rxferrix-cli     # install the `rxferrix` command
-rxferrix new my-app            # --web react (default), svelte or none
-```
-
-Then run it, the backend and the web app in two terminals:
+You need a current stable [Rust toolchain](https://rustup.rs/) with support for edition 2024 and [Bun](https://bun.sh/). Rust builds the backend; Bun installs and runs the web app.
 
 ```sh
-cd my-app && cargo run -- serve --dev         # backend on http://127.0.0.1:8090
-cd my-app/web && bun install && bun run dev   # web app
+cargo install rxferrix-cli
 ```
 
-The app depends on the published [`rxferrix`](https://crates.io/crates/rxferrix) crate and the
-[`@rxferrix`](https://www.npmjs.com/org/rxferrix) packages on npm.
+This installs `rxferrix`, the project generator. Server commands come from the app you create next.
 
-To work on RxFerrix itself, build the TypeScript packages in a checkout (`bun install && bun run build`) and install
-the command from it (`cargo install --path crates/rxferrix-cli`): apps it creates then use the checkout's crate and
-packages (`--published` uses crates.io and npm instead, `--rxferrix-path DIR` another checkout).
-
-## What's in the app
-
-| Path | What |
-|---|---|
-| `src/main.rs` | Starts the server: `rxferrix::RxFerrix::new().run()`, plus auth, crons and other options. |
-| `src/tasks.rs` | A sample `tasks` table with a query and mutations. Add your own modules next to it. |
-| `web/` | The web app (React or Svelte). |
-| `web/src/rxferrix` | The generated TypeScript API. `serve --dev` rewrites it each time it starts, so restart it after you change your functions. |
-| `.cargo/config.toml` | Build flags that let SQLite run queries in parallel (see [Deploying](/operations/deploying)), and where `serve --dev` writes the TypeScript API. |
-
-## Functions
-
-Everything the backend does is a function, and there are three kinds:
-
-| Kind | Use it to | Guarantees |
-|---|---|---|
-| `#[query]` | read data | Reactive and cached: reruns only when something it read changes. |
-| `#[mutation]` | write data | One transaction; runs exactly once, even when a client retries after a reconnect. |
-| `#[action]` | call the outside world (APIs, email) | Not transactional; can call queries and mutations. |
-
-```rust
-#[query]
-pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Task>>> { /* read with ctx.db */ }
-
-#[mutation]
-pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Task>> { /* write with ctx.db */ }
-
-#[action]
-pub async fn notify(ctx: &ActionCtx, id: Id<Task>) -> Result<()> { /* fetch, send email, ctx.run_mutation */ }
-```
-
-On the client, `useQuery(api.tasks.list, { done: false })` subscribes to a query, `useMutation(api.tasks.add)` and
-`useAction(api.tasks.notify)` return functions to call. The [functions guide](/guide/functions) covers tables,
-indexes, pagination and types.
-
-## The dashboard
-
-Every server has an admin dashboard at http://127.0.0.1:8090/_/. On the first start, the server prints a one-time
-setup link to create the first administrator. From there you can browse and edit data, run functions, follow the
-logs, and manage users, files, backups and settings. See [the dashboard](/guide/dashboard).
-
-## Examples
-
-The repository has two complete apps:
-
-- **`examples/todo`**: a todo list with a Svelte frontend, file uploads, search and a migration.
-- **`examples/chat-react`**: a Slack-like chat in React with auth, pagination, uploads, search, scheduled messages,
-  live aggregates and analytics.
-
-Run the todo example from the repository root:
+## 2. Create a project
 
 ```sh
-bun install && bun run build
-cargo run -p todo-server -- serve --dev --codegen-out examples/todo/web/src/lib/rxferrix    # backend on :8090
-cd examples/todo/web && bun run dev                                                       # app on :5173
+rxferrix new my-app
+cd my-app
 ```
 
-Open http://localhost:5173 in two tabs and watch them stay in sync.
+The default frontend is React. Choose `--web svelte` for Svelte 5 or `--web none` for a backend without a frontend.
 
-## Next steps
+| Path | Purpose |
+| --- | --- |
+| `src/main.rs` | Declares backend modules and configures `RxFerrix`. |
+| `src/tasks.rs` | The `Task` table and its list, add, update, and delete functions. |
+| `web/src/` | The frontend and client setup. |
+| `web/src/rxferrix/` | Generated function references and data types. |
+| `.cargo/config.toml` | SQLite build flags and, for a web app, the codegen output directory. |
+| `fx_data/` | Local database and server state, created when the backend starts. |
 
-- Add sign-in with [Auth](/guide/auth).
-- Store uploads with [File storage](/guide/file-storage).
-- Run things later or on a schedule with the [Scheduler](/guide/scheduler).
-- Read [Things to know](/guide/things-to-know) before you build something big.
-- When you're ready, [deploy it](/operations/deploying).
+Projects normally depend on crates.io and npm packages. A generator installed from a framework checkout uses that checkout when it still exists; pass `--published` to use published packages explicitly. See [framework development](https://github.com/genesysflow/rxferrix/blob/master/CONTRIBUTING.md) for checkout setup.
+
+## 3. Start the backend
+
+From `my-app`:
+
+```sh
+cargo run -- serve --dev
+```
+
+Leave it running. The first build can take a while. The server listens on http://127.0.0.1:8090 and writes the TypeScript API to `web/src/rxferrix`.
+
+`--dev` exposes detailed errors, enables development-only functions, and logs auth email codes when SMTP is not configured. Use it for local development.
+
+## 4. Start the frontend
+
+In a second terminal, from `my-app`:
+
+```sh
+cd web
+bun install
+bun run dev
+```
+
+Open http://localhost:5173 in two tabs. Add, complete, or remove a task. Both tabs should update without a refresh.
+
+The frontend connects to its own origin. Vite forwards `/api` requests, including the `/api/sync` WebSocket, to the backend. This also lets uploads and auth requests use the same origin.
+
+## 5. Make a backend change
+
+Open `src/tasks.rs`. A `#[query]` reads data, and a `#[mutation]` changes it. The generated frontend calls them as `api.tasks.list`, `api.tasks.add`, and so on.
+
+For example, change the maximum list size from `.take(100)` to `.take(50)`. Stop the backend with Ctrl+C and rerun:
+
+```sh
+cargo run -- serve --dev
+```
+
+Cargo rebuilds the app, and startup regenerates the client API. Existing clients reconnect. Repeat this after changing backend code, function arguments, or table types; `serve --dev` does not watch or rebuild Rust files.
+
+To generate types without starting the server:
+
+```sh
+cargo run -- codegen --out web/src/rxferrix
+```
+
+Do not edit `api.ts`, `dataModel.ts`, or `index.ts` by hand. Use [the types guide](/guide/types) to understand their naming and serialization.
+
+## 6. Open the dashboard
+
+The dashboard is at http://127.0.0.1:8090/_/. On first start, use the setup link printed in the backend terminal to create an administrator. **Data** shows the tasks; **Functions** lets you run a function with JSON arguments; **Logs** shows executions.
+
+Dashboard administrators are separate from your app's signed-in users. The starter task functions are public; add [authentication and authorization](/guide/auth) when the app needs private data.
+
+## Build and run a release
+
+For a generated app with a frontend, run these from `my-app` after generating the API:
+
+```sh
+cd web
+bun run build
+cd ..
+touch src/main.rs
+cargo build --release
+./target/release/my-app serve --dir ./production-data
+```
+
+The generated backend embeds `web/dist` when it exists at compile time. Touching `main.rs` makes Cargo rebuild the app with the new assets. For `--web none`, skip the frontend build and `touch`.
+
+See [Deploying](/operations/deploying) for persistent storage, public URLs, TLS, and updates.
+
+## Continue building
+
+Read [Core concepts](/guide/concepts), then [Functions and data](/guide/functions) and [Clients](/guide/clients). The [todo](https://github.com/genesysflow/rxferrix/tree/master/examples/todo) and [chat](https://github.com/genesysflow/rxferrix/tree/master/examples/chat-react) examples show complete apps you can run and inspect.
+
+If a command fails, first check its working directory. Run backend commands beside the app's `Cargo.toml`, frontend commands inside `web/`, and framework workspace commands from the framework repository root. The [command reference](/reference/cli) lists common commands.

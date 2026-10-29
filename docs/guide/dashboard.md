@@ -1,69 +1,60 @@
-# The dashboard
+# Use the admin dashboard
 
-Every server has an admin dashboard at `/_/` (e.g. http://127.0.0.1:8090/_/), embedded in the binary. Create an
-administrator with the `/_/setup#token=…` link that `serve` prints at startup while there is no administrator, or with
-`todo-server admin create you@example.com`, then sign in.
+Every default-feature server embeds a dashboard at `/_/`, such as http://127.0.0.1:8090/_/. It manages the running app using administrator credentials.
 
-- **Data**: every table (system tables grouped below), with a live, virtualized document grid (smooth at 10k+ rows;
-  pages load as you scroll; new rows slide in, changed cells flash, deleted rows fade out, up to 5,000 loaded rows), filters on index fields, a search box for tables with a full-text search index (live, most
-  relevant first), a quick filter over the loaded rows, JSONL/CSV export, a side panel with a JSON editor (insert,
-  edit, delete; validated against the table's Rust type), and clickable ids that open the referenced document. The
-  schema view lists indexes, tokenizers (with their language), vector index kinds (with HNSW parameters) and the
-  table's analytics columns with their SQL types. Secrets (password and token hashes) are never shown,
-  and system tables are read-only except the `name`, `image` and `emailVerified` of users.
-- **Functions**: every function with its TS signature, a runner (JSON args, optionally *as a user* through a real,
-  short-lived, audited session), latency (p50/p95) and calls/errors charts over the last hour to 7 days, from
-  the execution log, and the function's own live log.
-- **Logs**: a live tail of executions (filter by path or one function, kind, outcome; expand for the error, log lines
-  and args); new executions slide in, tinted by outcome.
-- **Hide background jobs**: a switch on the Overview, a function's activity and Logs that leaves out scheduled jobs,
-  crons and workflow steps (and the functions they call), so the charts, tables and logs show only what clients ran.
-  It applies to every page and is remembered per browser.
-- **Users**: users, linked providers, two-factor status (with a reset for users who lost their authenticator),
-  sessions (revoked live; impersonation sessions marked), delete, and "open app as
-  user": a short-lived, audited session of the user opened in a new tab at an allowed redirect URL.
-- **Files**: stored files with thumbnails and previews (images, video, audio, text), download, delete, and upload by
-  drag and drop; works with private storage (signed URLs). `Id<"_storage">` values in the data grid link here.
-- **Workflows**: workflows by state, an open one's steps (args, outcome, duration, job), and cancel.
-- **Scheduler**: crons with their schedule, time zone, last and next run, and "run now" (system crons last);
-  scheduled jobs live, by state, with cancel (running actions too), run now and retry; and the job history (finished
-  jobs moved to `aux.db` after an hour), by state, with retry.
-- **Migrations**: every `#[migration]` in run order with its dependencies, live progress, errors linking to the failing
-  document, the schema check,
-  run / cancel / restart and dry runs with before/after examples; migrating tables are highlighted.
-- **Backups**: create (optionally with `aux.db` and files), download, delete and **restore** backups (a stored one
-  or an archive from your computer: checked completely, then applied at the next start; cancel, or "Restart now"
-  under systemd/Docker); **Configure…** sets the schedule (interval, how many to keep, files and `aux.db`) and the
-  destination (the data directory, another directory, or an S3-compatible bucket with its own credentials, with a
-  "Test destination" check), applied at once; with `--replicate-to`, the replication status
-  (target, lag, last segment and snapshot, generations) and a point-in-time restore picker (a time or a commit ts);
-  export a table (JSONL/CSV) and import JSONL or CSV (insert, upsert or replace).
-- **Analytics** (with `--olap`): the copy's state and lag, its tables and columns, a SQL editor (one SELECT, the
-  sandbox of `ctx.olap`, audited) with the results as a table, and the whole result as a CSV or Parquet download;
-  rebuild the copy.
-- **Environment**: environment variables (`ctx.env`): add, edit, reveal, copy, remove, paste a `.env`; live, and
-  queries that read a variable rerun as soon as it changes.
-- **Settings**: OAuth providers (GitHub, Google, Discord, Apple, OIDC), SMTP (with a test email), redirect URLs,
-  sign-ups, token lifetimes, CORS origins, the trusted proxy headers the client IP is read from (showing your IP as
-  the server sees it), rate limits per client IP (by path prefix, such as `/api/`, or by function, such as
-  `messages:send` or `*:create`, for everyone, guests or signed-in users) and the templates of the verification,
-  password reset and sign-in emails (with a preview), applied without a restart. Fields fixed by the code, a flag or the
-  environment are read-only; secrets can be replaced but are never shown.
-- **Account**: two-factor authentication for your own administrator account (an authenticator app plus recovery
-  codes); signing in then asks for a code after the password. `admin disable-2fa <email>` removes it from the server
-  if both are lost.
-- **Audit log**: document edits, user and session changes, settings and environment variable changes, impersonation,
-  function runs, restores and analytics queries, live, filterable by
-  administrator, action, table, document and time, with field-level diffs.
-- **Overview**: commit ts, commits/s, connections, shared queries and reruns, the scheduler queue, database sizes,
-  busiest and failing functions, the query cache hit rate and the analytics copy's state.
+## Create the first administrator
 
-Ctrl+K (⌘K) opens a command palette (pages, tables, theme, sign out); Alt+1…9 and Alt+0 open the first ten pages in
-sidebar order.
+On first startup, open the setup link printed in the backend terminal. It contains a one-time token for creating the first administrator.
 
-It talks to the server over the same WebSocket protocol as apps (admin-only `_system/*` functions), so every
-view is live, plus `/api/admin/*` for logs, stats, backups, replication, analytics, export/import and impersonation (docs/CONTRACT.md §4). The built assets are committed, so
-`cargo build` needs no JS toolchain; after changing `packages/dashboard` (or the client packages it bundles), run
-`bun run build:dashboard` and commit `crates/rxferrix/dashboard-dist` (`cargo test` fails while it is stale). For UI
-work, `cd packages/dashboard && bun run dev` serves it on :5174 with `/api` proxied to :8090. Build without it with
-`default-features = false` on the `rxferrix` dependency.
+For offline setup, use the app's command:
+
+```sh
+cargo run -- admin create you@example.com
+```
+
+Use `--dir` if the server's data directory is not the default `fx_data`. Dashboard administrators are separate from your app users. Enable two-factor authentication for an administrator on **Account**; if its authenticator and recovery codes are lost, use `admin disable-2fa EMAIL` for recovery.
+
+## Inspect and change app data
+
+**Data** lists app and system tables. Select a table to browse its live documents, filter by indexed fields, inspect its schema, or open a document. Tables with text-search indexes also offer search.
+
+The JSON editor can insert, patch, or delete app documents. Writes are validated against the table's Rust type. Change the schema in Rust and deploy it; the dashboard does not define new schema fields or indexes.
+
+System tables are generally read-only. Selected user profile fields are editable, while credentials and token hashes are hidden. Treat all administrator edits as privileged operations; they are recorded in the audit log.
+
+## Debug a function
+
+**Functions** lists registered functions and signatures. Select one, supply JSON arguments, and run it. Use `{}` for a function with no arguments and camelCase argument keys.
+
+You can run as a user through a short-lived, audited impersonation session. The admin runner is trusted server tooling and bypasses app-wide guards; use client calls or `TestApp::as_user` to test the guard itself.
+
+**Logs** shows live executions, errors, arguments, and captured function logs. Expand an entry for details, or filter by function, kind, or outcome. **Hide background jobs** excludes scheduler/workflow activity across overview charts, function activity, and logs.
+
+## Find the right page
+
+| Page | Use it to |
+| --- | --- |
+| Overview | Inspect connections, commits, reruns, busy/failing functions, cache reuse, database sizes, and service state. |
+| Users | Inspect app accounts and sessions, revoke access sessions, reset a lost second factor, delete users, or open an audited session as a user. |
+| Files | Upload, preview, download, or delete stored files, including with private storage. |
+| Scheduler | Inspect crons, run a cron now, cancel jobs, retry failures, and browse finished-job history. |
+| Workflows | Inspect workflow state and recorded steps, or cancel a run. |
+| Migrations | Check schema state, preview changes, run/cancel/restart migrations, and inspect failures. |
+| Backups | Create/download backups, configure schedules and destinations, and stage restores. |
+| Analytics | Query the optional DuckDB copy and export results as CSV or Parquet. |
+| Environment | Add or update reactive app variables read through `ctx.env`. |
+| Settings | Configure auth providers, SMTP, redirects, sign-ups, email templates, CORS, trusted proxy headers, and request rate limits. |
+| Audit log | Review administrator edits, settings changes, impersonation, function runs, and recovery operations. |
+| Account | Manage the administrator's own second factor and recovery codes. |
+
+Settings fixed by code, flags, or process environment appear as read-only. Other settings apply without restarting. Secrets can be replaced without being shown again.
+
+A dashboard restore is validated and staged for the next startup. It does not replace the database under the active server. See [Backups and restores](/operations/backups#restore-from-the-dashboard) before using it.
+
+## Navigate and customize the build
+
+Ctrl+K (⌘K) opens the command palette. Alt+1 through Alt+9 and Alt+0 open the first ten sidebar pages.
+
+The dashboard uses administrator-only system functions over the same sync protocol as app clients, plus admin HTTP endpoints for operations. See the [system API reference](/CONTRACT#_4-built-in-system-tables-and-functions) when building admin integrations.
+
+The built assets ship with the Rust crate, so normal app builds do not need a JavaScript toolchain for the dashboard. Set `default-features = false` on the `rxferrix` dependency to omit it. Framework contributors should follow the [dashboard build instructions](https://github.com/genesysflow/rxferrix/blob/master/CONTRIBUTING.md#development).

@@ -1,85 +1,141 @@
-# Functions, tables and indexes
+# Functions and data
+
+Define tables and functions in backend modules such as `src/tasks.rs`. Declare each module in `main.rs` with `mod tasks;`; the macros register compiled tables and functions automatically.
+
+The examples on this page build on one task table. Start with `use rxferrix::prelude::*;` in the module.
+
+## Define a table
 
 ```rust
 use rxferrix::prelude::*;
 
-#[table(name = "todos")]
+#[table(name = "tasks")]
 #[index(by_done = [done])]
-pub struct Todo { pub text: String, pub done: bool }
+pub struct Task {
+    pub text: String,
+    pub done: bool,
+}
+```
 
+A stored document adds an ID and creation time to these fields. Rust uses `Doc<Task>` with `.id` and `.creation_time`; the client sees `_id` and `_creationTime`. Creation time is milliseconds since the Unix epoch.
+
+The table macro provides serialization, TypeScript types, and typed field/index handles such as `Task::done` and `Task::by_done`. You do not need a separate schema file. See [Types](/guide/types) for custom result types and field naming, and [Migrations](/guide/migrations) before changing fields in a table that already contains data.
+
+## Read with a query
+
+```rust
 #[query]
-pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Todo>>> {
-    let q = match done {
-        Some(d) => ctx.db.query::<Todo>().with_index(Todo::by_done, |q| q.eq(Todo::done, d)),
-        None => ctx.db.query::<Todo>(),
+pub async fn list(ctx: &QueryCtx, done: Option<bool>) -> Result<Vec<Doc<Task>>> {
+    let query = match done {
+        Some(done) => ctx.db.query::<Task>()
+            .with_index(Task::by_done, |q| q.eq(Task::done, done)),
+        None => ctx.db.query::<Task>(),
     };
-    q.order(Order::Desc).take(500).await
+    query.order(Order::Desc).take(100).await
+}
+```
+
+`done: None` lists all tasks; `Some(false)` uses the index to list open tasks. `Order::Desc` returns newer documents first within the selected range. Clients call `api.tasks.list` with `{ done: false }` or omit the optional argument.
+
+A query reads one consistent snapshot. Subscriptions rerun when a write touches what the query read. Keep the result deterministic: use tracked context inputs, avoid external I/O, and sort collections whose iteration order may vary.
+
+| Read | Result |
+| --- | --- |
+| `ctx.db.get(id).await?` | One document or `None`. |
+| `query.take(100).await?` | Up to 100 matching documents. |
+| `query.first().await?` | The first match or `None`. |
+| `query.unique().await?` | One match or `None`; an error if there is more than one. |
+| `query.count().await?` | The number of matches. |
+| `query.paginate(opts).await?` | A live page with continuation information. |
+| `query.collect().await?` | Every match; use it only when the range is bounded. |
+
+## Write with a mutation
+
+```rust
+#[mutation]
+pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Task>> {
+    let text = text.trim().to_string();
+    ensure_user!(!text.is_empty(), "empty_text", "A task needs some text");
+    ctx.db.insert(Task { text, done: false }).await
 }
 
 #[mutation]
-pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
-    ctx.db.insert(Todo { text, done: false }).await
+pub async fn set_done(ctx: &MutationCtx, id: Id<Task>, done: bool) -> Result<()> {
+    let task = ctx.db.get(id).await?
+        .or_user("not_found", "This task no longer exists")?;
+    if task.done != done {
+        ctx.db.patch(id, json!({ "done": done })).await?;
+    }
+    Ok(())
 }
-
-fn main() -> rxferrix::Result<()> { rxferrix::RxFerrix::new().run() }
 ```
 
-Actions call other functions through the runtime with turbofish: `ctx.run_mutation::<add>(("hi".into(),)).await?`
-(also `run_query` and `run_action`). Queries and mutations have no `run_*`: they share code through plain Rust
-functions.
+All reads and writes in one mutation share a transaction. An error rolls them back. `insert` returns an ID, `patch` changes named fields, `replace` supplies a complete new value, and `delete` removes a document. Patches use JSON field names: `completed_at` in Rust becomes `"completedAt"` in a patch.
 
-**Indexes end in `_creationTime, _id`**: documents with equal indexed fields are in creation order, so
-`with_index(Message::by_channel, |q| q.eq(Message::channel, c)).order(Order::Desc)` is newest first, and the creation
-time can be bounded after the declared fields: `q.eq(Message::channel, c).gt(Message::_creation_time, since)`.
-`.count()` counts an index range without reading the documents (unless the query has a `filter`).
+Validate arguments and permissions in the function. A typed ID identifies a table; it does not prove that the caller may read or change that document. See [authorization](/guide/auth#check-access-to-each-document).
 
-**Types that aren't tables** (a function's output "view" struct, an enum argument) use `#[object]`: it derives
-serde and ts-rs through rxferrix (camelCase JSON), so the app needs neither as a dependency. Codegen declares them in
-`dataModel.ts` by name (`Array<MessageView>`), with field doc comments as JSDoc. A document can be embedded whole:
+## Choose indexes for your reads
+
+An index with fields `[owner, done]` supports an equality prefix on `owner`, then an equality or range on `done`. Constraints follow declared field order. A post-read `.filter(...)` does not replace an index: it still scans the selected range.
+
+Every ordinary index ends with `_creationTime` and `_id`. Equal declared fields therefore sort by creation time. After constraining all declared fields with `eq`, you can bound creation time with a handle such as `Task::_creation_time`.
+
+Use `.count()` when you only need a count. Without a filter it counts the index range without deserializing the documents. For frequently displayed grouped counts or sums, use [aggregates](/guide/aggregates).
+
+## Paginate a growing list
+
+Use pagination when a list can grow beyond a small fixed result. The argument must be named `pagination_opts` in Rust so clients see `paginationOpts`:
 
 ```rust
-#[object]
-pub struct MessageView {
-    #[serde(flatten)]
-    pub message: Doc<Message>,       // _id, _creationTime and the message's fields, at the top level
-    pub author_name: String,         // TS: { authorName: string } & Doc<"messages">
-}
-
 #[query]
-pub async fn list(ctx: &QueryCtx, channel: Id<Channel>, pagination_opts: PaginationOpts)
-    -> Result<PaginationResult<MessageView>> {
-    let page = ctx.db.query::<Message>()
-        .with_index(Message::by_channel, |q| q.eq(Message::channel, channel))
+pub async fn page(ctx: &QueryCtx, pagination_opts: PaginationOpts)
+    -> Result<PaginationResult<Doc<Task>>>
+{
+    ctx.db.query::<Task>()
         .order(Order::Desc)
         .paginate(pagination_opts)
-        .await?;
-    page.try_map(|message| view(ctx, message)).await      // also map_async, try_map_concurrent
+        .await
 }
 ```
 
-**Dev mode.** `ctx.is_dev()` tells whether the server runs with `--dev`. `#[action(dev_only)]` (also queries and
-mutations) marks a function for development (seeding, reading a dev inbox): the server refuses it outside `--dev`,
-and codegen puts it in `devApi` instead of `api`. In `--dev` without SMTP, auth emails are printed to the log by
-`DevLogMailer`; `AuthConfig::dev_mailer(m)` replaces it (and can forward to it).
+On the client, use `usePaginatedQuery(api.tasks.page, {}, { initialNumItems: 20 })`. The hook manages cursors and keeps loaded pages subscribed. Do not interpret cursor strings or reuse them with another range or sort order.
 
-## Dates, times and UUIDs
+To return enriched rows, transform the page with `map`, `map_async`, `try_map`, or `try_map_concurrent`; these preserve its pagination metadata. See the [pagination reference](/CONTRACT#_1-2-1-pagination) for boundary and scan-limit behavior.
 
-Store times as `f64` milliseconds (what `ctx.now()` returns), or turn on the cargo features `chrono` and `uuid` to use
-those crates' types in tables and function signatures: `rxferrix = { version = "…", features = ["chrono", "uuid"] }`.
-`DateTime<Utc>`, `NaiveDate`, `NaiveDateTime`, `NaiveTime` and `Uuid` are then strings in the generated TypeScript (RFC
-3339 for times, as serde writes them). Your app depends on `chrono` (with its `serde` feature) or `uuid` itself to
-name them.
+## Use an action for external work
 
-## Errors for the client
-
-Return a `UserError` for anything the client should handle: its `code` and `message` reach the caller as they are,
-even outside `--dev` (any other error is a generic "Server Error" there). The prelude has shorthands:
+An action has no direct transaction. It calls queries and mutations through typed function references:
 
 ```rust
-ensure_user!(!text.trim().is_empty(), "empty_text", "A todo needs some text");
-let todo = ctx.db.get(id).await?.or_user("not_found", "This todo no longer exists")?;
-if todo.locked { bail_user!("locked", "{} is locked", todo.text); }
+#[action]
+pub async fn add_samples(ctx: &ActionCtx, count: u32) -> Result<u32> {
+    ensure_user!(count <= 100, "too_many", "Add at most 100 samples at once");
+    for i in 1..=count {
+        ctx.run_mutation::<add>((format!("Sample task #{i}"),)).await?;
+    }
+    Ok(count)
+}
 ```
 
-In tests, `UserError::of(&err)` finds the `UserError` in an error returned by `TestApp`.
+Each `run_mutation` commits independently. If a later call fails, earlier inserts remain. Use `ctx.run_query::<f>(args)` and `ctx.run_action::<f>(args)` in the same way. Arguments are tuples, `()` for none, or the value itself for one parameter.
 
+Queries and mutations share logic through ordinary Rust helper functions using their existing context. A direct Rust call does not create another transaction or add access checks.
+
+For email or network calls that should follow a committed write, schedule an action from the mutation. See [Scheduler](/guide/scheduler).
+
+## Return useful errors
+
+A `UserError` reaches clients with its code, message, and optional data. Use it for expected failures:
+
+```rust
+ensure_user!(!text.trim().is_empty(), "empty_text", "A task needs some text");
+let task = ctx.db.get(id).await?.or_user("not_found", "This task no longer exists")?;
+```
+
+`bail_user!("locked", "{} is locked", task.text)` returns a user error immediately. Other errors become `"Server Error"` in production; `--dev` exposes their details. Tests can inspect expected failures with `UserError::of(&error)`.
+
+## Keep server helpers internal
+
+Use `#[internal_query]`, `#[internal_mutation]`, or `#[internal_action]` for functions clients should not call directly. Actions, scheduled jobs, and trusted server code can still call them.
+
+Use `#[action(dev_only)]` or the equivalent query/mutation attribute for seeds and dev inbox helpers. These run only in development mode and appear in generated `devApi` rather than `api`. `ctx.is_dev()` reports the runtime mode.

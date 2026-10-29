@@ -1,72 +1,95 @@
 # Search
 
-Full-text search uses SQLite FTS5 and vector search uses sqlite-vec, both compiled into the binary. The indexes are
-updated in the mutation's transaction, so search results always agree with document reads, and search queries are
-reactive like any other query (docs/CONTRACT.md §1.8).
+Use a full-text index to search words in documents, or a vector index to find nearby embeddings. Both are maintained with document writes. You supply embeddings; the framework does not call an embedding provider for you.
+
+## Add full-text search
 
 ```rust
+use rxferrix::prelude::*;
+
 #[table(name = "messages")]
 #[search_index(search_body, search = body, filter = [channel], tokenizer = "porter")]
-#[search_index(search_ro, search = body, tokenizer = "snowball", language = "romanian")]   // "orașelor" finds "orașul"
-#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel], kind = "hnsw")]
-pub struct Message { pub channel: String, pub body: String, pub embedding: Option<Vec<f32>> }
+pub struct Message {
+    pub channel: String,
+    pub body: String,
+}
 
-#[query]   // most relevant first; the last word is a prefix ("hello wor" matches "hello world")
-pub async fn search(ctx: &QueryCtx, channel: String, text: String) -> Result<Vec<Doc<Message>>> {
+#[query]
+pub async fn search(ctx: &QueryCtx, channel: String, text: String)
+    -> Result<Vec<Doc<Message>>>
+{
     ctx.db.query::<Message>()
-        .with_search_index(Message::search_body, |q| q.search(Message::body, text).eq(Message::channel, channel))
+        .with_search_index(Message::search_body, |q| {
+            q.search(Message::body, text).eq(Message::channel, channel)
+        })
         .take(20)
         .await
 }
+```
 
-#[action]  // an embedding from an API: (id, cosine similarity) pairs, from the HNSW graph
-pub async fn similar(ctx: &ActionCtx, embedding: Vec<f32>) -> Result<Vec<Id<Message>>> {
-    let hits = ctx.vector_search(Message::by_embedding, &embedding, VectorSearchOpts::new(10)).await?;
-    Ok(hits.into_iter().map(|(id, _score)| id).collect())
-}
+This returns the most relevant matches in one channel. In a private app, check that the caller may read that channel before searching it.
 
-#[query]   // a vector the query already has: exact, deterministic and live (reruns when a nearer one is written)
-pub async fn more_like(ctx: &QueryCtx, id: Id<Message>) -> Result<Vec<Id<Message>>> {
-    let Some(msg) = ctx.db.get(id).await? else { return Ok(vec![]) };
-    let Some(embedding) = &msg.embedding else { return Ok(vec![]) };
-    let opts = VectorSearchOpts::new(5).filter(VectorFilter::eq(Message::channel, msg.channel.clone()));
-    Ok(ctx.db.vector_search(Message::by_embedding, embedding, opts).await?.into_iter().map(|(id, _)| id).collect())
+Search text is treated as literal words, not FTS5 query syntax. All words must match; the last word is a prefix, so `hello wor` can match `hello world`. Empty text matches nothing. A `take` search returns at most 1024 documents.
+
+Results use a per-document BM25 score without corpus statistics. A subscribed search filtered to one channel is invalidated by changes in that channel, rather than every message write.
+
+## Choose a tokenizer
+
+| Setting | Use |
+| --- | --- |
+| Default `unicode61` | Word matching with case and diacritic folding. |
+| `tokenizer = "porter"` | English stemming, such as `run` matching `running`. |
+| `tokenizer = "snowball", language = "romanian"` | Language-specific stemming; 18 languages are supported. |
+| `tokenizer = "trigram"` | Substring search using three-character tokens. |
+| `diacritics = "keep"` | Preserve accents instead of folding them. |
+
+Changing a tokenizer or its language rebuilds the index at startup. Declare only the indexes your app uses, since each adds write and storage cost.
+
+## Paginate search results
+
+Replace `.take(20)` with `.paginate(pagination_opts)` and return `PaginationResult<Doc<Message>>`. The client can then use `usePaginatedQuery`, as for ordinary index queries. Loaded pages stay live, and their boundaries use stable search positions.
+
+See [Functions and data](/guide/functions#paginate-a-growing-list) for the function argument and client convention.
+
+## Add a vector index
+
+Extend the table with an optional vector and an index whose dimensions match your embedding model:
+
+```rust
+#[table(name = "messages")]
+#[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+pub struct Message {
+    pub channel: String,
+    pub body: String,
+    pub embedding: Option<Vec<f32>>,
 }
 ```
 
-User text is split into words that are always matched literally (never parsed as FTS5 syntax); empty text matches
-nothing; a query returns at most 1024 documents. Relevance is BM25 per document (term frequency and length, no
-corpus statistics), so a document's rank depends only on itself and the query. That makes two things exact:
+Use `ctx.db.vector_search` inside a query when the vector comes from the database or client:
 
-- **Pagination**: `.paginate(pagination_opts)` instead of `.take(n)` returns the usual `PaginationResult`, so
-  `usePaginatedQuery` works as for index queries. Pages never duplicate or skip a match; when documents change, only
-  those documents move.
-- **Invalidation per filter value**: a search with `.eq(Message::channel, c)` reruns only after writes to messages
-  whose channel is (or was) `c`; an unfiltered search reruns after any write to the index.
+```rust
+#[query]
+pub async fn similar(ctx: &QueryCtx, channel: String, embedding: Vec<f32>)
+    -> Result<Vec<Id<Message>>>
+{
+    let opts = VectorSearchOpts::new(10)
+        .filter(VectorFilter::eq(Message::channel, channel));
+    let hits = ctx.db.vector_search(Message::by_embedding, &embedding, opts).await?;
+    Ok(hits.into_iter().map(|(id, _score)| id).collect())
+}
+```
 
-Tokenizers: `tokenizer = "porter"` (English stemming: "run" finds "running"), `tokenizer = "snowball", language =
-"…"` (Snowball stemmers for 18 languages, e.g. `"romanian"`, `"french"`, `"german"`, `"spanish"`, `"russian"`: a
-custom FTS5 tokenizer, so "chantait" finds "chanter" and "Häusern" finds "Haus"), `tokenizer = "trigram"` (substring
-search: "ell" finds "hello"), default `"unicode61"`; `diacritics = "keep"` stops folding `café` into `cafe` (with
-folding, a word typed without its accents still finds the accented forms). Changing the tokenizer or its language
-rebuilds the index at startup.
+This is an exact scan at the query's snapshot, so it is deterministic and reactive. Returned pairs contain an ID and cosine similarity; read the documents if the client needs their fields. Add access checks before exposing private results.
 
-Vector indexes are exact by default (sqlite-vec). For large sets, `kind = "hnsw"` adds an in-memory HNSW graph
-(approximate, recall@10 ≈ 0.95 on embedding-like data) that follows commits through the write log, so a search sees
-everything committed before it; filters are applied after the graph search with oversampling (exactly, when few
-documents match), deletes become tombstones that a background rebuild drops, and graphs of 10k+ vectors are saved
-next to `data.db` and validated against the table at startup. `VectorSearchOpts::exact()` bypasses the graph. Tune
-it per index with `m`, `ef_construction` (changing either rebuilds the graph) and `ef_search`
-(`#[vector_index(.., kind = "hnsw", m = 32, ef_construction = 256, ef_search = 64)]`), or per search with
-`VectorSearchOpts::ef(n)`.
+## Use approximate search for larger indexes
 
-Which vector search: `ctx.db.vector_search` in a query (or mutation) is always the exact scan at the query's snapshot
-(also on an HNSW index), so it is deterministic and reactive, with reruns narrowed per filter value like text search;
-use it when the query vector is already in the database or comes from the client, and the index is small enough for
-a scan per rerun. `ctx.vector_search` in an action is for embeddings from an API and for large indexes (the graph),
-but is not reactive.
+Add `kind = "hnsw"` to the vector index and call `ctx.vector_search(...)` from an action to use its approximate graph. This is useful when generating an embedding through an external API or searching a large collection. Action results are not subscriptions.
 
-Rough numbers (release build, a laptop): 50k documents of 12 words: a one-word query takes 0.15 ms, a broad two-letter
-prefix matching almost every document 17 ms. Vectors of 384 dimensions, k=10: exact, 18 ms at 50k and ~100 ms at 200k;
-HNSW at 200k, ~0.4 ms (built in 9–25 s on 16 threads). The todo example has a search box; the dashboard's
-`_system/dashboard:search_documents` backs a search box in the Data page (docs/CONTRACT.md §1.8, §4.1).
+| API | Search behavior |
+| --- | --- |
+| `ctx.db.vector_search` in a query or mutation | Exact at that transaction's snapshot, including on an HNSW index. |
+| `ctx.vector_search` in an action | Uses the configured index, including an HNSW graph when enabled. |
+
+`VectorSearchOpts::exact()` bypasses the graph. Index parameters `m` and `ef_construction` affect graph construction; `ef_search` and per-call `.ef(n)` affect search effort. Increasing effort trades latency for recall. Filters use oversampling, with exact fallback for small matching sets.
+
+For supported languages, index limits, and HNSW persistence, see the [search reference](/CONTRACT#_1-8-search-full-text-fts5-and-vector-sqlite-vec). The todo and chat examples both include text search.

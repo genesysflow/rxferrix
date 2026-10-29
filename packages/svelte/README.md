@@ -1,43 +1,78 @@
 # @rxferrix/svelte
 
-Svelte 5 (runes) bindings for RxFerrix.
+Svelte 5 bindings for [RxFerrix](https://genesysflow.github.io/rxferrix/): live queries, mutations, pagination, auth, and connection state. The package requires a Svelte 5 build pipeline because its reactive modules use runes.
+
+## Set up the client
+
+Install `@rxferrix/svelte` in your frontend. In a browser-rendered root component:
 
 ```svelte
-<!-- +layout.svelte -->
 <script lang="ts">
   import { setupRxFerrix } from "@rxferrix/svelte";
-  setupRxFerrix(import.meta.env.VITE_RXFERRIX_URL); // or setupRxFerrix(existingClient)
-  let { children } = $props();
+  setupRxFerrix(window.location.origin);
 </script>
-{@render children()}
 ```
+
+The URL should reach the backend, or a frontend server proxying `/api`, including the WebSocket. Passing a URL creates a client that closes with this component. Passing an existing client leaves cleanup to its owner. Server-rendered apps need to create and manage clients for their own lifecycle rather than using `window` on the server.
+
+## Read and change data
+
+With a generated `api` and the starter task functions, a descendant component can use:
 
 ```svelte
 <script lang="ts">
-  import { useQuery, useMutation } from "@rxferrix/svelte";
-  import { api } from "$lib/rxferrix/api";
-  let { channel } = $props();
+  import { useMutation, useQuery } from "@rxferrix/svelte";
+  import { api } from "./rxferrix";
 
-  const messages = useQuery(api.messages.list, () => ({ channel })); // or () => "skip"
-  const send = useMutation(api.messages.send);
+  const tasks = useQuery(api.tasks.list);
+  const add = useMutation(api.tasks.add);
+  let error = $state<string | null>(null);
+
+  async function addTask() {
+    try {
+      await add({ text: "Buy milk" });
+      error = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
 </script>
+
+<button onclick={addTask}>Add task</button>
+{#if error}<p>{error}</p>{/if}
+{#if tasks.isLoading}
+  <p>Loading…</p>
+{:else if tasks.error}
+  <p>{tasks.error.message}</p>
+{:else}
+  {#each tasks.data ?? [] as task (task._id)}
+    <p>{task.text}</p>
+  {/each}
+{/if}
 ```
 
-API: `setupRxFerrix(url | client, options?)`, `getRxFerrixClient()`, `useQuery(ref, argsThunk?, { client? })` →
-`{ data, error, isLoading }`, `useMutation(ref)` (callable, `.withOptimisticUpdate(fn)`), `useAction(ref)`,
-`useConnectionState()` → `{ current }`. Hooks read the client from context, so call them during component
-initialization, or pass `{ client }` explicitly.
+For query arguments, pass a function: `useQuery(ref, () => ({ channel }))`. Reactive reads inside it update the subscription; return `"skip"` to disable it. Read query fields directly in reactive code instead of destructuring their current values.
 
-## Packaging
+## Available bindings
 
-The runes code lives in `src/lib/*.svelte.ts`. `bun run build` runs `@sveltejs/package`
-(`svelte-package -i src/lib -o dist`), which strips the TypeScript and emits `dist/*.svelte.js` with `.d.ts` files.
-The `$derived` runes stay in place: the consumer's Svelte compiler (via `@sveltejs/vite-plugin-svelte` or SvelteKit)
-compiles `dist/*.svelte.js` like any other Svelte module. `package.json` exposes `dist/index.js` under both the `svelte`
-and `default` export conditions, with types under `types`. So the package only works in a Svelte 5 build pipeline,
-which is the only place it makes sense.
+| Binding | Result or purpose |
+| --- | --- |
+| `setupRxFerrix(urlOrClient, options?)` | Put a client in component context. |
+| `getRxFerrixClient()` | Read that client. |
+| `useQuery(ref, argsThunk?, options?)` | Reactive `data`, `error`, `isLoading`, and `isStale`. |
+| `usePaginatedQuery(ref, argsThunk, options)` | Live pages with `results`, `status`, `error`, and `loadMore`. |
+| `useMutation(ref)` | Callable mutation with `.withOptimisticUpdate(...)`. |
+| `useAction(ref)` | Callable action. |
+| `useConnectionState()` | Reactive connection state under `.current`. |
+| `useAuth()` | Reactive auth state and sign-in/out actions. |
+| `useCurrentUser()` | Reactive current-user result. |
 
-## Tests
+Call bindings during component initialization when using context. Bindings accepting `{ client }` can use an explicit client. Query options include `keepPreviousData: true` for retaining results while new arguments load.
 
-`bun run test` (vitest + jsdom + `@sveltejs/vite-plugin-svelte`, resolving Svelte's `browser` build). The tests mount
-components with `mount`/`flushSync` and drive a fake sync server from `@rxferrix/client/testing`.
+See the [client guide](https://genesysflow.github.io/rxferrix/guide/clients) for pagination, optimistic updates, and reconnect behavior.
+
+## Work on this package
+
+From the framework root, run `bun run build` for all client packages. Inside this package, `bun run build` runs `svelte-package`, emitting `.svelte.js` files and declarations to `dist`. The consuming app's Svelte compiler compiles the remaining runes.
+
+`bun run test` runs Vitest with jsdom and the Svelte Vite plugin. Tests mount components and drive the fake server from `@rxferrix/client/testing`. See the repository's [contributor guide](../../CONTRIBUTING.md).

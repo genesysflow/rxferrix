@@ -1,83 +1,109 @@
 # Backups and restores
 
-## Backups
+Back up the database, file contents, and server key according to how your app uses them. A database archive alone is not necessarily a complete recovery of uploaded files or encrypted settings.
 
-`todo-server backup [--out file] [--with-aux] [--with-files] [--include-secret]` takes a consistent
-snapshot (`VACUUM INTO`) while the server runs, without blocking writes, into a `.tar.zst` archive (`data.db`, plus
-`aux.db` (the execution log and the history of finished scheduled jobs), local file blobs and `auth_secret.key` when asked; the key only with `--include-secret`, since it
-can forge sessions). Keep a copy of `auth_secret.key` somewhere safe either way: it also encrypts the secrets stored
-in `_settings`, so a restore elsewhere without it signs everyone out and those settings must be entered again. `serve --backup-every 6h --backup-keep 7 [--backup-to s3://bucket/prefix|dir]` takes them on a
-schedule (the cron `rxferrix-backup`, visible on the Scheduler page) and deletes old scheduled ones. The same schedule
-and destination can be set on the dashboard instead (Backups, Configure…; stored in `_settings`, the S3 secret key
-encrypted like the other settings secrets): it takes effect without a restart, and a command-line flag wins over it
-(`--backup-every` for the schedule, `--backup-to` for the destination). Admins can list,
-create, download and delete backups over `/api/admin/backups` (docs/CONTRACT.md §4.2). `todo-server restore
-<archive|s3://…>` is offline: it refuses while a server holds the data directory, checks the archive (checksums,
-SQLite integrity, schema, indexes) and only then swaps the database, keeping the old files in
-`<dir>/pre-restore-<time>/`; the two newest of those are kept, older ones are deleted. A restore that a crash cuts
-short is finished at the next start (or the next `restore`), so the server never opens the data half swapped.
+All commands below belong to your app's binary. They use `fx_data` unless you pass `--dir`; always use the actual server data directory.
 
-## Restoring from the dashboard
-
-Restoring from the dashboard (Backups, "Restore", or an archive uploaded from your computer) never swaps the
-database under the running server. The backup is checked there and then, exactly like `restore` does; a bad archive is
-refused with the reason. A good one is *staged* in `<dir>/restore-staged/` with a `pending-restore.json` marker, and
-the next start of `serve` applies it before opening the database (the current files go to `pre-restore-<time>/`).
-Until then the dashboard shows it as pending and can cancel it (or `todo-server restore --cancel` offline). With
-`serve --restart-exit-code 75` (set in `deploy/rxferrix.service`; for Docker add a restart policy), the dashboard also
-offers "Restart now": a graceful shutdown and an exit with that code, for systemd or Docker to start the server again.
-Without it, restart the server yourself. A staged restore never restores `auth_secret.key` (only `restore` does), and
-it replaces everything else, administrators and sessions included: whoever is signed in may have to sign in again.
-
-## Continuous replication and point-in-time restore
-
-`serve --replicate-to s3://bucket/prefix` (or a directory)
-loses at most about a second of commits and can restore any moment of the last week:
+## Create a backup
 
 ```sh
-todo-server serve --replicate-to s3://bucket/replica [--replicate-every 1s] [--replicate-jobs-every 60s] [--snapshot-every 24h] [--replicate-keep 7d]
-todo-server restore --from s3://bucket/replica --list                          # generations and restorable ranges
-todo-server restore --from s3://bucket/replica --to-time 2026-10-09T12:00:00Z  # or --to-ts N; default: the newest
+./my-app backup --dir /var/lib/my-app --out ./backup.tar.zst
 ```
 
-Every commit writes its document changes to a journal table in `data.db` *in the same SQLite transaction* (so the
-journal never misses a commit nor holds a rolled-back one); every `--replicate-every` the new entries are shipped as a
-checksummed, compressed segment named by its ts range, then deleted locally. Commits that only record the
-scheduler's own progress (crons firing, jobs starting and finishing) wait up to `--replicate-jobs-every` while nothing
-else is unshipped, so an app whose only activity is its scheduled jobs uploads about once a minute rather than every
-second; restoring the newest point after losing the server may then miss up to a minute of job progress (those jobs
-run again, or are marked failed). A snapshot (an ordinary backup archive)
-is taken when a generation starts and every `--snapshot-every`; snapshots and segments older than `--replicate-keep`
-are deleted, except what the oldest restorable point still needs. A restore takes the newest snapshot before the
-point and replays the journal up to it through the normal write path (indexes, search and vector indexes are
-rebuilt), then checks it like any restore. From the dashboard (Backups, "Restore to this point") it is staged and
-applied at the next start, like an archive. If the target is unreachable, commits pile up locally (lag in
-`GET /api/admin/replication`, `/metrics` and the dashboard) and are shipped when it is back; past
-`--replicate-max-pending` (1 GB) the local journal is dropped and replication starts over with a new snapshot. A
-restored database, or one that was written without replication (e.g. `import` offline), starts a new *generation*
-next to the old ones, so history is never overwritten. The journal holds documents, not file contents, but **deleted
-files' contents are kept as long as restores reach** (`--replicate-keep`; `--storage-keep-deleted` to choose another
-window): the orphan sweep removes them only after that, so a restore to before a deletion finds the file. They are gone
-for everything else at once (their document is deleted). Restores leave a local storage directory in place (S3 files
-stay in their bucket). Keep a copy of `auth_secret.key`. The cost is one extra row per commit: about 5% fewer commits
-per second in a sequential benchmark (docs/CONTRACT.md §4.4).
+This creates a consistent database snapshot while the server runs. Optional contents are explicit:
 
-## Litestream
+| Option | Includes |
+| --- | --- |
+| `--with-aux` | Execution logs and finished-job history from `aux.db`. |
+| `--with-files` | Local file blobs. |
+| `--include-secret` | `auth_secret.key`, which signs sessions and encrypts secrets. |
 
-Litestream works too, as an alternative: `data.db` is a normal SQLite database in WAL mode, so
-[Litestream](https://litestream.io) can replicate its pages next to the server (`litestream replicate
-fx_data/data.db s3://bucket/data.db`; `litestream restore` into an empty data directory before starting the server).
-Replicate `data.db` only (`aux.db` is the execution log and the job history), with the same caveats for blobs and `auth_secret.key`.
-Archive backups, `--replicate-to` and Litestream can be combined.
+Keep an independent secure copy of `auth_secret.key` even if you exclude it from archives. Without the original key, a restore elsewhere signs users out and cannot decrypt the app's stored secrets. Protect archives that include it accordingly.
 
-## Export and import
+For S3-backed files, preserve the bucket contents separately. The analytics copy is derived and does not need backup.
 
-`todo-server export [--tables a,b] [--format jsonl|csv] [--out dir]` writes tables from one
-consistent snapshot; `todo-server import <dir|file.jsonl|file.csv> [--format jsonl|csv] [--mode
-insert|upsert|replace]` loads JSONL or CSV through the normal write path in batches (validated, indexed, ids and
-creation times kept), offline. CSV is read as the export writes it (a header row, RFC 4180), and each cell is typed
-with the table's Rust type: `42` is a number in a number field and text in a `String` field, JSON cells become arrays
-and objects, an empty cell is `null` (or `""` for a non-optional string). Fields the table doesn't define are left
-out, and the report lists them, so files converted from another backend may carry extra columns. Admins can stream
-one table with `GET /api/admin/export/{table}?format=csv` and import into a running server with
-`POST /api/admin/import/{table}?format=csv`.
+## Schedule backups
+
+Use **Dashboard → Backups → Configure** to choose an interval, retention count, optional files/logs, and local or S3 destination. Changes apply to the running server, and the panel can test a destination.
+
+Or configure startup flags:
+
+```sh
+./my-app serve --dir /var/lib/my-app \
+  --backup-every 6h --backup-keep 7 --backup-with-files \
+  --backup-to s3://my-bucket/backups
+```
+
+The backup cron is visible in **Scheduler**. Flags override the corresponding dashboard settings. S3 targets can use the process's AWS configuration; the dashboard can also store destination credentials encrypted.
+
+## Restore an archive offline
+
+Stop the server before using the restore command:
+
+```sh
+./my-app restore --dir /var/lib/my-app ./backup.tar.zst
+```
+
+The command validates checksums, SQLite integrity, schema, and indexes before replacing the database. It refuses to restore over an active server. Previous files go to `pre-restore-<time>/`; the two newest such recovery directories are retained.
+
+A restore interrupted during replacement is completed on the next startup or restore attempt. Test a restore to a separate directory periodically so you know the archive, key, and file contents are sufficient.
+
+## Restore from the dashboard
+
+Choose a stored backup or upload an archive on **Backups**. The server validates it and stages a pending restore. The active database keeps running until the next startup applies the replacement.
+
+Cancel a staged restore from the dashboard, or with `restore --cancel` offline. **Restart now** is available when a restart exit code and a working supervisor are configured. Otherwise restart the process yourself.
+
+A staged restore never replaces `auth_secret.key`. It does replace database contents, including administrators and sessions, so you may need to sign in again after restart.
+
+## Enable point-in-time recovery
+
+Continuous replication records committed changes and ships them to a directory or S3 target, alongside periodic snapshots:
+
+```sh
+./my-app serve --dir /var/lib/my-app \
+  --replicate-to s3://my-bucket/replica
+```
+
+Defaults are one-second shipping, daily snapshots, and a seven-day recovery window. Shipping is asynchronous: the interval is not a guarantee of maximum data loss when the destination or network is unavailable.
+
+List recovery generations and ranges, then restore offline:
+
+```sh
+./my-app restore --dir /var/lib/my-app --from s3://my-bucket/replica --list
+./my-app restore --dir /var/lib/my-app --from s3://my-bucket/replica \
+  --to-time 2026-10-29T12:00:00Z
+```
+
+Use `--to-ts N` for a commit timestamp. With no target point, the newest recoverable state is used. The dashboard's point-in-time picker stages the same type of restore for the next startup.
+
+The journal is written in the transaction with the document changes. A restore chooses a snapshot and replays changes through the requested point, rebuilding derived indexes as needed.
+
+## Understand replication retention
+
+Scheduler-only progress defaults to shipping at most once per minute (`--replicate-jobs-every 60s`) when no other writes are pending. After losing a server, more recent job progress may be missing, so some work can be attempted again. External side effects still need duplicate handling.
+
+If the destination is unreachable, the journal accumulates locally. Watch lag in the dashboard or metrics. Above `--replicate-max-pending` (1 GB by default), replication drops the local backlog and must begin a new snapshot generation when possible. Retention cannot recover a period that was never shipped.
+
+Restores and offline writes such as imports can start a new generation. Replication is recovery history, not an active failover server.
+
+The journal contains metadata, not file bytes. Deleted file blobs are retained for the recovery window by default with replication, but you still need the local storage directory or S3 objects. Tune this with `--storage-keep-deleted`. Preserve `auth_secret.key` independently.
+
+## Export or import documents
+
+```sh
+./my-app export --dir /var/lib/my-app --tables tasks --format jsonl --out ./export
+./my-app import --dir /var/lib/my-app ./export --mode insert
+```
+
+Exports use one consistent snapshot and may run beside the server. Offline imports validate documents and update indexes in batches. Modes are `insert`, `upsert`, and `replace`; consult `import --help` before choosing a mode that overwrites data.
+
+CSV is supported with `--format csv`. Cells are interpreted using the Rust field types; arrays and objects use JSON cells. Unknown columns are omitted and reported. IDs and creation times from exports are preserved.
+
+The dashboard can export or import a table on a running server through admin endpoints. Use archive backups for whole-app recovery and document exports for moving or inspecting selected data.
+
+## Use Litestream instead
+
+`data.db` is a normal SQLite WAL database, so [Litestream](https://litestream.io/) can replicate it alongside the server. Restore into an empty data directory before startup. The same separate requirements apply to `auth_secret.key`, local blobs, and S3 objects; `aux.db` contains logs and job history.
+
+See the [operations reference](/CONTRACT#_4-4-operations-backups-export-and-import-crate-ops) for archive contents, replication formats, and restore validation.

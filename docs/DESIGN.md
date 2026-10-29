@@ -1,54 +1,18 @@
-# Design
+# How RxFerrix works
 
-Why RxFerrix is built the way it is: the decisions, how the core works, what was measured, and the known trade-offs.
-For the exact API see the [API contract](CONTRACT.md), and for the wire format the [protocol](PROTOCOL.md).
+This page explains the implementation and its trade-offs. Use [Core concepts](/guide/concepts) for an app-level introduction, the [Rust contract](CONTRACT.md) for signatures, and the [protocol](PROTOCOL.md) for wire formats.
 
-## Decisions
+## One app process owns the database
 
-| Area | Decision |
-|---|---|
-| Backend functions | Rust, as a library. An app depends on the `rxferrix` crate, writes `#[query]` / `#[mutation]` / `#[action]` functions, and its `main` builds one binary. No JavaScript runtime is embedded. |
-| Data model | Tables of typed documents with secondary indexes and typed ids (`Id<T>`), stored in SQLite. |
-| Schema | Rust structs are the source of truth. The dashboard can browse and edit data but not change the schema. |
-| Transport | A WebSocket sync protocol for queries, mutations and actions, plus an HTTP JSON API for server-side rendering, scripts and webhooks. |
-| Clients | A framework-agnostic TypeScript core with React and Svelte 5 bindings, and a typed `api` object generated from the functions. |
-| Dashboard | A Svelte app embedded in the binary at `/_/`. It uses the same live protocol as apps. |
+An app links the `rxferrix` crate into a Rust executable. Macro-annotated tables and functions register at compile time. `RxFerrix::run` opens the database, starts services, and runs the HTTP/WebSocket server.
 
-**Not goals:**
+SQLite stores the live documents. There is one writer and a pool of snapshot readers. This makes transactions and consistent live updates possible without coordinating a distributed database. The trade-off is that one machine bounds capacity.
 
-- Several nodes or horizontal scaling: one process, one SQLite database.
-- Multi-tenancy or a hosted service.
-- Running user code in JavaScript, WASM or a sandbox.
-- Raw SQL on the live database from functions. Functions go through the document API so that reactivity stays
-  correct. (Read-only SQL over the [analytics copy](/guide/analytics) is allowed in actions: that copy isn't
-  reactive.)
-- Offline-first sync. Optimistic updates are supported; offline persistence isn't.
-- Declarative access rules. Authorization is written in function code.
-
-## Architecture
-
-```text
-                         ┌──────────────────────── rxferrix binary (your app) ────────────────────────┐
- Browser / app           │                                                                           │
- ┌───────────────┐  WS   │  axum ──► sync worker (per socket) ──► function runtime                   │
- │ @rxferrix/react │◄─────►│   │        query set, auth, versions     ├─ QueryCtx    (read-only snapshot)
- │ @rxferrix/svelte│       │   │                                      ├─ MutationCtx (the writer)      │
- │ @rxferrix/client│  HTTP │   ├─ /api/{query,mutation,action}        └─ ActionCtx   (any I/O)         │
- └───────────────┘◄─────►│   ├─ /api/auth/*       ┌──────────────┐        │ commit(ts, writes)      │
-                         │   ├─ /api/storage/*    │ subscription │◄── write log (recent commits)     │
- Admin browser           │   ├─ /_/ (dashboard)   │ manager      │──► invalidate ► rerun ► Transition│
- ┌───────────────┐       │   └─ your routes       └──────────────┘                                   │
- │ dashboard     │◄─────►│                                                                           │
- └───────────────┘       │  scheduler · auth · file storage · search (FTS5, sqlite-vec) · analytics  │
-                         │                                                                           │
-                         │  SQLite (WAL): data.db · aux.db (execution log) · storage/ or S3          │
-                         └───────────────────────────────────────────────────────────────────────────┘
-```
+React and Svelte bindings use a shared TypeScript client. The generated API describes functions and types; it does not execute Rust in the browser. The embedded dashboard uses the same live transport with administrator-only APIs.
 
 ## Storage
 
-All documents of all tables live in two SQLite tables, with a single version of each row (SQLite's WAL snapshots
-give readers isolation, so no multi-version rows are needed):
+Documents from all app and system tables share a generic SQLite layout:
 
 ```sql
 CREATE TABLE documents (id BLOB PRIMARY KEY, table_number INTEGER NOT NULL, json TEXT NOT NULL, ts INTEGER NOT NULL);
@@ -56,77 +20,66 @@ CREATE TABLE index_entries (index_id INTEGER NOT NULL, key BLOB NOT NULL, doc_id
                             PRIMARY KEY (index_id, key)) WITHOUT ROWID;
 ```
 
-Why one generic layout instead of a SQLite table per RxFerrix table:
+An index lookup is a byte-range scan over `index_entries`. Recording those ranges also records what a query depends on. Adding an index needs a backfill rather than a new SQLite table for each app schema.
 
-- Every index lookup is a byte-range scan over `index_entries`, so what a query read is just a set of byte ranges.
-  That is what makes [reactivity](#reactivity) cheap and exact.
-- Adding or removing an index needs no DDL, only a backfill.
-- One code path serves every table, system tables (`_users`, `_storage`, `_scheduled_jobs`, …) included, so the
-  dashboard and subscriptions treat them like any other.
+Index keys use an order-preserving byte encoding. Values sort by type: missing, null, integers, floats, booleans, strings, bytes, arrays, and objects. Ordinary indexes append `_creationTime` and `_id`, giving stable creation ordering within equal declared fields.
 
-**Index keys** are an order-preserving ("memcomparable") encoding of the indexed values: a type tag, then a payload
-whose bytes sort like the value. Values of different types sort by type: missing, `null`, integers, floats,
-booleans, strings, bytes, arrays, objects. Every index implicitly ends with `_creationTime` and `_id`, so documents
-with equal indexed values come in creation order. The encoding's version is stored in the database; opening a
-database with an older one rebuilds the affected indexes.
+IDs contain a four-byte table number and twelve random bytes, encoded as 26 base32 characters. The table number lets the runtime reject a typed ID for the wrong table. It does not authorize access.
 
-**Ids** are 16 bytes, a 4-byte table number and 12 random bytes, written as 26 characters of base32 that sort like
-the bytes. The table can be read from any id, so `ctx.db.get(id)` needs no table name and an id of the wrong table is
-rejected.
+SQLite WAL snapshots isolate readers; stored documents need only one current row. `aux.db` separately holds execution logs and finished-job history. File bytes live on disk or in object storage. Optional analytics uses a derived DuckDB copy.
 
 ## Transactions
 
-- **Queries** run on a pool of read-only connections (6 by default). Each opens a read transaction, which pins a WAL
-  snapshot, and reads the commit timestamp (ts) of that snapshot: every result is consistent at a single ts.
-- **Mutations** run on the single writer connection, one at a time, so they are serializable with no conflicts and no
-  retries. That's the right trade-off for one machine. **Group commit**: mutations waiting for the writer share one
-  SQLite transaction (up to 64 mutations or 2 ms), each in its own savepoint; the batch commits once and every member
-  gets its result after that commit. A mutation known to be slow (over 0.5 ms recently) commits the open batch first,
-  so the batch doesn't wait for it.
-- **Mutations can't do network I/O**, so they stay short, and a timeout (5 s by default) is checked at each await.
-- **Actions** have no transaction; each `ctx.run_query` / `ctx.run_mutation` they make is a transaction of its own.
-- **Checkpoints run off the commit path.** SQLite's automatic checkpoint would run inside a commit, holding the
-  writer. A background thread checkpoints instead once the WAL passes 1000 pages, and the writer finishes one itself
-  past 16 000, so the WAL doesn't grow without bound under constant writes.
-- **Retries are safe.** A client that reconnects sends its unanswered mutations again; the server recognizes them by
-  session and request id (kept for 10 minutes, written in the mutation's own transaction) and answers with the
-  recorded result instead of running them twice.
+A query holds a read-only connection for its run and reads one snapshot timestamp. The default pool size is about 1.5 readers per available core. Queries averaging at least 5 ms share a limited lane to keep slots available for faster reads.
+
+Mutations run serially on the writer. Queued mutations may share a group commit, with one savepoint per mutation. A failed mutation rolls back its savepoint; a failed batch commit fails the batch. Successful writes still get individual commit timestamps, and callers receive success only after commit.
+
+Groups are bounded by 64 mutations or two milliseconds. A recently slow mutation causes the current group to commit before it begins. This protects earlier fast mutations from waiting for it, but while it runs it still holds the single writer.
+
+External I/O belongs in actions. The context API separates transactional reads/writes from external work, but Rust is not sandboxed: the framework cannot prevent an app from making an inappropriate network call or blocking a thread. Timeouts are enforced at await points.
+
+Actions have no transaction. Each runtime query or mutation they call is separate. An external side effect cannot be rolled back if an action later fails.
+
+WAL checkpoints normally run off the write path. Default durability is `synchronous = NORMAL`; `--fsync-commits` waits for disk durability, with a shared fsync for a group.
 
 ## Reactivity
 
-**Read sets.** A query records what it read: the key range of each index scan, a point for each `get`, a range per
-search index, and how much of the caller's identity it looked at. `take(n)` narrows a scan's range to the part
-actually read, so "the latest 50 messages" isn't invalidated by an insert older than the 50th; a `filter` doesn't
-narrow it, since every document in the range was read.
+A query records document reads, index ranges, search/filter dependencies, environment reads, and the parts of identity it uses. A write log tracks committed changes. The subscription manager matches those changes to read sets and reruns affected queries.
 
-**The subscription manager** is one task per server that owns every subscription:
+A bounded scan such as `take(50)` records the span actually scanned. A post-read filter does not narrow that span. Changes to a document can invalidate its readers even when the fields relevant to the UI did not change.
 
-- **Shared queries.** Identical queries (same function, arguments, and the part of the identity they read) run once,
-  however many clients watch them. A query that never reads `ctx.auth` is shared by everyone.
-- **Versions.** A result computed at ts `r` stays valid until the first commit that writes into its read set. Each
-  commit's written keys are looked up in an interval index of all read sets, so only the queries it affects run again.
-- **Generations.** Commits are handled in rounds: a round takes a snapshot, invalidates what the new commits touched,
-  and queues those queries; runner tasks run them on the reader pool. The manager never waits for a query, a query
-  already queued isn't queued twice, and queries that take 5 ms or more have a lane of their own, so slow queries
-  don't hold up fast ones.
-- **No tearing.** A client gets an update at ts `T` only when every one of its queries has a result valid at `T`, so
-  all of its results move together, and never back in time.
-- **Read your writes.** The client resolves a mutation, and drops its optimistic update, only once it has results
-  at or after the mutation's commit.
+Identical queries share executions when their arguments and relevant identity match. A query that never reads auth can be shared across callers. Authorization reads therefore belong in the query or its guard, where they participate in tracking.
 
-Commits are kept in an in-memory write log (60 s, 100 000 commits or 32 MiB), which the manager reads to invalidate.
+The manager processes commits in generations without waiting for one slow query to finish. A client advances only when all its query results are valid at the new timestamp. This prevents the UI from combining query results from incompatible database snapshots.
 
-**Query cache.** A query whose last subscriber leaves stays cached while nothing it read changes (up to 30 minutes,
-64 MiB in all), and answers HTTP queries and `ctx.run_query` without running. A query has to miss twice before it is
-cached, so one-off queries don't fill it, and a query that reads the time is never cached.
+The client resolves a successful mutation only after subscriptions reach its commit timestamp. Until then, an optional optimistic update is replayed over new server results. Once the commit is visible, the optimistic layer is removed.
 
-**Fan-out.** Each result is serialized once and that text is shared by every subscriber's message. Clients that
-support it get diffs against the result they already have. Sockets set `TCP_NODELAY`.
+## Caching and transport
 
-**Determinism.** A query must be a pure function of the data, its arguments and the caller's identity, or caching
-and sharing would serve stale or wrong results. Rust can't enforce that, so it's a contract: `QueryCtx` has no
-network access, `ctx.now()` is the snapshot's commit time, and in `--dev` the server reruns queries now and then and
-warns when a result differs.
+Idle results can remain cached for up to 30 minutes within a 64 MiB budget. Repeated one-shot queries can be cached too; one-off calls are screened by an admission filter. Writes invalidate cache entries through the same dependencies. Time-dependent queries do not use this idle cache.
+
+Queries must be deterministic for caching and sharing to be correct. Development checks sample a second run in the same snapshot and warn on different results. They help detect mistakes but do not prove determinism.
+
+Each result is serialized once for fan-out. Clients advertising diff support may receive changes against their previous server result. Slow sockets can skip intermediate database states while still receiving a consistent transition.
+
+On reconnect, the client restores subscriptions and resends eligible unanswered mutations. Deduplication records are stored with their writes for about ten minutes, and the client retries within nine minutes under the same identity. Actions and HTTP mutations do not have this reconnect deduplication guarantee.
+
+## Updates and recovery
+
+A takeover prepares a database copy using the new code while the old process keeps serving. It validates schema/index compatibility, catches up with writes, then drains the old server and switches databases. Preparation errors leave the old process running; later initialization failures still need an operator recovery plan.
+
+Backups and continuous journal shipping support recovery. They do not create active replicas for serving app writes. Local SQLite storage and same-host coordination are requirements for the supplied takeover deployment.
+
+## Scope and trade-offs
+
+| Choice | Consequence |
+| --- | --- |
+| One writer | Simple serializable mutations; a slow mutation delays other writes. |
+| Native Rust code | Normal Rust tooling and libraries; compile/restart development loop and no sandbox. |
+| Tracked document API | Automatic live updates; app functions do not run raw SQL against the live database. |
+| Function-level permissions | Flexible app authorization; each public path must enforce its policy. |
+| Optional analytics copy | SQL reports without live-table scans; asynchronous freshness and a larger build. |
+| In-memory client state | Reconnects and optimistic views; no persistent offline database. |
 
 ## Measurements
 
@@ -154,20 +107,8 @@ Release builds on one machine, from development (dates are when they were taken)
   with about 0.23 ms from commit to client. Serializing each result once cut the server's CPU for 100 subscribers by
   10x; diffs cut a new post at the top of a 20-post list from 5.5 KB to about 250 bytes.
 - **Parallel reads:** 8 readers ran no faster than 1 until SQLite's global page-cache and memory-statistics mutexes
-  were turned off at build time (see [Deploying](/operations/deploying#build-with-the-right-sqlite-flags)); with them
+  were turned off at build time (see [Deploying](/operations/deploying#preserve-the-sqlite-build-configuration)); with them
   off, about 70k queries/s on 8 readers.
 - **Query cache (2026-10-10, HTTP):** get by id 134k → 293k requests/s, the 20 newest of a list 42k → 284k/s.
 
-## Trade-offs and risks
-
-| Risk | How it's handled |
-|---|---|
-| A slow mutation holds the single writer, and every write queued behind it waits. | No network in mutations, a timeout, durations on the dashboard. Group commit keeps a slow mutation from holding back the batch before it. Since queries already record read sets, optimistic concurrency could be added if this ever matters. |
-| Rust compile times slow the development loop. | The `rxferrix` crate is a precompiled dependency, so only the app rebuilds; clients reconnect and resubscribe on their own after a restart. Accepted as the cost of writing the backend in Rust. |
-| Non-deterministic queries break caching silently. | The determinism contract, `ctx.now()`, and the check in `--dev`. |
-| Data that no longer matches a changed type. | The schema is checked at startup, and the server refuses to start on a mismatch unless [migrations](/guide/migrations) for the table are pending. |
-| SQLite's default build flags serialize readers. | The build flags in `.cargo/config.toml` (and in every app made by `rxferrix new`); the server warns at startup when they're missing. |
-| DuckDB makes the binary bigger and the build longer. | The analytics copy is an opt-in feature (`olap`). |
-| SQL in actions reaching data or files it shouldn't. | One read-only SELECT per call, no file or network access, no extensions, locked settings, limits and a timeout; tables with secrets are never copied. |
-| The analytics copy holding back the database. | It only reads the change journal; a copy that falls too far behind is rebuilt from a snapshot instead. |
-| One machine is the ceiling. | Accepted: the design favours simplicity and consistency over horizontal scale. Deploys without downtime and continuous replication cover upgrades and recovery. |
+Measurements above describe specific workloads and machines. They are useful for understanding implementation choices, not capacity guarantees for another application. Benchmark your own query shapes, write sizes, and subscriber counts.

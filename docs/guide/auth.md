@@ -1,203 +1,201 @@
-# Auth
+# Authentication and authorization
 
-Enable sign-in methods in `main`, then use `ctx.auth` in functions:
+Authentication identifies the caller. Authorization decides which data that caller may use. Configure sign-in methods in `main.rs`, then enforce access in your public queries, mutations, and actions.
+
+## Enable sign-in
 
 ```rust
-use rxferrix::auth::{AuthConfig, GitHub, User};
-use rxferrix::prelude::*;
+use rxferrix::auth::AuthConfig;
 
 fn main() -> rxferrix::Result<()> {
     rxferrix::RxFerrix::new()
-        .auth(AuthConfig::password().magic_link().oauth(GitHub::from_env()).redirect_url("http://localhost:5173"))
+        .auth(AuthConfig::password()
+            .magic_link()
+            .redirect_url("http://localhost:5173"))
         .run()
 }
+```
+
+`password()` enables email/password accounts. `magic_link()` adds email-code/link sign-in. The redirect URL is the frontend users return to after following a link or completing OAuth.
+
+In development without SMTP, auth email codes and links appear in the backend log. For delivery, configure `--smtp-url` and `--smtp-from`, a custom mailer, or the dashboard's SMTP settings.
+
+Set the backend's `--public-url` in production so email links and OAuth callbacks use its public address. Keep allowed frontend return URLs in `redirect_url(...)`, `--auth-redirect-url`, or dashboard settings.
+
+## Sign in from a client
+
+The core auth manager stores browser tokens in `localStorage`, refreshes them, and authenticates the client's WebSocket:
+
+```ts
+import { getAuth } from "@rxferrix/client";
+
+const auth = getAuth(client);
+const result = await auth.signIn({ email, password });
+if (result.mfaRequired) {
+  await auth.verifyMfa(result.mfaToken, codeFromAuthenticator);
+}
+```
+
+`client` is the app's existing `RxFerrixClient`. Call `auth.handleRedirectCallback()` on the page receiving OAuth or email redirects, and handle a possible MFA challenge there too.
+
+| Task | Client method |
+| --- | --- |
+| Create a password account | `signUp({ email, password })` |
+| Sign in | `signIn({ email, password })` |
+| Send and verify an email code | `requestMagicLink(...)`, then `verifyCode(...)` |
+| Start OAuth | `signInWithOAuth("github")` |
+| Sign out | `signOut()` |
+| Change a password while signed in | `changePassword(currentPassword, newPassword)` |
+| Recover a password | `requestPasswordReset(...)`, then `resetPassword(...)` |
+
+React exposes state through `useRxFerrixAuth()`, actions through `useAuthActions()`, and the user's document through `useCurrentUser()`. Svelte combines state and actions in `useAuth()` and also provides `useCurrentUser()`. See [Clients](/guide/clients).
+
+## Check access to each document
+
+This example stores notes owned by an app user:
+
+```rust
+use rxferrix::auth::User;
+use rxferrix::prelude::*;
 
 #[table(name = "notes")]
 #[index(by_owner = [owner])]
-pub struct Note { pub owner: Id<User>, pub text: String }
+pub struct Note {
+    pub owner: Id<User>,
+    pub text: String,
+}
+
+#[query]
+pub async fn list(ctx: &QueryCtx) -> Result<Vec<Doc<Note>>> {
+    let owner = ctx.auth.require_user()?;
+    ctx.db.query::<Note>()
+        .with_index(Note::by_owner, |q| q.eq(Note::owner, owner))
+        .take(100)
+        .await
+}
 
 #[mutation]
-pub async fn add_note(ctx: &MutationCtx, text: String) -> Result<Id<Note>> {
-    let owner = ctx.auth.require_user()?;          // UserError "unauthenticated" when signed out
+pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Note>> {
+    let owner = ctx.auth.require_user()?;
     ctx.db.insert(Note { owner, text }).await
+}
+
+#[mutation]
+pub async fn remove(ctx: &MutationCtx, id: Id<Note>) -> Result<()> {
+    let owner = ctx.auth.require_user()?;
+    let note = ctx.db.get(id).await?.or_user("not_found", "Note not found")?;
+    ensure_user!(note.owner == owner, "forbidden", "You cannot delete this note");
+    ctx.db.delete(id).await
 }
 ```
 
-On the client, `getAuth(client)` signs in and keeps the socket authenticated (tokens in `localStorage`, refreshed
-automatically). React has `useRxFerrixAuth()`, `useAuthActions()` and `useCurrentUser()`; Svelte has `useAuth()`
-and `useCurrentUser()`:
+`require_user()` rejects signed-out callers with `unauthenticated`. The list selects that user's rows; deletion checks ownership explicitly. Knowing an ID never grants access by itself.
 
-```ts
-const auth = getAuth(client);
-await auth.signIn({ email, password });           // or signUp, requestMagicLink + verifyCode, signInWithOAuth("github")
-await auth.handleRedirectCallback();              // on the page OAuth and email links return to
-await auth.changePassword(current, newPassword);   // signed in; ends the user's other sessions
-```
+Authorization reads are tracked along with a subscribed query's other reads, so changing access data can invalidate the result. Use internal functions for operations that only trusted server code should call.
 
-Access tokens are HS256 JWTs (15 minutes by default) signed with a key derived from `<data dir>/auth_secret.key`;
-refresh tokens rotate on every use. Signing out, revoking a session from the dashboard, deleting a user or reusing a
-rotated refresh token (past a 10-second grace, `refresh_reuse_grace`) ends the sockets of that session **at once**
-(`AuthError`, then the client continues signed out), not when the access token expires. Email goes through
-`--smtp-url` (without it, printed to the log in `--dev`). With no admin yet, `serve` prints a
-one-time `/_/setup#token=…` link; `admin create <email>` works too.
+## Apply an app-wide guard
 
-OAuth presets: `GitHub`, `Google`, `Discord` and `Apple` (Sign in with Apple), plus `Oidc` for any OpenID Connect
-issuer; an email the provider hasn't verified is never stored or used to link accounts; each has `from_env()` (`RXFERRIX_AUTH_<PROVIDER>_CLIENT_ID`, …;
-`Oidc::from_env(id)` also reads `RXFERRIX_AUTH_<ID>_ISSUER`) and can also
-be set up in the dashboard's Settings. For Apple, give the Services ID, team id, key id and the `.p8` private key
-(`RXFERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`): rxferrix signs and rotates the short-lived client secret
-itself, accepts Apple's `form_post` callback (register `https://<public url>/api/auth/oauth/apple/callback`; the
-public URL must be https), verifies the ID token against Apple's keys, and keeps the name Apple sends on the first
-sign-in only. The key is a secret: keep it out of source control (the dashboard stores it encrypted).
-
-**Two-factor authentication.** Any user (and any administrator) can add an authenticator app (TOTP: Google
-Authenticator, 1Password, Authy, …) to their account; from then on every sign-in method stops at a second step until
-a code (or one of the 8 recovery codes shown at setup) is entered. A user with an email address verifies it first
-(`email_not_verified` otherwise). Nothing to configure on the server (optionally
-`.totp_issuer("My App")`, the name the authenticator shows; the public URL's host by default):
-
-```ts
-// Enrolling (signed in; accounts with a password confirm it):
-const { qrSvg, secret } = await auth.setupTotp({ password });   // show the QR code (an <svg>) or the secret
-const { recoveryCodes } = await auth.confirmTotp(firstCode);     // show the codes once; auth.getMfaStatus() from then on
-// Signing in:
-const r = await auth.signIn({ email, password });                 // also verifyCode, resetPassword, handleRedirectCallback
-if (r.mfaRequired) await auth.verifyMfa(r.mfaToken, codeFromApp); // or a recovery code
-// Later: auth.disableMfa(code), auth.regenerateRecoveryCodes(code)
-```
-
-Five wrong codes lock the factor for five minutes, a code works once, and the secret is stored encrypted with the
-server's key. A user who lost both the app and the recovery codes is rescued from the dashboard's Users page
-("Reset 2FA"); an administrator with `admin disable-2fa <email>`. Administrators turn on their own second factor on
-the dashboard's Account page.
-
-**Clerk, Auth0, Supabase or any OIDC provider** can sign users in instead (or as well): rxferrix verifies their JWTs
-against the provider's JWKS (RS256, ES256, EdDSA; `iss`, `aud`, `exp`, `nbf`) and creates a `_users` row for each new
-subject, so `ctx.auth.user_id()` and `Id<User>` work the same for every sign-in method:
+A guard can enforce a common requirement before every client call to your public functions:
 
 ```rust
-.auth(AuthConfig::default()
-    .jwt(JwtProvider::new("https://clerk.example.com").any_audience())          // JWKS found by OIDC discovery
-    .jwt(JwtProvider::new("https://tenant.auth0.com/").audience("https://api.example.com")))
+rxferrix::RxFerrix::new()
+    .guard(|ctx, _function| async move {
+        ctx.auth.require_user()?;
+        Ok(())
+    })
+    .run()
 ```
+
+The callback can also read access data through `ctx.db` or exempt selected functions with `function.is::<module::function>()`. Its reads use the call's snapshot/transaction and participate in query invalidation.
+
+Guards apply to client calls to app public functions. Internal functions, built-in `_system/*` functions, scheduled jobs, action-to-function calls, trusted `App` calls, and the admin function runner bypass them. Keep document-specific checks in the functions that need them. In tests, set `AppOptions::guard` with `Guard::new(...)`; `TestApp::as_user` exercises client access checks.
+
+## Add OAuth
+
+Add a provider to the auth configuration, for example `.oauth(rxferrix::auth::GitHub::from_env())`.
+
+Presets are `GitHub`, `Google`, `Discord`, and `Apple`; `Oidc` supports other OpenID Connect issuers. `from_env()` reads `RXFERRIX_AUTH_<PROVIDER>_CLIENT_ID` and related variables. `Oidc::from_env(id)` also reads `RXFERRIX_AUTH_<ID>_ISSUER`. Providers can also be configured through the dashboard.
+
+Register the provider callback as `https://your-backend/api/auth/oauth/<provider>/callback`. Accounts are linked by email only when the provider verifies that address.
+
+For Apple, configure the Services ID, team ID, key ID, and `.p8` private key (`RXFERRIX_AUTH_APPLE_PRIVATE_KEY` or `_PRIVATE_KEY_FILE`). RxFerrix creates and rotates the client secret. Apple requires an HTTPS public callback and uses `form_post`; the name supplied on the first sign-in is retained. Store the private key outside source control or in encrypted dashboard settings.
+
+## Use an external identity provider
+
+To accept JWTs from Clerk, Auth0, Supabase, or another issuer:
+
+```rust
+use rxferrix::auth::{AuthConfig, JwtProvider};
+
+let auth = AuthConfig::default().jwt(
+    JwtProvider::new("https://tenant.auth0.com/")
+        .audience("https://api.example.com")
+);
+```
+
+Pass this configuration to `.auth(auth)`. RxFerrix discovers the issuer's JWKS and validates signatures and claims. Supported algorithms are RS256, ES256, and EdDSA. Each new subject gets a `_users` row, so app code continues using `Id<User>`.
+
+Give the core client a token getter from your provider:
 
 ```ts
-// Hand the provider's token getter to the client; it refreshes before `exp` and after an AuthError. A getter that
-// throws (offline at page load) is retried with backoff; the user stays signed in meanwhile.
-client.setAuth(({ forceRefresh }) => clerk.session!.getToken({ skipCache: forceRefresh }));
+client.setAuth(({ forceRefresh }) =>
+  clerk.session!.getToken({ skipCache: forceRefresh })
+);
 ```
 
-**Runtime settings.** Administrators can change OAuth providers, SMTP, the redirect allowlist, sign-ups, token
-lifetimes and CORS origins without a restart (`_system/settings:*`). Secrets are encrypted at rest with a key derived
-from `auth_secret.key` and never shown again. Whatever the code, the command line or the environment configures wins
-over these settings. Every administrator write is recorded in an audit log (`_audit_log`), and admins can act as a
-user through a short-lived, audited session. Details: [docs/PROTOCOL.md](../PROTOCOL.md) ("Auth") and
-[docs/CONTRACT.md](../CONTRACT.md) §1.2, §1.5, §4.1.4, §4.1.5.
+The client refreshes before token expiry and after rejection. A getter that throws is retried with backoff. If your issuer does not use an audience claim, configure `.any_audience()` explicitly.
 
-**Users from another system.** Import `_users` and `_credentials` with `<app> import --mode insert` (system tables
-can be imported from the command line). Besides argon2id, `_credentials.passwordHash` may hold a bcrypt hash
-(`$2a$`, `$2b$`, `$2y$`: Laravel, Devise, Supabase, ...): those users sign in with their old password,
-and the hash is replaced with an argon2id one on that sign-in.
+## Add two-factor authentication
 
-**Email templates.** The verification, password reset and sign-in emails are plain text by default. In the
-dashboard's **Settings → Email templates**, give any of them a subject and an HTML body (with a live preview); a
-plain-text version is made from the HTML. Placeholders: `{link}` (the link back to your app; empty without a redirect
-URL), `{code}`, `{expires}` (e.g. `15 minutes`), `{app_name}` (set there, else the display name of the SMTP sender) and
-`{email}`. Values are HTML-escaped in the body, and a template must contain `{code}` or `{link}`.
+Users and administrators can enroll a TOTP authenticator without extra server infrastructure. Accounts with an email address must verify it first. `.totp_issuer("My App")` changes the name shown by authenticator apps.
 
-**Sending your own email.** Actions send through the same mailer as the auth emails (`--smtp-url`, `AuthConfig::mailer`
-or SMTP from the dashboard's settings, and the dev log mailer in `--dev`):
+```ts
+const { qrSvg, secret } = await auth.setupTotp({ password });
+// Show the QR code or secret, then ask for the first code.
+const { recoveryCodes } = await auth.confirmTotp(firstCode);
+// Show the recovery codes once and ask the user to save them.
+```
+
+Every enabled sign-in method then returns an MFA challenge until a TOTP code or recovery code is verified. `getMfaStatus()`, `disableMfa(code)`, and `regenerateRecoveryCodes(code)` manage enrollment. Five wrong codes lock the factor for five minutes; a code cannot be reused.
+
+Administrators can reset a user's lost factor on **Users**. For an administrator who lost both the authenticator and recovery codes, use the app's `admin disable-2fa EMAIL` command. Administrators manage their own enrollment on **Account**.
+
+## Control account creation and sign-in hooks
+
+`signups(false)` disables sign-ups. `allowed_domains(["example.com"])` and `allowed_emails(["guest@example.net"])` restrict accepted addresses. With an allowlist, password accounts must verify their email before sign-in and OAuth must supply a verified address.
+
+For invitations or another custom policy, use `before_sign_up(|app, attempt| async move { ... })`. The attempt contains the email, verification state, method, name, and optional frontend return URL. Return `UserError` to reject creation with a code the client can handle. The hook is a check; perform app-side invitation acceptance after sign-in because account creation can still fail after the check passes.
+
+`on_sign_in(|app, sign_in| async move { ... })` runs after a successful session-creating sign-in. It receives the user, session, method, and client information. Keep it short: the response waits for it. Use an internal mutation to record app-side login history.
+
+## Send email and customize templates
+
+Actions can use the same configured mailer as auth:
 
 ```rust
 use rxferrix::auth::Email;
+use rxferrix::prelude::*;
 
-#[action]
-pub async fn send_confirmation(ctx: &ActionCtx, to: String, text: String, html: String) -> Result<()> {
-    ctx.send_email(Email::new(to, "Your booking", text).html(html)).await   // `email_not_configured` without a mailer
+#[internal_action]
+pub async fn send_confirmation(ctx: &ActionCtx, to: String, text: String) -> Result<()> {
+    ctx.send_email(Email::new(to, "Your booking", text)).await
 }
 ```
 
-From a mutation, schedule the action (`ctx.scheduler.run_after::<send_confirmation>(Duration::ZERO, ..)`), so the
-email goes out only if the mutation commits; a workpool adds retries.
+Use `.html(html)` for an HTML body. Without a mailer this returns `email_not_configured`. Schedule email actions from mutations so a rolled-back mutation does not send mail; use retries only with an appropriate duplicate-delivery strategy.
 
-**Reacting to sign-ins.** `AuthConfig::on_sign_in` runs after each successful user sign-in that starts a session
-(password, sign-up, password reset, magic link, OAuth), e.g. to keep a login history:
+In **Settings → Email templates**, customize the subject and HTML for verification, password reset, and sign-in. Placeholders are `{link}`, `{code}`, `{expires}`, `{app_name}`, and `{email}`. A template must include `{code}` or `{link}`; values are HTML-escaped and a plain-text alternative is generated.
 
-```rust
-AuthConfig::password().on_sign_in(|app, sign_in| async move {
-    // sign_in.user, sign_in.session, sign_in.method ("password", "oauth:google", ...), sign_in.client (ip, user agent)
-    if let Err(e) = app.mutation::<audit::record_sign_in>((sign_in.user, sign_in.method.to_string())).await {
-        tracing::warn!("recording a sign-in failed: {e:#}");
-    }
-})
-```
+## Sessions, settings, and user removal
 
-The user is already signed in when it runs, and the response waits for it: keep it short.
+Built-in access tokens last 15 minutes by default; refresh tokens rotate. Sign-out, session revocation, user deletion, or detected refresh-token reuse revokes affected sockets promptly. The refresh reuse grace period is 10 seconds by default. External tokens have no local session row; deleting their provisioned user also revokes their sockets.
 
-**Who may sign up.** `signups(false)` closes sign-ups altogether. To let only some people in, list them, or decide in
-code; either way the check runs before an account is created (password sign-up, and the first sign-in by magic link
-or OAuth), and nothing is created when it refuses:
+The data directory's `auth_secret.key` signs built-in sessions and encrypts secrets. Preserve it when moving or restoring the app.
 
-```rust
-AuthConfig::password().magic_link()
-    .allowed_domains(["example.com"])          // and/or .allowed_emails(["guest@gmail.com"]): `signup_not_allowed`
-    .before_sign_up(|app, attempt| async move {
-        // attempt.email, attempt.email_verified, attempt.method, attempt.name, and attempt.redirect_to: the app URL
-        // the sign-up returns to, so an invite page that passes its own URL lets the invite authorize it.
-        let token = attempt.redirect_to.as_deref().and_then(invite_token);
-        if !app.query::<invites::valid>((token, attempt.email)).await? {
-            return Err(UserError::new("invite_required", "You need an invite to sign up").into());
-        }
-        Ok(())
-    })
-```
+Dashboard administrators can update providers, SMTP, redirects, sign-up settings, token lifetimes, and CORS without restarting. Values explicitly fixed in code, flags, or environment take precedence. Admin changes and impersonation sessions are audited.
 
-```ts
-await auth.signUp({ email, password, redirectTo: location.href });   // also requestMagicLink, signInWithOAuth
-// rejects with RxFerrixError code "invite_required"; OAuth returns with `rxferrix_error=invite_required`
-```
+Mutations can call `ctx.users.delete(user)`, `revoke_sessions(user)`, or `revoke_session(session)` in their transaction. These helpers do not check app permissions: protect the calling mutation. Revoking sessions does not ban a user who can sign in again; store and enforce a ban in your access policy.
 
-The refusal's code reaches the client (status 403). Only proven addresses pass the lists: while one is set, password
-accounts verify their address before they can sign in, and OAuth needs a provider-verified address. For a magic link
-the hook runs when the link is used, so the address is proven by then. Keep the hook a check (accept the invite from
-the app once the user is in): the account can still fail to be created after it said yes.
+For imported users, `_credentials.passwordHash` accepts bcrypt hashes (`$2a$`, `$2b$`, `$2y$`) as well as argon2id. A successful bcrypt sign-in upgrades the hash to argon2id. Use the offline import command for system-table imports.
 
-**Keeping everything behind a check.** A guard runs before every call a client makes to one of the app's public
-functions, and can refuse it, so a new function can't forget the check:
-
-```rust
-RxFerrix::new().guard(|ctx, function| async move {
-    if function.is::<access::status>() || function.is::<invites::accept>() {
-        return Ok(());                       // reachable before access is granted
-    }
-    let user = ctx.auth.require_user()?;
-    if !access::granted(&ctx.db, user).await? {
-        return Err(UserError::new("access_required", "Ask for an invite first").into());
-    }
-    Ok(())
-})
-```
-
-It reads through the call's own snapshot or transaction: a subscribed query reruns when the access data changes,
-going from the guard's error to results by itself. Internal functions, `_system/*` functions (`me`, the dashboard)
-and server code (actions calling `ctx.run_*`, `app.mutation`, scheduled jobs, the dashboard's function runner) are not
-guarded. In tests, set `AppOptions::guard` (`Guard::new(..)`); `TestApp::as_user` calls go through it.
-
-**Removing users from app code.** Mutations have `ctx.users`, in the mutation's transaction: `delete(user)` (with
-their sessions, linked accounts, password, second factor and email codes; `None` if already gone),
-`revoke_sessions(user)` and `revoke_session(session)`. Ended sessions are signed out at once, sockets included. They
-check nothing themselves: guard the mutation that calls them, or make it internal.
-
-```rust
-#[internal_mutation]
-pub async fn reject(ctx: &MutationCtx, request: Id<AccessRequest>) -> Result<()> {
-    let Some(r) = ctx.db.get(request).await? else { return Ok(()) };
-    ctx.db.delete(request).await?;
-    ctx.users.delete(r.user).await?;
-    Ok(())
-}
-```
-
-Ending sessions doesn't keep anyone out (they can sign in again). To ban someone from a space, record the ban in the
-app's data and check it in the guard or the space's functions; to remove them entirely, delete the user and refuse
-their sign-up.
+See the [auth API contract](/CONTRACT#_1-5-auth-configuration-and-services) and [auth endpoints](/PROTOCOL#auth) for full signatures and wire formats.

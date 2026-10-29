@@ -120,6 +120,21 @@ function randomSessionId(): string {
 }
 
 /** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
+/** Who a token speaks for, as far as the server's mutation dedup goes: its issuer and `sub` (`null` for no token). A
+ * refreshed token keeps it; another user's doesn't. */
+function tokenIdentity(token: string | null): string | null {
+  if (token === null) return null;
+  const parts = token.split(".");
+  try {
+    const b64 = (parts[1] ?? "").replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(typeof atob === "function" ? atob(padded) : "") as { sub?: unknown; iss?: unknown };
+    return `${String(payload.iss ?? "")}|${String(payload.sub ?? "")}`;
+  } catch {
+    return token;
+  }
+}
+
 function jwtExpiry(token: string): number | null {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return null;
@@ -418,9 +433,13 @@ export class RxFerrixClient {
 
   private sendUnsentRequests(): void {
     if (!this.ws.canSend()) return;
+    // Who the server takes these requests from: the identity of the token sent last (Authenticate goes out first).
+    const identity = tokenIdentity(this.serverToken);
+    const expired = this.requests.expireUnsafeResends(identity);
+    if (expired.length > 0) this.finishMutations(expired);
     for (const message of this.requests.unsent()) {
       if (!this.ws.send(message)) break;
-      this.requests.markSent(message.requestId);
+      this.requests.markSent(message.requestId, identity);
     }
   }
 

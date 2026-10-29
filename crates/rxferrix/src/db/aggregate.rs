@@ -262,15 +262,16 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
 /// Every group of `info`, computed from the table's documents.
 fn compute(conn: &Connection, table_number: u32, info: &AggregateInfo) -> anyhow::Result<BTreeMap<Vec<u8>, Counts>> {
     let mut groups: BTreeMap<Vec<u8>, Counts> = BTreeMap::new();
-    for (_, json) in super::storage::table_documents(conn, table_number)? {
-        let Value::Object(doc) = serde_json::from_str(&json)? else { continue };
+    super::storage::for_each_document(conn, table_number, |_, json| {
+        let Value::Object(doc) = serde_json::from_str(json)? else { return Ok(()) };
         let (key, values) = contribution(&info.spec, &doc);
         let entry = groups.entry(key).or_insert_with(|| (0, vec![Sum::ZERO; values.len()]));
         entry.0 += 1;
         for (s, v) in entry.1.iter_mut().zip(values) {
             *s = s.add(v);
         }
-    }
+        Ok(())
+    })?;
     Ok(groups)
 }
 

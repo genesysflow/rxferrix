@@ -556,20 +556,21 @@ fn drop_storage(conn: &Connection, info: &SearchIndexInfo) -> anyhow::Result<()>
 }
 
 fn backfill(conn: &Connection, table: &str, table_number: u32, info: &SearchIndexInfo) -> anyhow::Result<()> {
-    let docs = storage::table_documents(conn, table_number)?;
-    if !docs.is_empty() {
-        tracing::info!(table, index = %info.name, docs = docs.len(), "backfilling search index");
+    let docs = storage::count_documents(conn, table_number)?;
+    if docs > 0 {
+        tracing::info!(table, index = %info.name, docs, "backfilling search index");
     }
     let mut skipped = 0usize;
-    for (id, json) in docs {
-        let doc: Value = serde_json::from_str(&json)?;
+    storage::for_each_document(conn, table_number, |id, json| {
+        let doc: Value = serde_json::from_str(json)?;
         let doc = doc.as_object().context("stored document is not an object")?;
         match Entry::of(info, doc) {
             Ok(Some(entry)) => entry.insert(conn, info, &DocId(id))?,
             Ok(None) => {}
             Err(_) => skipped += 1,
         }
-    }
+        Ok(())
+    })?;
     if skipped > 0 {
         tracing::warn!(
             table,
@@ -782,17 +783,17 @@ pub(crate) fn verify(conn: &Connection, catalog: &Catalog) -> anyhow::Result<Vec
         if table.search_indexes.is_empty() {
             continue;
         }
-        let docs = storage::table_documents(conn, table.number)?;
         for info in &table.search_indexes {
             known.insert(info.storage_table().trim_matches('"').to_string());
             let mut expected: Vec<(String, Entry)> = Vec::new();
-            for (id, json) in &docs {
+            storage::for_each_document(conn, table.number, |id, json| {
                 let doc: Value = serde_json::from_str(json)?;
                 let doc = doc.as_object().context("document is not an object")?;
                 if let Ok(Some(entry)) = Entry::of(info, doc) {
-                    expected.push((DocId(*id).encode(), entry));
+                    expected.push((DocId(id).encode(), entry));
                 }
-            }
+                Ok(())
+            })?;
             expected.sort_by(|a, b| a.0.cmp(&b.0));
             let actual = stored_entries(conn, info)?;
             if actual != expected {

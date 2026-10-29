@@ -403,14 +403,15 @@ impl Database {
         snapshot.with_conn(|conn| {
             let mut problems = Vec::new();
             for table in catalog.tables() {
-                let docs = storage::table_documents(conn, table.number)?;
                 for index in table.stored_indexes() {
+                    // One pass over the documents per index: the expected keys are held, the documents aren't.
                     let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                    for (id, json) in &docs {
+                    storage::for_each_document(conn, table.number, |id, json| {
                         let doc: Value = serde_json::from_str(json)?;
                         let obj = doc.as_object().context("document is not an object")?;
-                        expected.push((keys::index_key(obj, &index.key_fields, id), id.to_vec()));
-                    }
+                        expected.push((keys::index_key(obj, &index.key_fields, &id), id.to_vec()));
+                        Ok(())
+                    })?;
                     expected.sort();
                     let mut stmt =
                         conn.prepare("SELECT key, doc_id FROM index_entries WHERE index_id = ?1 ORDER BY key")?;

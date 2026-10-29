@@ -374,21 +374,21 @@ fn backfill(
     (index, index_id): (&str, IndexId),
     key_fields: &[String],
 ) -> anyhow::Result<()> {
-    let docs = storage::table_documents(conn, table_number)?;
-    if !docs.is_empty() {
-        tracing::info!(table, index, docs = docs.len(), "backfilling index");
+    let docs = storage::count_documents(conn, table_number)?;
+    if docs > 0 {
+        tracing::info!(table, index, docs, "backfilling index");
     }
     let (mut long, mut longest) = (0, 0);
-    for (id, json) in docs {
-        let doc: Value = serde_json::from_str(&json)?;
+    storage::for_each_document(conn, table_number, |id, json| {
+        let doc: Value = serde_json::from_str(json)?;
         let obj = doc.as_object().context("stored document is not an object")?;
         let key = keys::index_key(obj, key_fields, &id);
         if key.len() > super::WARN_KEY_BYTES {
             long += 1;
             longest = longest.max(key.len());
         }
-        storage::insert_index_entry(conn, index_id, &key, &id)?;
-    }
+        storage::insert_index_entry(conn, index_id, &key, &id)
+    })?;
     if long > 0 {
         tracing::warn!(
             table,

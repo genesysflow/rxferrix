@@ -80,13 +80,16 @@ rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-l
 duckdb = { version = "1.20000.0", features = ["bundled", "json"], optional = true }
 # Parquet exports of analytics queries, written from DuckDB's Arrow batches (same Arrow major version as duckdb's).
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
+# The global allocator (feature `mimalloc`). musl's own malloc, which the release binaries (`scripts/release.sh`) would
+# otherwise use, takes one lock for every allocation across threads.
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 # Verifying imported bcrypt password hashes (`auth::password`).
 bcrypt = "0.19.3"
 # The QR code (as SVG) of a TOTP enrollment (`auth::totp`); no dependencies of its own.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 [features]
-default = ["dashboard", "s3", "acme", "thumbnails"]
+default = ["dashboard", "s3", "acme", "thumbnails", "mimalloc"]
 # S3-compatible file storage (AWS, R2, MinIO): `--storage s3://bucket/prefix`.
 s3 = ["object_store/aws"]
 # The admin dashboard SPA, embedded from `dashboard-dist/` and served at `/_/`. Its admin-only system functions and
@@ -105,6 +108,10 @@ acme = ["dep:rustls-acme"]
 # Image thumbnails (`GET /api/storage/{id}?thumb=WxH`). Without it, thumbnail requests get a 501
 # (`thumbnails_unavailable`).
 thumbnails = ["dep:image"]
+# mimalloc as the process's global allocator, for any binary that links rxferrix. Measured with `bench_network`
+# (2026-10-30), musl's malloc made HTTP calls 2.5-4.7x slower than glibc's. Turn it off (`default-features = false`) to
+# use another allocator: a program can only have one `#[global_allocator]`.
+mimalloc = ["dep:mimalloc"]
 
 # Zero-downtime takeover (`serve --takeover`): the listening sockets are passed to the new process over a Unix socket.
 [target.'cfg(unix)'.dependencies]

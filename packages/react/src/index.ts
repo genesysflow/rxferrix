@@ -1,5 +1,11 @@
 export { RxFerrixProvider, useRxFerrix, type RxFerrixProviderProps } from "./context.js";
-export { useQuery, useQueryWithStatus, type UseQueryResult } from "./use_query.js";
+export {
+  useQuery,
+  useQueryWithStatus,
+  useQueryKeepingPrevious,
+  type UseQueryResult,
+  type UseQueryKeepingPreviousResult,
+} from "./use_query.js";
 export {
   usePaginatedQuery,
   usePaginatedQueryWithStatus,

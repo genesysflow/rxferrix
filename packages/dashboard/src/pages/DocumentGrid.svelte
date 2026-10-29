@@ -189,6 +189,17 @@
     router.navigate(href("data", [table.name], { doc: id }));
   }
 
+  // Only rows in view can be selected: a selection doesn't carry over to another table, index, filter, order or
+  // search, and rows that left the view (deleted elsewhere, or no longer matching) drop out of it.
+  $effect(() => {
+    void [table.name, index?.name, JSON.stringify(applied), order, mode, searchText, searchIndex?.name];
+    selected = new Set();
+  });
+  const visibleSelection = $derived.by(() => {
+    const visible = new Set(rows.map((d) => d._id));
+    return [...selected].filter((id) => visible.has(id));
+  });
+
   function toggle(id: string, on: boolean) {
     const next = new Set(selected);
     if (on) next.add(id);
@@ -197,7 +208,7 @@
   }
 
   async function deleteSelected() {
-    const ids = [...selected];
+    const ids = visibleSelection;
     if (!confirm(`Delete ${ids.length} document${ids.length === 1 ? "" : "s"} from ${table.name}?`)) return;
     try {
       const n = await deleteDocuments({ ids });
@@ -265,8 +276,8 @@
         {exporting === "csv" ? "Exporting…" : "⇩ CSV"}
       </button>
     </div>
-    {#if selected.size > 0 && writable}
-      <button class="danger" onclick={deleteSelected}>Delete {selected.size}</button>
+    {#if visibleSelection.length > 0 && writable}
+      <button class="danger" onclick={deleteSelected}>Delete {visibleSelection.length}</button>
     {/if}
     {#if writable}
       <button class="primary" onclick={() => oninsert(template())}>+ Insert</button>

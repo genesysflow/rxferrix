@@ -42,12 +42,17 @@
   let result = $state<RunResult | null>(null);
   let error = $state<string | null>(null);
 
-  // A different function starts with fresh args and no result.
+  /** Bumped per run and per function switch: a run's answer is shown only if nothing changed meanwhile. */
+  let runSeq = 0;
+
+  // A different function starts with fresh args and no result (and a run still out for the old one is ignored).
   $effect(() => {
     void selectedPath;
+    runSeq++;
     args = "{}";
     result = null;
     error = null;
+    running = false;
   });
 
   async function run() {
@@ -59,13 +64,16 @@
     }
     running = true;
     error = null;
+    const seq = ++runSeq;
     try {
-      result = await runFunction({ path: selected.path, args: parsed.value as Json, asUser: asUser || null });
+      const answer = await runFunction({ path: selected.path, args: parsed.value as Json, asUser: asUser || null });
+      if (seq === runSeq) result = answer;
     } catch (e) {
+      if (seq !== runSeq) return;
       result = null;
       error = e instanceof RxFerrixError ? e.message : String(e);
     } finally {
-      running = false;
+      if (seq === runSeq) running = false;
     }
   }
 

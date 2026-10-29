@@ -1,9 +1,10 @@
-import { flushSync, mount, unmount } from "svelte";
+import { createRawSnippet, flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Json, TableSummary } from "../src/lib/api.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
 import JsonEditor from "../src/components/JsonEditor.svelte";
 import JsonValue from "../src/components/JsonValue.svelte";
+import Modal from "../src/components/Modal.svelte";
 
 let target: HTMLElement;
 let mounted: ReturnType<typeof mount> | null = null;
@@ -98,3 +99,40 @@ describe("JsonValue", () => {
     expect(render(1791554695097.8223, "_creationTime").textContent).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
   });
 });
+
+describe("Modal", () => {
+  const body = createRawSnippet(() => ({ render: () => "<p class='inside'>Recovery codes</p>" }));
+  function open(dismissible = true) {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const onclose = vi.fn();
+    const component = mount(Modal, { target, props: { title: "Codes", onclose, dismissible, children: body } });
+    flushSync();
+    const dialog = target.querySelector("dialog")!;
+    const press = (down: Element, up: Element) => {
+      down.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      up.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    };
+    return { dialog, inside: target.querySelector(".inside")!, onclose, press, close: () => unmount(component) };
+  }
+
+  it("closes on a click on the backdrop, not on a drag that only ends there", () => {
+    const m = open();
+    m.press(m.inside, m.dialog); // selecting text inside, released over the backdrop
+    expect(m.onclose).not.toHaveBeenCalled();
+    m.press(m.dialog, m.dialog);
+    expect(m.onclose).toHaveBeenCalledTimes(1);
+    m.close();
+  });
+
+  it("ignores the backdrop and Escape when not dismissible", () => {
+    const m = open(false);
+    m.press(m.dialog, m.dialog);
+    const cancel = new Event("cancel", { cancelable: true });
+    m.dialog.dispatchEvent(cancel);
+    expect(cancel.defaultPrevented).toBe(true);
+    expect(m.onclose).not.toHaveBeenCalled();
+    m.close();
+  });
+});
+

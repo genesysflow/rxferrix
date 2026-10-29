@@ -25,3 +25,10 @@ describe("router", () => {
     expect(href("functions", [], { fn: "todos:add" })).toBe("/_/functions?fn=todos%3Aadd");
   });
 });
+
+describe("parseRoute with a malformed path", () => {
+  it("keeps a segment that isn't valid percent-encoding as typed instead of throwing", () => {
+    expect(parseRoute("/_/data/50%off", "")).toMatchObject({ page: "data", rest: ["50%off"] });
+  });
+});
+

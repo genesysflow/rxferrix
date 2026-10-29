@@ -26,6 +26,10 @@ impl ::core::convert::From<()> for __rxferrix_args_ia {
         Self {}
     }
 }
+#[cfg(feature = "x")]
+const _: () = {
+    ::rxferrix::__private::assert_wire_output::<String>();
+};
 /// Function reference for [`ia`](fn@ia).
 #[cfg(feature = "x")]
 #[allow(non_camel_case_types, dead_code)]

@@ -27,8 +27,11 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         }
     };
 
-    // A `rename_all` the user chose (in #[serde] or #[ts]) replaces the camelCase default.
+    // A `rename_all` the user chose replaces the camelCase default. It must be in #[serde] (ts-rs reads it from there
+    // too): one only in #[ts] would rename the TS fields and leave the JSON ones as they are.
     let mut custom_rename_all = false;
+    let mut serde_rename_all = false;
+    let mut ts_rename_all = None;
     let mut kept = Vec::new();
     for attr in std::mem::take(attrs) {
         let path = attr.path();
@@ -65,6 +68,11 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     ),
                     Some("rename_all") => {
                         custom_rename_all = true;
+                        if which == "serde" {
+                            serde_rename_all = true;
+                        } else {
+                            ts_rename_all = Some(item.tokens.clone());
+                        }
                         kept_items.push(item);
                     }
                     _ => kept_items.push(item),
@@ -76,6 +84,13 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         }
     }
     *attrs = kept;
+    if let (Some(tokens), false) = (&ts_rename_all, serde_rename_all) {
+        errors.error(
+            tokens,
+            "set `rename_all` in #[serde(..)] (ts-rs follows it): in #[ts(..)] alone, the TS names would differ from the \
+             JSON ones",
+        );
+    }
     errors.finish()?;
     match &mut item {
         syn::Item::Struct(s) => crate::util::mark_skipped_options_optional(&mut s.fields),

@@ -72,6 +72,12 @@ impl QueryDb {
     }
 
     pub(super) fn record(&self, index_id: crate::db::catalog::IndexId, range: KeyRange) {
+        // Only a query run at a snapshot has its read set read (to know when its result goes stale); inside the
+        // write transaction (a mutation, or a query it runs) recording would only cost a lock and an allocation on
+        // the single writer's critical path.
+        if matches!(self.source, Source::Write(_)) {
+            return;
+        }
         self.read_set.lock().unwrap_or_else(|e| e.into_inner()).record(index_id, range);
     }
 

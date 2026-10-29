@@ -295,6 +295,30 @@ async fn reactivity_is_narrowed_to_the_changed_groups() {
 }
 
 #[tokio::test]
+async fn a_limited_listing_reads_only_the_groups_it_returns() {
+    let t = TestApp::new().await.unwrap();
+    let app = t.app();
+    for c in ["ann", "bob", "cat", "dan"] {
+        t.mutation::<add>((c.to_string(), "d1".to_string(), 1.0, None)).await.unwrap();
+    }
+    let commit = |ts: u64| app.db().write_log().entries_between(ts - 1, ts).unwrap().pop().unwrap();
+    // The first two customers (ann, bob) ascending, and the last two (dan, cat) descending.
+    let asc = t.query_run::<groups>((false, false, 2)).await.unwrap();
+    let desc = t.query_run::<groups>((false, true, 2)).await.unwrap();
+    asc.result.unwrap();
+    desc.result.unwrap();
+    let (_, ts) = t.mutation_ts::<add>(("dan".to_string(), "d2".to_string(), 1.0, None)).await.unwrap();
+    assert!(!asc.read_set.overlaps(&commit(ts)), "dan is past the first two");
+    assert!(desc.read_set.overlaps(&commit(ts)), "dan is one of the last two");
+    let (_, ts) = t.mutation_ts::<add>(("ann".to_string(), "d2".to_string(), 1.0, None)).await.unwrap();
+    assert!(asc.read_set.overlaps(&commit(ts)), "ann is one of the first two");
+    assert!(!desc.read_set.overlaps(&commit(ts)), "ann is past the last two");
+    // A new group past the first two can't change them either.
+    let (_, ts) = t.mutation_ts::<add>(("zed".to_string(), "d1".to_string(), 1.0, None)).await.unwrap();
+    assert!(!asc.read_set.overlaps(&commit(ts)));
+}
+
+#[tokio::test]
 async fn rollbacks_and_reading_your_own_writes() {
     let t = TestApp::new().await.unwrap();
     t.mutation::<add>(("ann".to_string(), "d".to_string(), 1.0, Some(1))).await.unwrap();

@@ -155,6 +155,17 @@ shapes!(Shape::Text => String, str, char);
 shapes!(Shape::Bytes => crate::Bytes);
 shapes!(Shape::Json => serde_json::Value, serde_json::Map<String, serde_json::Value>, u128, i128, ());
 
+#[cfg(feature = "chrono")]
+impl<Tz: chrono::TimeZone> HasShape for chrono::DateTime<Tz> {
+    fn shape() -> Shape {
+        Shape::Text
+    }
+}
+#[cfg(feature = "chrono")]
+shapes!(Shape::Text => chrono::NaiveDate, chrono::NaiveDateTime, chrono::NaiveTime);
+#[cfg(feature = "uuid")]
+shapes!(Shape::Text => uuid::Uuid);
+
 impl<T> HasShape for crate::Id<T> {
     fn shape() -> Shape {
         Shape::Text

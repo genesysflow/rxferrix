@@ -62,6 +62,14 @@ mutations) marks a function for development (seeding, reading a dev inbox): the 
 and codegen puts it in `devApi` instead of `api`. In `--dev` without SMTP, auth emails are printed to the log by
 `DevLogMailer`; `AuthConfig::dev_mailer(m)` replaces it (and can forward to it).
 
+## Dates, times and UUIDs
+
+Store times as `f64` milliseconds (what `ctx.now()` returns), or turn on the cargo features `chrono` and `uuid` to use
+those crates' types in tables and function signatures: `rxferrix = { version = "…", features = ["chrono", "uuid"] }`.
+`DateTime<Utc>`, `NaiveDate`, `NaiveDateTime`, `NaiveTime` and `Uuid` are then strings in the generated TypeScript (RFC
+3339 for times, as serde writes them). Your app depends on `chrono` (with its `serde` feature) or `uuid` itself to
+name them.
+
 ## Errors for the client
 
 Return a `UserError` for anything the client should handle: its `code` and `message` reach the caller as they are,

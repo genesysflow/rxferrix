@@ -1,4 +1,4 @@
-import { CONNECTION_LOST, RxFerrixError } from "./errors.js";
+import { CONNECTION_LOST, OUTCOME_UNKNOWN, RxFerrixError } from "./errors.js";
 import type {
   ActionMessage,
   ActionResponseMessage,
@@ -9,6 +9,13 @@ import type {
 
 type Settle = { resolve: (value: unknown) => void; reject: (error: unknown) => void };
 
+/**
+ * How long after its first send a mutation may still be sent again. The server recognizes a resent mutation (and
+ * answers with the recorded result instead of running it again) for 10 minutes (docs/PROTOCOL.md); later, a resend
+ * could run it twice. Kept below that, for clock and transit slack.
+ */
+export const RESEND_WINDOW_MS = 9 * 60_000;
+
 type MutationRequest = Settle & {
   kind: "mutation";
   message: MutationMessage;
@@ -17,6 +24,8 @@ type MutationRequest = Settle & {
   /** Set once a successful MutationResponse arrived: waiting for a Transition with ts >= this. */
   completed: { ts: number; result: unknown } | null;
   startedAt: number;
+  /** When it first went out, and as whom (`identity` of the client then): a resend must match both. */
+  firstSent: { at: number; identity: string | null } | null;
 };
 
 type ActionRequest = Settle & {
@@ -58,6 +67,7 @@ export class RequestManager {
         sent: false,
         completed: null,
         startedAt: Date.now(),
+        firstSent: null,
         resolve,
         reject,
       });
@@ -88,10 +98,35 @@ export class RequestManager {
     return out;
   }
 
-  /** The message went out on the current socket. */
-  markSent(requestId: RequestId): void {
+  /** The message went out on the current socket, from `identity` (whom the socket is authenticated as). */
+  markSent(requestId: RequestId, identity: string | null = null): void {
     const request = this.requests.get(requestId);
-    if (request) request.sent = true;
+    if (!request) return;
+    request.sent = true;
+    if (request.kind === "mutation" && !request.firstSent) request.firstSent = { at: Date.now(), identity };
+  }
+
+  /**
+   * Mutations waiting to be sent again that can't be safely: sent more than {@link RESEND_WINDOW_MS} ago (the server
+   * no longer recognizes them, so they could run twice), or from another identity than now (the server never matches
+   * a resend across identities: it would run, or fail, as someone else). They are taken off and returned, rejected
+   * with {@link OUTCOME_UNKNOWN}: whether the first send ran isn't known.
+   */
+  expireUnsafeResends(identity: string | null, now: number = Date.now()): SettledMutation[] {
+    const expired: SettledMutation[] = [];
+    for (const [requestId, request] of this.requests) {
+      if (request.kind !== "mutation" || request.sent || request.completed || !request.firstSent) continue;
+      const tooOld = now - request.firstSent.at > RESEND_WINDOW_MS;
+      if (!tooOld && request.firstSent.identity === identity) continue;
+      this.requests.delete(requestId);
+      const why = tooOld ? "too long ago to be sent again safely" : "as another user than now";
+      const error = new RxFerrixError(
+        `The connection was lost after mutation "${request.message.udfPath}" was sent, ${why}: it may or may not have run`,
+        { code: OUTCOME_UNKNOWN },
+      );
+      expired.push({ requestId, settle: () => request.reject(error) });
+    }
+    return expired;
   }
 
   /**

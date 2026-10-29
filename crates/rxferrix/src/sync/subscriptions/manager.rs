@@ -98,6 +98,8 @@ struct Conn {
     updates: u64,
     /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
     starving: bool,
+    /// The subscription that kept the last [`Manager::try_flush`] from flushing: the next one starts there.
+    blocker: QueryId,
     /// After a hold for it reached [`HOLD_MAX`]: no new hold for it before then.
     no_hold_until: Option<Instant>,
 }
@@ -118,6 +120,7 @@ impl Conn {
             deferred: VecDeque::new(),
             updates: 0,
             starving: false,
+            blocker: 0,
             no_hold_until: None,
         }
     }

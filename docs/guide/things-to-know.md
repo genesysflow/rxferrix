@@ -16,6 +16,9 @@
   const id = `optimistic:${crypto.randomUUID()}` as Id<"messages">, now = Date.now();
   send.withOptimisticUpdate((store, args) => insertAtTop({ …, item: { _id: id, _creationTime: now, …args } }));
   ```
+- **Changing a query's args shows "loading" until the new result comes**: `undefined` from `useQuery`. To keep
+  showing the previous result meanwhile (a search box, a pager), use `useQueryKeepingPrevious` in React or
+  `useQuery(ref, args, { keepPreviousData: true })` in Svelte; `isStale` tells which one it is.
 - **Query results are read-only** (frozen): the client applies the server's next diff to them, so changing one in
   place would corrupt every later update. Copy before you change: `[...todos].sort(…)` or `todos.toSorted(…)`, and in
   an optimistic update `store.setQuery(q, args, [item, ...current])` rather than `current.push(item)`.

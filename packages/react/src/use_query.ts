@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   canonicalJSON,
 
@@ -91,5 +91,30 @@ export function useQueryWithStatus<Q extends FunctionReference<"query">>(
         return { data: undefined, error: undefined, isLoading: false };
     }
   }, [state]);
+}
+
+export type UseQueryKeepingPreviousResult<T> = UseQueryResult<T> & {
+  /** `data` is the previous args' value, shown while the current args load. */
+  isStale: boolean;
+};
+
+/**
+ * Like {@link useQueryWithStatus}, but while the query loads for new args, `data` keeps the last value it had (for the
+ * previous args) with `isStale: true`, instead of going back to `undefined`: a search box or a pager doesn't flash
+ * empty between results. Skipping (`"skip"`) or an error shows no previous value.
+ */
+export function useQueryKeepingPrevious<Q extends FunctionReference<"query">>(
+  ref: Q,
+  ...args: OptionalArgsOrSkip<Q>
+): UseQueryKeepingPreviousResult<OutputOf<Q>> {
+  const result = useQueryWithStatus(ref, ...args);
+  const last = useRef<{ data: OutputOf<Q> } | null>(null);
+  if (!result.isLoading) last.current = result.error === undefined && result.data !== undefined ? { data: result.data } : null;
+  const previous = result.isLoading ? last.current : null;
+  return useMemo(
+    (): UseQueryKeepingPreviousResult<OutputOf<Q>> =>
+      previous ? { data: previous.data, error: undefined, isLoading: false, isStale: true } : { ...result, isStale: false },
+    [result, previous],
+  );
 }
 

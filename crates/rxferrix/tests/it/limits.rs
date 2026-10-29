@@ -95,6 +95,24 @@ async fn a_subscription_that_timed_out_runs_again() {
     assert_eq!(c.value(1), json!(true));
 }
 
+/// A client that stops reading gets the latest state when it reads again, not a frame per commit it missed: updates
+/// wait in its mailbox, merging, while the socket's queue is full (`worker::OUT_QUEUE`).
+#[tokio::test]
+async fn a_client_that_stops_reading_gets_merged_updates() {
+    let t = TestApp::new().await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    assert_eq!(c.subscribe(1, &fns::everyone::path(), json!({})).await, Ok(json!(0)));
+    let before = c.transitions;
+    // Spaced out, so that each commit gets an update of its own.
+    for i in 0..50 {
+        t.mutation::<crate::common::todos::add>((format!("todo {i}"),)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    c.until(|c| c.value(1) == json!(50)).await;
+    let read = c.transitions - before;
+    assert!(read <= worker::OUT_QUEUE + 2, "{read} Transitions for 50 commits the client didn't read");
+}
+
 #[tokio::test(start_paused = true)]
 async fn silent_clients_are_disconnected() {
     let t = TestApp::new().await.unwrap();

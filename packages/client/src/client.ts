@@ -119,13 +119,13 @@ function randomSessionId(): string {
   });
 }
 
-/** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
 /** Whether a JWT's `exp` has passed (a token without one never expires here). */
 function isExpired(token: string): boolean {
   const exp = jwtExpiry(token);
   return exp !== null && exp * 1000 <= Date.now();
 }
 
+/** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
 function jwtExpiry(token: string): number | null {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return null;
@@ -797,13 +797,13 @@ export class RxFerrixClient {
 
   // ---------------------------------------------------------------------------------------------------------------
 
-  /** Closes the socket for good. Pending mutations and actions are rejected. */
   /** Calls `hook` when the client is closed (e.g. so that the `RxFerrixAuth` of `getAuth` stops listening to other tabs). */
   onClose(hook: () => void): void {
     if (this.closed) hook();
     else this.closeHooks.push(hook);
   }
 
+  /** Closes the socket for good. Pending mutations and actions are rejected. */
   close(): void {
     if (this.closed) return;
     this.closed = true;

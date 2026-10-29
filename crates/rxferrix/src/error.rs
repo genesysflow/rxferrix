@@ -64,11 +64,11 @@ macro_rules! ensure_user {
 
 /// Turn a missing value into a [`UserError`]: `ctx.db.get(id).await?.or_user("not_found", "no such channel")?`.
 pub trait OrUserError<T> {
-    fn or_user(self, code: &str, message: impl Into<String>) -> Result<T>;
+    fn or_user(self, code: impl Into<String>, message: impl Into<String>) -> Result<T>;
 }
 
 impl<T> OrUserError<T> for Option<T> {
-    fn or_user(self, code: &str, message: impl Into<String>) -> Result<T> {
+    fn or_user(self, code: impl Into<String>, message: impl Into<String>) -> Result<T> {
         self.ok_or_else(|| UserError::new(code, message).into())
     }
 }

@@ -555,20 +555,20 @@ pub(crate) async fn delete_session_by_refresh(app: &App, keys: &Keys, refresh: &
     .await
 }
 
-/// Whether `session` exists, is unexpired and belongs to `principal`.
+/// When `session` expires, if it exists, is unexpired and belongs to `principal`.
 pub(crate) async fn session_active(
     app: &App,
     session: Id<Session>,
     principal: Principal,
     now: f64,
-) -> crate::Result<bool> {
+) -> crate::Result<Option<f64>> {
     read(app, |db| async move {
-        let Some(s) = db.get(session).await? else { return Ok(false) };
+        let Some(s) = db.get(session).await? else { return Ok(None) };
         let owner = match principal {
             Principal::User(u) => s.user == Some(u),
             Principal::Admin(a) => s.admin == Some(a),
         };
-        Ok(owner && s.expires_at > now)
+        Ok((owner && s.expires_at > now).then_some(s.expires_at))
     })
     .await
 }

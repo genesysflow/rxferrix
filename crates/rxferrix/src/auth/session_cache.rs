@@ -55,7 +55,8 @@ impl SessionCache {
             }
         }
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        inner.catch_up(log, by_id, latest);
+        // Read again: another check may have moved the cursor past `latest` while this one waited for the lock.
+        inner.catch_up(log, by_id, log.latest());
         valid(&inner)
     }
 
@@ -88,13 +89,12 @@ impl SessionCache {
 }
 
 impl Inner {
-    /// Apply the commits after the cursor, up to `latest`.
+    /// Apply the commits after the cursor, up to `latest` (nothing if the cursor is there already).
     fn catch_up(&mut self, log: &WriteLog, by_id: IndexId, latest: u64) {
-        if self.cursor == latest {
+        if latest <= self.cursor {
             return;
         }
-        let entries = if self.cursor < latest { log.entries_between(self.cursor, latest) } else { None };
-        match entries {
+        match log.entries_between(self.cursor, latest) {
             Some(entries) if !self.sessions.is_empty() => {
                 for entry in entries {
                     for (index, key) in &entry.writes {
@@ -107,7 +107,7 @@ impl Inner {
                 }
             }
             Some(_) => {}
-            // Trimmed (or a log that went backwards): anything may have changed.
+            // Trimmed: anything may have changed.
             None => self.sessions.clear(),
         }
         self.cursor = latest;
@@ -168,6 +168,18 @@ mod tests {
         write(&log, other);
         assert!(!cache.is_active(&log, BY_ID, &other, principal(), 1.0));
         cache.insert(&log, BY_ID, s, principal(), 1e15, read_from);
+        assert!(cache.is_active(&log, BY_ID, &s, principal(), 1.0));
+    }
+
+    #[test]
+    fn a_check_behind_the_cursor_keeps_the_cache() {
+        let (log, cache, s) = (WriteLog::new(0), SessionCache::default(), [1; 16]);
+        cache.insert(&log, BY_ID, s, principal(), 1e15, 0);
+        write(&log, [2; 16]);
+        assert!(cache.is_active(&log, BY_ID, &s, principal(), 1.0));
+        // A check that read an older latest ts before another moved the cursor past it.
+        cache.inner.write().unwrap().catch_up(&log, BY_ID, 0);
+        assert_eq!(cache.inner.read().unwrap().cursor, 1, "the cursor doesn't go back");
         assert!(cache.is_active(&log, BY_ID, &s, principal(), 1.0));
     }
 

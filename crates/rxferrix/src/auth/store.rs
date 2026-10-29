@@ -555,7 +555,7 @@ pub(crate) async fn delete_session_by_refresh(app: &App, keys: &Keys, refresh: &
     .await
 }
 
-/// When `session` expires, if it exists, is unexpired and belongs to `principal`.
+/// The expiry (ms) of `session` if it exists, is unexpired and belongs to `principal`; otherwise `None`.
 pub(crate) async fn session_active(
     app: &App,
     session: Id<Session>,

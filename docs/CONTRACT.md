@@ -14,7 +14,8 @@ carry the *JSON* name (`created_by` → `"createdBy"`).
 
 ```rust
 use rxferrix::prelude::*;
-// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, Bytes,
+// prelude = Id, Doc, Field, Index, Order, QueryCtx, MutationCtx, ActionCtx, Result, Error, UserError, OrUserError,
+//           bail_user!, ensure_user!, Bytes,
 //           PaginationOpts, PaginationResult, SearchIndex, VectorIndex, VectorFilter, VectorSearchOpts, Aggregate, DocChange,
 //           table, object, query, mutation, action, internal_query, internal_mutation, internal_action, migration,
 //           workflow, WorkflowCtx, json!, RxFerrix
@@ -86,6 +87,10 @@ impl UserError {
     pub fn with_data(self, data: serde_json::Value) -> Self;
 }
 impl std::error::Error for UserError {}   // + Display = message. Detected at the boundary via anyhow downcast_ref.
+impl UserError { pub fn of(err: &Error) -> Option<&UserError>; }  // the UserError in err's chain (tests)
+// bail_user!(code, "fmt", args..)        = return Err(UserError::new(code, format!(..)).into())
+// ensure_user!(cond, code, "fmt", ..)    = if !cond { bail_user!(..) }
+// option.or_user(code, message)?         = option.ok_or_else(|| UserError::new(code, message).into())?  (OrUserError)
 
 /// Typed document id. String form: 26-char lowercase Crockford base32 of 16 bytes:
 /// [table_number: u32 big-endian][12 random bytes]. Serializes as a JSON string.
@@ -1961,8 +1966,11 @@ impl Todo {
 #[linkme(crate = ::rxferrix::__private::linkme)]
 static __RXFERRIX_TABLE_Todo: fn() -> ::rxferrix::TableDef = <Todo as ::rxferrix::Table>::table_def;
 ```
-Compile errors (with spans) for: tuple or unit structs, enums, generics, an index naming an unknown field, a duplicate
-index name, an index named `by_id` or `by_creation_time`, and an existing `#[serde(rename_all)]` other than camelCase.
+Compile errors (with spans) for: tuple or unit structs, enums, generics, an index naming an unknown field or one not
+stored under its own key (`#[serde(skip)]`, `skip_serializing`, `flatten`; the same for search and vector indexes and
+aggregates), a duplicate index name, an index named `by_id` or `by_creation_time`, and an existing
+`#[serde(rename_all)]` other than camelCase. A field named `id`, `value` or `creation_time` is allowed, but `Doc<T>`'s
+own fields of those names win on `doc.id` etc. (reach the table's through `doc.value.id`).
 Per-field `#[serde(rename = "x")]` is honored: the handle and IndexDef use "x".
 
 **Shapes.** `SHAPE_OF!(T)` above stands for the block
@@ -2214,8 +2222,12 @@ impl ::rxferrix::shape::HasShape for MessageView {
 struct of several fields or a unit struct: `Shape::Json`; a newtype or `transparent` struct: its field's shape;
 `guard` returns `Shape::Json` for a type already being computed, so recursive types terminate).
 - Structs (named, tuple, unit) and enums, generic or not; for an enum, `rename_all` renames the variants
-  (`InProgress` → `"inProgress"`). A `#[serde(rename_all = "...")]` (or `#[ts(...)]`) on the item replaces the camelCase
-  default; other `#[serde]` / `#[ts]` attributes are kept (ts-rs follows serde's, e.g. `rename`, `skip`, `flatten`).
+  (`InProgress` → `"inProgress"`), not the fields of struct variants, which keep their Rust names unless the enum sets
+  `#[serde(rename_all_fields = "camelCase")]`. A `#[serde(rename_all = "...")]` on the item replaces the camelCase
+  default (one only in `#[ts(...)]` is a compile error: the TS names would differ from the JSON ones); other `#[serde]`
+  / `#[ts]` attributes are kept (ts-rs follows serde's, e.g. `rename`, `skip`, `flatten`).
+- A function's argument and output types get a hint when they lack the derives: `` `T` can't be an argument of a
+  rxferrix function `` with "add `#[rxferrix::object]` to it" (`__private::assert_wire_arg` / `assert_wire_output`).
 - Compile errors: arguments (`#[object(x)]`), an item that is not a struct or enum, deriving `Serialize`,
   `Deserialize` or `TS` again, and `crate = ...` in `#[serde]` / `#[ts]`.
 - **Embedding documents.** `Id<T>` fields work as is (TS `Id<"table">`). `#[serde(flatten)] doc: Doc<T>` puts the

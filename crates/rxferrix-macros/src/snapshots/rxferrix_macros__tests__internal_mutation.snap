@@ -25,6 +25,10 @@ impl ::core::convert::From<(i32,)> for __rxferrix_args_im {
         Self { x: __rxferrix_tuple.0 }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<i32>();
+    ::rxferrix::__private::assert_wire_output::<i32>();
+};
 /// Function reference for [`im`](fn@im).
 #[allow(non_camel_case_types, dead_code)]
 struct im {}

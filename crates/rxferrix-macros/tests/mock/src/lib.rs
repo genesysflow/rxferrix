@@ -616,6 +616,23 @@ pub mod __private {
     }
     sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
     pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` can't be an argument of a rxferrix function: it must deserialize from JSON and have a TS type",
+        label = "missing `#[rxferrix::object]`?",
+        note = "for a struct or enum of your own, add `#[rxferrix::object]` to it (it derives `Serialize`, `Deserialize` and `TS`)"
+    )]
+    pub trait WireArg {}
+    impl<T: serde::de::DeserializeOwned + ts_rs::TS> WireArg for T {}
+    pub const fn assert_wire_arg<T: WireArg>() {}
+
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` can't be returned by a rxferrix function: it must serialize to JSON and have a TS type",
+        label = "missing `#[rxferrix::object]`?",
+        note = "for a struct or enum of your own, add `#[rxferrix::object]` to it (it derives `Serialize`, `Deserialize` and `TS`)"
+    )]
+    pub trait WireOutput {}
+    impl<T: serde::Serialize + ts_rs::TS> WireOutput for T {}
+    pub const fn assert_wire_output<T: WireOutput>() {}
 
     pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
         <crate::Doc<T> as serde::Deserialize>::deserialize(doc).map(drop).map_err(|e| e.to_string())

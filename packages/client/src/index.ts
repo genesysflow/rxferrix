@@ -22,7 +22,7 @@ export {
   type ConnectionState,
   type QueryWatch,
 } from "./client.js";
-export { RxFerrixError, CONNECTION_LOST, CLIENT_CLOSED } from "./errors.js";
+export { RxFerrixError, CONNECTION_LOST, CLIENT_CLOSED, OUTCOME_UNKNOWN } from "./errors.js";
 export { applyDiff, DiffMismatch } from "./diff.js";
 export {
   RxFerrixAuth,

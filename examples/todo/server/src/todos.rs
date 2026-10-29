@@ -55,9 +55,7 @@ pub async fn remaining(ctx: &QueryCtx) -> Result<u32> {
 #[mutation]
 pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
     let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err(UserError::new("empty_text", "A todo needs some text").into());
-    }
+    ensure_user!(!text.is_empty(), "empty_text", "A todo needs some text");
     log::info!(len = text.len(), "adding a todo");
     ctx.db.insert(Todo { text, done: false, image: None, completed_at: None }).await
 }
@@ -66,9 +64,7 @@ pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
 /// Returns the scheduled job, which `ctx.scheduler.cancel` (or the dashboard) can cancel.
 #[mutation]
 pub async fn add_later(ctx: &MutationCtx, text: String, delay_seconds: u32) -> Result<Id<ScheduledJob>> {
-    if text.trim().is_empty() {
-        return Err(UserError::new("empty_text", "A todo needs some text").into());
-    }
+    ensure_user!(!text.trim().is_empty(), "empty_text", "A todo needs some text");
     ctx.scheduler.run_after::<add>(Duration::from_secs(delay_seconds.into()), (text,)).await
 }
 
@@ -106,16 +102,12 @@ pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
 /// Step 2: attach the uploaded image to a todo (`image: null` removes it). The previous image is deleted.
 #[mutation]
 pub async fn set_image(ctx: &MutationCtx, id: Id<Todo>, image: Option<Id<StoredFile>>) -> Result<()> {
-    let Some(todo) = ctx.db.get(id).await? else {
-        return Err(UserError::new("not_found", "This todo no longer exists").into());
-    };
+    let todo = ctx.db.get(id).await?.or_user("not_found", "This todo no longer exists")?;
     if let Some(image) = image {
-        let Some(file) = ctx.storage.get_metadata(image).await? else {
-            return Err(UserError::new("not_found", "The uploaded file does not exist").into());
-        };
+        let file = ctx.storage.get_metadata(image).await?.or_user("not_found", "The uploaded file does not exist")?;
         if !file.content_type.as_deref().is_some_and(|ct| ct.starts_with("image/")) {
             ctx.storage.delete(image).await?;
-            return Err(UserError::new("not_an_image", "Only images can be attached").into());
+            bail_user!("not_an_image", "Only images can be attached");
         }
     }
     if todo.image != image {

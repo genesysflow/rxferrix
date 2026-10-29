@@ -42,6 +42,13 @@ for __rxferrix_args_add_many {
         }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<u32>();
+    ::rxferrix::__private::assert_wire_arg::<Option<String>>();
+    ::rxferrix::__private::assert_wire_arg::<bool>();
+    ::rxferrix::__private::assert_wire_arg::<String>();
+    ::rxferrix::__private::assert_wire_output::<()>();
+};
 /// Function reference for [`add_many`](fn@add_many).
 #[allow(non_camel_case_types, dead_code)]
 pub struct add_many {}

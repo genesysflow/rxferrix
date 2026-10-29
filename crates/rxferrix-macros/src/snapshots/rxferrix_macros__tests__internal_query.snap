@@ -23,6 +23,9 @@ impl ::core::convert::From<()> for __rxferrix_args_iq {
         Self {}
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_output::<()>();
+};
 /// Function reference for [`iq`](fn@iq).
 #[allow(non_camel_case_types, dead_code)]
 struct iq {}

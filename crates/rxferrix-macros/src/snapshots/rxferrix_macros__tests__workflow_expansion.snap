@@ -35,6 +35,11 @@ impl ::core::convert::From<(Id<User>, Option<u32>)> for __rxferrix_args_onboard 
         }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<Id<User>>();
+    ::rxferrix::__private::assert_wire_arg::<Option<u32>>();
+    ::rxferrix::__private::assert_wire_output::<String>();
+};
 /// Function reference for [`onboard`](fn@onboard).
 #[allow(non_camel_case_types, dead_code)]
 pub struct onboard {}

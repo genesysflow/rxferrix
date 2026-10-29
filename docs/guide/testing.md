@@ -10,23 +10,24 @@ use rxferrix::UserError;
 #[tokio::test]
 async fn adding_a_todo() {
     let t = TestApp::new().await.unwrap();
-    let id = t.mutation::<todos::add>(("Buy milk".to_string(),)).await.unwrap();
+    let id = t.mutation::<todos::add>("Buy milk".to_string()).await.unwrap();
     let list = t.query::<todos::list>(()).await.unwrap();
     assert_eq!(list[0].id, id);
 
-    let err = t.mutation::<todos::add>((String::new(),)).await.unwrap_err();
+    let err = t.mutation::<todos::add>(String::new()).await.unwrap_err();
     assert_eq!(UserError::of(&err).map(|e| e.code.as_str()), Some("empty_text"));
 }
 ```
 
-Arguments are a tuple of the function's parameters (`()` for none, `(x,)` for one).
+Arguments are a tuple of the function's parameters (`()` for none), or the value itself when there is one (`x`, or
+`(x,)`).
 
 **Users.** `t.create_user(email, Some(password))` creates a verified user directly (no auth method or email needed),
 and `t.as_user(id)` calls functions as them:
 
 ```rust
 let ann = t.create_user("ann@example.com", None).await.unwrap();
-t.as_user(ann).mutation::<channels::join>((general,)).await.unwrap();
+t.as_user(ann).mutation::<channels::join>(general).await.unwrap();
 ```
 
 `TestApp::with_auth(AuthConfig::password()...)` configures auth when a test signs in over HTTP; `t.serve()` starts

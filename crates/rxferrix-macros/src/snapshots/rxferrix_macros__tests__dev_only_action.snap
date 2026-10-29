@@ -46,6 +46,7 @@ static __RXFERRIX_FN_last_code: ::rxferrix::__private::FunctionDef = ::rxferrix:
     name: "last_code",
     visibility: ::rxferrix::__private::Visibility::Public,
     dev_only: true,
+    docs: "The newest code emailed to `email` (dev only).",
     handler: ::rxferrix::__private::Handler::Action(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
         let __rxferrix_decoded: __rxferrix_args_last_code = ::rxferrix::__private::decode_args(
             "last_code",

@@ -134,6 +134,12 @@ function tokenIdentity(token: string | null): string | null {
   }
 }
 
+/** Whether a JWT's `exp` has passed (a token without one never expires here). */
+function isExpired(token: string): boolean {
+  const exp = jwtExpiry(token);
+  return exp !== null && exp * 1000 <= Date.now();
+}
+
 /** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
 function jwtExpiry(token: string): number | null {
   const parts = token.split(".");
@@ -230,6 +236,10 @@ export class RxFerrixClient {
   private tokenFetchFailures = 0;
   /** Rejecters of `query()` calls still waiting for their first result (settled on `close()`). */
   private readonly oneShotQueries = new Set<(e: RxFerrixError) => void>();
+  /** Run on `close()` (`onClose`). */
+  private readonly closeHooks: (() => void)[] = [];
+  /** A token fetch failed while the token in hand is expired: sends wait for a token (or `clearAuth`). */
+  private awaitingToken = false;
 
   private readonly removeUnloadListener: () => void;
 
@@ -308,7 +318,13 @@ export class RxFerrixClient {
         finish(() => (state.status === "success" ? resolve(state.value) : reject(state.error)));
       };
       this.oneShotQueries.add(closed);
-      unsubscribe = watch.onUpdate(check);
+      try {
+        unsubscribe = watch.onUpdate(check);
+      } catch (e) {
+        // E.g. `too_many_queries`: nothing will settle it later.
+        this.oneShotQueries.delete(closed);
+        throw e;
+      }
       check();
     });
   }
@@ -465,6 +481,7 @@ export class RxFerrixClient {
     this.auth = null;
     this.authGeneration++;
     this.clearAuthRefreshTimer();
+    this.awaitingToken = false;
     this.applyToken(null);
     if (this.ws.isPaused) this.ws.resume();
     this.setAuthenticated(false, previous?.onChange);
@@ -486,6 +503,13 @@ export class RxFerrixClient {
         // have returned may well be valid, so the token in hand (if any) is kept and the fetch is retried with
         // backoff instead of treating the user as signed out.
         this.tokenFetchFailures++;
+        // An expired token in hand would only be rejected (and that AuthError would count as the server refusing the
+        // session, signing the user out): sends wait for a fresh one instead. (With no token yet, they go out
+        // anonymously meanwhile, so an app offline at page load isn't frozen.)
+        if (this.authToken !== null && isExpired(this.authToken)) {
+          this.awaitingToken = true;
+          if (!this.ws.isPaused) this.ws.pause();
+        }
         const delay = Math.min(
           TOKEN_FETCH_RETRY_MAX_MS,
           TOKEN_FETCH_RETRY_BASE_MS * 2 ** Math.min(this.tokenFetchFailures - 1, 10),
@@ -496,6 +520,7 @@ export class RxFerrixClient {
       }
       if (generation !== this.authGeneration || this.auth !== auth || this.closed) return;
       this.tokenFetchFailures = 0;
+      this.awaitingToken = false;
       this.applyToken(token);
       if (token === null) this.setAuthenticated(false, auth.onChange);
       this.scheduleTokenRefresh(token);
@@ -503,7 +528,7 @@ export class RxFerrixClient {
       this.tokenFetchesInFlight--;
       // Whichever fetch finishes last lets sends through again: a superseded fetch (a newer `setAuth` or
       // `clearAuth`) must not leave the socket paused for good.
-      if (this.tokenFetchesInFlight === 0 && this.ws.isPaused && !this.closed) this.ws.resume();
+      if (this.tokenFetchesInFlight === 0 && this.ws.isPaused && !this.closed && !this.awaitingToken) this.ws.resume();
     }
   }
 
@@ -585,6 +610,10 @@ export class RxFerrixClient {
 
   /** A new socket is open and `Connect` was sent: rebuild the server's state from scratch. */
   private onSocketOpen(): void {
+    // An access token that expired meanwhile (a laptop waking up) would be rejected: get a fresh one first.
+    if (this.auth && this.authToken !== null && isExpired(this.authToken) && this.tokenFetchesInFlight === 0) {
+      void this.fetchAndApplyToken(true, true);
+    }
     this.remoteQueries.resetVersion();
     this.localQueries.resetForNewSocket();
     this.identityVersion = 0;
@@ -787,10 +816,23 @@ export class RxFerrixClient {
 
   // ---------------------------------------------------------------------------------------------------------------
 
+  /** Calls `hook` when the client is closed (e.g. so that the `RxFerrixAuth` of `getAuth` stops listening to other tabs). */
+  onClose(hook: () => void): void {
+    if (this.closed) hook();
+    else this.closeHooks.push(hook);
+  }
+
   /** Closes the socket for good. Pending mutations and actions are rejected. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    for (const hook of this.closeHooks.splice(0)) {
+      try {
+        hook();
+      } catch (e) {
+        this.logger.error("onClose hook threw", e);
+      }
+    }
     this.authGeneration++;
     this.clearAuthRefreshTimer();
     this.ws.stop();

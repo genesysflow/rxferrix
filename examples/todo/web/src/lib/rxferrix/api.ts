@@ -7,17 +7,38 @@ import type { DayStats, Doc, Id } from "./dataModel";
 export const api = {
   todos: {
     add: makeFunctionReference<"mutation", { text: string, }, Id<"todos">>("mutation", "todos:add"),
+    /**
+     * Adds the todo after `delay_seconds` (a delayed reminder): schedules `add`, in this mutation's transaction.
+     * Returns the scheduled job, which `ctx.scheduler.cancel` (or the dashboard) can cancel.
+     */
     add_later: makeFunctionReference<"mutation", { text: string, delaySeconds: number, }, Id<"_scheduled_jobs">>("mutation", "todos:add_later"),
+    /** Adds `count` sample todos, one mutation each (shows actions composing mutations). */
     add_samples: makeFunctionReference<"action", { count: number, }, number>("action", "todos:add_samples"),
+    /** Deletes every completed todo; returns how many were removed. */
     clear_completed: makeFunctionReference<"mutation", Record<string, never>, number>("mutation", "todos:clear_completed"),
+    /** Step 1 of attaching an image: a short-lived URL to upload it to (`uploadFile` in `@rxferrix/client`). */
     generate_upload_url: makeFunctionReference<"mutation", Record<string, never>, string>("mutation", "todos:generate_upload_url"),
+    /** The URL of a todo's image, or `null` once it is deleted (live, like any query). */
     image_url: makeFunctionReference<"query", { image: Id<"_storage">, }, string | null>("query", "todos:image_url"),
+    /** All todos, newest first. Pass `done` to show only open or only completed ones. */
     list: makeFunctionReference<"query", { done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:list"),
+    /** How many todos are still open. */
     remaining: makeFunctionReference<"query", Record<string, never>, number>("query", "todos:remaining"),
+    /** Deletes a todo and its image. */
     remove: makeFunctionReference<"mutation", { id: Id<"todos">, }, null>("mutation", "todos:remove"),
+    /**
+     * Todos whose text contains every word of `text` (the last word as a prefix, for search-as-you-type), most
+     * relevant first. Pass `done` to search only open or only completed ones.
+     */
     search: makeFunctionReference<"query", { text: string, done?: boolean | null, }, Array<Doc<"todos">>>("query", "todos:search"),
     set_done: makeFunctionReference<"mutation", { id: Id<"todos">, done: boolean, }, null>("mutation", "todos:set_done"),
+    /** Step 2: attach the uploaded image to a todo (`image: null` removes it). The previous image is deleted. */
     set_image: makeFunctionReference<"mutation", { id: Id<"todos">, image?: Id<"_storage"> | null, }, null>("mutation", "todos:set_image"),
+    /**
+     * Todos added and completed per day, in SQL over the analytics copy. Needs `serve --olap` and a binary built with
+     * the `olap` feature (`cargo run -p todo-server --features olap -- serve --dev --olap`); fails with
+     * `olap_unavailable` otherwise.
+     */
     stats_by_day: makeFunctionReference<"action", Record<string, never>, Array<DayStats>>("action", "todos:stats_by_day"),
   },
 } as const;

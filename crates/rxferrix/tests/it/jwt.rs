@@ -228,7 +228,8 @@ async fn rs256_es256_and_eddsa_tokens_map_to_provisioned_users() {
         }
     };
     assert_eq!((msg["type"].as_str(), msg["error"].as_str()), (Some("AuthError"), Some("session has ended")));
-    assert!(at.elapsed() < Duration::from_millis(100), "{:?}", at.elapsed());
+    // At once, not at the token's expiry (minutes away): well under a second even on a loaded CI runner.
+    assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
 }
 
 #[tokio::test]

@@ -103,6 +103,13 @@ function load(base: string, writers = 4) {
   };
 }
 
+/** Whether `e` (a rejected fetch) is a refused connection: Bun's code was `ConnectionRefused`, newer ones say
+ * `ECONNREFUSED`. */
+function isRefused(e: unknown): boolean {
+  const code = (e as { code?: string }).code;
+  return code === "ConnectionRefused" || code === "ECONNREFUSED";
+}
+
 function check(name: string, cond: boolean, detail: string) {
   console.log(`${cond ? "✓" : "✗"} ${name}${cond ? "" : `: ${detail}`}`);
   if (!cond) failures.push(`${name}: ${detail}`);
@@ -146,8 +153,7 @@ function proxy(upstreams: string[]) {
         try {
           return await fetch(`${target}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body });
         } catch (e) {
-          const refused = (e as { code?: string }).code === "ConnectionRefused";
-          if (!refused || attempt >= attempts) return new Response(`bad gateway: ${e}`, { status: 502 });
+          if (!isRefused(e) || attempt >= attempts) return new Response(`bad gateway: ${e}`, { status: 502 });
           await Bun.sleep(interval);
           interval *= 2 ** (1 / (attempts - 1));
         }
@@ -203,9 +209,9 @@ async function containers() {
   check("containers: the old process waits after handing over", waiting, oldLog.join("").slice(-500));
   const refused = await fetch(`${A}/api/health`).then(
     (r) => `answered ${r.status}`,
-    (e) => (e as { code?: string }).code ?? String(e),
+    (e) => (isRefused(e) ? "refused" : ((e as { code?: string }).code ?? String(e))),
   );
-  check("containers: while waiting its port refuses connections", refused === "ConnectionRefused", refused);
+  check("containers: while waiting its port refuses connections", refused === "refused", refused);
   old.kill("SIGTERM");
   check("containers: and exits cleanly on SIGTERM", (await old.exited) === 0, `exit ${old.exitCode}`);
   // auto with nothing running: a normal start.

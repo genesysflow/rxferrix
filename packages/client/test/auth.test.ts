@@ -180,6 +180,57 @@ describe("RxFerrixAuth", () => {
     expect(auth.state().isAuthenticated).toBe(true);
   });
 
+  it("refreshes an expired access token before sending it, and keeps the session while that fails", async () => {
+    // Stored as good for a while, but the access token itself has expired (a laptop waking up after the night).
+    const expired = jwt("old", Math.floor(Date.now() / 1000) - 60);
+    storage.setItem(KEY, JSON.stringify({ accessToken: expired, refreshToken: "refresh-old", expiresAt: Date.now() + 600_000, userId: "user1" }));
+    const fresh = tokens("new");
+    let refreshes = 0;
+    const { fetch } = mockFetch({
+      "/api/auth/refresh": () => (++refreshes === 1 ? authError(429, "rate_limited") : { status: 200, body: fresh }),
+    });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    client.watchQuery(systemApi.auth.me).onUpdate(() => {});
+    const sent = await openAndDrain();
+    // The expired token isn't sent (it would be refused, and that would sign the user out), nor are queries.
+    expect(sent.map((m) => m.type)).toEqual(["Connect"]);
+    expect(auth.state()).toMatchObject({ isLoading: true });
+    expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-old");
+    vi.advanceTimersByTime(2_500); // the retry's backoff
+    await settle();
+    expect(refreshes).toBe(2);
+    const later = server.drain();
+    expect(later.map((m) => m.type)).toEqual(["Authenticate", "ModifyQuerySet"]);
+    expect(later[0]).toMatchObject({ token: fresh.accessToken });
+  });
+
+  it("doesn't store what a refresh returns after the user signed out meanwhile", async () => {
+    storage.setItem(KEY, stored("old", Date.now() - 1000));
+    let answer!: (r: Response) => void;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/auth/refresh") return new Promise<Response>((r) => (answer = r));
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch;
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await settle();
+    await auth.signOut();
+    answer(new Response(JSON.stringify(tokens("new")), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await settle();
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(auth.state()).toMatchObject({ isLoading: false, isAuthenticated: false });
+  });
+
+  it("stops listening to other tabs when the client closes", () => {
+    const removed = vi.fn();
+    vi.stubGlobal("addEventListener", vi.fn());
+    vi.stubGlobal("removeEventListener", removed);
+    const { fetch } = mockFetch({});
+    new RxFerrixAuth(client, { storage, fetch });
+    client.close();
+    expect(removed).toHaveBeenCalledWith("storage", expect.any(Function));
+  });
+
   it("signs out locally when the refresh token is rejected", async () => {
     storage.setItem(KEY, stored("a", Date.now() - 1000));
     const { fetch } = mockFetch({ "/api/auth/refresh": () => authError(401, "refresh_token_reused") });

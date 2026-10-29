@@ -150,8 +150,12 @@ async fn user_enrolls_and_signs_in_with_a_code_or_a_recovery_code() {
     // A wrong first code doesn't confirm; the right one does and hands out the recovery codes.
     let (s, b) = http.post("/api/auth/mfa/totp/confirm", Some(&token), json!({ "code": "000000" })).await;
     assert!(s == 400 && code_of(&b) == "invalid_mfa_code" || code_now(&secret, 0) == "000000", "{s} {b}");
-    let (s, confirmed) =
-        http.post("/api/auth/mfa/totp/confirm", Some(&token), json!({ "code": code_now(&secret, 0) })).await;
+    // The step the factor is confirmed at: later checks count from it, not from the clock (a 30 s step may end
+    // between two requests, and the then current code would be a fresh one).
+    let confirmed_step = step_at(now_s());
+    let (s, confirmed) = http
+        .post("/api/auth/mfa/totp/confirm", Some(&token), json!({ "code": code_at(&secret, confirmed_step) }))
+        .await;
     assert_eq!(s, 200, "{confirmed}");
     let recovery: Vec<String> = confirmed["recoveryCodes"].as_array().unwrap().iter().map(str).collect();
     assert_eq!(recovery.len(), 8);
@@ -173,11 +177,11 @@ async fn user_enrolls_and_signs_in_with_a_code_or_a_recovery_code() {
 
     // The code that confirmed the factor was used; the next step's code works (within the accepted window).
     let (s, b) = http.post("/api/auth/mfa/verify", None, json!({ "mfaToken": mfa_token, "code": "123456" })).await;
-    assert!(s == 400 && code_of(&b) == "invalid_mfa_code" || code_now(&secret, 1) == "123456", "{s} {b}");
-    let (s, b) =
-        http.post("/api/auth/mfa/verify", None, json!({ "mfaToken": mfa_token, "code": code_now(&secret, 0) })).await;
+    let next = code_at(&secret, confirmed_step + 1);
+    assert!(s == 400 && code_of(&b) == "invalid_mfa_code" || next == "123456", "{s} {b}");
+    let used = code_at(&secret, confirmed_step);
+    let (s, b) = http.post("/api/auth/mfa/verify", None, json!({ "mfaToken": mfa_token, "code": used })).await;
     assert_eq!((s, code_of(&b)), (400, "invalid_mfa_code"), "a code works once: {b}");
-    let next = code_now(&secret, 1);
     let (s, signed_in) = http.post("/api/auth/mfa/verify", None, json!({ "mfaToken": mfa_token, "code": next })).await;
     assert_eq!(s, 200, "{signed_in}");
     let session_token = str(&signed_in["accessToken"]);

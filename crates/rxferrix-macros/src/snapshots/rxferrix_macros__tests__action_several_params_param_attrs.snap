@@ -62,6 +62,7 @@ static __RXFERRIX_FN_add_many: ::rxferrix::__private::FunctionDef = ::rxferrix::
     name: "add_many",
     visibility: ::rxferrix::__private::Visibility::Public,
     dev_only: false,
+    docs: "",
     handler: ::rxferrix::__private::Handler::Action(|__rxferrix_ctx, __rxferrix_args| ::std::boxed::Box::pin(async move {
         let __rxferrix_decoded: __rxferrix_args_add_many = ::rxferrix::__private::decode_args(
             "add_many",

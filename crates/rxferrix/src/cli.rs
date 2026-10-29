@@ -194,8 +194,10 @@ pub const CODEGEN_OUT_ENV: &str = "RXFERRIX_CODEGEN_OUT";
 
 #[derive(Args, Debug, Clone)]
 struct CodegenArgs {
-    /// Output directory, e.g. `../web/src/rxferrix`. Only files whose content changed are rewritten.
-    #[arg(long, value_name = "DIR", default_value = "rxferrix-generated")]
+    /// Output directory, e.g. `../web/src/rxferrix`. Only files whose content changed are rewritten. Default:
+    /// `RXFERRIX_CODEGEN_OUT` (what `serve --dev` writes to, set by apps made with `rxferrix new`), else
+    /// `rxferrix-generated`.
+    #[arg(long, value_name = "DIR", env = CODEGEN_OUT_ENV, default_value = "rxferrix-generated")]
     out: PathBuf,
 }
 

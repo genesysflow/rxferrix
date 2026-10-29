@@ -63,6 +63,9 @@ pub mod tasks {
         /// Zero when unlabeled.
         pub label_count: u32,
         pub priority: Priority,
+        /// Left out when there is none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
     }
 
     /// Only used by an internal function: must not be emitted.
@@ -149,7 +152,12 @@ pub mod tasks {
         let all = ctx.db.query::<Task>().collect().await?;
         Ok(all
             .into_iter()
-            .map(|t| TaskSummary { label_count: t.labels.len() as u32, priority: t.priority, title: t.value.title })
+            .map(|t| TaskSummary {
+                label_count: t.labels.len() as u32,
+                priority: t.priority,
+                title: t.value.title,
+                note: None,
+            })
             .collect())
     }
 
@@ -205,7 +213,14 @@ fn generates_from_the_real_registry() {
     for internal in ["_sessions", "_credentials", "_admins", "_accounts", "passwordHash", "refreshTokenHash"] {
         assert!(!dm.contains(internal), "{internal} must not be emitted");
     }
-    assert!(!api.contains("_system"), "system functions are not emitted");
+    assert!(!api.contains("\"_system/"), "system functions are not emitted");
+    // Function docs become the JSDoc of their reference.
+    assert!(
+        api.contains(
+            "      /** Labels, keyed by name (the values are inlined, so `Label` is referenced through its dependencies only). */\n      labels: makeFunctionReference"
+        ),
+        "{api}"
+    );
     assert!(dm.contains("/** How urgent a task is. */\nexport type Priority = \"low\" | \"high\";\n"), "{dm}");
     assert!(dm.contains("export type Color = \"Red\" | \"Green\" | { \"Custom\": { hex: string, } };\n"), "{dm}");
     assert!(dm.contains("export type Label = { name: string, color: Color, };\n"), "{dm}");
@@ -233,7 +248,7 @@ fn generates_from_the_real_registry() {
         dm.contains(
             "/** A task as a list shows it (an `#[rxferrix::object]`, returned in a `Vec`). */\nexport type TaskSummary = {\n  \
              /** The task's title. */\n  title: string,\n  /**\n   * How many labels it has.\n   *\n   * Zero when unlabeled.\n   \
-             */\n  labelCount: number,\n  priority: Priority,\n};\n"
+             */\n  labelCount: number,\n  priority: Priority,\n  /** Left out when there is none. */\n  note?: string | null,\n};\n"
         ),
         "{dm}"
     );

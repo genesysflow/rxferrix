@@ -6,41 +6,80 @@ import type { ChannelInfo, ChannelSummary, Doc, Id, Insights, MessageView, Pagin
 /** References to every public function, for `useQuery(api.module.fn, args)` and friends. */
 export const api = {
   announcement: {
+    /** The announcement, if one is set (blank counts as none). */
     get: makeFunctionReference<"query", Record<string, never>, string | null>("query", "announcement:get"),
   },
   channels: {
+    /** Creates a channel (the caller joins it). Names are lowercase letters, digits and dashes, and unique. */
     create: makeFunctionReference<"mutation", { name: string, topic?: string | null, private: boolean, }, Id<"channels">>("mutation", "channels:create"),
+    /** One channel with its members. Fails with `not_a_member` for a private channel the caller isn't in. */
     get: makeFunctionReference<"query", { channel: Id<"channels">, }, ChannelInfo>("query", "channels:get"),
+    /** Adds the user with this email to a channel the caller belongs to (the way into private channels). */
     invite: makeFunctionReference<"mutation", { channel: Id<"channels">, email: string, }, null>("mutation", "channels:invite"),
+    /** Joins a public channel. Private channels need an invitation (`private_channel`). */
     join: makeFunctionReference<"mutation", { channel: Id<"channels">, }, null>("mutation", "channels:join"),
     leave: makeFunctionReference<"mutation", { channel: Id<"channels">, }, null>("mutation", "channels:leave"),
+    /** Public channels plus the private channels the caller belongs to, by name. */
     list: makeFunctionReference<"query", Record<string, never>, Array<ChannelSummary>>("query", "channels:list"),
+    /** Marks everything in the channel as read (the app calls it while the channel is open). */
     mark_read: makeFunctionReference<"mutation", { channel: Id<"channels">, }, null>("mutation", "channels:mark_read"),
+    /** How many messages from others arrived in each of the caller's channels since they last read it. */
     unread: makeFunctionReference<"query", Record<string, never>, Array<UnreadCount>>("query", "channels:unread"),
   },
   insights: {
+    /**
+     * Insights over the channels the caller can read, or just `channel`. `tz_offset_minutes`: the caller's offset from
+     * UTC (east positive), so hours and buckets line up with their clock.
+     */
     overview: makeFunctionReference<"action", { channel?: Id<"channels"> | null, tzOffsetMinutes: number, }, Insights>("action", "insights:overview"),
   },
   messages: {
     edit: makeFunctionReference<"mutation", { message: Id<"messages">, body: string, }, null>("mutation", "messages:edit"),
+    /** Step 1 of attaching an image: a short-lived URL to upload it to. */
     generate_upload_url: makeFunctionReference<"mutation", Record<string, never>, string>("mutation", "messages:generate_upload_url"),
+    /** A channel's messages, newest first (the app shows them bottom-up and loads older pages on scroll). */
     list: makeFunctionReference<"query", { channel: Id<"channels">, paginationOpts: PaginationOpts, }, PaginationResult<MessageView>>("query", "messages:list"),
+    /** Deletes a message with its reactions and attachment. */
     remove: makeFunctionReference<"mutation", { message: Id<"messages">, }, null>("mutation", "messages:remove"),
+    /** Messages whose text contains every word of `text` (the last one as a prefix), most relevant first. */
     search: makeFunctionReference<"query", { channel: Id<"channels">, text: string, }, Array<MessageView>>("query", "messages:search"),
+    /**
+     * Posts `count` numbered sample messages to a channel (for trying infinite scroll): #1 is the oldest, #count the
+     * newest. They are inserted in one transaction: clients see them arrive at once, as one block of history (in
+     * batches, each batch would land on top of the newest page, which a client that already loaded older pages keeps
+     * pinned, so it would grow to hold them all).
+     */
     seed: makeFunctionReference<"action", { channel: Id<"channels">, count: number, }, number>("action", "messages:seed"),
+    /**
+     * Posts a message (text and/or an uploaded image), or runs a slash command:
+     * `/remind me in <n> <seconds|minutes|hours> [to] <text>`.
+     */
     send: makeFunctionReference<"mutation", { channel: Id<"channels">, body: string, attachment?: Id<"_storage"> | null, }, SendResult>("mutation", "messages:send"),
   },
   profiles: {
+    /**
+     * Creates the signed-in user's profile on first sign-in (named after the account's name or email) and joins them
+     * to #general (created if missing). Idempotent: the app calls it after every sign-in.
+     */
     ensure: makeFunctionReference<"mutation", Record<string, never>, Id<"profiles">>("mutation", "profiles:ensure"),
+    /** The signed-in user's profile, or `null` before `ensure` created it. */
     me: makeFunctionReference<"query", Record<string, never>, Doc<"profiles"> | null>("query", "profiles:me"),
+    /** Renames the signed-in user. */
     rename: makeFunctionReference<"mutation", { name: string, }, null>("mutation", "profiles:rename"),
   },
   reactions: {
+    /**
+     * Adds the caller's `emoji` reaction to a message, or removes it if it is already there. Returns whether it was
+     * added.
+     */
     toggle: makeFunctionReference<"mutation", { message: Id<"messages">, emoji: string, }, boolean>("mutation", "reactions:toggle"),
   },
   typing: {
+    /** Who else is typing in the channel. */
     list: makeFunctionReference<"query", { channel: Id<"channels">, }, Array<TypingUser>>("query", "typing:list"),
+    /** The caller is typing in the channel (until `TYPING_TTL` after the last call). */
     start: makeFunctionReference<"mutation", { channel: Id<"channels">, }, null>("mutation", "typing:start"),
+    /** The caller stopped typing (cleared the composer, or switched channels). */
     stop: makeFunctionReference<"mutation", { channel: Id<"channels">, }, null>("mutation", "typing:stop"),
   },
 } as const;
@@ -48,6 +87,7 @@ export const api = {
 /** Dev-only functions (`#[query(dev_only)]`, ...): the server refuses them unless it runs with `--dev`. */
 export const devApi = {
   dev: {
+    /** The newest 6-digit code emailed to `email`. */
     last_code: makeFunctionReference<"action", { email: string, }, string | null>("action", "dev:last_code"),
   },
 } as const;

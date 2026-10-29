@@ -77,6 +77,13 @@ pub fn expand_object(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     }
     *attrs = kept;
     errors.finish()?;
+    match &mut item {
+        syn::Item::Struct(s) => crate::util::mark_skipped_options_optional(&mut s.fields),
+        syn::Item::Enum(e) => {
+            e.variants.iter_mut().for_each(|v| crate::util::mark_skipped_options_optional(&mut v.fields))
+        }
+        _ => {}
+    }
 
     let rename_all = if custom_rename_all {
         quote!()

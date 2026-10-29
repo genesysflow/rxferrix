@@ -1,10 +1,11 @@
 # Gates, the static musl release binary and the Docker image.
 #
-#   gates   every check of README "Development": rustfmt, Rust tests and clippy (no warnings), the macro tests, the TS type
-#           check of generated code, the TS packages, the committed dashboard build, and the end-to-end tests
-#           (dashboard, todo example, chat example) in Chromium.
-#   olap         clippy and the tests with the `olap` feature, and the `chrono` and `uuid` ones (DuckDB, built from source: a job of its own, with its
-#                own cache and disk; DuckDB is compiled once on a cold cache, and not at all with the cache warm).
+#   gates   every check of README "Development": rustfmt, Rust tests and clippy (no warnings; also the library without
+#           its default features), the macro tests, the TS type check of generated code, the TS packages, the
+#           committed dashboard build, and the end-to-end tests (dashboard, todo example, chat example) in Chromium.
+#   olap         clippy and the tests with the `olap` feature, and the `chrono` and `uuid` ones (DuckDB, built from
+#                source: a job of its own, with its own cache and disk; DuckDB is compiled once on a cold cache, and
+#                not at all with the cache warm).
 #   release      scripts/release.sh: x86_64-unknown-linux-musl todo-server with the web app embedded (an artifact;
 #                attached to the GitHub release for v* tags).
 #   release-olap the same with `olap` (todo-server-olap), smoke-tested with `serve --olap`: for v* tags and manual
@@ -114,6 +115,10 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --profile test --workspace --all-targets -- -D warnings
+
+      # The library alone, every optional feature off (s3, dashboard, acme, thumbnails): it must still build.
+      - name: cargo clippy --no-default-features
+        run: cargo clippy -p rxferrix --no-default-features --lib -- -D warnings
 
       - name: macro tests
         run: CARGO_TARGET_DIR=target/macros cargo test -p rxferrix-macros

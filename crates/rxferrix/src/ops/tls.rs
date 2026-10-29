@@ -30,6 +30,7 @@ use anyhow::{Context, bail};
 use axum::Router;
 use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect};
+#[cfg(feature = "acme")]
 use futures::StreamExt;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
@@ -44,7 +45,13 @@ async fn stopped(stop: &Stop) {
     let _ = rx.wait_for(|s| *s).await;
 }
 
-pub use rustls_acme::acme::{LETS_ENCRYPT_PRODUCTION_DIRECTORY, LETS_ENCRYPT_STAGING_DIRECTORY};
+/// Let's Encrypt's ACME directory.
+pub const LETS_ENCRYPT_PRODUCTION_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// Let's Encrypt's staging ACME directory (untrusted certificates, generous rate limits).
+pub const LETS_ENCRYPT_STAGING_DIRECTORY: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+const ACME_MISSING: &str = "--https (Let's Encrypt certificates) needs rxferrix built with its `acme` feature (on by \
+                            default); --tls-cert/--tls-key work without it";
 
 /// Automatic certificates from Let's Encrypt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +74,9 @@ impl AcmeSettings {
 
     /// Check the domains and create the cache directory (mode 0700: it holds private keys).
     pub fn prepare(&self) -> crate::Result<()> {
+        if !cfg!(feature = "acme") {
+            bail!(ACME_MISSING);
+        }
         if self.domains.is_empty() {
             bail!("--https needs a domain name");
         }
@@ -94,6 +104,7 @@ impl AcmeSettings {
     }
 
     /// The `rustls-acme` configuration.
+    #[cfg(feature = "acme")]
     pub fn config(&self) -> rustls_acme::AcmeConfig<std::io::Error> {
         rustls_acme::AcmeConfig::new(self.domains.iter())
             .contact(self.emails.iter().map(|e| format!("mailto:{e}")))
@@ -589,6 +600,9 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
                 fds,
             })
         }
+        #[cfg(not(feature = "acme"))]
+        Listen::Acme { .. } => bail!(ACME_MISSING),
+        #[cfg(feature = "acme")]
         Listen::Acme { https, redirect, acme } => {
             acme.prepare()?;
             let mut state = acme.config().state();
@@ -725,6 +739,19 @@ mod tests {
         assert!(stream.nodelay().unwrap(), "TCP_NODELAY before the inner (TLS) acceptor");
     }
 
+    #[cfg(not(feature = "acme"))]
+    #[test]
+    fn https_needs_the_acme_feature() {
+        let s = AcmeSettings {
+            domains: vec!["example.com".into()],
+            emails: vec![],
+            staging: false,
+            cache_dir: PathBuf::from("/nonexistent"),
+        };
+        assert!(s.prepare().unwrap_err().to_string().contains("`acme` feature"));
+    }
+
+    #[cfg(feature = "acme")]
     #[test]
     fn acme_settings() {
         let dir = tempfile::tempdir().unwrap();

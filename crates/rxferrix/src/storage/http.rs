@@ -478,6 +478,10 @@ async fn serve_thumbnail(
     inline: bool,
 ) -> Response {
     let service = app.storage().clone();
+    if !thumbs::AVAILABLE {
+        let message = "This server was built without thumbnails (the rxferrix crate's `thumbnails` feature)";
+        return failure(501, "thumbnails_unavailable", message);
+    }
     if !thumbs::supported_source(file.content_type.as_deref()) {
         return failure(415, "unsupported_image", ThumbError::Unsupported.to_string());
     }

@@ -133,3 +133,40 @@ describe("applyDiff on garbage", () => {
     expect(Object.prototype).not.toHaveProperty("x"); // nothing leaked into the global prototype
   });
 });
+
+describe("RemoteQuerySet results", () => {
+  const known = () => true;
+  const transition = (set: RemoteQuerySet, ts: number, modification: object) =>
+    set.transition(
+      {
+        type: "Transition",
+        startVersion: { querySet: ts === 1 ? 0 : 1, identity: 0, ts: ts - 1 },
+        endVersion: { querySet: 1, identity: 0, ts },
+        modifications: [modification as never],
+      },
+      known,
+    );
+  const value = (set: RemoteQuerySet) => (set.result(1) as { value: unknown }).value;
+
+  it("are frozen, so changing one in place can't corrupt the base of the next diff", () => {
+    const set = new RemoteQuerySet();
+    transition(set, 1, { type: "QueryUpdated", queryId: 1, value: [{ n: 2 }, { n: 1, tags: ["a"] }] });
+    const first = value(set) as { n: number; tags?: string[] }[];
+    expect(Object.isFrozen(first) && Object.isFrozen(first[1]) && Object.isFrozen(first[1]!.tags)).toBe(true);
+    expect(() => first.sort((a, b) => a.n - b.n)).toThrow(TypeError);
+    expect(() => first[1]!.tags!.push("b")).toThrow(TypeError);
+    // The next diff applies to the result the server diffed against, and its result is frozen too.
+    transition(set, 2, { type: "QueryUpdated", queryId: 1, diff: { $a: [[{ n: 3 }], 2] } });
+    const second = value(set) as { n: number }[];
+    expect(second).toEqual([{ n: 3 }, { n: 2 }, { n: 1, tags: ["a"] }]);
+    expect(Object.isFrozen(second) && Object.isFrozen(second[0])).toBe(true);
+    expect(second[1]).toBe(first[0]);
+  });
+
+  it("keep bytes as they are", () => {
+    const set = new RemoteQuerySet();
+    const bytes = new Uint8Array([1, 2]);
+    transition(set, 1, { type: "QueryUpdated", queryId: 1, value: { bytes } });
+    expect((value(set) as { bytes: Uint8Array }).bytes).toBe(bytes);
+  });
+});

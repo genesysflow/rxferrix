@@ -26,6 +26,10 @@ impl ::core::convert::From<(String,)> for __rxferrix_args_last_code {
         Self { email: __rxferrix_tuple.0 }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<String>();
+    ::rxferrix::__private::assert_wire_output::<Option<String>>();
+};
 /// Function reference for [`last_code`](fn@last_code).
 #[allow(non_camel_case_types, dead_code)]
 pub struct last_code {}

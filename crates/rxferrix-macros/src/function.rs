@@ -292,6 +292,18 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
     }
 
     // --- names
+    // A hint, at each argument and the output type, for types that lack the derives (`#[rxferrix::object]`).
+    let wire_checks: Vec<TokenStream> = args
+        .iter()
+        .map(|a| {
+            let ty = &a.ty;
+            quote_spanned!(ty.span()=> ::rxferrix::__private::assert_wire_arg::<#ty>();)
+        })
+        .chain(std::iter::once({
+            let ty = &output;
+            quote_spanned!(ty.span()=> ::rxferrix::__private::assert_wire_output::<#ty>();)
+        }))
+        .collect();
     let name_str = name.unraw().to_string();
     let args_ident = format_ident!("__rxferrix_args_{}", name, span = name.span());
     let static_ident = format_ident!("__RXFERRIX_FN_{}", name, span = name.span());
@@ -408,6 +420,11 @@ pub fn expand_function(kind: FnKind, internal: bool, attr: TokenStream, item: To
                 Self { #(#from_fields),* }
             }
         }
+
+        #(#cfgs)*
+        const _: () = {
+            #(#wire_checks)*
+        };
 
         #[doc = #ref_doc]
         #(#cfgs)*

@@ -35,6 +35,11 @@ impl ::core::convert::From<(Option<bool>, u32)> for __rxferrix_args_list {
         }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<Option<bool>>();
+    ::rxferrix::__private::assert_wire_arg::<u32>();
+    ::rxferrix::__private::assert_wire_output::<Vec<Doc<Todo>>>();
+};
 /// Function reference for [`list`](fn@list).
 #[allow(non_camel_case_types, dead_code)]
 pub struct list {}

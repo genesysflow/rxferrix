@@ -23,6 +23,9 @@ impl ::core::convert::From<()> for __rxferrix_args_count {
         Self {}
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_output::<u64>();
+};
 /// Function reference for [`count`](fn@count).
 #[allow(non_camel_case_types, dead_code)]
 struct count {}

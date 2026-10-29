@@ -615,6 +615,8 @@ pub mod __private {
     }
     sum_fields!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
     pub const fn assert_sum_field<T: SumFieldType + ?Sized>() {}
+    pub const fn assert_wire_arg<T: ?Sized>() {}
+    pub const fn assert_wire_output<T: ?Sized>() {}
 
     pub fn validate_doc<T: crate::Table>(doc: &serde_json::Value) -> std::result::Result<(), String> {
         <crate::Doc<T> as serde::Deserialize>::deserialize(doc).map(drop).map_err(|e| e.to_string())

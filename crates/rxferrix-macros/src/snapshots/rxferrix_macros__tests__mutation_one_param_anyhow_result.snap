@@ -30,6 +30,10 @@ impl ::core::convert::From<(String,)> for __rxferrix_args_add {
         Self { text: __rxferrix_tuple.0 }
     }
 }
+const _: () = {
+    ::rxferrix::__private::assert_wire_arg::<String>();
+    ::rxferrix::__private::assert_wire_output::<Id<Todo>>();
+};
 /// Function reference for [`add`](fn@add).
 #[allow(non_camel_case_types, dead_code)]
 pub(crate) struct add {}

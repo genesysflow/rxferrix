@@ -1,0 +1,5 @@
+error: set `rename_all` in #[serde(..)] (ts-rs follows it): in #[ts(..)] alone, the TS names would differ from the JSON ones
+ --> tests/ui/object_ts_rename_all.rs:6:6
+  |
+6 | #[ts(rename_all = "snake_case")]
+  |      ^^^^^^^^^^^^^^^^^^^^^^^^^

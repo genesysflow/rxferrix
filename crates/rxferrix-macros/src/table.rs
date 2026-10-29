@@ -93,6 +93,22 @@ struct FieldInfo<'a> {
     ident: &'a syn::Ident,
     ty: &'a syn::Type,
     json_name: String,
+    /// Not under its own key in the stored JSON (`#[serde(skip)]`, `skip_serializing` or `flatten`): no index can
+    /// read it.
+    unstored: Option<&'static str>,
+}
+
+/// The error for an index, search or vector index or aggregate over a field that isn't stored under its own key.
+fn unstored_field_error(errors: &mut Errors, field: &syn::Ident, info: &FieldInfo, what: &str) {
+    if let Some(attr) = info.unstored {
+        errors.error(
+            field,
+            format_args!(
+                "field `{}` can't be used in {what}: with #[serde({attr})] it isn't stored under its own key",
+                field.unraw()
+            ),
+        );
+    }
 }
 
 pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
@@ -225,8 +241,15 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         for f in &named.named {
             let ident = f.ident.as_ref().expect("named field");
             let mut json_name = camel_case(&ident.unraw().to_string());
+            let mut unstored = None;
             for attr in f.attrs.iter().filter(|a| a.path().is_ident("serde")) {
                 for item in attr_items(attr).unwrap_or_default() {
+                    match item.key().map(|k| k.to_string()).as_deref() {
+                        Some("skip") => unstored = Some("skip"),
+                        Some("skip_serializing") => unstored = Some("skip_serializing"),
+                        Some("flatten") => unstored = Some("flatten"),
+                        _ => {}
+                    }
                     if item.key().is_some_and(|k| k == "rename") {
                         match item.str_value() {
                             Some(v) => json_name = v.value(),
@@ -250,7 +273,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     ),
                 );
             }
-            fields.push(FieldInfo { ident, ty: &f.ty, json_name });
+            fields.push(FieldInfo { ident, ty: &f.ty, json_name, unstored });
         }
     }
     let mut seen_json = HashMap::new();
@@ -291,6 +314,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     if !seen_fields.insert(fname.clone()) {
                         errors.error(field, format_args!("field `{fname}` appears twice in index `{name}`"));
                     }
+                    unstored_field_error(&mut errors, field, info, &format!("index `{name}`"));
                     json_fields.push(info.json_name.clone());
                 }
                 None if fname == "_id" || fname == "_creation_time" => errors.error(
@@ -324,7 +348,10 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let lookup = |field: &syn::Ident, errors: &mut Errors, role: &str| -> Option<&FieldInfo> {
             let fname = field.unraw().to_string();
             match field_by_name.get(&fname) {
-                Some(info) => Some(*info),
+                Some(info) => {
+                    unstored_field_error(errors, field, info, &format!("#[{attr}] `{name}`"));
+                    Some(*info)
+                }
                 None if fname == "_id" || fname == "_creation_time" => {
                     errors.error(field, format_args!("system field `{fname}` cannot be used in #[{attr}]"));
                     None
@@ -430,7 +457,10 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     continue;
                 }
                 match field_by_name.get(&fname) {
-                    Some(info) => out.push(*info),
+                    Some(info) => {
+                        unstored_field_error(&mut errors, f, info, &format!("#[aggregate] `{name}`"));
+                        out.push(*info)
+                    }
                     None if fname == "_id" || fname == "_creation_time" => {
                         errors.error(f, format_args!("system field `{fname}` cannot be used in #[aggregate]"))
                     }
@@ -464,7 +494,7 @@ pub fn expand_table(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { ::rxferrix::IndexDef { name: #name, fields: ::std::vec![#(#json_fields),*] } }
     });
     let field_consts = fields.iter().map(|f| {
-        let FieldInfo { ident: fident, ty, json_name } = f;
+        let FieldInfo { ident: fident, ty, json_name, .. } = f;
         quote_spanned! {fident.span()=>
             pub const #fident: ::rxferrix::Field<#ident, #ty> = ::rxferrix::Field::new(#json_name);
         }

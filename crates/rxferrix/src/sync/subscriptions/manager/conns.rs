@@ -114,6 +114,4 @@ impl Manager {
             self.apply(cmd);
         }
     }
-
-    // ---- execution ----
 }

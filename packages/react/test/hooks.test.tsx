@@ -9,6 +9,7 @@ import {
   useConnectionState,
   useMutation,
   useQuery,
+  useQueryKeepingPrevious,
   useQueryWithStatus,
 } from "../src/index.js";
 
@@ -288,3 +289,34 @@ describe("useAction and useConnectionState", () => {
     expect(screen.getByText("offline")).toBeTruthy();
   });
 });
+
+describe("useQueryKeepingPrevious", () => {
+  function Item({ id }: { id: string }) {
+    const r = useQueryKeepingPrevious(api.todos.get, { id });
+    if (r.isLoading) return <p>loading</p>;
+    return <p>{`${r.data?.text ?? "none"}${r.isStale ? " (stale)" : ""}`}</p>;
+  }
+
+  it("keeps the previous args' value, marked stale, while the new args load", async () => {
+    const { rerender } = renderWithClient(<Item id="a" />);
+    await settle();
+    expect(screen.getByText("loading")).toBeTruthy();
+    act(() => server.transition({ querySet: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: { _id: "a", text: "A" } }]));
+    expect(screen.getByText("A")).toBeTruthy();
+    rerender(
+      <RxFerrixProvider client={client}>
+        <Item id="b" />
+      </RxFerrixProvider>,
+    );
+    await settle();
+    expect(screen.getByText("A (stale)")).toBeTruthy();
+    act(() =>
+      server.transition({ querySet: 2, ts: 2 }, [
+        { type: "QueryUpdated", queryId: 1, value: { _id: "b", text: "B" } },
+        { type: "QueryRemoved", queryId: 0 },
+      ]),
+    );
+    expect(screen.getByText("B")).toBeTruthy();
+  });
+});
+

@@ -1364,6 +1364,9 @@ fn seed_tables(db: &Path, tables: &BTreeMap<u32, String>) -> crate::Result<()> {
     Ok(())
 }
 
+/// Segments a point-in-time restore downloads at once.
+const SEGMENT_PREFETCH: usize = 8;
+
 /// Restore the state of `point` from the replication `target` into the empty directory `staging`, using `scratch`
 /// for downloads, and check it (see the module docs; `skip_verify` skips opening it with this binary's tables, as
 /// for an archive). Leaves `staging` as [`backup::prepare`] does, ready for [`backup::apply_staged`]. Doesn't touch
@@ -1395,9 +1398,24 @@ pub async fn prepare_point_in_time(
     let mut tables: BTreeMap<u32, String> = BTreeMap::new();
     let (mut ts, mut time) = (manifest.ts, manifest.commit_time);
     let mut stopped = false;
-    'segments: for seg in &plan.segments {
-        let raw = get(target, &segment_rel(&plan.generation, seg.from, seg.to)).await?;
-        let (header, entries) = decode_segment(&raw, Some(&plan.generation))?;
+    // A day of one-second segments is tens of thousands of objects: fetch several at a time, in order, and decode
+    // (zstd, SHA-256) off the runtime's threads.
+    let ranges: Vec<(u64, u64)> = plan.segments.iter().map(|s| (s.from, s.to)).collect();
+    let mut fetched = futures::stream::iter(ranges.into_iter().map(|(from, to)| {
+        let (target, generation) = (target.clone(), plan.generation.clone());
+        async move {
+            let raw = get(&target, &segment_rel(&generation, from, to)).await?;
+            let decoded = tokio::task::spawn_blocking(move || {
+                decode_segment(&raw, Some(&generation)).map(|(header, entries)| (header, entries, raw))
+            })
+            .await??;
+            Ok::<_, crate::Error>(((from, to), decoded))
+        }
+    }))
+    .buffered(SEGMENT_PREFETCH);
+    'segments: while let Some(next) = fetched.next().await {
+        let ((from, to), (header, entries, raw)) = next?;
+        let seg = SegmentInfo { from, to, bytes: raw.len() as u64 };
         anyhow::ensure!(
             (header.from, header.to) == (seg.from, seg.to),
             "segment {} holds ts {}..{}",
@@ -1406,7 +1424,8 @@ pub async fn prepare_point_in_time(
             header.to
         );
         let file = scratch.join(segment_name(seg.from, seg.to));
-        std::fs::write(&file, &raw)?;
+        let dest = file.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(&dest, &raw)).await??;
         files.push(file);
         for e in &entries {
             if e.ts <= ts {
@@ -1436,10 +1455,15 @@ pub async fn prepare_point_in_time(
     })
     .await?
     .context("the snapshot can't be opened by this binary")?;
+    drop(fetched);
     let mut replayed = 0u64;
     for file in &files {
-        let raw = std::fs::read(file)?;
-        let (_, entries) = decode_segment(&raw, Some(&plan.generation))?;
+        let (file, generation) = (file.clone(), plan.generation.clone());
+        let (_, entries) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
+            let raw = std::fs::read(&file)?;
+            decode_segment(&raw, Some(&generation))
+        })
+        .await??;
         for e in &entries {
             if e.ts <= manifest.ts + replayed || e.ts > final_ts {
                 continue;
@@ -1503,12 +1527,13 @@ pub async fn restore_point_in_time(
     options: &backup::RestoreOptions,
 ) -> crate::Result<(backup::RestoreReport, PointInTimeInfo)> {
     let _lock = super::DirLock::acquire(dir)?;
+    backup::finish_interrupted_restore(dir)?;
     let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
     let staging = scratch.path().join("staged");
     std::fs::create_dir_all(&staging)?;
     let (manifest, info) = prepare_point_in_time(target, scratch.path(), &staging, point, options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
-    let report = backup::apply_staged(&staging, dir, manifest, options.storage_dir.clone(), &previous)?;
+    let report = backup::apply_staged_durably(&staging, dir, manifest, options.storage_dir.clone(), &previous)?;
     Ok((report, info))
 }
 

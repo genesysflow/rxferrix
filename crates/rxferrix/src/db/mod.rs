@@ -1046,8 +1046,37 @@ impl WriteState {
     }
 
     /// Write a new version of a document (`new = None` deletes it), maintaining every index and recording the old
-    /// and new keys for the write log.
+    /// and new keys for the write log. All or nothing: a failure part way (a SQLite error after some index entries
+    /// changed) is rolled back to before this write, so a mutation that catches the error and goes on can't commit
+    /// a half-written document.
     fn write(
+        &mut self,
+        table: &TableInfo,
+        id: DocId,
+        old: Option<&Map<String, Value>>,
+        new: Option<&Map<String, Value>>,
+    ) -> anyhow::Result<()> {
+        let writes_before = self.writes.len();
+        self.conn.prepare_cached("SAVEPOINT rxferrix_write")?.execute([])?;
+        match self.write_unguarded(table, id, old, new) {
+            Ok(()) => {
+                self.conn.prepare_cached("RELEASE rxferrix_write")?.execute([])?;
+                Ok(())
+            }
+            Err(e) => {
+                let undone = self
+                    .conn
+                    .execute_batch("ROLLBACK TO rxferrix_write; RELEASE rxferrix_write")
+                    .context("rolling back a failed write");
+                self.writes.truncate(writes_before);
+                undone?;
+                Err(e)
+            }
+        }
+    }
+
+    /// [`WriteState::write`] without its savepoint.
+    fn write_unguarded(
         &mut self,
         table: &TableInfo,
         id: DocId,

@@ -1,14 +1,29 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
 
-  /** A modal dialog (native `<dialog>`: focus trapping, Escape closes). Mounted = open; `onclose` unmounts it. */
+  /**
+   * A modal dialog (native `<dialog>`: focus trapping, Escape closes). Mounted = open; `onclose` unmounts it. With
+   * `dismissible={false}`, only its own buttons close it: neither Escape nor the backdrop (for a step that would be
+   * lost, such as recovery codes shown once).
+   */
   let {
     title,
     onclose,
     wide = false,
+    dismissible = true,
     children,
     actions,
-  }: { title: string; onclose: () => void; wide?: boolean; children: Snippet; actions?: Snippet } = $props();
+  }: {
+    title: string;
+    onclose: () => void;
+    wide?: boolean;
+    dismissible?: boolean;
+    children: Snippet;
+    actions?: Snippet;
+  } = $props();
+
+  /** Whether the current click started on the backdrop: a drag that only ends there (selecting text) isn't a click on it. */
+  let pressedBackdrop = false;
 
   let dialog: HTMLDialogElement | undefined = $state();
   $effect(() => {
@@ -21,9 +36,14 @@
   class:wide
   aria-label={title}
   onclose={onclose}
+  oncancel={(e) => {
+    if (!dismissible) e.preventDefault();
+  }}
+  onmousedown={(e) => (pressedBackdrop = e.target === e.currentTarget)}
   onclick={(e) => {
     // A click on the backdrop (the dialog element itself, outside its content) closes it.
-    if (e.target === e.currentTarget) onclose();
+    if (dismissible && pressedBackdrop && e.target === e.currentTarget) onclose();
+    pressedBackdrop = false;
   }}
 >
   <div class="content">

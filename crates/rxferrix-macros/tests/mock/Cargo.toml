@@ -17,3 +17,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 anyhow = "1.0.104"
 futures = "0.3.34"
+
+# `shape.rs` (included from the real crate) has impls behind these; the mock never turns them on.
+[features]
+chrono = []
+uuid = []

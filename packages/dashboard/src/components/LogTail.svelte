@@ -33,10 +33,14 @@
 
   const ctx = dashboardContext();
   const MAX = 1000;
+  /** A filter that changes while being typed restarts the tail once typing pauses. */
+  const RESTART_DEBOUNCE_MS = 250;
 
   let entries = $state<LogEntry[]>([]);
   let expanded = $state<Set<number>>(new Set());
   let olderDone = $state(false);
+  /** Entries kept: `MAX`, plus a page per "Load older". */
+  let cap = MAX;
   /** Entries that arrived on the live tail (not history), and when: they animate in. */
   let arrived = $state.raw(new Map<number, number>());
 
@@ -45,7 +49,7 @@
     const byId = new Map<number, LogEntry>();
     for (const e of entries) byId.set(e.id, e);
     for (const e of incoming) byId.set(e.id, e);
-    entries = [...byId.values()].sort((a, b) => b.id - a.id).slice(0, MAX);
+    entries = [...byId.values()].sort((a, b) => b.id - a.id).slice(0, cap);
   }
 
   function live(e: LogEntry) {
@@ -60,37 +64,54 @@
   // history, so nothing between the two is missed (duplicates are merged by id).
   // Keyed by value: a filter built inline by the parent is a new object on every render.
   const filterKey = $derived(JSON.stringify(filter));
+  let started = false;
   $effect(() => {
-    const f = JSON.parse(filterKey) as LogFilter;
+    const key = filterKey;
+    const f = JSON.parse(key) as LogFilter;
     if (paused) return;
     const abort = new AbortController();
     entries = [];
     arrived = new Map();
     olderDone = false;
-    void tailLogs(
-      ctx.auth,
-      f,
-      {
-        onReady: () => {
-          fetchLogs(ctx.auth, { ...f, limit: pageSize }).then(merge, (e: unknown) => (statusError = String(e)));
+    cap = MAX;
+    const start = () =>
+      void tailLogs(
+        ctx.auth,
+        f,
+        {
+          onReady: () => {
+            // History for a filter that changed since belongs to that filter only.
+            fetchLogs(ctx.auth, { ...f, limit: pageSize }).then(
+              (history) => !abort.signal.aborted && merge(history),
+              (e: unknown) => !abort.signal.aborted && (statusError = String(e)),
+            );
+          },
+          onEntry: live,
+          onLagged: (n) => (lagged += n),
+          onStatus: (s, err) => {
+            status = s;
+            statusError = err ?? null;
+          },
         },
-        onEntry: live,
-        onLagged: (n) => (lagged += n),
-        onStatus: (s, err) => {
-          status = s;
-          statusError = err ?? null;
-        },
-      },
-      abort.signal,
-    );
-    return () => abort.abort();
+        abort.signal,
+      );
+    // The first start is immediate; a filter being typed restarts once typing pauses.
+    const timer = started ? setTimeout(start, RESTART_DEBOUNCE_MS) : (start(), undefined);
+    started = true;
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
   });
 
   async function loadOlder() {
     const last = entries.at(-1);
     if (!last) return;
+    const key = filterKey;
     const older = await fetchLogs(ctx.auth, { ...filter, limit: pageSize, beforeId: last.id });
+    if (key !== filterKey) return;
     if (older.length < pageSize) olderDone = true;
+    cap = Math.max(cap, entries.length + older.length);
     merge(older);
   }
 

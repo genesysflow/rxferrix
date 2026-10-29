@@ -19,7 +19,7 @@ step 5, so the pause is longer but the takeover still ends.
 The old server interrupts a backup or replication snapshot it is taking, and lets go of the data directory only once
 every connection to the database is closed, so the swap never moves a file it still uses.
 A mutation that a reconnecting client sends again still runs only once. The previous database is kept in
-`<data dir>/takeover/previous/`.
+`<data dir>/takeover/previous/` until the next successful takeover replaces it (an attempt that gives up leaves it).
 
 ::: tip If the new version can't read your data
 Say a field's type changed and existing documents don't fit, with no migration for it. The new version notices in

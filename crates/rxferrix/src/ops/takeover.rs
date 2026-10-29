@@ -356,7 +356,7 @@ pub async fn take_over_with(
     let started = Instant::now();
     tracing::info!(pid = from_pid, "takeover: copying the database and opening it with this version");
     let abort = |e: anyhow::Error| {
-        let _ = std::fs::remove_dir_all(dir.join(STAGING_DIR));
+        clear_staging(&dir.join(STAGING_DIR));
         e.context("this version can't take over (the running server carries on, unaffected)")
     };
     let staged = Staged::create(dir, tables).await.map_err(abort)?;
@@ -442,7 +442,7 @@ impl Staged {
         let dir = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let staging = dir.join(STAGING_DIR);
-            let _ = std::fs::remove_dir_all(&staging);
+            clear_staging(&staging);
             std::fs::create_dir_all(&staging)?;
             crate::ops::backup::snapshot_db(&dir.join("data.db"), &staging.join("data.db"))?;
             let journal_copied_to = {
@@ -635,6 +635,7 @@ fn swap(dir: &Path, staging: &Path) -> crate::Result<()> {
         let _ = std::fs::remove_file(staging.join(format!("data.db{suffix}")));
     }
     std::fs::write(staging.join(SWAP_MARKER), b"")?;
+    crate::ops::backup::sync_dir(staging)?;
     let previous = staging.join("previous");
     let _ = std::fs::remove_dir_all(&previous);
     std::fs::create_dir_all(&previous)?;
@@ -645,8 +646,25 @@ fn swap(dir: &Path, staging: &Path) -> crate::Result<()> {
         }
     }
     std::fs::rename(&staged, dir.join("data.db"))?;
+    crate::ops::backup::sync_dir(dir)?;
     std::fs::remove_file(staging.join(SWAP_MARKER))?;
+    crate::ops::backup::sync_dir(staging)?;
     Ok(())
+}
+
+/// Empty the staging directory, except `previous/`: the database the last successful takeover replaced (a way back
+/// after a bad deploy) must outlive a later attempt that gives up.
+fn clear_staging(staging: &Path) {
+    let Ok(entries) = std::fs::read_dir(staging) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if entry.file_name() == "previous" {
+            continue;
+        }
+        let path = entry.path();
+        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
+    // Nothing kept: no directory left behind either (fails, harmlessly, when `previous/` is there).
+    let _ = std::fs::remove_dir(staging);
 }
 
 /// Finish a swap a crash interrupted (call with the data directory locked, before opening it).
@@ -657,6 +675,7 @@ pub fn recover(dir: &Path) -> crate::Result<()> {
     }
     if !dir.join("data.db").exists() && staging.join("data.db").exists() {
         std::fs::rename(staging.join("data.db"), dir.join("data.db"))?;
+        crate::ops::backup::sync_dir(dir)?;
         tracing::warn!("finished a takeover's database swap that was interrupted");
     }
     std::fs::remove_file(staging.join(SWAP_MARKER))?;

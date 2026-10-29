@@ -32,9 +32,18 @@ export interface Route {
   params: URLSearchParams;
 }
 
+/** A path segment, decoded; as typed when it isn't valid percent-encoding (a stray `%` must not blank the dashboard). */
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 export function parseRoute(pathname: string, search: string): Route {
   const path = pathname.startsWith(BASE) ? pathname.slice(BASE.length) : pathname.replace(/^\/+/, "");
-  const [first = "", ...rest] = path.split("/").filter(Boolean).map(decodeURIComponent);
+  const [first = "", ...rest] = path.split("/").filter(Boolean).map(decodeSegment);
   const pages: Page[] = [
     "data",
     "functions",

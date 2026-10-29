@@ -16,8 +16,10 @@ export interface UseQueryResult<T> {
   readonly data: T | undefined;
   /** The query's error, if its latest result is an error. */
   readonly error: RxFerrixError | undefined;
-  /** True until the first result arrives (false when skipped). */
+  /** True until the first result arrives (false when skipped, or while showing previous data). */
   readonly isLoading: boolean;
+  /** With `keepPreviousData`: `data` is the previous args' value, shown while the current args load. */
+  readonly isStale: boolean;
 }
 
 /** Args thunk: re-evaluated reactively; return `"skip"` to not subscribe. */
@@ -28,6 +30,11 @@ const SKIPPED = Object.freeze({ status: "skipped" as const });
 export interface UseQueryOptions {
   /** Use this client instead of the one from context (allows calling `useQuery` outside component init). */
   client?: RxFerrixClient;
+  /**
+   * While the query loads for new args, keep showing the last value it had (for the previous args) instead of
+   * `undefined`, with `isStale` true: a search box or a pager doesn't flash empty between results.
+   */
+  keepPreviousData?: boolean;
 }
 
 /**
@@ -67,24 +74,35 @@ export function useQuery<Q extends FunctionReference<"query">>(
     return w ? createSubscriber((update) => w.onUpdate(update)) : null;
   });
 
-  const current = (): QueryState<OutputOf<Q>> | typeof SKIPPED => {
+  const live = (): QueryState<OutputOf<Q>> | typeof SKIPPED => {
     const s = subscribe;
     const w = watch;
     s?.();
     return w ? w.localQueryState() : SKIPPED;
   };
+  // The last success, for `keepPreviousData` (plain state: reading it doesn't track anything).
+  let previous: { value: OutputOf<Q> } | null = null;
+  const current = (): { state: QueryState<OutputOf<Q>> | typeof SKIPPED; stale: boolean } => {
+    const state = live();
+    if (state.status !== "loading") previous = state.status === "success" ? { value: state.value } : null;
+    else if (options.keepPreviousData && previous) return { state: { status: "success", value: previous.value }, stale: true };
+    return { state, stale: false };
+  };
 
   return {
     get data() {
-      const s = current();
-      return s.status === "success" ? s.value : undefined;
+      const { state } = current();
+      return state.status === "success" ? state.value : undefined;
     },
     get error() {
-      const s = current();
-      return s.status === "error" ? s.error : undefined;
+      const { state } = current();
+      return state.status === "error" ? state.error : undefined;
     },
     get isLoading() {
-      return current().status === "loading";
+      return current().state.status === "loading";
+    },
+    get isStale() {
+      return current().stale;
     },
   };
 }

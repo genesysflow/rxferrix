@@ -4,6 +4,7 @@ import { RxFerrixClient } from "@rxferrix/client";
 import { FakeServer, flushMicrotasks } from "@rxferrix/client/testing";
 import { useAction, useMutation, useQuery } from "../src/lib/index.js";
 import { api } from "./api.js";
+import KeepView from "./KeepView.svelte";
 import QueryView from "./QueryView.svelte";
 import Root from "./Root.svelte";
 import TodoList from "./TodoList.svelte";
@@ -251,3 +252,25 @@ describe("useConnectionState", () => {
     expect(seen).toEqual([true, false]);
   });
 });
+
+describe("useQuery with keepPreviousData", () => {
+  it("keeps the previous args' value, marked stale, while the new args load", async () => {
+    const props = $state({ id: "a" });
+    mounted = mount(Root, { target, props: { client, child: KeepView, props } });
+    await settle();
+    expect(text()).toBe("loading");
+    server.transition({ querySet: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: { _id: "a", text: "A" } }]);
+    await settle();
+    expect(text()).toBe("todo: A");
+    props.id = "b";
+    await settle();
+    expect(text()).toBe("todo: A (stale)");
+    server.transition({ querySet: 2, ts: 2 }, [
+      { type: "QueryUpdated", queryId: 1, value: { _id: "b", text: "B" } },
+      { type: "QueryRemoved", queryId: 0 },
+    ]);
+    await settle();
+    expect(text()).toBe("todo: B");
+  });
+});
+

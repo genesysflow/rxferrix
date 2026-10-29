@@ -3,7 +3,7 @@
 #   gates   every check of README "Development": rustfmt, Rust tests and clippy (no warnings), the macro tests, the TS type
 #           check of generated code, the TS packages, the committed dashboard build, and the end-to-end tests
 #           (dashboard, todo example, chat example) in Chromium.
-#   olap         clippy and the tests with the `olap` feature (DuckDB, built from source: a job of its own, with its
+#   olap         clippy and the tests with the `olap` feature, and the `chrono` and `uuid` ones (DuckDB, built from source: a job of its own, with its
 #                own cache and disk; DuckDB is compiled once on a cold cache, and not at all with the cache warm).
 #   release      scripts/release.sh: x86_64-unknown-linux-musl todo-server with the web app embedded (an artifact;
 #                attached to the GitHub release for v* tags).
@@ -199,11 +199,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: cargo clippy --features olap
-        run: cargo clippy --profile test -p rxferrix -p todo-server --features rxferrix/olap,todo-server/olap --all-targets -- -D warnings
+      - name: cargo clippy --features olap,chrono,uuid
+        run: cargo clippy --profile test -p rxferrix -p todo-server --features rxferrix/olap,rxferrix/chrono,rxferrix/uuid,todo-server/olap --all-targets -- -D warnings
 
-      - name: cargo test --features olap
-        run: cargo test -p rxferrix --features olap --lib --test it && df -h /
+      - name: cargo test --features olap,chrono,uuid
+        run: cargo test -p rxferrix --features olap,chrono,uuid --lib --test it && df -h /
 
   release:
     needs: gates

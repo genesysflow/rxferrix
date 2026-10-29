@@ -26,6 +26,11 @@ impl ::core::convert::From<(String,)> for __rxferrix_args_last_code {
         Self { email: __rxferrix_tuple.0 }
     }
 }
+impl ::core::convert::From<String> for __rxferrix_args_last_code {
+    fn from(email: String) -> Self {
+        Self { email }
+    }
+}
 const _: () = {
     ::rxferrix::__private::assert_wire_arg::<String>();
     ::rxferrix::__private::assert_wire_output::<Option<String>>();

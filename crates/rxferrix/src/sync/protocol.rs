@@ -90,8 +90,12 @@ struct QueryValueInner {
     value: Value,
     json: Box<str>,
     /// Diffs to this result from earlier ones (by their id), as JSON text; `None` where sending the value is better.
-    diffs: std::sync::Mutex<Vec<(u64, Option<Arc<str>>)>>,
+    /// Each is computed once, outside the list's lock: connections needing other diffs don't wait for it.
+    diffs: std::sync::Mutex<Vec<(u64, Arc<DiffCell>)>>,
 }
+
+/// A diff to a result from one earlier result, set once by the first connection that needs it.
+type DiffCell = std::sync::OnceLock<Option<Arc<str>>>;
 
 /// How many diffs (from distinct earlier results) a result keeps: clients are almost always one result behind.
 const DIFFS_KEPT: usize = 8;
@@ -108,19 +112,28 @@ impl QueryValue {
     /// connection that needs it and shared by every other client that has the same `base`. `None` if sending the value
     /// is better (the diff isn't clearly smaller).
     pub fn diff_from(&self, base: &QueryValue) -> Option<Arc<str>> {
-        let mut diffs = self.0.diffs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, cached)) = diffs.iter().find(|(id, _)| *id == base.0.id) {
-            return cached.clone();
-        }
-        let text = crate::sync::diff::diff(&base.0.value, &self.0.value)
-            .map(|d| serde_json::to_string(&d).expect("a JSON value serializes"))
-            .filter(|d| d.len() * 10 < self.0.json.len() * 7)
-            .map(Arc::<str>::from);
-        if diffs.len() >= DIFFS_KEPT {
-            diffs.remove(0);
-        }
-        diffs.push((base.0.id, text.clone()));
-        text
+        let cell = {
+            let mut diffs = self.0.diffs.lock().unwrap_or_else(|e| e.into_inner());
+            match diffs.iter().find(|(id, _)| *id == base.0.id) {
+                Some((_, cell)) => cell.clone(),
+                None => {
+                    if diffs.len() >= DIFFS_KEPT {
+                        diffs.remove(0);
+                    }
+                    let cell = Arc::new(DiffCell::new());
+                    diffs.push((base.0.id, cell.clone()));
+                    cell
+                }
+            }
+        };
+        // Clients with the same base wait for the first one to compute it; others go on.
+        cell.get_or_init(|| {
+            crate::sync::diff::diff(&base.0.value, &self.0.value)
+                .map(|d| serde_json::to_string(&d).expect("a JSON value serializes"))
+                .filter(|d| d.len() * 10 < self.0.json.len() * 7)
+                .map(Arc::<str>::from)
+        })
+        .clone()
     }
 
     pub fn value(&self) -> &Value {

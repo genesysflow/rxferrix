@@ -260,7 +260,12 @@ fn stored_file_ids(db: &Path) -> crate::Result<Vec<DocId>> {
         .query_row("SELECT table_number FROM _tables WHERE name = ?1", [crate::storage::StoredFile::NAME], |r| r.get(0))
         .optional()?;
     let Some(number) = number else { return Ok(Vec::new()) };
-    Ok(crate::db::storage::table_documents(&conn, number)?.into_iter().map(|(id, _)| DocId(id)).collect())
+    let mut ids = Vec::new();
+    crate::db::storage::for_each_document(&conn, number, |id, _| {
+        ids.push(DocId(id));
+        Ok(())
+    })?;
+    Ok(ids)
 }
 
 /// The commit ts and time of a snapshot copy, after removing its replication journal and state

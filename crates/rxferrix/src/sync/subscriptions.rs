@@ -67,7 +67,9 @@
 //! marked *starving*, and while a starving connection has a query in flight, no new generation starts: the frontier
 //! stays put, every query queued meanwhile runs at it and finishes valid at it, so within at most two runs of each of
 //! its queries the connection has all of them valid at the frontier and gets its update. (Other connections wait for
-//! that hold too, so it is a last resort: a single slow query is served by updates at its runs' ts instead.)
+//! that hold too, so it is a last resort: a single slow query is served by updates at its runs' ts instead.) A hold
+//! lasts at most `HOLD_MAX` (2 s); then generations go on, and those connections get no hold for `HOLD_COOLDOWN`
+//! (5 s), so expensive queries a client keeps re-subscribing can't stall everyone else for long.
 //!
 //! ## Commands and ordering
 //!
@@ -142,6 +144,11 @@ const VERSIONS_KEPT: usize = 8;
 
 use crate::read_lanes::SLOW_RUN_US;
 
+/// The longest a hold for starving connections lasts (see the module docs, Liveness): every other connection waits
+/// for it, and a starving connection's queries may each take up to the query timeout.
+const HOLD_MAX: Duration = Duration::from_secs(2);
+/// How long a connection whose hold reached [`HOLD_MAX`] gets no new one.
+const HOLD_COOLDOWN: Duration = Duration::from_secs(5);
 /// A query whose run timed out runs again after this, doubling with every timeout in a row ([`Manager::retries`]).
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 /// The longest wait between runs of a query that keeps timing out.
@@ -633,6 +640,8 @@ struct SharedQuery {
     ranges: Vec<(IndexId, Interval)>,
     /// Queued or running, since a generation at this ts.
     in_flight: Option<u64>,
+    /// The sequence number of that job.
+    job: Option<u64>,
     /// Moving average of its run time, µs.
     cost_us: u64,
     /// Set while nobody subscribes to it (see the module docs, Query cache).
@@ -695,6 +704,8 @@ struct Conn {
     updates: u64,
     /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
     starving: bool,
+    /// After a hold for it reached [`HOLD_MAX`]: no new hold for it before then.
+    no_hold_until: Option<Instant>,
 }
 
 impl Conn {
@@ -713,6 +724,7 @@ impl Conn {
             deferred: VecDeque::new(),
             updates: 0,
             starving: false,
+            no_hold_until: None,
         }
     }
 }
@@ -736,6 +748,10 @@ enum Event {
 struct JobQueue {
     generation: u64,
     lanes: [VecDeque<(SharedId, u64, Job)>; 2],
+    /// Jobs of dropped queries, by sequence number: runners skip them when they come up (finding them in a lane to
+    /// remove them would cost the queue's length per dropped query). A job already running when its query was dropped
+    /// is taken off when its result comes in.
+    cancelled: std::collections::HashSet<u64>,
 }
 
 /// Reports the end of a runner task (and the job it was running, if it panicked).
@@ -778,6 +794,8 @@ struct Manager {
     starving: BTreeSet<ConnId>,
     /// New generations are held for them.
     holding: bool,
+    /// Since when ([`HOLD_MAX`]).
+    hold_since: Option<Instant>,
     subscriptions: u64,
     /// Commits (or a `Cover` ts) not covered by the frontier yet: a new generation is due.
     need_round: bool,
@@ -872,12 +890,17 @@ impl Manager {
             covering: BTreeSet::new(),
             starving: BTreeSet::new(),
             holding: false,
+            hold_since: None,
             subscriptions: 0,
             need_round: false,
             retry: false,
             retries: HashMap::new(),
             generation: 0,
-            queue: Arc::new(Mutex::new(JobQueue { generation: 0, lanes: [VecDeque::new(), VecDeque::new()] })),
+            queue: Arc::new(Mutex::new(JobQueue {
+                generation: 0,
+                lanes: [VecDeque::new(), VecDeque::new()],
+                cancelled: Default::default(),
+            })),
             runners: [0, 0],
             max_runners: app.db().readers().min(threads).max(1),
             max_slow: (app.db().readers().min(threads) / 2).max(1),
@@ -899,6 +922,7 @@ impl Manager {
 
     async fn run(mut self) {
         loop {
+            let hold_ends = self.hold_since.map(|since| since + HOLD_MAX);
             let next_retry = self.next_retry();
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
@@ -914,6 +938,8 @@ impl Manager {
                     self.need_round = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.retry => self.retry = false,
+                // A hold that reached its limit ends even when nothing else happens (`update_hold`).
+                _ = tokio::time::sleep_until(hold_ends.unwrap_or_else(Instant::now).into()), if hold_ends.is_some() => {}
                 _ = tokio::time::sleep_until(next_retry.into()), if !self.retries.is_empty() => {
                     self.retry_timed_out();
                 }
@@ -1162,14 +1188,9 @@ impl Manager {
     fn drop_query(&mut self, id: SharedId) {
         self.retries.remove(&id);
         let Some(q) = self.queries.remove(&id) else { return };
-        if q.in_flight.is_some() {
-            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            for lane in &mut queue.lanes {
-                if let Some(at) = lane.iter().position(|(job, ..)| *job == id) {
-                    let (_, seq, _) = lane.remove(at).expect("found");
-                    self.in_flight.remove(&seq);
-                }
-            }
+        if let Some(seq) = q.job {
+            self.in_flight.remove(&seq);
+            self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.insert(seq);
         }
         if let Some(idle) = &q.idle {
             self.idle.remove(&idle.seq);
@@ -1263,6 +1284,7 @@ impl Manager {
             deps: AuthDeps::None,
             ranges: Vec::new(),
             in_flight: None,
+            job: None,
             cost_us: 0,
             idle: None,
             reads_clock: false,
@@ -1387,6 +1409,7 @@ impl Manager {
             q.in_flight = Some(self.ts);
             let seq = self.next_job;
             self.next_job += 1;
+            q.job = Some(seq);
             self.in_flight.insert(seq, self.ts);
             let lane = if q.cost_us >= SLOW_RUN_US { SLOW } else { FAST };
             queue.lanes[lane].push_back((id, seq, q.job()));
@@ -1406,18 +1429,29 @@ impl Manager {
         match event {
             Event::Ran { id, seq, run, elapsed } => {
                 self.in_flight.remove(&seq);
-                if let Some(q) = self.queries.get_mut(&id) {
-                    let us = elapsed.as_micros() as u64;
-                    q.cost_us = if q.cost_us == 0 { us } else { (q.cost_us * 3 + us) / 4 };
+                match self.queries.get_mut(&id) {
+                    Some(q) => {
+                        let us = elapsed.as_micros() as u64;
+                        q.cost_us = if q.cost_us == 0 { us } else { (q.cost_us * 3 + us) / 4 };
+                        self.finish_run(id, run);
+                    }
+                    // Dropped while it ran: its job was marked cancelled, and is done now.
+                    None => {
+                        self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.remove(&seq);
+                    }
                 }
-                self.finish_run(id, run);
             }
             Event::Lost { id, seq } => {
                 tracing::error!("a query execution task stopped early");
                 self.in_flight.remove(&seq);
-                if let Some(q) = self.queries.get_mut(&id) {
-                    q.in_flight = None;
-                    self.launch([id]);
+                match self.queries.get_mut(&id) {
+                    Some(q) => {
+                        (q.in_flight, q.job) = (None, None);
+                        self.launch([id]);
+                    }
+                    None => {
+                        self.queue.lock().unwrap_or_else(|e| e.into_inner()).cancelled.remove(&seq);
+                    }
                 }
             }
             Event::RunnerDone { generation, lane } => {
@@ -1473,8 +1507,10 @@ impl Manager {
                             continue 'pump;
                         }
                         Some(snapshot) => {
-                            // Nothing committed since the frontier.
+                            // Nothing committed since the frontier, as of the snapshot. A commit that landed since was
+                            // just marked seen, so no notice of it will wake the loop: retry soon instead.
                             self.need_round = *self.commits.borrow_and_update() > self.ts;
+                            self.retry |= self.need_round;
                             if self.gen_snapshot.is_none() && self.queued(FAST) + self.queued(SLOW) > 0 {
                                 self.gen_snapshot = Some(snapshot);
                             }
@@ -1600,7 +1636,15 @@ impl Manager {
             loop {
                 let next = {
                     let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
-                    if queue.generation == generation { queue.lanes[lane].pop_front() } else { None }
+                    loop {
+                        if queue.generation != generation {
+                            break None;
+                        }
+                        match queue.lanes[lane].pop_front() {
+                            Some((_, seq, _)) if queue.cancelled.remove(&seq) => continue,
+                            next => break next,
+                        }
+                    }
                 };
                 let Some((id, seq, (path, args, identity))) = next else { break };
                 guard.job = Some((id, seq));
@@ -1650,11 +1694,18 @@ impl Manager {
                 }
             }
             Some(entries) => {
-                // In ts order, so the first hit of a query is the commit that ends its version.
-                let mut hits = Vec::new();
+                // In ts order, so the first hit of a query is the commit that ends its version. One hit per query, and
+                // none for queries no longer current: a burst of writes over a range thousands of queries read would
+                // otherwise collect writes × queries entries.
+                let mut hits: HashMap<SharedId, u64> = HashMap::new();
+                let queries = &self.queries;
                 for entry in &entries {
                     for (index_id, key) in &entry.writes {
-                        self.index.stab(*index_id, key, |id| hits.push((id, entry.ts)));
+                        self.index.stab(*index_id, key, |id| {
+                            if !hits.contains_key(&id) && queries.get(&id).is_some_and(SharedQuery::is_current) {
+                                hits.insert(id, entry.ts);
+                            }
+                        });
                     }
                 }
                 for (id, ts) in hits {
@@ -1789,15 +1840,36 @@ impl Manager {
         self.launch(launch);
     }
 
-    /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness).
+    /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness), for at
+    /// most [`HOLD_MAX`] at a time: then those connections get no hold for [`HOLD_COOLDOWN`], and generations go on.
     fn update_hold(&mut self) {
+        let now = Instant::now();
         let conns = &self.conns;
         let queries = &self.queries;
-        let holding = self.starving.iter().any(|c| {
-            conns.get(c).is_some_and(|conn| {
-                conn.subs.values().any(|sub| queries.get(&sub.shared).is_some_and(|q| q.in_flight.is_some()))
+        let holding_for: Vec<ConnId> = self
+            .starving
+            .iter()
+            .filter(|c| {
+                conns.get(c).is_some_and(|conn| {
+                    conn.no_hold_until.is_none_or(|t| t <= now)
+                        && conn.subs.values().any(|sub| queries.get(&sub.shared).is_some_and(|q| q.in_flight.is_some()))
+                })
             })
-        });
+            .copied()
+            .collect();
+        let mut holding = !holding_for.is_empty();
+        if holding && now.duration_since(*self.hold_since.get_or_insert(now)) >= HOLD_MAX {
+            // Every other connection has waited long enough for these.
+            for c in holding_for {
+                if let Some(conn) = self.conns.get_mut(&c) {
+                    conn.no_hold_until = Some(now + HOLD_COOLDOWN);
+                }
+            }
+            holding = false;
+        }
+        if !holding {
+            self.hold_since = None;
+        }
         if holding && !self.holding {
             self.metrics.record_hold();
         }
@@ -1849,7 +1921,7 @@ impl Manager {
         });
         q.deps = run.auth_deps;
         q.reads_clock = run.read_set.reads_clock();
-        q.in_flight = None;
+        (q.in_flight, q.job) = (None, None);
         if ranges != q.ranges {
             for (index_id, interval) in &q.ranges {
                 self.index.remove(*index_id, interval, id);

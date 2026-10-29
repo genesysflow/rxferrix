@@ -188,12 +188,16 @@ pub fn delete_index_entry(conn: &Connection, index_id: IndexId, key: &[u8]) -> a
     Ok(())
 }
 
-/// All documents of a table as `(id, json)`. Ids start with the big-endian table number, so a table is a contiguous
-/// range of the `documents` primary key.
-pub fn table_documents(conn: &Connection, table_number: u32) -> anyhow::Result<Vec<([u8; 16], String)>> {
+/// Call `f` with the id and JSON of every document of a table, in id order, one row at a time: memory stays flat
+/// whatever the table's size (index and aggregate backfills, verification). `f` may write other tables on the same
+/// connection.
+pub fn for_each_document(
+    conn: &Connection,
+    table_number: u32,
+    mut f: impl FnMut([u8; 16], &str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let start = table_number.to_be_bytes().to_vec();
     let end = crate::keys::prefix_successor(&start);
-    let mut out = Vec::new();
     let mut stmt;
     let mut rows = match &end {
         Some(end) => {
@@ -208,13 +212,14 @@ pub fn table_documents(conn: &Connection, table_number: u32) -> anyhow::Result<V
     while let Some(row) = rows.next()? {
         let id: Vec<u8> = row.get(0)?;
         let id: [u8; 16] = id.try_into().map_err(|_| anyhow::anyhow!("corrupt document id"))?;
-        out.push((id, row.get(1)?));
+        let json = row.get_ref(1)?.as_str()?;
+        f(id, json)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The number of documents in a table (a range count over the `documents_by_table` index; the same documents as the
-/// table's range of the primary key, see [`table_documents`], since writes check that an id's table is its row's).
+/// table's range of the primary key, see [`for_each_document`], since writes check that an id's table is its row's).
 pub fn count_documents(conn: &Connection, table_number: u32) -> anyhow::Result<u64> {
     let n: i64 = conn.prepare_cached(COUNT_TABLE_DOCUMENTS)?.query_row([table_number], |r| r.get(0))?;
     Ok(n as u64)

@@ -171,6 +171,8 @@ interface StoredTokens {
 
 /** Refresh access tokens that expire within this window instead of using them. */
 const EXPIRY_LEEWAY_MS = 10_000;
+/** A refresh request that hasn't answered by then is given up (a black-holed connection after a network switch). */
+const REFRESH_TIMEOUT_MS = 10_000;
 
 function defaultStorage(): AuthStorage {
   try {
@@ -244,6 +246,9 @@ export class RxFerrixAuth {
   private refreshing: Promise<string | null> | null = null;
   private removeStorageListener: () => void = () => {};
 
+  /** Bumped whenever who is signed in may change (sign-in, sign-out, another tab): see `doRefresh`. */
+  private epoch = 0;
+
   constructor(client: RxFerrixClient, options: RxFerrixAuthOptions = {}) {
     this.client = client;
     this.storage = options.storage ?? defaultStorage();
@@ -258,6 +263,7 @@ export class RxFerrixAuth {
     // Holds the socket's subscriptions back until the stored session (if any) has been sent with Authenticate.
     this.client.setAuth(this.fetchToken, this.onServerAuthChange);
     if (options.syncTabs !== false) this.listenToOtherTabs();
+    client.onClose(() => this.dispose());
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -344,6 +350,7 @@ export class RxFerrixAuth {
   /** Store fresh tokens and authenticate the socket with them. */
   private async signedIn(tokens: AuthTokens): Promise<void> {
     await this.loaded;
+    this.epoch++;
     const t = toStored(tokens);
     await this.saveTokens(t);
     this.setState(this.pendingState(t));
@@ -395,6 +402,9 @@ export class RxFerrixAuth {
   }
 
   private async doRefresh(): Promise<string | null> {
+    // A sign-in, sign-out or another tab's change while the request is out makes its answer someone else's session:
+    // it must not be stored over theirs.
+    const epoch = this.epoch;
     const before = this.tokens;
     if (!before) return null;
     const adopted = await this.adoptNewerStoredTokens(before);
@@ -403,16 +413,19 @@ export class RxFerrixAuth {
     if (!t) return null;
     let res: Response;
     try {
+      const timeout = (AbortSignal as { timeout?: (ms: number) => AbortSignal }).timeout?.(REFRESH_TIMEOUT_MS);
       res = await this.fetchImpl(`${this.baseUrl}/api/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refreshToken: t.refreshToken }),
+        ...(timeout ? { signal: timeout } : {}),
       });
     } catch (e) {
       // Offline: keep the session; the next reconnect or AuthError tries again.
       throw new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: e });
     }
     const body = (await res.json().catch(() => null)) as unknown;
+    if (epoch !== this.epoch || this.tokens !== t) return this.tokens?.accessToken ?? null;
     if (res.ok) {
       const next = toStored(body as AuthTokens);
       await this.saveTokens(next);
@@ -444,6 +457,7 @@ export class RxFerrixAuth {
   }
 
   private onOtherTabChange(next: StoredTokens | null): void {
+    this.epoch++;
     const had = this.tokens;
     this.tokens = next;
     if (!next) {
@@ -621,6 +635,7 @@ export class RxFerrixAuth {
   /** End the session on the server and forget the tokens (also in other tabs). */
   async signOut(): Promise<void> {
     await this.loaded;
+    this.epoch++;
     const t = this.tokens;
     await this.saveTokens(null);
     this.client.clearAuth();

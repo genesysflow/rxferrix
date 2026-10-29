@@ -119,7 +119,6 @@ function randomSessionId(): string {
   });
 }
 
-/** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
 /** Who a token speaks for, as far as the server's mutation dedup goes: its issuer and `sub` (`null` for no token). A
  * refreshed token keeps it; another user's doesn't. */
 function tokenIdentity(token: string | null): string | null {
@@ -135,6 +134,7 @@ function tokenIdentity(token: string | null): string | null {
   }
 }
 
+/** Seconds-since-epoch `exp` claim of a JWT, if the token is a decodable JWT. */
 function jwtExpiry(token: string): number | null {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return null;

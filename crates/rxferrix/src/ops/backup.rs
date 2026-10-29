@@ -981,7 +981,12 @@ pub fn apply_staged_durably(
 /// locked, before anything opens the database. Does nothing without a marker.
 pub fn finish_interrupted_restore(dir: &Path) -> crate::Result<()> {
     let path = dir.join(RESTORING_MARKER);
-    let Ok(raw) = std::fs::read(&path) else { return Ok(()) };
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // Starting anyway would open a half-swapped directory: fail instead.
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+    };
     let marker: RestoringMarker = serde_json::from_slice(&raw).context("reading the interrupted restore's marker")?;
     tracing::warn!(staging = %marker.staging.display(), "finishing a restore that was interrupted");
     apply_staged(&marker.staging, dir, marker.manifest, marker.storage_dir, &marker.previous)?;

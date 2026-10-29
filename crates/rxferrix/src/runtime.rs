@@ -172,6 +172,8 @@ pub struct FunctionInfo {
     pub args_ts: String,
     /// TS type of the return value.
     pub output_ts: String,
+    /// The fn's doc comment (empty without one), for the JSDoc of its generated reference.
+    pub docs: String,
 }
 
 /// All functions registered through `__private::FUNCTIONS`, keyed by path.
@@ -213,6 +215,7 @@ impl Registry {
                     dev_only: def.dev_only,
                     args_ts,
                     output_ts,
+                    docs: def.docs.to_string(),
                 }
             })
             .collect()

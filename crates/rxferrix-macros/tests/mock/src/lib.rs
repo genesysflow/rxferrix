@@ -555,6 +555,7 @@ pub mod __private {
         pub name: &'static str,
         pub visibility: Visibility,
         pub dev_only: bool,
+        pub docs: &'static str,
         pub handler: Handler,
         pub ts: fn() -> (String, String),
     }

@@ -52,6 +52,7 @@ macro_rules! expand_fn {
             name: stringify!($name),
             visibility: ::rxferrix::__private::Visibility::$vis,
             dev_only: false,
+            docs: "",
             handler: ::rxferrix::__private::Handler::$handler(|ctx, args| ::std::boxed::Box::pin(async move {
                 #[allow(unused_variables)]
                 let a: $args = ::rxferrix::__private::decode_args(stringify!($name), args)?;

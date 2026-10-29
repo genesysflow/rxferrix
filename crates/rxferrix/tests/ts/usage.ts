@@ -151,7 +151,7 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
   assertType<Equals<OutputOf<typeof api.codegen.tasks.stats>, Stats>>();
   assertType<Equals<OutputOf<typeof api.codegen.tasks.summaries>, Array<TaskSummary>>>();
   assertType<Equals<OutputOf<typeof api.codegen.tasks.first_summary>, TaskSummary | null>>();
-  assertType<Equals<TaskSummary, { title: string; labelCount: number; priority: Priority }>>();
+  assertType<Equals<TaskSummary, { title: string; labelCount: number; priority: Priority; note?: string | null }>>();
 
   // Dev-only functions are in `devApi`, not in `api`.
   const wiped: number = await client.mutation(devApi.codegen.tasks.wipe);

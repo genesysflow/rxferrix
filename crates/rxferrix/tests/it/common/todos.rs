@@ -106,6 +106,7 @@ static __RXFERRIX_FN_list: ::rxferrix::__private::FunctionDef = ::rxferrix::__pr
     name: "list",
     visibility: ::rxferrix::__private::Visibility::Public,
     dev_only: false,
+    docs: "Lists todos.",
     handler: ::rxferrix::__private::Handler::Query(|ctx, args| {
         ::std::boxed::Box::pin(async move {
             let a: __rxferrix_args_list = ::rxferrix::__private::decode_args("list", args)?;
@@ -166,6 +167,7 @@ static __RXFERRIX_FN_add: ::rxferrix::__private::FunctionDef = ::rxferrix::__pri
     name: "add",
     visibility: ::rxferrix::__private::Visibility::Public,
     dev_only: false,
+    docs: "",
     handler: ::rxferrix::__private::Handler::Mutation(|ctx, args| {
         ::std::boxed::Box::pin(async move {
             let a: __rxferrix_args_add = ::rxferrix::__private::decode_args("add", args)?;
@@ -221,6 +223,7 @@ static __RXFERRIX_FN_add_many: ::rxferrix::__private::FunctionDef = ::rxferrix::
     name: "add_many",
     visibility: ::rxferrix::__private::Visibility::Public,
     dev_only: false,
+    docs: "",
     handler: ::rxferrix::__private::Handler::Action(|ctx, args| {
         ::std::boxed::Box::pin(async move {
             let a: __rxferrix_args_add_many = ::rxferrix::__private::decode_args("add_many", args)?;

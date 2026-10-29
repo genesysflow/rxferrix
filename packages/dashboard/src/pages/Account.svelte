@@ -218,7 +218,7 @@
     {/snippet}
   </Modal>
 {:else if enabling === "scan" && setup}
-  <Modal title="Scan the QR code" onclose={cancelSetup}>
+  <Modal title="Scan the QR code" onclose={cancelSetup} dismissible={false}>
     <form class="steps" onsubmit={confirm}>
       <p class="muted small">
         Open your authenticator app, add an account by scanning this code, then enter the 6-digit code it shows.
@@ -243,7 +243,7 @@
     {/snippet}
   </Modal>
 {:else if enabling === "codes" && recoveryCodes}
-  <Modal title="Save your recovery codes" onclose={() => (enabling = null)}>
+  <Modal title="Save your recovery codes" onclose={() => (enabling = null)} dismissible={false}>
     <div class="steps">
       <div class="alert info">
         These codes are shown <strong>once</strong>. Each signs you in one time if you lose the authenticator. Keep them

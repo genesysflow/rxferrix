@@ -128,8 +128,16 @@
 
 {#if entries.length === 0}
   <Empty
-    title={paused ? "Paused" : status === "live" ? "No executions yet" : "Connecting…"}
-    hint="Function executions appear here live as they happen."
+    title={paused
+      ? "Paused"
+      : status !== "live"
+        ? "Connecting…"
+        : filter.minDurationUs
+          ? `No executions took ${formatDuration(filter.minDurationUs)} or longer`
+          : "No executions yet"}
+    hint={filter.minDurationUs
+      ? "Slower executions appear here live as they happen; choose a shorter duration to see more."
+      : "Function executions appear here live as they happen."}
   />
 {:else}
   <table class="grid" data-testid="logs">

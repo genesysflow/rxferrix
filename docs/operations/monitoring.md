@@ -31,7 +31,7 @@ This exposes `/metrics`. Set `--metrics-token` or `RXFERRIX_METRICS_TOKEN` to re
 
 Metrics cover requests and status codes, function execution times, commits, connections, subscriptions, reruns, cache activity, database sizes, scheduler depth, and dropped log entries. Replication and analytics lag appear when those services are enabled.
 
-Watch sustained errors, slow mutations holding the writer, growing scheduler queues, disk growth, and replication lag. The dashboard's **Overview** gives an interactive view of several of the same signals.
+Watch sustained errors, slow mutations holding the writer, growing scheduler queues, disk growth, and replication lag. The dashboard's **Overview** gives an interactive view of several of the same signals; its **Slowest functions** table ranks the queries and mutations of the last 24 hours by p95 duration, with a bar comparing their p50 and p95 on one scale, and **Slow calls** opens **Logs** on the calls of that function at least as slow as its p95 (the Logs page's duration filter narrows any view the same way).
 
 ## Check health
 

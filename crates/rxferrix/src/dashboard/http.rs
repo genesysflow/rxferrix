@@ -34,7 +34,8 @@
 //! in proxy or server logs). The stream ends when the access token expires; the client reconnects with a fresh one.
 //!
 //! `LogFilter` query parameters: `pathPrefix`, `path` (one function), `kind` (`query|mutation|action`), `outcome`
-//! (`success|userError|serverError`), `since`, `limit`, `beforeId`, `identity`, `excludeSystem`, `excludeBackground`.
+//! (`success|userError|serverError`), `since`, `minDurationUs` (only executions that took at least this long), `limit`,
+//! `beforeId`, `identity`, `excludeSystem`, `excludeBackground`.
 
 use std::convert::Infallible;
 use std::time::{Duration, SystemTime};

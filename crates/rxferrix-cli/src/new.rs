@@ -109,7 +109,9 @@ pub fn run(opts: &Options) -> Result<(), String> {
         Source::Checkout(root) => format!("RxFerrix from {}", root.display()),
     };
     let dir = opts.dir.display();
-    println!("Created {name} in {dir} ({from}).\n\nNext:\n  cd {dir}\n  cargo run -- serve --dev");
+    println!(
+        "Created {name} in {dir} ({from}).\n\nNext:\n  cd {dir}\n  rxferrix dev                  # cargo run -- serve --dev, restarted when Rust code changes"
+    );
     if opts.web != Web::None {
         println!("\n  # in a second terminal, once the server has started (it writes web/src/rxferrix)");
         println!("  cd {dir}/web && bun install && bun run dev");

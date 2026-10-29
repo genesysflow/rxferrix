@@ -20,6 +20,26 @@ rxferrix new my-backend --web none
 
 The target directory must be absent or empty. Names start with an ASCII letter and contain letters, digits, `-`, or `_`. `--published` and `--rxferrix-path` are mutually exclusive.
 
+## Develop with rebuilds
+
+From the directory containing your app's `Cargo.toml`:
+
+```sh
+rxferrix dev
+rxferrix dev -- --http 127.0.0.1:9000 --dir dev_data
+```
+
+`rxferrix dev` builds the app and runs `cargo run -- serve --dev`. It watches the app's Rust sources and `Cargo.toml`, plus those of local crates the app builds with (workspace members and path dependencies). On a change it rebuilds; when the build succeeds, it stops the server (as Ctrl+C would) and starts the new version. The old server keeps serving while the new version compiles and after a failed build. Clients reconnect on their own, and every start regenerates the client API when a codegen directory is configured.
+
+Only `.rs` files and `Cargo.toml` changes trigger rebuilds. Tests, benches, and examples are not watched.
+
+| Option | Meaning |
+| --- | --- |
+| `-p`, `--package NAME` | Run this package of a workspace (`cargo run --package`). |
+| `--bin NAME` | Run this binary of a package with several (`cargo run --bin`). |
+| `--release` | Build with optimizations. |
+| `-- SERVE_ARGS` | Pass further options to `serve --dev`. |
+
 ## Run your app
 
 From the directory containing your app's `Cargo.toml`:

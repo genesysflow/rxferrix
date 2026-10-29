@@ -10,7 +10,7 @@ You need a current stable [Rust toolchain](https://rustup.rs/) with support for 
 cargo install rxferrix-cli
 ```
 
-This installs `rxferrix`, the project generator. Server commands come from the app you create next.
+This installs `rxferrix`, the project generator and development runner. Server commands come from the app you create next.
 
 ## 2. Create a project
 
@@ -37,12 +37,12 @@ Projects normally depend on crates.io and npm packages. A generator installed fr
 From `my-app`:
 
 ```sh
-cargo run -- serve --dev
+rxferrix dev
 ```
 
 Leave it running. The first build can take a while. The server listens on http://127.0.0.1:8090 and writes the TypeScript API to `web/src/rxferrix`.
 
-`--dev` exposes detailed errors, enables development-only functions, and logs auth email codes when SMTP is not configured. Use it for local development.
+`rxferrix dev` runs `cargo run -- serve --dev` and rebuilds the app when its Rust code changes. You can run `cargo run -- serve --dev` yourself instead; it doesn't watch files. `--dev` exposes detailed errors, enables development-only functions, and logs auth email codes when SMTP is not configured. Use it for local development.
 
 ## 4. Start the frontend
 
@@ -62,13 +62,7 @@ The frontend connects to its own origin. Vite forwards `/api` requests, includin
 
 Open `src/tasks.rs`. A `#[query]` reads data, and a `#[mutation]` changes it. The generated frontend calls them as `api.tasks.list`, `api.tasks.add`, and so on.
 
-For example, change the maximum list size from `.take(100)` to `.take(50)`. Stop the backend with Ctrl+C and rerun:
-
-```sh
-cargo run -- serve --dev
-```
-
-Cargo rebuilds the app, and startup regenerates the client API. Existing clients reconnect. Repeat this after changing backend code, function arguments, or table types; `serve --dev` does not watch or rebuild Rust files.
+For example, change the maximum list size from `.take(100)` to `.take(50)` and save. `rxferrix dev` rebuilds the app and restarts the server, and startup regenerates the client API. Existing clients reconnect. The old server keeps serving while the new version compiles. If the build fails, it keeps serving until you fix the error.
 
 To generate types without starting the server:
 

@@ -1,11 +1,13 @@
-//! The `rxferrix` command. Apps are their own binaries (`cargo run -- serve`, `cargo run -- codegen`, ...); this one only
-//! creates them:
+//! The `rxferrix` command. Apps are their own binaries (`cargo run -- serve`, `cargo run -- codegen`, ...); this one
+//! creates them, and runs them in development:
 //!
 //! ```sh
 //! cargo install --path crates/rxferrix-cli
 //! rxferrix new my-app --web react      # or svelte, or none
+//! cd my-app && rxferrix dev            # `cargo run -- serve --dev`, rebuilt and restarted when Rust code changes
 //! ```
 
+mod dev;
 mod new;
 
 use std::path::PathBuf;
@@ -25,6 +27,25 @@ enum Command {
     /// Create a new app in DIR: a Rust backend with a sample table, query and mutations, the `.cargo/config.toml` that
     /// builds SQLite for parallel queries, and optionally a web app.
     New(NewArgs),
+    /// Run the app in the current directory with `serve --dev`, and rebuild and restart it when its Rust code changes.
+    /// The running server keeps serving while the new version compiles, and after a failed build.
+    Dev(DevArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DevArgs {
+    /// Package to run, in a workspace with several (`cargo run --package`).
+    #[arg(short, long)]
+    package: Option<String>,
+    /// Binary to run, in a package with several (`cargo run --bin`).
+    #[arg(long)]
+    bin: Option<String>,
+    /// Build with optimizations.
+    #[arg(long)]
+    release: bool,
+    /// More options for `serve`, after `--`: `rxferrix dev -- --http 127.0.0.1:9000`.
+    #[arg(last = true, value_name = "SERVE_ARGS")]
+    serve_args: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -67,6 +88,12 @@ fn main() -> ExitCode {
             };
             new::run(&new::Options { dir: args.dir, name: args.name, web: args.web, source })
         }
+        Command::Dev(args) => dev::run(&dev::Options {
+            package: args.package,
+            bin: args.bin,
+            release: args.release,
+            serve_args: args.serve_args,
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -90,8 +117,17 @@ mod tests {
     #[test]
     fn new_defaults_to_react() {
         let cli = Cli::try_parse_from(["rxferrix", "new", "app"]).unwrap();
-        let Command::New(args) = cli.command;
+        let Command::New(args) = cli.command else { panic!("{:?}", cli.command) };
         assert_eq!(args.web, Web::React);
         assert!(Cli::try_parse_from(["rxferrix", "new", "app", "--published", "--rxferrix-path", "x"]).is_err());
+    }
+
+    #[test]
+    fn dev_passes_serve_args_after_dashes() {
+        let cli = Cli::try_parse_from(["rxferrix", "dev", "-p", "app", "--", "--http", "127.0.0.1:9000"]).unwrap();
+        let Command::Dev(args) = cli.command else { panic!("{:?}", cli.command) };
+        assert_eq!(args.package.as_deref(), Some("app"));
+        assert_eq!(args.serve_args, ["--http", "127.0.0.1:9000"]);
+        assert!(Cli::try_parse_from(["rxferrix", "dev", "--http", "127.0.0.1:9000"]).is_err());
     }
 }

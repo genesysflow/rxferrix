@@ -888,8 +888,13 @@ pub fn apply_staged(
         let path = dir.join(&name);
         if path.exists() {
             std::fs::create_dir_all(previous)?;
-            std::fs::rename(&path, previous.join(&name)).with_context(|| format!("moving {} aside", path.display()))?;
-            moved_aside.push(name);
+            match std::fs::rename(&path, previous.join(&name)) {
+                Ok(()) => moved_aside.push(name),
+                // A `-wal` / `-shm` can vanish between the check and the rename: the last connection to the database,
+                // closing just now, deletes them. Nothing left to move.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(anyhow::Error::from(e).context(format!("moving {} aside", path.display()))),
+            }
         }
     }
     for name in ["data.db", "aux.db", SECRET_FILE] {
@@ -920,15 +925,161 @@ pub fn apply_staged(
 /// Restore `archive` into the data directory `dir` (offline). See the module docs.
 pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> crate::Result<RestoreReport> {
     let _lock = super::DirLock::acquire(dir)?;
+    finish_interrupted_restore(dir)?;
     let staging = tempfile::Builder::new().prefix(".rxferrix-restore-").tempdir_in(dir)?;
     let manifest = prepare(archive, staging.path(), options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
-    apply_staged(staging.path(), dir, manifest, options.storage_dir.clone(), &previous)
+    apply_staged_durably(staging.path(), dir, manifest, options.storage_dir.clone(), &previous)
+}
+
+/// Written in the data directory while [`apply_staged_durably`] moves files: what to finish if the process dies.
+const RESTORING_MARKER: &str = "restoring.json";
+/// `pre-restore-<time>/` directories kept after a restore (each a full copy of the data it replaced).
+const PRE_RESTORE_KEPT: usize = 2;
+
+#[derive(Serialize, Deserialize)]
+struct RestoringMarker {
+    staging: PathBuf,
+    previous: PathBuf,
+    storage_dir: Option<PathBuf>,
+    manifest: Manifest,
+}
+
+/// [`apply_staged`], crash-safely: a marker written (and synced) before anything moves lets the next start finish
+/// a restore a crash cut short ([`finish_interrupted_restore`]), instead of opening (or creating) a database with
+/// the old one moved aside and the restored one not yet in place. Afterwards the directory is synced, the marker and
+/// the staging directory removed, and old `pre-restore-*` copies beyond the newest [`PRE_RESTORE_KEPT`] deleted.
+pub fn apply_staged_durably(
+    staging: &Path,
+    dir: &Path,
+    manifest: Manifest,
+    storage_dir: Option<PathBuf>,
+    previous: &Path,
+) -> crate::Result<RestoreReport> {
+    let marker = RestoringMarker {
+        staging: staging.to_path_buf(),
+        previous: previous.to_path_buf(),
+        storage_dir: storage_dir.clone(),
+        manifest: manifest.clone(),
+    };
+    let tmp = dir.join(format!("{RESTORING_MARKER}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(&marker)?)?;
+    std::fs::File::open(&tmp)?.sync_all()?;
+    std::fs::rename(&tmp, dir.join(RESTORING_MARKER))?;
+    sync_dir(dir)?;
+    let report = apply_staged(staging, dir, manifest, storage_dir, previous)?;
+    sync_dir(dir)?;
+    std::fs::remove_file(dir.join(RESTORING_MARKER))?;
+    sync_dir(dir)?;
+    let _ = std::fs::remove_dir_all(staging);
+    prune_pre_restore(dir);
+    Ok(report)
+}
+
+/// Finish a restore that [`apply_staged_durably`] began and a crash interrupted: moving files is idempotent (what is
+/// still in the staging directory goes into place, the old files it replaces aside). Call it with the data directory
+/// locked, before anything opens the database. Does nothing without a marker.
+pub fn finish_interrupted_restore(dir: &Path) -> crate::Result<()> {
+    let path = dir.join(RESTORING_MARKER);
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // Starting anyway would open a half-swapped directory: fail instead.
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+    };
+    let marker: RestoringMarker = serde_json::from_slice(&raw).context("reading the interrupted restore's marker")?;
+    tracing::warn!(staging = %marker.staging.display(), "finishing a restore that was interrupted");
+    apply_staged(&marker.staging, dir, marker.manifest, marker.storage_dir, &marker.previous)?;
+    sync_dir(dir)?;
+    std::fs::remove_file(&path)?;
+    sync_dir(dir)?;
+    let _ = std::fs::remove_dir_all(&marker.staging);
+    Ok(())
+}
+
+/// Delete `pre-restore-*` directories beyond the newest [`PRE_RESTORE_KEPT`] (their names sort by time).
+fn prune_pre_restore(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut copies: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("pre-restore-") && e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    copies.sort();
+    let old = copies.len().saturating_sub(PRE_RESTORE_KEPT);
+    for path in copies.into_iter().take(old) {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "removed an old pre-restore copy"),
+            Err(e) => tracing::warn!(path = %path.display(), "could not remove an old pre-restore copy: {e}"),
+        }
+    }
+}
+
+/// Persist the directory entries of `dir` (renames into or out of it): without it, a power loss right after a rename
+/// can undo it.
+pub(crate) fn sync_dir(dir: &Path) -> crate::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restore_interrupted_part_way_is_finished_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, staging, previous) = (dir.path(), dir.path().join(".staging"), dir.path().join("pre-restore-x"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(data.join("data.db"), "old").unwrap();
+        std::fs::write(data.join("aux.db"), "old aux").unwrap();
+        std::fs::write(staging.join("data.db"), "restored").unwrap();
+        std::fs::write(staging.join("aux.db"), "restored aux").unwrap();
+        let manifest = Manifest {
+            format: MANIFEST_FORMAT.into(),
+            version: MANIFEST_VERSION,
+            created_at: 0.0,
+            rxferrix_version: String::new(),
+            ts: 1,
+            commit_time: 0.0,
+            storage: "excluded".into(),
+            missing_blobs: 0,
+            files: Vec::new(),
+        };
+        let marker =
+            RestoringMarker { staging: staging.clone(), previous: previous.clone(), storage_dir: None, manifest };
+        std::fs::write(data.join(RESTORING_MARKER), serde_json::to_vec(&marker).unwrap()).unwrap();
+        // The crash: the old data.db was moved aside, nothing else happened yet.
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::rename(data.join("data.db"), previous.join("data.db")).unwrap();
+
+        finish_interrupted_restore(data).unwrap();
+        assert_eq!(std::fs::read_to_string(data.join("data.db")).unwrap(), "restored");
+        assert_eq!(std::fs::read_to_string(data.join("aux.db")).unwrap(), "restored aux");
+        assert_eq!(std::fs::read_to_string(previous.join("data.db")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(previous.join("aux.db")).unwrap(), "old aux");
+        assert!(!data.join(RESTORING_MARKER).exists() && !staging.exists());
+        // Nothing to do the next time.
+        finish_interrupted_restore(data).unwrap();
+    }
+
+    #[test]
+    fn only_the_newest_pre_restore_copies_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        for t in ["20261001T000000Z", "20261002T000000Z", "20261003T000000Z"] {
+            std::fs::create_dir_all(dir.path().join(format!("pre-restore-{t}"))).unwrap();
+        }
+        prune_pre_restore(dir.path());
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["pre-restore-20261002T000000Z", "pre-restore-20261003T000000Z"]);
+    }
 
     #[test]
     fn a_running_snapshot_can_be_interrupted() {

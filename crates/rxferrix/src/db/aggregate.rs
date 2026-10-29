@@ -455,10 +455,10 @@ impl QueryDb {
         order: Order,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<GroupRow>> {
-        self.record(info.id, range.clone());
         let dir = if order == Order::Desc { "DESC" } else { "ASC" };
+        let wanted = limit;
         let limit = limit.map_or(-1, |n| n as i64);
-        self.with_conn(|c| {
+        let rows = self.with_conn(|c| {
             let sql = format!(
                 "SELECT key, count, sums FROM aggregate_values WHERE agg_id = ?1 AND key >= ?2 AND (?3 IS NULL OR key < ?3)
                  ORDER BY key {dir} LIMIT ?4"
@@ -473,7 +473,23 @@ impl QueryDb {
                 out.push((key, count, parse_sums(&sums)?));
             }
             Ok(out)
-        })
+        });
+        // As for scans (`query::scan`): when the limit was reached, only the groups up to the last one returned were
+        // read, and a write to a group past it can't change the result. On error, the whole range (always safe).
+        let recorded = match (&rows, wanted) {
+            (Ok(rows), Some(n)) if n > 0 && rows.len() >= n => {
+                let last = &rows.last().expect("n > 0 rows").0;
+                match order {
+                    Order::Asc => {
+                        KeyRange { start: range.start.clone(), end: Some(crate::keys::immediate_successor(last)) }
+                    }
+                    Order::Desc => KeyRange { start: last.clone(), end: range.end.clone() },
+                }
+            }
+            _ => range.clone(),
+        };
+        self.record(info.id, recorded);
+        rows
     }
 }
 
@@ -532,7 +548,7 @@ impl<T: Table> AggregateQuery<'_, T> {
         let ops = range(IndexRange::new()).into_ops();
         let (info, range) = self.db.aggregate_range(self.table, self.name, &ops)?;
         let rows = self.db.aggregate_rows(&info, &range, order, Some(limit))?;
-        // A full scan of `limit` groups: the read set covers only what was returned (later keys can't change it).
+        // At most `limit` groups: the read set covers only what was returned (later keys can't change it).
         let mut out = Vec::with_capacity(rows.len());
         for (key, count, sums) in rows {
             let mut group = Vec::with_capacity(info.spec.group_fields.len());

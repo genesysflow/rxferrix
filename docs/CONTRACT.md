@@ -72,7 +72,7 @@ Rules:
   the *type* namespace, so it never clashes with the fn or with local variables named `list`. Call other functions
   through the runtime with turbofish: `ctx.run_query::<list>(args)`, `ctx.run_mutation::<add>(args)`,
   `ctx.run_action::<..>(args)`, `app.query::<list>(args)`, where `args` is the generated args struct or a tuple of the
-  params (`(x,)` for one param, `()` for none).
+  params (`(x,)` or just `x` for one param, `()` for none).
 
 ### 1.1 Core types (in `rxferrix`, re-exported by the prelude)
 

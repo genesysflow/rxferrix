@@ -142,6 +142,11 @@ const VERSIONS_KEPT: usize = 8;
 
 use crate::read_lanes::SLOW_RUN_US;
 
+/// A query whose run timed out runs again after this, doubling with every timeout in a row ([`Manager::retries`]).
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait between runs of a query that keeps timing out.
+const RETRY_MAX: Duration = Duration::from_secs(60);
+
 /// Job lanes: queries known to be slow wait in a lane of their own, so they never hold up the others (see
 /// `Manager::pump`).
 const FAST: usize = 0;
@@ -778,6 +783,10 @@ struct Manager {
     need_round: bool,
     /// Retry soon (opening a snapshot failed).
     retry: bool,
+    /// Queries whose newest run timed out: when to run them again, and how many retries came before. A timed-out run
+    /// read only part of what it would have, so no commit may ever invalidate its error; it is run again on a timer
+    /// instead, for as long as anyone watches it.
+    retries: HashMap<SharedId, (Instant, u32)>,
 
     // ---- execution ----
     generation: u64,
@@ -866,6 +875,7 @@ impl Manager {
             subscriptions: 0,
             need_round: false,
             retry: false,
+            retries: HashMap::new(),
             generation: 0,
             queue: Arc::new(Mutex::new(JobQueue { generation: 0, lanes: [VecDeque::new(), VecDeque::new()] })),
             runners: [0, 0],
@@ -889,6 +899,7 @@ impl Manager {
 
     async fn run(mut self) {
         loop {
+            let next_retry = self.next_retry();
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
                     Some(cmd) => self.handle(cmd),
@@ -903,6 +914,9 @@ impl Manager {
                     self.need_round = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.retry => self.retry = false,
+                _ = tokio::time::sleep_until(next_retry.into()), if !self.retries.is_empty() => {
+                    self.retry_timed_out();
+                }
                 // Idle queries expire, and the write log is trimmed, even when nothing else happens.
                 _ = tokio::time::sleep(Duration::from_secs(30)) => self.write_log.trim(),
             }
@@ -1146,6 +1160,7 @@ impl Manager {
     /// Forget a query. Its queued job is dropped too (a client adding and removing queries would otherwise grow the
     /// queue without bound); one that is already running finishes, and its result is ignored.
     fn drop_query(&mut self, id: SharedId) {
+        self.retries.remove(&id);
         let Some(q) = self.queries.remove(&id) else { return };
         if q.in_flight.is_some() {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -1703,6 +1718,14 @@ impl Manager {
         for &(c, qid) in &q.subscribers {
             subscribers.entry(c).or_default().push(qid);
         }
+        let timed_out = run.result.as_ref().is_err_and(|e| e.chain().any(|c| c.is::<crate::error::QueryTimeout>()));
+        if timed_out {
+            let attempt = self.retries.get(&id).map_or(0, |&(_, n)| n + 1);
+            let wait = (RETRY_FIRST * 2u32.saturating_pow(attempt.min(16))).min(RETRY_MAX);
+            self.retries.insert(id, (Instant::now() + wait, attempt));
+        } else {
+            self.retries.remove(&id);
+        }
         self.apply_run(id, run);
         let stale = self.queries.get(&id).is_some_and(|q| !q.is_current());
         let mut split = Vec::new();
@@ -1735,6 +1758,35 @@ impl Manager {
             self.metrics.record_stale_run();
             self.launch([id]);
         }
+    }
+
+    /// When the next timed-out query is due to run again ([`Manager::retries`]).
+    fn next_retry(&self) -> Instant {
+        self.retries.values().map(|&(at, _)| at).min().unwrap_or_else(|| Instant::now() + RETRY_MAX)
+    }
+
+    /// Run again the timed-out queries that are due and still watched; forget those nobody watches.
+    fn retry_timed_out(&mut self) {
+        let now = Instant::now();
+        let due: Vec<SharedId> = self.retries.iter().filter(|(_, (at, _))| *at <= now).map(|(id, _)| *id).collect();
+        let mut launch = Vec::new();
+        for id in due {
+            match self.queries.get(&id) {
+                Some(q) if !q.subscribers.is_empty() => {
+                    if q.in_flight.is_none() {
+                        launch.push(id);
+                    }
+                    // Not due again until its run reports back (`finish_run` reschedules it, or forgets it).
+                    if let Some(entry) = self.retries.get_mut(&id) {
+                        entry.0 = now + RETRY_MAX * 60;
+                    }
+                }
+                _ => {
+                    self.retries.remove(&id);
+                }
+            }
+        }
+        self.launch(launch);
     }
 
     /// Hold new generations while a starving connection has a query in flight (see the module docs, Liveness).
@@ -1784,6 +1836,10 @@ impl Manager {
                     .map_or(OPEN, |e| e.ts - 1),
             }
         };
+        if q.versions.back().is_some_and(|v| v.ts == run.ts && v.result.outcome.is_err()) {
+            // A retry of a run that failed (timed out) at the same ts, with nothing committed since: it replaces it.
+            q.versions.pop_back();
+        }
         debug_assert!(q.versions.back().is_none_or(|v| v.ts < run.ts), "versions in ts order");
         let changed = q.versions.back().is_none_or(|v| v.result.hash != hash);
         q.versions.push_back(Version {

@@ -64,6 +64,37 @@ async fn queries_time_out() {
     assert_eq!(run.result.unwrap(), json!(0));
 }
 
+pub mod slow_until {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use rxferrix::prelude::*;
+
+    pub static RELEASED: AtomicBool = AtomicBool::new(false);
+
+    /// Slower than the test's query timeout until `RELEASED` is set.
+    #[query]
+    pub async fn slow_until_released(_ctx: &QueryCtx) -> Result<bool> {
+        if !RELEASED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(true)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscription_that_timed_out_runs_again() {
+    let options = AppOptions { query_timeout: Duration::from_millis(100), ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    let first = c.subscribe(1, &slow_until::slow_until_released::path(), json!({})).await;
+    assert!(first.is_err(), "it times out");
+    // Nothing is committed, so no commit would ever invalidate the error: a timer runs it again.
+    slow_until::RELEASED.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), c.until(|c| c.results[&1].is_ok())).await.expect("retried");
+    assert_eq!(c.value(1), json!(true));
+}
+
 #[tokio::test(start_paused = true)]
 async fn silent_clients_are_disconnected() {
     let t = TestApp::new().await.unwrap();

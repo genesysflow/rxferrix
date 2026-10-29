@@ -109,7 +109,8 @@ impl Client {
     /// Next message (Pings skipped); Transitions are checked and applied.
     pub async fn recv(&mut self) -> ServerMessage {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
+            // Generous: the whole suite runs in parallel, and a loaded machine can take seconds for a busy query.
+            let msg = tokio::time::timeout(Duration::from_secs(30), self.rx.recv())
                 .await
                 .expect("timed out")
                 .expect("worker stopped");

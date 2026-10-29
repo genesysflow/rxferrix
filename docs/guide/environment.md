@@ -1,19 +1,42 @@
-# Environment variables
+# App environment variables
 
-API keys, URLs and switches that functions read at run time, set on the dashboard's **Environment** page (or with
-`<server> env set NAME` before the first start) instead of in the process environment:
+Use `ctx.env` for app settings that should change while the server runs: API keys, an announcement, or a feature switch. These values are stored in the database and managed through **Dashboard → Environment**.
+
+They are separate from the process environment used by server flags, SMTP configuration, and cloud credentials.
+
+## Read a value
 
 ```rust
+use rxferrix::prelude::*;
+
 #[query]
 pub async fn banner(ctx: &QueryCtx) -> Result<Option<String>> {
-    ctx.env.get("ANNOUNCEMENT").await          // ctx.env.require("NAME") fails with a clear error when unset
+    ctx.env.get("ANNOUNCEMENT").await
 }
 ```
 
-They are reactive: a query that reads a variable depends on it like on a document, so changing, adding or removing it
-on the dashboard reruns those queries and every client sees the new result at once (no restart, no redeploy).
-Mutations read them in their transaction and actions read the latest value. Values are encrypted at rest with the
-server key (`auth_secret.key`), masked in the data browser and the execution log, and changes are audited. Names are
-letters, digits and `_`, not starting with a digit (up to 64), values up to 8 KB, at most 200 variables. From the command line (offline):
-`env list [--values]`, `env set NAME [VALUE]` (the value is read from stdin when omitted), `env unset NAME`.
-`std::env::var` still works, but it is fixed at startup and invisible to the dependency tracking.
+`get` returns `None` when unset. `require("NAME")` returns an error when the value is missing.
+
+A query tracks the variables it reads. Changing, adding, or removing one invalidates dependent queries and updates their subscribers. Mutations read in their transaction; actions read the latest value.
+
+Returning a value from a public function exposes it to the caller. Keep API keys inside authorized server logic rather than returning them to the UI.
+
+## Set values
+
+Use the dashboard on a running server. Before startup, or with the server stopped, run the app's offline commands:
+
+```sh
+cargo run -- env set ANNOUNCEMENT "Maintenance on Sunday"
+cargo run -- env list
+cargo run -- env unset ANNOUNCEMENT
+```
+
+Pass `--dir` to each command when the data lives outside `fx_data`. Omitting the value from `env set NAME` reads it from stdin. `env list --values` prints values explicitly.
+
+Names start with a letter or `_`, contain letters, digits, or `_`, and are at most 64 characters. Values are at most 8 KB, with at most 200 variables.
+
+## Storage and process configuration
+
+Values are encrypted at rest with the server key, masked in normal data/log views, and changes are audited. Preserve `auth_secret.key` when moving or restoring the app.
+
+`std::env::var` still reads the process environment, but it does not participate in dependency tracking or dashboard updates. Use it for deployment configuration; use `ctx.env` for app values you want to update at runtime.

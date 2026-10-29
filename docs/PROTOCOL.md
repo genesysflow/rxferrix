@@ -1,8 +1,17 @@
-# RxFerrix sync protocol (v1)
+# Wire protocol and HTTP API
 
-Transport: WebSocket at `GET /api/sync`. Every frame is a UTF-8 JSON text frame containing exactly one message.
-Every message has a `"type"` discriminator. Field names are camelCase. This document is the **contract between
-`crates/rxferrix` (server) and `packages/client` (TS)**. If you change it, change both sides.
+This reference defines the interface between the Rust server and the TypeScript client. Use it when implementing a client or changing transport behavior. App code normally uses generated references and [client bindings](/guide/clients).
+
+| Interface | Use |
+| --- | --- |
+| [WebSocket messages](#client-→-server) | Live queries, mutations, and actions over `/api/sync`. |
+| [Server guarantees](#server-guarantees) and [client rules](#client-rules) | Consistency, retry, identity, and reconnect behavior. |
+| [Result diffs](#result-diffs) | Incremental query-result updates. |
+| [Limits](#limits) | Message sizes, query counts, backpressure, and timeouts. |
+| [HTTP API](#http-api-non-realtime) | One-shot function calls without live subscriptions. |
+| [Auth](#auth) and [file storage](#file-storage) | Sign-in endpoints, tokens, uploads, and downloads. |
+
+The sync protocol is version 1. It uses WebSocket at `GET /api/sync`, with one UTF-8 JSON message per text frame. Each message has a `type` discriminator and camelCase field names. The server and client must agree on changes to this contract.
 
 ## Concepts
 
@@ -25,7 +34,7 @@ Every message has a `"type"` discriminator. Field names are camelCase. This docu
 // First message on every socket. sessionId is a UUID that stays stable for the life of the client object across
 // reconnects. connectionCount is 0 for the first socket and incremented on each reconnect. features (optional)
 // lists protocol features the client supports: "diffs" (results may arrive as diffs, see "Result diffs").
-{ "type": "Connect", "sessionId": "8f1c…", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.1.0",
+{ "type": "Connect", "sessionId": "8f1c…", "connectionCount": 0, "lastCloseReason": null, "clientVersion": "0.9.0",
   "features": ["diffs"] }
 
 // Add or remove subscriptions. baseVersion must equal the server's current querySet version for this socket, and
@@ -117,6 +126,11 @@ process rather than being refused.
    its response. A replayed `ts` may be older than the socket's current version; guarantee 4 still holds. Without a
    `Connect`, mutations are not deduplicated. The key also includes the caller's identity (user, admin or
    anonymous): a response is never replayed to a different identity, which runs its own mutation instead.
+8. **`logLines`** (on `QueryUpdated`, `QueryFailed`, `MutationResponse`, `ActionResponse` and the HTTP responses)
+   are the log lines the function emitted while it ran, formatted as `"[LEVEL] message key=value ..."`, including
+   those of functions an action called. They are sent **only in `--dev`**; otherwise they are always `[]` (the server
+   still keeps them in its execution log). A query rerun whose result didn't change sends nothing, so its new log
+   lines aren't sent either.
 9. **Token expiry.** While a socket is authenticated, the server sends `AuthError` ("access token expired") and
    closes the socket when the token's `exp` passes, unless the client has sent a fresher token with `Authenticate`
    before then. The TS client refreshes 30s before `exp`, so this only happens to clients that stopped refreshing.
@@ -128,11 +142,6 @@ process rather than being refused.
    row) the same happens when the provisioned user is deleted. The TS client answers with a forced refresh, which
    fails for an ended session, and then continues anonymously (`getAuth` signs out). Refreshing a session does not
    affect its sockets. The admin log stream (`/api/admin/logs/stream`) ends the same way, with `event: revoked`.
-8. **`logLines`** (on `QueryUpdated`, `QueryFailed`, `MutationResponse`, `ActionResponse` and the HTTP responses)
-   are the log lines the function emitted while it ran, formatted as `"[LEVEL] message key=value ..."`, including
-   those of functions an action called. They are sent **only in `--dev`**; otherwise they are always `[]` (the server
-   still keeps them in its execution log). A query rerun whose result didn't change sends nothing, so its new log
-   lines aren't sent either.
 
 ## Result diffs
 
@@ -157,7 +166,7 @@ isn't what the server diffed against: the client drops the whole Transition (not
 starts over from full values. The reference implementations are `rxferrix::sync::diff::apply` and
 `packages/client/src/diff.ts`; `crates/rxferrix/tests/it/diff_fixtures.rs` checks they agree.
 
-## Clarifications (resolved while building the client)
+## Versioning and reconnect details
 
 - **Authenticate versioning**: `baseVersion` must equal the server's current identity version for this socket. The
   server sets identity to `baseVersion + 1` and reflects it in the next Transition's `endVersion.identity`. A
@@ -195,7 +204,7 @@ Nothing here changes the messages or the guarantees above; it describes how the 
 
 ## Limits
 
-So that no client can grow the server's memory without bound:
+The server bounds per-socket resource use with these limits:
 
 - At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`. The client
   refuses the 1025th distinct query up front (`too_many_queries`) rather than having every reconnect repeat the error.
@@ -215,6 +224,8 @@ So that no client can grow the server's memory without bound:
   after 1 s, then after twice as long each time it times out again (up to a minute), for as long as it is subscribed.
 
 ## Client rules
+
+These rules apply to the WebSocket client. HTTP calls are one-shot and HTTP mutations are not deduplicated.
 
 - **On reconnect**, the client creates a fresh server state (versions start at 0). It sends `Connect`, then
   `Authenticate` if it has a token, then one `ModifyQuerySet` adding every live query (new queryIds are fine), then

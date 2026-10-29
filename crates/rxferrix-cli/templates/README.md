@@ -1,22 +1,38 @@
 # {{name}}
 
-A RxFerrix app: the backend is the Rust crate in `src/` (tables, queries, mutations and actions),
-built into a single binary that also serves the dashboard{{web_blurb}}.
+A Rust backend built with RxFerrix. The app binary serves the API, embedded database, admin dashboard{{web_blurb}}.
 
-## Develop
+## Run the backend
+
+From this directory:
 
 ```sh
-cargo run -- serve --dev     # http://127.0.0.1:8090; the dashboard is at http://127.0.0.1:8090/_/
+cargo run -- serve --dev
 ```
-{{web_steps}}
-`serve --dev` prints a one-time link that signs you in to the dashboard as an admin. Data lives in `fx_data/`.
 
-## Build for production
+The backend listens on http://127.0.0.1:8090 and the dashboard is at http://127.0.0.1:8090/_/. Use the setup link printed on the first start to create an administrator. Local data lives in `fx_data/`.
+{{web_steps}}
+## Make a backend change
+
+Tables and functions start in `src/tasks.rs`. Add new modules with `mod module_name;` in `src/main.rs`. Stop and rerun the backend after editing Rust code; development mode does not watch source files.
 
 ```sh
-{{build_steps}}cargo build --release         # one binary: target/release/{{name}}
+cargo run -- functions
+cargo run -- --help
+```
+
+`rxferrix` creates projects. Commands such as `serve`, `functions`, `codegen`, and `backup` belong to this app's binary.
+
+## Build a release
+
+From this directory, after stopping the development backend:
+
+```sh
+{{build_steps}}touch src/main.rs             # ensure rebuilt frontend assets are embedded, when present
+cargo build --release
 ./target/release/{{name}} serve --dir /var/lib/{{name}}
 ```
 
-Keep `.cargo/config.toml`: it builds SQLite so that queries run in parallel (RxFerrix logs a warning at startup when it
-is missing).
+Keep `.cargo/config.toml`: it configures SQLite for parallel reads. The data directory must persist across releases. Configure public URLs, TLS, sign-in permissions, and backups for production.
+
+The starter task functions are public. See the [documentation](https://genesysflow.github.io/rxferrix/) for authentication, authorization, deployment, and recovery.

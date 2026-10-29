@@ -3,85 +3,67 @@ layout: home
 
 hero:
   name: RxFerrix
-  text: A reactive backend in Rust
-  tagline: Write typed Rust functions. Clients get live results. Ship it all as one binary.
+  text: Rust backends with live data
+  tagline: Define tables and functions in Rust. Subscribe from React or Svelte. Deploy your app with an embedded database.
   image:
     src: /logo.svg
     alt: RxFerrix
   actions:
     - theme: brand
-      text: Get started
+      text: Build your first app
       link: /getting-started
     - theme: alt
-      text: Read the guide
-      link: /guide/functions
+      text: Understand the framework
+      link: /guide/concepts
     - theme: alt
       text: GitHub
       link: https://github.com/genesysflow/rxferrix
 
 features:
-  - icon: ⚡
-    title: Live by default
-    details: Clients subscribe to queries, and results update by themselves whenever a write changes the data they read. No cache to invalidate, no refetching to write.
-  - icon: 🦀
-    title: Typed end to end
-    details: Rust structs are the schema. A TypeScript API is generated from your functions, for React and Svelte.
-  - icon: 📦
-    title: One file to deploy
-    details: SQLite is embedded, and so is your frontend if you like. Copy the binary to a server, or use the Docker image, and start it.
-  - icon: 🔁
-    title: Deploys without downtime
-    details: A new version prepares next to the running one and takes over in well under a second, without losing a write. One that can't read the data steps back.
-  - icon: 🔋
-    title: Batteries included
-    details: Auth, file storage, crons, durable workflows, full-text and vector search, live aggregates, analytics and migrations.
-  - icon: 🛠️
-    title: An admin dashboard
-    details: Browse and edit data live, run functions, tail logs, manage users, files, backups, migrations and settings, at /_/ in every server.
+  - title: Live query results
+    details: Queries track their database reads. Committed writes update the subscribers whose results may have changed.
+  - title: A typed client API
+    details: Generate TypeScript function references and data types from your Rust backend for React, Svelte 5, or the core client.
+  - title: One server to run
+    details: SQLite, auth, file storage, scheduled jobs, search, and the admin dashboard run in your app. Frontend assets can be embedded too.
 ---
 
-## What it looks like
+## Start with a working app
 
-A table and two functions on the server:
+Install Rust and Bun, then create a project:
 
-```rust
-// src/todos.rs
-use rxferrix::prelude::*;
-
-#[table(name = "todos")]
-pub struct Todo { pub text: String, pub done: bool }
-
-#[query]
-pub async fn list(ctx: &QueryCtx) -> Result<Vec<Doc<Todo>>> {
-    ctx.db.query::<Todo>().order(Order::Desc).take(100).await
-}
-
-#[mutation]
-pub async fn add(ctx: &MutationCtx, text: String) -> Result<Id<Todo>> {
-    ctx.db.insert(Todo { text, done: false }).await
-}
-
-// src/main.rs
-mod todos;
-fn main() -> rxferrix::Result<()> { rxferrix::RxFerrix::new().run() }
+```sh
+cargo install rxferrix-cli
+rxferrix new my-app
+cd my-app
+cargo run -- serve --dev
 ```
 
-And a React component that uses them. When anyone adds a todo, every open list updates:
+In a second terminal, run `bun install` and `bun run dev` inside `my-app/web`. Open http://localhost:5173 in two tabs to see live task updates.
 
-```tsx
-import { useMutation, useQuery } from "@rxferrix/react";
-import { api } from "./rxferrix"; // generated from the functions above
+The [walkthrough](/getting-started) explains the files, dashboard setup, and how to rebuild after a backend change. Choose `--web svelte` for Svelte 5 or `--web none` for a backend only.
 
-function Todos() {
-  const todos = useQuery(api.todos.list);
-  const add = useMutation(api.todos.add);
-  return (
-    <>
-      <button onClick={() => add({ text: "Buy milk" })}>Add</button>
-      <ul>{todos?.map((t) => <li key={t._id}>{t.text}</li>)}</ul>
-    </>
-  );
-}
-```
+## Understand the three function types
 
-[Get started →](/getting-started)
+| Function | What your code does | How clients use it |
+| --- | --- | --- |
+| Query | Read a consistent snapshot and return data. | Subscribe and receive updated results. |
+| Mutation | Validate and change data in one transaction. | Await the write and updated subscriptions. |
+| Action | Call external services or coordinate other functions. | Await a result; external effects are not transactional. |
+
+Tables are Rust structs. Functions live in normal Rust modules. Codegen produces `api.tasks.list` and other typed references for your frontend. [Core concepts](/guide/concepts) explains how these pieces fit together.
+
+## Find what you need
+
+| Build | Run |
+| --- | --- |
+| [Functions and data](/guide/functions) | [Deploy an app](/operations/deploying) |
+| [Connect a client](/guide/clients) | [Update a running app](/operations/zero-downtime) |
+| [Authentication and authorization](/guide/auth) | [Backups and restores](/operations/backups) |
+| [Files](/guide/file-storage) and [background work](/guide/scheduler) | [Logs and metrics](/operations/monitoring) |
+
+For a complete app, explore the repository's [todo](https://github.com/genesysflow/rxferrix/tree/master/examples/todo) or [chat](https://github.com/genesysflow/rxferrix/tree/master/examples/chat-react) example. For exact signatures and wire formats, use the [Rust API](/CONTRACT), [protocol](/PROTOCOL), and [command line](/reference/cli) references.
+
+## Know the deployment model
+
+RxFerrix uses one active server and a SQLite database on local disk. It supports concurrent reads, transactional writes, takeover updates, and recovery from backups or replication. It does not distribute live writes across nodes or persist offline client state. Read [Behavior and limits](/guide/things-to-know) when deciding whether this model fits your app.

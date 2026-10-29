@@ -1,64 +1,91 @@
 # File storage
 
-Files live in `<data dir>/storage/` by default, or in an S3-compatible bucket (`--storage s3://bucket/prefix`, with
-the standard `AWS_*` variables for credentials, region and endpoint, e.g. R2 or MinIO). Uploads take three steps:
+Store uploaded files separately from documents, then save an `Id<StoredFile>` in your app data. Local files live in `<data dir>/storage/`; an S3-compatible backend is optional.
+
+An upload has three app-level steps: authorize an upload URL, upload the bytes, and attach the returned file ID to a document.
+
+## Authorize and upload
+
+Define an upload function in a backend module such as `src/files.rs`:
 
 ```rust
-use std::time::Duration;
-use rxferrix::storage::{DownloadOptions, StoredFile};
+use rxferrix::prelude::*;
 
 #[mutation]
 pub async fn generate_upload_url(ctx: &MutationCtx) -> Result<String> {
-    ctx.storage.generate_upload_url().await        // signed, single-use, valid for an hour
-}
-
-#[mutation]
-pub async fn set_avatar(ctx: &MutationCtx, file: Id<StoredFile>) -> Result<()> { /* store the id in a document */ }
-
-#[query]
-pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
-    ctx.storage.get_url(file).await                // ".../api/storage/<id>", live: null once the file is deleted
+    ctx.auth.require_user()?;
+    ctx.storage.generate_upload_url().await
 }
 ```
+
+Then use the existing client and a browser `File`:
 
 ```ts
+import { uploadFile } from "@rxferrix/client";
+import { api } from "./rxferrix";
+
 const url = await client.mutation(api.files.generate_upload_url, {});
-const storageId = await uploadFile(url, file, { onProgress: ({ loaded, total }) => (progress = loaded / total) });
-await client.mutation(api.files.set_avatar, { file: storageId });
+const storageId = await uploadFile(url, file, {
+  onProgress: ({ loaded, total }) => {
+    console.log(loaded / total);
+  },
+});
 ```
 
-`GET /api/storage/<id>` serves files with ETags, range requests (several ranges as `multipart/byteranges`) and
-headers that keep uploads from running script on your origin. In `--dev`, file and upload URLs are root-relative
-(`/api/storage/...`) unless a public URL is set explicitly (`--public-url`), so they go through a dev server's
-`/api` proxy (Vite) like every other request. Add `?thumb=200x200` (and `&fit=cover`) to an image's
-URL for a thumbnail (JPEG, PNG, WebP, GIF; generated once and cached; oversized images are refused from their header,
-before decoding; new sizes are rate limited per client, cached ones aren't). Mutations can also `delete` files (transactionally) and read their metadata; actions can `store`
-and `get` bytes directly. Uploads are capped at 100 MB (`--max-upload-size`). File URLs are unguessable capability
-URLs: anyone with the URL can read the file. For private files, use expiring signed URLs and turn on private mode
-(`StorageConfig::private(true)` or `--storage-private`), which refuses unsigned URLs:
+The default upload URL is signed, single-use, and valid for one hour. Uploads are limited to 100 MB by default (`--max-upload-size`). The backend records file metadata in `_storage`.
+
+After uploading, pass `storageId` to your own mutation that attaches it to a note, avatar, or message. In that mutation, check access to the destination document and validate the file metadata, including any ownership, size, and content-type requirements. Uploading a file does not attach it automatically.
+
+See the [todo example](https://github.com/genesysflow/rxferrix/blob/master/examples/todo/server/src/todos.rs) for `set_image` and deletion of a replaced image.
+
+## Return a public file URL
 
 ```rust
-#[query]   // in a query the expiry is rounded up to a multiple of the TTL, so the result is stable for that long
-pub async fn avatar_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
-    ctx.storage.get_signed_url(file, Duration::from_secs(3600)).await   // ".../api/storage/<id>?exp=…&sig=…"
+use rxferrix::storage::StoredFile;
+
+#[query]
+pub async fn file_url(ctx: &QueryCtx, file: Id<StoredFile>) -> Result<Option<String>> {
+    ctx.storage.get_url(file).await
 }
 ```
 
-With S3, `get_download_url` hands out a **presigned URL to the bucket**: the file downloads straight from S3 (not
-through the server), the bucket stays private, and S3 refuses the URL once it expires:
+The URL serves the file through `/api/storage/<id>` and becomes `None` when the metadata is deleted. In `--dev`, URLs are root-relative unless `--public-url` is set, so Vite's `/api` proxy handles them.
+
+A public file URL is a capability: anyone who has it can read the file. Checking auth in the query controls who receives the URL, not who can use a leaked URL.
+
+Serving supports ETags, byte ranges, and safe content headers. For an image thumbnail, append `?thumb=200x200`, optionally with `&fit=cover`. JPEG, PNG, WebP, and GIF inputs are supported; generated thumbnails are cached.
+
+## Serve private files
+
+Start the server with `--storage-private`, or configure `StorageConfig::private(true)`, to reject unsigned file URLs. In the authorized function, use:
 
 ```rust
-#[mutation]
-pub async fn download_report(ctx: &MutationCtx, file: Id<StoredFile>) -> Result<Option<String>> {
-    ctx.auth.require_user()?;   // decide who may see it
-    ctx.storage.get_download_url_with(file, Duration::from_secs(15 * 60), DownloadOptions::default().attachment()).await
-}
+use std::time::Duration;
+
+// After checking the caller's access to the document containing this file:
+let url = ctx.storage.get_signed_url(file, Duration::from_secs(3600)).await?;
 ```
 
-S3 serves it with the file's content type and name (unsafe types as attachments). The URL lasts at most 7 days, and
-`?thumb=` doesn't work on it (use `get_signed_url` for thumbnails). With local storage the same call returns a signed
-URL of the server, so the code works in development too.
+`get_url` fails in private mode. A signed URL remains usable by anyone who has it until expiry.
 
-Blobs left without a document (a crash mid-upload) and stale thumbnails are removed by the `_storage_sweep` system
-cron (every 6 hours). Details: [docs/CONTRACT.md](../CONTRACT.md) §1.6 and [docs/PROTOCOL.md](../PROTOCOL.md)
-("File storage"). The todo example attaches images to todos.
+In queries, expiry is rounded up to a TTL boundary, giving a URL valid for between one and two TTLs. **The subscription does not renew it when time passes.** Choose a TTL suitable for the view, or request fresh URLs through a mutation/action before they expire. Mutations and actions use an exact TTL from issuance.
+
+## Use S3-compatible storage
+
+```sh
+./my-app serve --storage s3://my-bucket/uploads
+```
+
+Configure credentials, region, and any custom endpoint through the standard `AWS_*` settings for your backend. File metadata stays in the app database.
+
+`get_download_url(file, ttl)` returns a presigned bucket URL with S3, so downloads bypass the app server. For local storage it returns a signed server URL. `get_download_url_with(..., DownloadOptions::default().attachment())` requests an attachment download.
+
+Presigned S3 URLs last at most seven days and can stop working earlier when temporary credentials expire. Do not append thumbnail options to them; use a signed server URL for thumbnails. With deleted-file retention, an already issued S3 URL can remain usable until the underlying blob is removed.
+
+## Delete files and manage retention
+
+Mutations can read metadata with `get_metadata` and delete with `ctx.storage.delete(file)`. Metadata deletion is transactional; bytes are removed after commit or after the configured retention window. A rolled-back mutation leaves the file intact. Actions can store and read bytes directly.
+
+The `_storage_sweep` system cron removes orphaned blobs and stale thumbnails, subject to grace and retention settings. It does not decide whether an uploaded file is still useful to your app: delete unwanted `_storage` documents through app logic.
+
+Database backups do not include all file bytes by default. See [Backups](/operations/backups) for local files, S3, deleted-file retention, and restores. The [storage reference](/CONTRACT#_1-6-file-storage) lists the full API.

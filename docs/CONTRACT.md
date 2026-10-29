@@ -1,8 +1,26 @@
-# RxFerrix Rust contract: user API, runtime internals, and macro expansions
+# Rust API and implementation contract
 
-This document is the **contract between `crates/rxferrix` (runtime) and `crates/rxferrix-macros` (proc macros)**,
-plus the user-facing API that both serve. Everything the macros emit refers only to paths listed under
-"`::rxferrix::__private` items" or under the public API. The runtime must provide exactly those items.
+Use this page to look up exact Rust signatures, macro output, system functions, and operational behavior. For learning the framework, start with [Core concepts](/guide/concepts) and [Functions and data](/guide/functions).
+
+The public API describes what an app can call. The internal sections define the interface between `crates/rxferrix` and `crates/rxferrix-macros`; macro expansions may refer only to the listed public or `::rxferrix::__private` paths. Signature blocks describe the interface and sometimes omit implementation details; they are not complete app files.
+
+## Find a topic
+
+| You need | Section |
+| --- | --- |
+| Documents, IDs, contexts, database reads/writes | [Core types](#_1-1-core-types-in-rxferrix-re-exported-by-the-prelude), [contexts](#_1-2-contexts-and-database-api) |
+| Live pages and cursors | [Pagination](#_1-2-1-pagination) |
+| Runtime options and app lifecycle | [Logging and runtime](#_1-4-logging-the-execution-log-and-runtime-options) |
+| Sign-in, permissions, sessions | [Auth](#_1-5-auth-configuration-and-services) |
+| Files and URLs | [Storage](#_1-6-file-storage) |
+| Background work | [Scheduler](#_1-7-scheduler-and-crons), [workflows](#_1-7-1-workflows) |
+| Search and data transformation | [Search](#_1-8-search-full-text-fts5-and-vector-sqlite-vec), [migrations](#_1-9-migrations) |
+| Reports and live totals | [Analytics](#_1-11-analytics-olap), [aggregates](#_1-12-live-aggregates) |
+| Runtime app variables | [Environment](#_1-13-environment-variables) |
+| Macro/runtime compatibility | [Internal exports](#_2-rxferrix-private-items-used-only-by-macro-output), [macro expansions](#_3-macro-expansions-normative) |
+| Admin integrations and recovery | [System APIs](#_4-built-in-system-tables-and-functions) |
+
+The numbered sections remain stable so source comments can refer to them. [Command line](/reference/cli), [wire protocol](PROTOCOL.md), and [design](DESIGN.md) cover the other interfaces.
 
 Wire and storage naming: tables, args and system fields use **camelCase JSON keys**. The macros add
 `#[serde(rename_all = "camelCase")]` to table structs and to generated args structs. Field and index handles always
@@ -55,7 +73,8 @@ fn main() -> rxferrix::Result<()> {
 }
 ```
 
-Rules:
+Function declaration rules:
+
 - A function's first parameter is the context, `&QueryCtx`, `&MutationCtx` or `&ActionCtx`, matching the macro.
   The remaining parameters become the args. Parameter patterns must be plain identifiers.
 - The return type must be `rxferrix::Result<T>` (written `Result<T>` with the prelude), where
@@ -175,6 +194,8 @@ rebuilds every index (ordinary, search and vector) before anything else. Paginat
 upgrade then fail with `paginate: cursor does not belong to this query` (the version is part of their fingerprint).
 
 ### 1.2 Contexts and database API
+
+Choose the context matching the operation: queries read a snapshot, mutations read/write one transaction, and actions coordinate separate calls. Mutations and queries must avoid external side effects; Rust code is not sandboxed.
 
 ```rust
 pub struct QueryCtx    { pub db: QueryDb,    pub auth: Auth, pub storage: QueryStorage, pub env: Env,    /* private */ }
@@ -370,7 +391,7 @@ pub async fn list(ctx: &QueryCtx, channel: String, pagination_opts: PaginationOp
   is laid out one field per line, indented (`codegen::format_ts`); a one-line type doc becomes `/** … */`. A
   function's doc comment becomes the JSDoc of its entry in `api` / `devApi` (`FunctionDef::docs`). In `#[object]`
   and `#[table]` types, an `Option` field with `#[serde(skip_serializing_if = ..)]` is `field?: T | null` (the key is
-  left out when `None`). `rxferrix codegen --out` defaults to `RXFERRIX_CODEGEN_OUT` (set by apps made with
+  left out when `None`). `<app> codegen --out` defaults to `RXFERRIX_CODEGEN_OUT` (set by apps made with
   `rxferrix new`), else `rxferrix-generated`.
 - **Clients** also have `usePaginatedQueryWithStatus` (`@rxferrix/react`): the same, but a failed page comes back as
   `error` (with the pages that did load still in `results`) instead of being thrown. (`@rxferrix/svelte`'s
@@ -1844,6 +1865,8 @@ impl Env {
 
 ## 2. `::rxferrix::__private` items (used ONLY by macro output)
 
+This section is for runtime and macro maintainers. App code should use the public types above. Changes here must stay compatible with every macro expansion using these paths.
+
 ```rust
 pub use ::linkme;           // macro output uses #[linkme(crate = ::rxferrix::__private::linkme)]
 pub use ::serde;            // #[serde(crate = "::rxferrix::__private::serde")]
@@ -1918,6 +1941,8 @@ pub const fn assert_sum_field<T: SumFieldType + ?Sized>();
 ---
 
 ## 3. Macro expansions (normative)
+
+These definitions explain what each macro emits and what the runtime expects. Use them when changing derives, registration, code generation, or diagnostics; ordinary apps write the annotated Rust declarations rather than these expansions.
 
 ### 3.1 `#[table]`
 
@@ -2240,6 +2265,8 @@ struct of several fields or a unit struct: `Shape::Json`; a newtype or `transpar
 ---
 
 ## 4. Built-in (system) tables and functions
+
+System APIs power auth, background work, and the dashboard. They have their own access checks; the application guard does not apply to `_system/*` functions. Prefer the public context helpers when an app-level API exists.
 
 rxferrix ships some tables and functions of its own (auth, dashboard, bookkeeping). They are defined **inside the
 `rxferrix` crate with the same macros** (`extern crate self as rxferrix;` makes `::rxferrix::` paths resolve there).

@@ -16,12 +16,13 @@ export default defineConfig({
     logo: "/logo.svg",
     nav: [
       { text: "Get started", link: "/getting-started" },
-      { text: "Guide", link: "/guide/functions" },
+      { text: "Guide", link: "/guide/concepts" },
       { text: "Operations", link: "/operations/deploying" },
       { text: "Reference", items: [
-        { text: "API contract", link: "/CONTRACT" },
-        { text: "Protocol", link: "/PROTOCOL" },
+        { text: "Rust API", link: "/CONTRACT" },
+        { text: "Wire protocol", link: "/PROTOCOL" },
         { text: "Design", link: "/DESIGN" },
+        { text: "Command line", link: "/reference/cli" },
       ] },
     ],
     sidebar: [
@@ -30,13 +31,16 @@ export default defineConfig({
         items: [
           { text: "What is RxFerrix?", link: "/" },
           { text: "Get started", link: "/getting-started" },
+          { text: "Core concepts", link: "/guide/concepts" },
         ],
       },
       {
         text: "Guide",
         items: [
-          { text: "Functions, tables and indexes", link: "/guide/functions" },
-          { text: "Auth", link: "/guide/auth" },
+          { text: "Functions and data", link: "/guide/functions" },
+          { text: "Connect a client", link: "/guide/clients" },
+          { text: "Rust and TypeScript types", link: "/guide/types" },
+          { text: "Authentication and authorization", link: "/guide/auth" },
           { text: "File storage", link: "/guide/file-storage" },
           { text: "Scheduler and crons", link: "/guide/scheduler" },
           { text: "Workflows", link: "/guide/workflows" },
@@ -45,19 +49,17 @@ export default defineConfig({
           { text: "Environment variables", link: "/guide/environment" },
           { text: "Analytics (OLAP)", link: "/guide/analytics" },
           { text: "Migrations", link: "/guide/migrations" },
-          { text: "Clients: React and Svelte", link: "/guide/clients" },
-          { text: "Rust and TypeScript types", link: "/guide/types" },
           { text: "Testing", link: "/guide/testing" },
           { text: "Binary data", link: "/guide/binary-data" },
           { text: "The dashboard", link: "/guide/dashboard" },
-          { text: "Things to know", link: "/guide/things-to-know" },
+          { text: "Behavior and limits", link: "/guide/things-to-know" },
         ],
       },
       {
         text: "Operations",
         items: [
-          { text: "Deploying", link: "/operations/deploying" },
-          { text: "Deploys with no downtime", link: "/operations/zero-downtime" },
+          { text: "Deploy an app", link: "/operations/deploying" },
+          { text: "Update a running app", link: "/operations/zero-downtime" },
           { text: "Backups and restores", link: "/operations/backups" },
           { text: "Logs and metrics", link: "/operations/monitoring" },
         ],
@@ -65,9 +67,10 @@ export default defineConfig({
       {
         text: "Reference",
         items: [
-          { text: "API contract", link: "/CONTRACT" },
-          { text: "Protocol", link: "/PROTOCOL" },
+          { text: "Rust API", link: "/CONTRACT" },
+          { text: "Wire protocol", link: "/PROTOCOL" },
           { text: "Design", link: "/DESIGN" },
+          { text: "Command line", link: "/reference/cli" },
         ],
       },
     ],

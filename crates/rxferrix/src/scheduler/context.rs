@@ -110,8 +110,8 @@ impl Scheduler {
 
     /// Opt into retries for an **action**: if it returns an error, it is run again up to `retries` more times, with
     /// exponential backoff (`SchedulerOptions::retry_backoff`, doubled each time, or [`ScheduleWith::backoff`]).
-    /// Ignored for mutations (a failing mutation fails the same way again). An action interrupted by a restart is
-    /// never retried: it may have had side effects.
+    /// Ignored for mutations. An action interrupted by a restart is retried while attempts remain; external side
+    /// effects may repeat, so retryable actions need an idempotency strategy.
     ///
     /// `ctx.scheduler.with_retries(3).run_after::<send_email>(Duration::ZERO, (to,)).await?`
     pub fn with_retries(&self, retries: u32) -> ScheduleWith<'_> {

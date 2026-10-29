@@ -1,8 +1,10 @@
-# Binary data
+# Small binary values
 
-`rxferrix::Bytes` holds small binary values (a hash, a key, a thumbnail, an encoded protobuf) in documents, function
-args and results. For anything larger than a few hundred KB, or that users download, use
-[file storage](/guide/file-storage) instead: a document is read whole every time, and requests are limited to 2 MiB.
+Use `rxferrix::Bytes` for small binary values that belong inside a document or function call, such as a hash, key, or encoded message. Use [file storage](/guide/file-storage) for uploads and downloadable files.
+
+A document is read as a whole and the ordinary API has a 2 MiB request limit. Base64 also adds about a third to the binary size, so large bytes make documents and subscriptions more expensive.
+
+## Define a binary field
 
 ```rust
 use rxferrix::prelude::*;
@@ -15,31 +17,33 @@ pub struct Key {
 }
 
 #[mutation]
-pub async fn add_key(ctx: &MutationCtx, name: String, fingerprint: Bytes) -> Result<Id<Key>> {
-    ensure_user!(fingerprint.len() == 32, "bad_fingerprint", "a fingerprint is 32 bytes");
+pub async fn add(ctx: &MutationCtx, name: String, fingerprint: Bytes) -> Result<Id<Key>> {
+    ensure_user!(fingerprint.len() == 32, "bad_fingerprint", "A fingerprint is 32 bytes");
     ctx.db.insert(Key { name, fingerprint }).await
-}
-
-#[query]
-pub async fn by_fingerprint(ctx: &QueryCtx, fingerprint: Bytes) -> Result<Option<Doc<Key>>> {
-    ctx.db.query::<Key>().with_index(Key::by_fingerprint, |q| q.eq(Key::fingerprint, fingerprint)).first().await
 }
 ```
 
-`Bytes` dereferences to `[u8]` and converts from `Vec<u8>` and `&[u8]`.
+`Bytes` converts from `Vec<u8>` and `&[u8]`, and dereferences to `[u8]`. It serializes as `{ "$bytes": "base64" }`; an ordinary `Vec<u8>` is a JSON array instead.
 
-**On the wire and in storage** it is `{"$bytes": "<base64>"}`, so in TypeScript it is `{ $bytes: string }`. Convert with
-`bytesToJson(uint8Array)` and `bytesFromJson(value)` from `@rxferrix/client` (`isBytes(value)` tells whether a value is
-one):
+## Convert on the client
 
 ```ts
 import { bytesFromJson, bytesToJson } from "@rxferrix/client";
+import { api } from "./rxferrix";
 
-const id = await addKey({ name: "laptop", fingerprint: bytesToJson(digest) });
-const key = useQuery(api.keys.by_fingerprint, { fingerprint: bytesToJson(digest) });
-const raw: Uint8Array | undefined = key ? bytesFromJson(key.fingerprint) : undefined;
+await client.mutation(api.keys.add, {
+  name: "laptop",
+  fingerprint: bytesToJson(digest),
+});
+
+// Given a Key document returned by a query:
+const raw: Uint8Array = bytesFromJson(key.fingerprint);
 ```
 
-**In indexes** `Bytes` sort byte by byte, after strings (see the order of types in [Design](../DESIGN.md#storage)), so a
-range over a `Bytes` field is a prefix or byte-range scan. Base64 adds a third to the stored size; keep index keys
-short (keys over about 1 KB spill into overflow pages and slow scans down).
+Here `digest` is a `Uint8Array`. `isBytes(value)` checks the JSON representation, and generated TypeScript uses `{ $bytes: string }`.
+
+## Index bytes
+
+A `Bytes` field can be indexed and compared with typed index constraints. Its order is byte-by-byte, rather than the lexical order of its base64 encoding. Keep indexed binary values short; large keys can require extra B-tree pages.
+
+See [Types](/guide/types) for the other Rust-to-TypeScript mappings and [storage design](/DESIGN#storage) for key encoding.

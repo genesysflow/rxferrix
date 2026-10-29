@@ -1,57 +1,79 @@
-# RxFerrix Chat (React)
+# Chat example (React)
 
-A Slack-lite that exercises most of RxFerrix: auth (password, email code, optional GitHub), reactive queries and
-paginated queries, optimistic updates, file storage, full-text search, the scheduler and crons, per-channel
-authorization, live aggregates (message and member counts) and SQL analytics over the DuckDB copy (Insights). The backend is `server/` (crate `chat-server`), the React 19 + Vite app is `web/`.
+A multi-user chat app with a Rust backend and React 19 frontend. It demonstrates sign-in, channel access checks, live messages, pagination, optimistic updates, attachments, search, delayed reminders, aggregates, and optional SQL analytics.
 
-## Run it
+## Run locally
 
-Prerequisites: Rust via mise and bun, from the repository root.
+Install Rust and Bun. From the framework repository root:
 
 ```sh
-bun install && bun run build                          # build the TS packages
+bun install
+bun run build
 cargo run -p chat-server -- serve --dev --http 127.0.0.1:8097 \
-  --codegen-out examples/chat-react/web/src/rxferrix     # backend on :8097; regenerates the TS API on start
-cd examples/chat-react/web && bun run dev              # app on http://localhost:5180 (proxies /api to :8097)
+  --codegen-out examples/chat-react/web/src/rxferrix
 ```
 
-Open http://localhost:5180 in two browser profiles (or one normal and one private window) and sign up twice.
-
-- In `--dev`, file URLs (`ctx.storage.get_url`) and upload URLs are root-relative (`/api/storage/...`), so images
-  and uploads go through the same Vite `/api` proxy as everything else. (With `--public-url` they would be absolute.)
-- Ports: `RXFERRIX_URL` (the backend Vite proxies to, default `http://127.0.0.1:8097`) and `VITE_PORT` (default 5180).
-- In `--dev` without `--smtp-url`, sign-in emails (codes and magic links) are printed to the backend log. The example
-  plugs a mailer into `AuthConfig::dev_mailer` that also keeps them in memory (and forwards to rxferrix's
-  `DevLogMailer`), so the e2e test can read codes with `dev:last_code`, an `#[action(dev_only)]`: it is generated
-  into `devApi`, not `api`, and the server refuses it outside `--dev`.
-- GitHub sign-in shows up when `RXFERRIX_AUTH_GITHUB_CLIENT_ID` and `RXFERRIX_AUTH_GITHUB_CLIENT_SECRET` are set (callback
-  URL: `<public url>/api/auth/oauth/github/callback`).
-- Slash commands: `/remind me in 10 seconds to stretch` (also `minutes`, `hours`), and `/seed 200`, which adds 200
-  numbered sample messages through an action so there is history to scroll through.
-- The admin dashboard is at http://127.0.0.1:8097/_/ (the backend prints a one-time setup link on first start).
-- Set `CHAT_ANNOUNCEMENT` on the dashboard's Environment page (or `chat-server env set CHAT_ANNOUNCEMENT` before
-  starting): it shows as a banner above every channel, and changing or removing it updates open chats at once.
-
-### Insights (OLAP) and demo traffic
-
-The 📊 Insights view runs SQL over the analytics copy, so it needs a server built with the `olap` feature and started
-with `--olap` (without them it explains this instead):
+In a second terminal, from the repository root:
 
 ```sh
-cargo run -p chat-server --features olap -- serve --dev --http 127.0.0.1:8097 --olap
-cd examples/chat-react/web && bun e2e/demo-seed.ts http://127.0.0.1:8097 120   # 6 people chatting for 2 minutes
+cd examples/chat-react/web
+bun run dev
 ```
 
-`demo-seed.ts` signs up `ada@demo.test`, `alan@demo.test`, ... (password `demo-password`), creates #engineering,
-#design and #random, and sends messages and reactions in bursts through the HTTP API; run it again for more. Sign in
-as one of them to watch the counts and the charts move. To serve the built app from the backend instead of Vite,
-`bun run build` in `web/` and set `CHAT_WEB_DIR=examples/chat-react/web/dist`.
+Open http://localhost:5180 in two browser profiles, or a normal and private window, and create two accounts. Separate profiles keep their sign-in tokens independent.
 
-## What's where
+The dashboard is at http://127.0.0.1:8097/_/; use the first-start setup link to create an administrator. Restart the backend after Rust changes to rebuild and regenerate the API.
+
+## Configure the example
+
+| Setting | Default / purpose |
+| --- | --- |
+| `RXFERRIX_URL` | Vite's backend target; `http://127.0.0.1:8097`. |
+| `VITE_PORT` | Vite's port; `5180`. |
+| `CHAT_APP_URL` | Allowed frontend auth return URL; `http://localhost:5180`. |
+| `CHAT_WEB_DIR` | Optional directory of built frontend files served by the backend. |
+| `RXFERRIX_AUTH_GITHUB_CLIENT_ID`, `RXFERRIX_AUTH_GITHUB_CLIENT_SECRET` | Enable GitHub sign-in when configured. |
+
+Vite proxies `/api`, including the WebSocket. In `--dev`, file/upload URLs are relative to that origin unless `--public-url` is set. For GitHub, register `<public backend URL>/api/auth/oauth/github/callback`.
+
+Without SMTP in development, email codes and links are printed to the backend log. The example also keeps a dev inbox for its browser tests. `dev:last_code` is a development-only action exposed through `devApi`; production mode refuses it.
+
+Data uses `fx_data/` relative to the backend command's working directory. Pass a dedicated `--dir` when running this alongside another example.
+
+## Try the features
+
+Send messages between two accounts, join channels, upload an image, and search the channel. Use `/remind me in 10 seconds to stretch` for a scheduled reminder, or `/seed 200` to create history for pagination.
+
+Set `CHAT_ANNOUNCEMENT` on **Dashboard → Environment**. It appears above channels and updates without a restart. This is a `ctx.env` app variable, separate from the process settings in the table above.
+
+Channel functions enforce membership/readability and editing permissions. Expected errors such as `not_a_member`, `private_channel`, and `forbidden` are displayed in the UI. Internal reminder and maintenance jobs use trusted arguments rather than inheriting the user's identity.
+
+## Enable Insights
+
+Build with the analytics feature and enable the copy at runtime:
+
+```sh
+cargo run -p chat-server --features olap -- serve --dev --http 127.0.0.1:8097 \
+  --olap --codegen-out examples/chat-react/web/src/rxferrix
+```
+
+Without analytics, the Insights view explains how to enable it. To generate demo traffic, from `examples/chat-react/web`:
+
+```sh
+bun e2e/demo-seed.ts http://127.0.0.1:8097 120
+```
+
+This creates demo users such as `ada@demo.test` with password `demo-password`, channels, messages, and reactions. It runs for two minutes and may be repeated. Use a disposable development data directory for this demo.
+
+Insights uses actions over the asynchronous DuckDB copy, so it polls for reports rather than subscribing to SQL. Queries scope results to readable channels.
+
+## Find the implementation
+
+Server paths below are relative to `server/src/`; web paths are relative to `web/src/components/` unless indicated.
 
 | Feature | Server | Web |
 |---|---|---|
-| Sign up / sign in, email code, GitHub | `main.rs` (`AuthConfig`), `dev.rs` (dev inbox, `dev_mailer`, `#[action(dev_only)]`) | `AuthScreen.tsx` (`useAuthActions`, `providers()`) |
+| Sign up / sign in, email code, GitHub | `server/src/main.rs` (`AuthConfig`), `dev.rs` (dev inbox, `dev_mailer`, `#[action(dev_only)]`) | `AuthScreen.tsx` (`useAuthActions`, `providers()`) |
 | Profiles linked to `_users`, auto-join #general | `profiles.rs` (`ensure`) | `Chat.tsx` |
 | Channels, join, invite, private channels | `channels.rs`, `model.rs` (`require_member`, `require_readable`) | `Sidebar.tsx`, `ChannelView.tsx`, `AccessError.tsx` |
 | Messages newest first, infinite scroll | `messages.rs` (`list`: index `by_channel` + `Order::Desc`, `paginate`, `try_map` into `MessageView`) | `MessageList.tsx` (`usePaginatedQueryWithStatus`, `column-reverse` + IntersectionObserver) |
@@ -68,25 +90,38 @@ as one of them to watch the counts and the charts move. To serve the built app f
 | Announcement banner (an environment variable, live) | `announcement.rs` (`ctx.env.get("CHAT_ANNOUNCEMENT")`) | `Chat.tsx` (`Announcement`) |
 | Insights: activity, busiest hours, rankings | `insights.rs` (an action using `ctx.olap.query_as`, scoped to readable channels) | `InsightsView.tsx` (polls `useAction`) |
 
-Every function starts with `ctx.auth.require_user()`; channel access fails with the `UserError` codes
-`not_a_member`, `private_channel`, `forbidden` (editing someone else's message), which the UI shows.
+## Serve the built frontend
 
-## Tests
+From the repository root, after generating the API:
 
 ```sh
-cargo test -p chat-server                 # TestApp (create_user / as_user): authorization, unread counts, pagination order, typing expiry, /remind
-cargo build -p chat-server
 cd examples/chat-react/web
-bun run typecheck
-bun e2e/chat.ts                           # starts its own backend (fresh data dir) on :8097 and Vite on :5180
-CHAT_OLAP=1 bun e2e/chat.ts               # with --olap (needs `cargo build -p chat-server --features olap`)
-SCREENSHOTS=/tmp/shots bun e2e/chat.ts    # ...and saves chat-*.png screenshots
-E2E_EXTERNAL=1 bun e2e/chat.ts            # against a backend (--dev) and Vite that are already running
+bun run build
+cd ../../..
+CHAT_WEB_DIR=examples/chat-react/web/dist cargo run -p chat-server -- \
+  serve --http 127.0.0.1:8097 --auth-redirect-url http://127.0.0.1:8097
 ```
 
-The e2e drives three users in separate browser contexts: two sign up with passwords, the third signs in with an
-emailed code. It covers live messages, reactions, edits and deletes, unread badges, attachments, search, infinite
-scroll over 200 seeded messages, a typing indicator that appears and expires, a `/remind` that arrives a few seconds
-later, a private channel that a non-member can't read (in the UI and over the HTTP API) until invited, live message
-counts in the sidebar and header, an announcement banner that follows an environment variable (set, changed and
-removed by an administrator), and the Insights view (its totals with `CHAT_OLAP=1`, the how-to otherwise).
+This example reads frontend files at runtime through `static_dir`; it does not embed them. Set the frontend return URL for the origin you actually use. See [Deploying](../../docs/operations/deploying.md) for public URLs and HTTPS.
+
+## Run tests
+
+From the repository root:
+
+```sh
+cargo test -p chat-server
+cargo build -p chat-server
+```
+
+Then, from `examples/chat-react/web`:
+
+```sh
+bun run typecheck
+bun e2e/chat.ts
+```
+
+The browser suite starts its own backend with a fresh data directory on :8097 and Vite on :5180. Stop existing processes on those ports first, or use `E2E_EXTERNAL=1` to test already-running development servers.
+
+`CHAT_OLAP=1 bun e2e/chat.ts` includes analytics checks after `cargo build -p chat-server --features olap`. `SCREENSHOTS=/tmp/shots bun e2e/chat.ts` saves screenshots.
+
+The suites cover permissions, unread state, pagination, typing expiry, reminders, uploads, search, live counts, announcements, and optional analytics. See [Contributing](../../CONTRIBUTING.md) for framework-wide checks.

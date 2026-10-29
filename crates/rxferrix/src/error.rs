@@ -31,6 +31,46 @@ impl UserError {
         self.data = data;
         self
     }
+
+    /// The `UserError` in `err` (anywhere in its chain), if it is one: what a test asserts on.
+    ///
+    /// ```ignore
+    /// let err = t.mutation::<send>((channel, String::new())).await.unwrap_err();
+    /// assert_eq!(UserError::of(&err).map(|e| e.code.as_str()), Some("empty"));
+    /// ```
+    pub fn of(err: &Error) -> Option<&UserError> {
+        err.chain().find_map(|e| e.downcast_ref::<UserError>())
+    }
+}
+
+/// End the function with a [`UserError`] for the client: `bail_user!("not_found", "no channel {name}")` is
+/// `return Err(UserError::new("not_found", format!("no channel {name}")).into())`.
+#[macro_export]
+macro_rules! bail_user {
+    ($code:expr, $($message:tt)+) => {
+        return ::core::result::Result::Err($crate::UserError::new($code, ::std::format!($($message)+)).into())
+    };
+}
+
+/// [`bail_user!`] unless `cond` holds: `ensure_user!(!text.is_empty(), "empty", "a message needs some text")`.
+#[macro_export]
+macro_rules! ensure_user {
+    ($cond:expr, $code:expr, $($message:tt)+) => {
+        if !$cond {
+            $crate::bail_user!($code, $($message)+);
+        }
+    };
+}
+
+/// Turn a missing value into a [`UserError`]: `ctx.db.get(id).await?.or_user("not_found", "no such channel")?`.
+pub trait OrUserError<T> {
+    fn or_user(self, code: &str, message: impl Into<String>) -> Result<T>;
+}
+
+impl<T> OrUserError<T> for Option<T> {
+    fn or_user(self, code: &str, message: impl Into<String>) -> Result<T> {
+        self.ok_or_else(|| UserError::new(code, message).into())
+    }
 }
 
 impl std::fmt::Display for UserError {

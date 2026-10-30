@@ -156,8 +156,12 @@ mod gated {
 
     pub static GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
 
+    /// `gate` is only there to keep other callers out: the protocol fuzzer (`fuzz.rs`) calls every registered function
+    /// with random arguments, and never one named `gate`. A call of its that got through would wait here and take one of
+    /// the permits the test below counts on, leaving the test's last action waiting for good.
     #[action]
-    pub async fn wait_for_gate(_ctx: &ActionCtx) -> Result<()> {
+    pub async fn wait_for_gate(_ctx: &ActionCtx, gate: u32) -> Result<()> {
+        let _ = gate;
         GATE.acquire().await?.forget();
         Ok(())
     }
@@ -179,7 +183,7 @@ async fn a_connection_with_every_slot_taken_keeps_serving_updates_and_revocation
     let actions = worker::MAX_IN_FLIGHT as u64 + 1;
     for request_id in 0..actions {
         let udf_path = gated::wait_for_gate::path();
-        c.send(ClientMessage::Action { request_id, udf_path, args: json!({}) }).await;
+        c.send(ClientMessage::Action { request_id, udf_path, args: json!({ "gate": 1 }) }).await;
     }
     // Every slot is taken and one action is parked. A write elsewhere still reaches this socket.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -199,7 +203,7 @@ async fn a_connection_with_every_slot_taken_keeps_serving_updates_and_revocation
     // Full again: signing out still ends the socket at once.
     for request_id in actions..2 * actions {
         let udf_path = gated::wait_for_gate::path();
-        c.send(ClientMessage::Action { request_id, udf_path, args: json!({}) }).await;
+        c.send(ClientMessage::Action { request_id, udf_path, args: json!({ "gate": 1 }) }).await;
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     app.auth().sign_out(&app, None, Some(&token)).await.unwrap();

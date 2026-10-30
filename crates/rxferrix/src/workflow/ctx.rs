@@ -33,6 +33,7 @@ pub(crate) struct Call {
     pub pool: Option<String>,
     pub retries: Option<u32>,
     pub backoff: Option<Backoff>,
+    pub jitter: Option<f64>,
 }
 
 /// A step the body started that isn't in the journal yet.
@@ -127,7 +128,7 @@ impl WorkflowCtx {
     }
 
     fn step<T>(&self, kind: StepKind, name: String, args: Result<Value, serde_json::Error>) -> Step<T> {
-        let call = args.map(|args| Call { kind, name, args, pool: None, retries: None, backoff: None });
+        let call = args.map(|args| Call { kind, name, args, pool: None, retries: None, backoff: None, jitter: None });
         Step { replay: self.replay.clone(), call: call.map_err(|e| e.to_string()), _output: PhantomData }
     }
 
@@ -190,6 +191,14 @@ impl<T> Step<T> {
     pub fn backoff(mut self, initial: Duration, base: f64) -> Self {
         if let Ok(call) = &mut self.call {
             call.backoff = Some(Backoff { initial_ms: initial.as_secs_f64() * 1000.0, base });
+        }
+        self
+    }
+
+    /// The action's retry jitter: each retry waits a random `1 - jitter` to 1 times its backoff (0 to 1).
+    pub fn jitter(mut self, jitter: f64) -> Self {
+        if let Ok(call) = &mut self.call {
+            call.jitter = Some(jitter);
         }
         self
     }

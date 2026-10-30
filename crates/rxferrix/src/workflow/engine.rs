@@ -189,6 +189,9 @@ async fn start_step(ctx: &MutationCtx, wf: &mut Doc<Workflow>, step: NewStep) ->
             if let Some(b) = call.backoff {
                 with = with.backoff(Duration::from_secs_f64(b.initial_ms / 1000.0), b.base);
             }
+            if let Some(jitter) = call.jitter {
+                with = with.jitter(jitter);
+            }
             (step_id, with.run_path(call.name, call.args, Duration::ZERO).await)
         }
         StepKind::Sleep => {

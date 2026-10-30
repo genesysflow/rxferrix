@@ -28,13 +28,25 @@ pub(crate) struct NewJob {
     pub pool: Option<String>,
     pub on_complete: Option<OnComplete>,
     pub backoff: Option<Backoff>,
+    pub jitter: Option<f64>,
 }
 
 impl NewJob {
     /// A job with no pool, completion callback or custom backoff.
     pub fn new(path: String, kind: JobKind, args: Value, run_at: f64, attempts: u32, origin: Option<String>) -> NewJob {
         let max_attempts = attempts;
-        NewJob { path, kind, args, run_at, max_attempts, origin, pool: None, on_complete: None, backoff: None }
+        NewJob {
+            path,
+            kind,
+            args,
+            run_at,
+            max_attempts,
+            origin,
+            pool: None,
+            on_complete: None,
+            backoff: None,
+            jitter: None,
+        }
     }
 }
 
@@ -80,6 +92,7 @@ pub(crate) async fn insert(db: &MutationDb, job: NewJob, now: f64) -> crate::Res
         pool: job.pool,
         on_complete: job.on_complete,
         backoff: job.backoff,
+        jitter: job.jitter,
     };
     let id = db.insert(value.clone()).await?;
     // `scheduledAt` := the document's `_creationTime`, which is strictly increasing across all inserts (even within

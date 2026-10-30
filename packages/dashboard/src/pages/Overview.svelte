@@ -375,7 +375,7 @@
                 ]}
               />
             </Panel>
-            <Panel title="Query Cache" help="HTTP queries and ctx.run_query calls answered from the cache, as a share of all lookups: since the server started in the headline, per 3-second sample in the chart." testid="stat-cache">
+            <Panel title="Query Cache" help="New subscriptions, HTTP queries and ctx.run_query calls answered from the cache, as a share of all lookups: since the server started in the headline, per 3-second sample in the chart." testid="stat-cache">
               {@render headline(cacheHitRate(o), `hit rate since start · ${formatBytes(o.cacheBytes ?? 0)} kept`)}
               <LineChart
                 label="Query cache hit rate"

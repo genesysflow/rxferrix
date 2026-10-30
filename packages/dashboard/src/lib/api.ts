@@ -812,7 +812,10 @@ export interface Stats {
     /** Of those, kept as a cache after their last subscriber left (until a write changes them). */
     cachedQueries?: number;
     cacheBytes?: number;
-    /** HTTP queries and `ctx.run_query` calls answered from the cache, and those that ran the query. */
+    /**
+     * Subscriptions, HTTP queries and `ctx.run_query` calls answered from the cache, and those that waited for a
+     * run.
+     */
     cacheHits?: number;
     cacheMisses?: number;
     droppedLogEntries: number;

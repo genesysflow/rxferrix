@@ -86,13 +86,27 @@ impl Graph {
         for v in vectors {
             g.push(v);
         }
-        let n = vectors.len();
-        if n == 0 {
-            return g;
+        g.link_all(0, threads);
+        g
+    }
+
+    /// Link the allocated nodes from `from` on, on up to `threads` threads, then [reconnect](Graph::reconnect) any
+    /// node the concurrent inserts left without a way in.
+    pub fn link_all(&self, from: usize, threads: usize) {
+        let n = self.len();
+        if from >= n {
+            return;
         }
-        g.link(0);
-        let next = std::sync::atomic::AtomicUsize::new(1);
-        let threads = threads.clamp(1, 64).min(n);
+        let threads = threads.clamp(1, 64).min(n - from);
+        if threads == 1 {
+            for i in from..n {
+                self.link(i as u32);
+            }
+            return;
+        }
+        // The first node of an empty graph becomes the entry point; the others need one to start from.
+        self.link(from as u32);
+        let next = std::sync::atomic::AtomicUsize::new(from + 1);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(|| {
@@ -101,12 +115,89 @@ impl Graph {
                         if i >= n {
                             break;
                         }
-                        g.link(i as u32);
+                        self.link(i as u32);
                     }
                 });
             }
         });
-        g
+        self.reconnect((from as u32..n as u32).collect());
+    }
+
+    /// Give each of `nodes` that has no incoming link on layer 0 (the entry point aside) one, so searches can reach it.
+    ///
+    /// Concurrent inserts leave a few such nodes (3 in 288,000 with 64 threads on 4 cores in a debug build). Two close
+    /// nodes inserted at the same time don't see each other and choose the same neighbours; when one of those lists
+    /// overflows, the heuristic keeps the first node and prunes the second, which is closer to the first than to the
+    /// neighbour. The heuristic counts on the first node linking to the second, but it doesn't: it chose its own links
+    /// before the second one was reachable. A sequential insert would have found the first node and linked to it.
+    ///
+    /// Only the nodes just linked can be left so (and those a forced link drops, checked again in the next round). The
+    /// check is local ([`Graph::linked_back`]): a batch costs in proportion to its size, not to the graph's.
+    fn reconnect(&self, mut nodes: Vec<u32>) {
+        let ep = self.entry.lock().unwrap_or_else(|e| e.into_inner()).map(|(ep, _)| ep);
+        // Forcing a link into a full list drops another one, which may leave that node without a way in: a few rounds.
+        for _ in 0..4 {
+            let orphans: Vec<u32> = nodes.into_iter().filter(|&n| Some(n) != ep && !self.linked_back(n)).collect();
+            if orphans.is_empty() {
+                return;
+            }
+            nodes = Vec::new();
+            let mut visited = self.take_visited();
+            for node in orphans {
+                let q = self.vector(node).to_vec();
+                let mut found = self.nearest(&q, self.params.ef_construction, &mut visited, Some(node));
+                if found.is_empty() {
+                    // The descent ended on the node itself (it is linked on an upper layer): its own neighbours.
+                    found = self.neighbours(node, 0).into_iter().map(|n| (self.distance(&q, n), n)).collect();
+                    found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                }
+                // The closest node with room for one more link, else the closest one, dropping its farthest link.
+                let max = self.max_links(0);
+                let Some(&(_, closest)) = found.first() else { continue };
+                let room = found.iter().take(self.params.m).find(|&&(_, n)| self.neighbours(n, 0).len() < max);
+                let target = room.map_or(closest, |&(_, n)| n);
+                let base = self.vector(target);
+                let mut links = self.links[target as usize].write().unwrap_or_else(|e| e.into_inner());
+                let list = &mut links[0];
+                if list.len() >= max {
+                    let farthest = (0..list.len())
+                        .max_by(|&a, &b| {
+                            let (da, db) =
+                                (1.0 - dot(base, self.vector(list[a])), 1.0 - dot(base, self.vector(list[b])));
+                            da.total_cmp(&db)
+                        })
+                        .expect("a full list");
+                    nodes.push(list.swap_remove(farthest));
+                }
+                list.push(node);
+            }
+            self.put_visited(visited);
+        }
+    }
+
+    /// Does one of `node`'s layer-0 neighbours link back to it? Links are mostly mutual, so a node with an incoming
+    /// link almost always has one of those; when it has none, [`Graph::reconnect`] gives it one more, which is harmless.
+    /// A node nothing links to never has one.
+    fn linked_back(&self, node: u32) -> bool {
+        self.neighbours(node, 0).into_iter().any(|n| {
+            let links = self.links[n as usize].read().unwrap_or_else(|e| e.into_inner());
+            links[0].contains(&node)
+        })
+    }
+
+    /// The nodes no layer-0 list links to, except the entry point (a scan of the whole graph).
+    #[cfg(test)]
+    fn orphans(&self) -> Vec<u32> {
+        let mut linked = vec![false; self.len()];
+        for links in &self.links {
+            for &n in &links.read().unwrap_or_else(|e| e.into_inner())[0] {
+                linked[n as usize] = true;
+            }
+        }
+        if let Some((ep, _)) = *self.entry.lock().unwrap_or_else(|e| e.into_inner()) {
+            linked[ep as usize] = true;
+        }
+        (0..self.len() as u32).filter(|&n| !linked[n as usize]).collect()
     }
 
     pub fn dims(&self) -> usize {
@@ -354,16 +445,22 @@ impl Graph {
     /// The (up to) `k` nodes closest to `query` among those `accept` keeps, closest first, as `(distance, node)`,
     /// searching with width `max(ef, k)`. Rejected nodes are still traversed (deleted nodes route searches).
     pub fn search(&self, query: &[f32], k: usize, ef: usize, accept: impl Fn(u32) -> bool) -> Vec<(f32, u32)> {
-        let Some((ep, top)) = *self.entry.lock().unwrap_or_else(|e| e.into_inner()) else { return Vec::new() };
         let q = normalized(query);
-        let mut cur = (self.distance(&q, ep), ep);
-        for layer in (1..=top as usize).rev() {
-            cur = self.greedy(&q, cur, layer);
-        }
         let mut visited = self.take_visited();
-        let found = self.search_layer(&q, &[cur], ef.max(k), 0, &mut visited, None);
+        let found = self.nearest(&q, ef.max(k), &mut visited, None);
         self.put_visited(visited);
         found.into_iter().filter(|&(_, n)| accept(n)).take(k).collect()
+    }
+
+    /// The `ef` nodes closest to `q` (normalized) found on layer 0 after descending from the entry point, closest
+    /// first, never `skip`.
+    fn nearest(&self, q: &[f32], ef: usize, visited: &mut Visited, skip: Option<u32>) -> Vec<(f32, u32)> {
+        let Some((ep, top)) = *self.entry.lock().unwrap_or_else(|e| e.into_inner()) else { return Vec::new() };
+        let mut cur = (self.distance(q, ep), ep);
+        for layer in (1..=top as usize).rev() {
+            cur = self.greedy(q, cur, layer);
+        }
+        self.search_layer(q, &[cur], ef, 0, visited, skip)
     }
 
     fn take_visited(&self) -> Visited {
@@ -689,16 +786,41 @@ mod tests {
     }
 
     /// Regression: oversubscribed parallel builds (many more threads than cores, so links are preempted midway) used
-    /// to leave nodes unreachable (about 0.2% of them here: a search for their own vector missed them). See `link`.
+    /// to leave nodes unreachable (about 0.2% of them here: a search for their own vector missed them), and still did
+    /// for about one in 100,000 under heavy contention. See `link` and `reconnect`.
     #[test]
     fn oversubscribed_parallel_builds_reach_every_node() {
         let vectors = random_vectors(4800, 24, 11);
         let mut misses = 0;
         for seed in 0..2 {
             let g = Graph::build(24, Params::default(), seed, &vectors, 64);
+            assert_eq!(g.orphans(), Vec::<u32>::new(), "nodes without an incoming link");
             misses += (0..vectors.len()).filter(|&i| g.search(&vectors[i], 1, 128, |_| true)[0].1 != i as u32).count();
         }
         assert!(misses <= 1, "{misses} of {} self-searches missed", 2 * vectors.len());
+    }
+
+    #[test]
+    fn reconnect_links_nodes_nothing_links_to() {
+        let vectors = random_vectors(2000, 16, 5);
+        let g = Graph::build(16, Params::default(), 7, &vectors, 4);
+        assert!(g.orphans().is_empty());
+        // Cut every link to a few nodes on every layer, as lost races would.
+        let cut = [3u32, 400, 1999];
+        for links in &g.links {
+            for list in links.write().unwrap().iter_mut() {
+                list.retain(|n| !cut.contains(n));
+            }
+        }
+        let ep = g.entry.lock().unwrap().unwrap().0;
+        let expected: Vec<u32> = cut.into_iter().filter(|&n| n != ep).collect();
+        assert_eq!(g.orphans(), expected);
+        g.reconnect((0..g.len() as u32).collect());
+        assert!(g.orphans().is_empty());
+        for n in cut {
+            assert_eq!(g.search(&vectors[n as usize], 1, 64, |_| true)[0].1, n);
+        }
+        assert!(g.links.iter().all(|l| l.read().unwrap()[0].len() <= g.max_links(0)));
     }
 
     #[test]

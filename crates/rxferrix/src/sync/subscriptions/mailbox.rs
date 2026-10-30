@@ -88,6 +88,14 @@ impl Mailbox {
         (state.queue.drain(..).collect(), state.overflowed)
     }
 
+    /// Take the oldest queued update; also whether more are queued, and whether the connection was dropped for being
+    /// too slow.
+    pub fn take_one(&self) -> (Option<Update>, bool, bool) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let update = state.queue.pop_front();
+        (update, !state.queue.is_empty(), state.overflowed)
+    }
+
     /// Number of queued updates (for tests).
     pub fn len(&self) -> usize {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).queue.len()

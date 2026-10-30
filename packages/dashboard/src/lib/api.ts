@@ -234,6 +234,8 @@ export interface ScheduledJob {
   onComplete: { path: string; context: Json } | null;
   /** The retry backoff; null for the scheduler's. */
   backoff: { initialMs: number; base: number } | null;
+  /** How much of each retry delay is random (0 to 1); null for the scheduler's. */
+  jitter: number | null;
 }
 
 /** `GET /api/admin/job-history` (lib/admin.ts): finished jobs moved from `_scheduled_jobs` to `aux.db`. */

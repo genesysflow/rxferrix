@@ -112,7 +112,9 @@ impl UserError { pub fn of(err: &Error) -> Option<&UserError>; }  // the UserErr
 // option.or_user(code, message)?         = option.ok_or_else(|| UserError::new(code, message).into())?  (OrUserError)
 
 /// Typed document id. String form: 26-char lowercase Crockford base32 of 16 bytes:
-/// [table_number: u32 big-endian][12 random bytes]. Serializes as a JSON string.
+/// [table_number: u32 big-endian][creation time: 48-bit ms since the Unix epoch, big-endian][6 random bytes], so new
+/// ids grow with time (ids made before 0.10 have 12 random bytes; both forms are valid). Stored files' ids (`_storage`)
+/// keep 12 random bytes: their URLs are capabilities. Serializes as a JSON string.
 pub struct Id<T> { /* raw: [u8; 16], PhantomData<fn() -> T> */ }
 // Copy, Clone, Eq, Ord, Hash, Debug, Display (the string form), FromStr (validates format, not table),
 // Serialize/Deserialize as string, ts_rs::TS => `Id<"<table name>">` (requires T: Table).
@@ -754,6 +756,12 @@ fires the watches of deleted ones. So every way a session ends is covered (sign-
 deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
 guarantee 10).
 
+**Session checks of native access tokens** (`auth::session_cache`) are served from a cache of sessions recently
+found active, instead of a read of `_sessions` per call. Before each check the cache applies the write log since its
+last one, dropping every session a commit wrote, and the writer appends a commit before its mutation returns. So a
+session that has ended (any way, as above) is refused by the next call, as with a read; expiry and the session's owner
+are checked on every hit; a write log trimmed past the cache's position drops the whole cache.
+
 **Runtime settings and precedence** (`rxferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
 the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
 encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)
@@ -993,7 +1001,7 @@ impl ActionCtx {
 - **In a mutation** the job row is written in the mutation's transaction: it exists only if the mutation commits.
   `run_after` counts from `ctx.now()`. `cancel` is just as atomic.
 - **In an action** scheduling and canceling take effect immediately: they run the internal system mutations
-  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin, pool?, onComplete?, backoff? }`,
+  `_system/scheduler:schedule { path, args, runAt, maxAttempts, origin, pool?, onComplete?, backoff?, jitter? }`,
   `_system/scheduler:cancel { id, reason? }` and `_system/scheduler:cancel_pool { pool, reason }`.
 - Args are serialized when scheduling (at most 1 MiB of JSON). `run_at` in the past means "as soon as possible".
 - `cancel`: a pending job, or an action in progress, becomes `canceled` with `completedAt` and the reason in `error`
@@ -1029,7 +1037,8 @@ error `ActionAborted` ("canceled: the action was aborted 5s after its job was ca
   leaves the job `pending` with none of its writes, so it runs once after the restart.
 - **Actions: at most once per attempt.** The job is committed as `inProgress` (attempts + 1) before the action
   starts; the outcome is recorded afterwards. With `with_retries(n)`, an action that *returns an error* goes back to
-  `pending` up to `n` times, after `retry_backoff` (1s) doubled per retry (at most 1h). A server that stops (or hands
+  `pending` up to `n` times, after `retry_backoff` (1s) doubled per retry (at most 1h), cut by a random share of up to
+  `retry_jitter` (0: none). A server that stops (or hands
   over) starts no job once it drains and waits up to 10 s for running actions to finish. At startup, jobs still
   `inProgress` count as an attempt that failed with the error `server restarted while running`: retried like an
   error if attempts are left, else `failed`. Without `with_retries`, an action therefore never runs twice.
@@ -1093,6 +1102,7 @@ pub struct SchedulerOptions {          // AppOptions::scheduler; RxFerrix::sched
     pub retention: Option<Duration>,   // Some(7 days)
     pub cleanup_interval: Duration,    // 1 hour
     pub retry_backoff: Duration,       // 1 second
+    pub retry_jitter: f64,             // 0.0 (0 to 1): each retry waits a random `1 - retry_jitter` to 1 times its backoff
     pub cancel_grace: Duration,        // 5 seconds: a canceled action is aborted this long after the cancel
     pub crons: Vec<CronSpec>,
     pub pools: Vec<Workpool>,          // RxFerrix::workpool(..) / SchedulerOptions::workpool(..)
@@ -1117,7 +1127,7 @@ how many of its actions run at once, with defaults for their retries:
 
 ```rust
 rxferrix::RxFerrix::new()
-    .workpool(Workpool::new("emails").max_parallelism(5).retries(3).backoff(Duration::from_millis(250), 2.0))
+    .workpool(Workpool::new("emails").max_parallelism(5).retries(3).backoff(Duration::from_millis(250), 2.0).jitter(0.5))
 
 #[mutation]
 pub async fn invite(ctx: &MutationCtx, to: String) -> Result<Id<ScheduledJob>> {
@@ -1128,7 +1138,7 @@ pub async fn invite(ctx: &MutationCtx, to: String) -> Result<Id<ScheduledJob>> {
 pub async fn sent(ctx: &MutationCtx, work_id: Id<ScheduledJob>, context: String, result: WorkResult<String>) -> Result<()> { … }
 ```
 ```rust
-pub struct Workpool { pub name: String, pub max_parallelism: usize /* 10 */, pub retries: u32 /* 0 */, pub backoff: Option<Backoff> }
+pub struct Workpool { pub name: String, pub max_parallelism: usize /* 10 */, pub retries: u32 /* 0 */, pub backoff: Option<Backoff>, pub jitter: Option<f64> }
 impl Scheduler {   // each returns a ScheduleWith; the options combine, in any order
     pub fn pool(&self, name: &str) -> ScheduleWith<'_>;
     pub fn on_complete<F: MutationFunction>(&self, context: impl Serialize) -> ScheduleWith<'_>;
@@ -1136,7 +1146,7 @@ impl Scheduler {   // each returns a ScheduleWith; the options combine, in any o
 }
 impl ScheduleWith<'_> {
     pub fn pool(self, name: &str) -> Self;  pub fn with_retries(self, n: u32) -> Self;
-    pub fn backoff(self, initial: Duration, base: f64) -> Self;
+    pub fn backoff(self, initial: Duration, base: f64) -> Self;  pub fn jitter(self, jitter: f64) -> Self;
     pub fn on_complete<F: MutationFunction>(self, context: impl Serialize) -> Self;
     pub async fn run_after<F>(self, delay, args) -> Result<Id<ScheduledJob>>;  run_at<F>(..);  enqueue<F>(args) /* = run_after(0) */
 }
@@ -1146,10 +1156,13 @@ impl ScheduleWith<'_> {
   scheduled without `pool`, else its workpool's `max_parallelism`. Pools don't share slots: a full pool doesn't hold
   up the default pool or another pool. Within a pool, actions start in the order they are due. **Mutations need no
   slot** (they run one at a time in the dispatcher anyway, first in each round), whatever their pool.
-- **Defaults.** An action in a pool gets the pool's `retries` and `backoff` unless the call sets its own. Backoff:
-  wait `initial`, then `base` times longer before each further retry, at most an hour (default: `retry_backoff`,
-  doubling). Pools are declared at startup (unknown name: an error when scheduling; duplicate names, empty names,
-  names over 64 characters, `max_parallelism: 0`, a backoff `base` below 1 or a negative `initial` fail `App::open`). Pending actions naming a pool the app no longer declares still run, in a
+- **Defaults.** An action in a pool gets the pool's `retries`, `backoff` and `jitter` unless the call sets its own.
+  Backoff: wait `initial`, then `base` times longer before each further retry, at most an hour (default:
+  `retry_backoff`, doubling). Jitter `j`, from 0 to 1: each retry waits a random `1 - j` to 1 times that delay (1: from
+  no wait to the full delay), so actions that fail together (an outage, a restart) don't retry together (default:
+  `retry_jitter`, 0). A call's jitter outside 0 to 1 is an error when scheduling. Pools are declared at startup
+  (unknown name: an error when scheduling; duplicate names, empty names, names over 64 characters,
+  `max_parallelism: 0`, a backoff `base` below 1, a negative `initial` or a jitter outside 0 to 1 fail `App::open`). Pending actions naming a pool the app no longer declares still run, in a
   pool of the default size (with a warning at startup).
 - **`on_complete`.** When the job reaches its final state (success; failed once no retries are left, including
   "server restarted while running"; canceled, also while running), the transaction that records it also schedules
@@ -1190,7 +1203,7 @@ impl WorkflowCtx {
     pub fn sleep(&self, d: Duration) -> Step<()>;
     pub fn wait_for_event<T: DeserializeOwned>(&self, name: &str) -> Step<T>;
 }
-impl<T> Step<T> { pub fn with_retries(self, n: u32) -> Self; pub fn pool(self, name: &str) -> Self; pub fn backoff(self, initial: Duration, base: f64) -> Self; }
+impl<T> Step<T> { pub fn with_retries(self, n: u32) -> Self; pub fn pool(self, name: &str) -> Self; pub fn backoff(self, initial: Duration, base: f64) -> Self; pub fn jitter(self, jitter: f64) -> Self; }
 impl<T: DeserializeOwned> IntoFuture for Step<T> { type Output = Result<T>; }
 pub struct Workflows;   // ctx.workflows in MutationCtx (transactional) and ActionCtx (immediate)
 impl Workflows {
@@ -1206,7 +1219,7 @@ impl Workflows {
   the journal (`_workflow_steps`) resolves at once with its recorded result or error, a new one is recorded and stays
   pending. When the body can't go further, the new steps start: **queries** run right there in the transaction (and
   the body runs again with their result, up to 100 times per transaction, then a new `advance` job continues);
-  **mutations and actions** become scheduled jobs (pool, retries and backoff from the step's options, origin
+  **mutations and actions** become scheduled jobs (pool, retries, backoff and jitter from the step's options, origin
   `workflow:<id>`) whose `on_complete` is `_system/workflow:step_done`, which records the outcome and advances, in one
   transaction; a **sleep** schedules `_system/workflow:wake` for when it ends; an **event** waits for `send_event`.
   Steps started together (`try_join!`) run in parallel.
@@ -2356,7 +2369,7 @@ scheduling function's path, "cron:<name>" or "dashboard") }`, with indexes `by_s
 scheduledAt]`, `by_completed_at = [completedAt]`, `by_kind_state_run_at = [kind, state, runAt, scheduledAt]` (the
 dispatcher's mutations) and `by_kind_pool_state_run_at = [kind, pool, state, runAt, scheduledAt]` (each pool's
 actions). Mutation jobs never show `inProgress`. Workpools (§1.7) add `pool: string | null`, `onComplete: { path,
-context } | null` and `backoff: { initialMs, base } | null`; `origin` can also be `"onComplete:<job id>"` or
+context } | null`, `backoff: { initialMs, base } | null` and `jitter: number | null`; `origin` can also be `"onComplete:<job id>"` or
 `"workflow:<id>"`.
 
 **`_crons`** (`Cron`): `{ name, schedule (the expression, or "every 5m"), timezone (IANA name, null for UTC), path,
@@ -2364,7 +2377,7 @@ args, lastRun, nextRun, lastJob }`, indexes `by_name` and `by_next_run`. Names s
 
 | Path `_system/scheduler:…` | Kind | Args → result |
 |---|---|---|
-| `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin?, pool?, onComplete?, backoff? }` → job id. `ctx.scheduler` in actions. |
+| `schedule` | internal mutation | `{ path, args, runAt, maxAttempts, origin?, pool?, onComplete?, backoff?, jitter? }` → job id. `ctx.scheduler` in actions. |
 | `cancel_pool` | internal mutation | `{ pool, reason }` → how many were canceled. `ctx.scheduler.cancel_pool` in actions. |
 | `cancel` | internal mutation | `{ id, reason? }` → `"canceled" \| "alreadyFinished"`. `ctx.scheduler.cancel` in actions. |
 | `jobs` | query (admin) | `{ state?, paginationOpts }` → `PaginationResult<Doc<"_scheduled_jobs">>`. With `state`: that state through `by_state_run_at`, pending/in-progress soonest first, finished ones most recent first; without: newest first. Live. Finished jobs are listed until they move to the job history (§1.7; `GET /api/admin/job-history`, §4.2). |
@@ -2589,7 +2602,7 @@ endpoints' shape; responses carry `Cache-Control: no-store`. The backup, export 
 | `GET /metrics` | Not under `/api/admin`: Prometheus text (`text/plain; version=0.0.4`), only when the server runs with `--metrics` (404 otherwise); with `--metrics-token`, `Authorization: Bearer <token>` is required (401). Metrics are listed in `crates/rxferrix/src/ops/metrics.rs`. |
 | `GET /api/admin/logs?<LogFilter>` | `{ entries: LogEntry[] }`, newest first. Query parameters: `pathPrefix`, `path` (exactly this function), `kind`, `outcome`, `since`, `minDurationUs` (only executions that took at least this many µs), `limit` (≤ 1000), `beforeId`, `identity`, `excludeSystem`, `excludeBackground` (leave out scheduled jobs, crons and workflow steps, and the functions they call). 400 `invalid_request` for malformed ones. |
 | `GET /api/admin/job-history?<HistoryFilter>` | `{ jobs: Doc<"_scheduled_jobs">[] }`: the job history (§1.7), most recently finished first. Query parameters: `state` (`success`, `failed`, `canceled`), `path` (exactly this function), `limit` (50, ≤ 500), and `beforeCompletedAt` with `beforeId` (the last job of the previous page; 400 `invalid_request` with only one). |
-| `POST /api/admin/job-history/retry` | Body `{ id }` → `{ id }`: run a job of the history again as a new job due now (same path, args, pool, attempts, `onComplete` and backoff; origin `dashboard`), like `run_job_now` for a finished job. 404 `not_found` when the history has no such job. |
+| `POST /api/admin/job-history/retry` | Body `{ id }` → `{ id }`: run a job of the history again as a new job due now (same path, args, pool, attempts, `onComplete`, backoff and jitter; origin `dashboard`), like `run_job_now` for a finished job. 404 `not_found` when the history has no such job. |
 | `GET /api/admin/logs/stream?<LogFilter>` | `text/event-stream`: `event: ready` once, then `event: log` (`data`: a `LogEntry` as JSON) for each new matching entry, `event: lagged` (`data`: how many entries were skipped because the client fell behind), keep-alive comments every 15s, `event: expired` right before the stream ends when the access token expires (reconnect with a fresh token), and `event: revoked` (`data`: `session has ended`) when it ends because the admin's session ended (sign-out, revocation). |
 | `POST /api/admin/impersonate` | Body `{ user, ttlSeconds?, redirectTo? }` → `{ accessToken, refreshToken, expiresIn, userId, sessionId, expiresAt, url }`. Mints a session of `user` (default 15 minutes, 1–3600 s, 400 `invalid_request` otherwise) marked `impersonatedBy` the admin, with a fixed expiry (refreshing never extends it; access tokens never outlive it), audited as `impersonate` in the same transaction. With `redirectTo` (checked against the redirect allowlist, 400 `invalid_redirect`), `url` is that app URL with `#rxferrix_access_token=…&rxferrix_refresh_token=…&rxferrix_expires_in=…&rxferrix_user_id=…`, which `handleRedirectCallback()` consumes: open it in a private window. 404 `not_found` for an unknown user (400 `invalid_id` for a malformed one), 403 `impersonation_disabled` with `AuthConfig::impersonation(false)`. |
 | `GET /api/admin/stats?since=<ms>&excludeBackground=<bool>` | `{ since, functions: FunctionStats[], olap: OlapStatus \| null, overview: { now, startedAt, version, dev, ts, commitTime, tables, documents, registeredFunctions, sockets, subscriptions, sharedQueries, droppedLogEntries, files: [{ name, bytes }], commitsPerSecond, queueDepth, runningJobs, subscriptionRounds, queryReruns, cachedQueries, cacheBytes, cacheHits, cacheMisses, metricsEnabled } }`. With `excludeBackground`, `functions` leaves out background work, as for the logs. `subscriptions` counts (socket, queryId) pairs, `sharedQueries` the distinct queries the server actually reruns; `cachedQueries` / `cacheBytes` / `cacheHits` / `cacheMisses` describe the cache of unwatched query results. `olap` is as for `GET /api/admin/olap` (null without `--olap`). `since` defaults to 24 hours ago; `files` are `data.db`, `aux.db` and their WAL files. `commitsPerSecond` is over the last 10 seconds; `queueDepth` / `runningJobs` count pending scheduled jobs and actions in progress; `subscriptionRounds` / `queryReruns` are totals since startup (rate them between polls); all are available without `--metrics` (`metricsEnabled` says whether `/metrics` is served). |
@@ -2814,8 +2827,10 @@ isn't a wildcard (400 if none); with no names at all, the requested host. Every 
 certificates (`--https`) need the crate's `acme` feature (default); without it, `--https` fails at startup and
 certificate files still work.
 
-**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme` and `thumbnails` are on by default; `olap`, `chrono` and
-`uuid` are off.
+**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme`, `thumbnails` and `mimalloc` are on by default; `olap`,
+`chrono` and `uuid` are off. `mimalloc` makes mimalloc the global allocator of the binary (musl's own, which the
+release binaries would otherwise use, serializes allocations across threads); an app with its own
+`#[global_allocator]` turns it off.
 `default-features = false` (then `features = [...]` for the ones wanted) leaves out the dependencies of those that
 aren't needed, e.g. about 60 crates for a server behind a TLS-terminating proxy that makes no thumbnails.
 

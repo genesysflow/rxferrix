@@ -42,6 +42,15 @@ pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 /// on sending query updates and pings and enforcing token expiry and revocation.
 pub const MAX_IN_FLIGHT: usize = 64;
 
+/// How many messages may wait between the worker and the socket writer. A Transition is only made from the mailbox once
+/// one of these slots is free, so while a client reads slower than its results change, its updates wait in the mailbox,
+/// where those that change no version merge into one (`Mailbox::push`), instead of queueing as frames of stale
+/// results, each holding its result and its diff base. Measured with `bench_ws_slow_reader` (2026-10-30), a socket
+/// that stopped reading for 3 s while a 2000-string result changed 150 times: with 256 slots here the server's memory
+/// grew 17.5 MiB and the socket then read 150 frames (5.8 MiB); with 2, 0.1 MiB and 71 frames (2.7 MiB: what the
+/// kernel's socket buffers held).
+pub const OUT_QUEUE: usize = 2;
+
 /// Input to the worker from the socket reader.
 #[derive(Debug)]
 pub enum Inbound {
@@ -93,6 +102,8 @@ pub struct SyncWorker {
     bases: std::collections::HashMap<QueryId, QueryValue>,
     conn: Connection,
     mailbox: Arc<Mailbox>,
+    /// The mailbox has updates the worker hasn't taken (its doorbell rang since it was last emptied).
+    undelivered: bool,
     completions_tx: mpsc::UnboundedSender<Completion>,
     completions_rx: mpsc::UnboundedReceiver<Completion>,
     /// When the current access token expires; the socket then ends with `AuthError` unless the client has sent a
@@ -122,7 +133,7 @@ pub fn spawn(app: App) -> (mpsc::Sender<Inbound>, mpsc::Receiver<ServerMessage>)
 /// [`spawn`] for a client at `ip` (the WebSocket handler).
 pub fn spawn_from(app: App, ip: Option<std::net::IpAddr>) -> (mpsc::Sender<Inbound>, mpsc::Receiver<ServerMessage>) {
     let (in_tx, in_rx) = mpsc::channel(64);
-    let (out_tx, out_rx) = mpsc::channel(256);
+    let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
     tokio::spawn(run_from(app, ip, in_rx, out_tx));
     (in_tx, out_rx)
 }
@@ -160,6 +171,7 @@ async fn run_from(
         bases: std::collections::HashMap::new(),
         conn,
         mailbox,
+        undelivered: false,
         completions_tx,
         completions_rx,
         auth_expires_at: None,
@@ -198,7 +210,12 @@ impl SyncWorker {
                             self.start(msg, permit);
                         }
                     }
-                    Some(()) = doorbell.recv() => self.deliver().await?,
+                    Some(()) = doorbell.recv() => self.undelivered = true,
+                    // An update is only taken from the mailbox once it can be queued for the socket (see `OUT_QUEUE`).
+                    permit = self.out.clone().reserve_owned(), if self.undelivered => {
+                        let permit = permit.map_err(|_| Fatal("connection closed".into()))?;
+                        self.deliver(permit)?
+                    }
                     _ = ping.tick() => {
                         // While a message is parked the client's answers wait unread behind it: not silence.
                         if self.parked.is_none() && self.last_heard.elapsed() >= SILENCE_LIMIT {
@@ -234,19 +251,20 @@ impl SyncWorker {
         self.out.send(msg).await.map_err(|_| Fatal("connection closed".into()))
     }
 
-    /// Send every update the manager queued, one Transition each.
-    async fn deliver(&mut self) -> Result<(), Fatal> {
-        let (updates, overflowed) = self.mailbox.take();
-        for update in updates {
-            self.send_transition(update).await?;
-        }
+    /// Send the oldest update the manager queued, as a Transition.
+    fn deliver(&mut self, permit: mpsc::OwnedPermit<ServerMessage>) -> Result<(), Fatal> {
+        let (update, more, overflowed) = self.mailbox.take_one();
         if overflowed {
             return Err(Fatal("connection dropped: the client is not keeping up with updates".into()));
+        }
+        self.undelivered = more;
+        if let Some(update) = update {
+            permit.send(self.transition(update));
         }
         Ok(())
     }
 
-    async fn send_transition(&mut self, update: Update) -> Result<(), Fatal> {
+    fn transition(&mut self, update: Update) -> ServerMessage {
         let end = StateVersion { query_set: update.query_set, identity: update.identity, ts: update.ts };
         debug_assert!(end.ts >= self.sent.ts, "transitions must not go back in time");
         let start = std::mem::replace(&mut self.sent, end);
@@ -265,7 +283,7 @@ impl SyncWorker {
                 }
             }
         }
-        self.send(ServerMessage::Transition { start_version: start, end_version: end, modifications }).await
+        ServerMessage::Transition { start_version: start, end_version: end, modifications }
     }
 
     async fn handle_message(&mut self, msg: ClientMessage) -> Result<(), Fatal> {

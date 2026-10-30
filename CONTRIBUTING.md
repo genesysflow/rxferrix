@@ -69,7 +69,11 @@ bun scripts/k3s-rollout-e2e.ts
 
 The latter two require Docker and the example image. For longer protocol fuzzing, use `FUZZ_SCALE=20 cargo test --release -p rxferrix --test it fuzz`.
 
-Benchmarks: `cargo test --release -p rxferrix --test it bench_ -- --ignored --nocapture`.
+Benchmarks: `scripts/bench.sh` runs every `bench_*` test in release mode, one at a time (`scripts/bench.sh
+bench_network` runs some; tunables are documented in each benchmark). `TARGET=x86_64-unknown-linux-musl
+scripts/bench.sh` builds them for musl like `scripts/release.sh`, so they measure what the release binaries run.
+The `bench_network` ones go through real sockets: HTTP calls anonymous and signed in, WebSocket fan-out of many
+queries per connection, and a socket that stops reading.
 
 The dashboard's built files are committed, so `cargo build` needs no JavaScript toolchain. After changing
 `packages/dashboard` or the client packages, run `bun run build:dashboard` and commit `crates/rxferrix/dashboard-dist`

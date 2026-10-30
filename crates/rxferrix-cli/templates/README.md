@@ -7,14 +7,16 @@ A Rust backend built with RxFerrix. The app binary serves the API, embedded data
 From this directory:
 
 ```sh
-cargo run -- serve --dev
+rxferrix dev
 ```
+
+This runs `cargo run -- serve --dev`, and rebuilds and restarts the backend when you change its Rust code.
 
 The backend listens on http://127.0.0.1:8090 and the dashboard is at http://127.0.0.1:8090/_/. Use the setup link printed on the first start to create an administrator. Local data lives in `fx_data/`.
 {{web_steps}}
 ## Make a backend change
 
-Tables and functions start in `src/tasks.rs`. Add new modules with `mod module_name;` in `src/main.rs`. Stop and rerun the backend after editing Rust code; development mode does not watch source files.
+Tables and functions start in `src/tasks.rs`. Add new modules with `mod module_name;` in `src/main.rs`. `rxferrix dev` picks up saved changes. The running backend keeps serving while the new version builds and when a build fails.
 
 ```sh
 cargo run -- functions

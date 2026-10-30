@@ -1,8 +1,13 @@
 //! Document ids.
 //!
-//! An id is 16 raw bytes: `[table_number: u32 BE][12 random bytes]`. Its string form is 26 characters of lowercase
+//! An id is 16 raw bytes: `[table_number: u32 BE][12 bytes]`. Its string form is 26 characters of lowercase
 //! Crockford base32 without padding. Base32 packs bits most-significant first, so the string order equals the byte
 //! order, and the table can be recovered from any id without a lookup.
+//!
+//! The 12 bytes of a new document's id ([`DocId::new_ordered`]) are the milliseconds since the Unix epoch when it was
+//! created (48 bits, big-endian), then 48 random bits: documents and their index entries are stored in id order, so
+//! ids that grow with time put each insert next to the previous ones instead of at a random page of a large table.
+//! Stored files keep 96 random bits ([`DocId::new_random`]): a file's id is the capability its URL grants.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -30,7 +35,23 @@ static BASE32: LazyLock<Encoding> = LazyLock::new(|| {
 pub struct DocId(pub [u8; 16]);
 
 impl DocId {
-    /// A fresh random id in `table_number`.
+    /// A fresh id in `table_number` for a document created at `now_ms` (ms since the Unix epoch): the time in 48 bits,
+    /// then 48 random bits. See the module docs.
+    ///
+    /// Measured (2026-10-30) against 96 random bits: loading 200k documents with 8 indexes 21.7k -> 31.9k documents/s
+    /// and inserts into that table 11.2k -> 15.1k/s (p99 2.9 -> 1.6 ms, `bench_indexes_large_table`); one-insert
+    /// mutations from 64 writers 42.4k -> 69.5k/s and 10-insert ones 62.8k -> 96.0k documents/s (`bench_writes`).
+    pub fn new_ordered(table_number: u32, now_ms: f64) -> Self {
+        let mut raw = [0u8; 16];
+        raw[..4].copy_from_slice(&table_number.to_be_bytes());
+        let ms = (now_ms.max(0.0) as u64).min((1 << 48) - 1);
+        raw[4..10].copy_from_slice(&ms.to_be_bytes()[2..]);
+        let random: [u8; 6] = rand::random();
+        raw[10..].copy_from_slice(&random);
+        DocId(raw)
+    }
+
+    /// A fresh id in `table_number` with 96 random bits, unguessable (stored files: see the module docs).
     pub fn new_random(table_number: u32) -> Self {
         let mut raw = [0u8; 16];
         raw[..4].copy_from_slice(&table_number.to_be_bytes());
@@ -200,6 +221,20 @@ mod tests {
         }
         let max = DocId([0xFF; 16]);
         assert_eq!(DocId::decode(&max.encode()).unwrap(), max);
+    }
+
+    #[test]
+    fn ordered_ids_follow_the_time() {
+        let t = 1_761_800_000_000.0;
+        let (a, b, later) = (DocId::new_ordered(7, t), DocId::new_ordered(7, t), DocId::new_ordered(7, t + 1.0));
+        assert_eq!((a.table_number(), later.table_number()), (7, 7));
+        assert_eq!(a.0[4..10], b.0[4..10], "the same millisecond");
+        assert_ne!(a, b, "random below the millisecond");
+        assert!(a < later && b < later);
+        assert_eq!(DocId::decode(&later.encode()).unwrap(), later);
+        // Out-of-range clocks stay in their 48 bits.
+        assert_eq!(DocId::new_ordered(7, -5.0).0[4..10], [0; 6]);
+        assert_eq!(DocId::new_ordered(7, f64::MAX).0[4..10], [0xFF; 6]);
     }
 
     #[test]

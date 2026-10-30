@@ -115,6 +115,9 @@ pub struct ScheduledJob {
     // The retry backoff of this action; null for the scheduler's (`SchedulerOptions::retry_backoff`, doubling).
     #[ts(type = "{ initialMs: number, base: number } | null")]
     pub backoff: Option<Backoff>,
+    // How much of each retry delay is random, 0 to 1 (`ScheduleWith::jitter`); null for the scheduler's
+    // (`SchedulerOptions::retry_jitter`).
+    pub jitter: Option<f64>,
 }
 
 /// A cron declared with `RxFerrix::cron` / `RxFerrix::cron_tz` / `RxFerrix::interval` (`_crons`), reconciled at startup:

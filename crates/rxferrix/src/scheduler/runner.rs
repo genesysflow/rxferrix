@@ -102,6 +102,7 @@ impl SchedulerState {
         specs.extend(cron::system_crons(app_options));
         let crons = cron::parse_all(&specs)?;
         let declared = crons.iter().map(|c| c.name.clone()).collect();
+        anyhow::ensure!(valid_jitter(options.retry_jitter), "the retry jitter must be between 0 and 1");
         let mut pools = BTreeMap::new();
         let mut slots = BTreeMap::from([(None, Slots::new(options.concurrency))]);
         for pool in &options.pools {
@@ -111,6 +112,9 @@ impl SchedulerState {
             anyhow::ensure!(pool.max_parallelism >= 1, "workpool `{name}` must allow at least 1 action at a time");
             if let Some(b) = pool.backoff {
                 anyhow::ensure!(b.initial_ms >= 0.0 && b.base >= 1.0, "workpool `{name}`: the backoff must not shrink");
+            }
+            if let Some(jitter) = pool.jitter {
+                anyhow::ensure!(valid_jitter(jitter), "workpool `{name}`: the jitter must be between 0 and 1");
             }
             anyhow::ensure!(pools.insert(name.clone(), pool.clone()).is_none(), "two workpools are named `{name}`");
             slots.insert(Some(name.clone()), Slots::new(pool.max_parallelism));
@@ -275,7 +279,7 @@ impl App {
 /// Jobs left `inProgress` (actions that were running when the process stopped) are retried if they have attempts
 /// left (scheduled `with_retries`, so they are meant to run again after a failure), and become `failed` otherwise.
 async fn recover_interrupted(app: &App, now: f64) -> crate::Result<usize> {
-    let backoff_base = app.scheduler_state().options.retry_backoff;
+    let st = app.scheduler_state();
     store::write(app, |db| async move {
         let running = db
             .query::<ScheduledJob>()
@@ -287,7 +291,7 @@ async fn recover_interrupted(app: &App, now: f64) -> crate::Result<usize> {
             value.error = Some(INTERRUPTED.to_string());
             if value.attempts < value.max_attempts {
                 value.state = JobState::Pending;
-                value.run_at = now + retry_delay(&value, backoff_base).as_secs_f64() * 1000.0;
+                value.run_at = now + retry_delay(&value, &st.options).as_secs_f64() * 1000.0;
             } else {
                 value.state = JobState::Failed;
                 value.completed_at = Some(now);
@@ -702,7 +706,7 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
         return;
     }
     let run = app.call_action(&job.path, job.args.clone(), &Identity::anonymous(), Origin::Server).await;
-    let backoff_base = app.scheduler_state().options.retry_backoff;
+    let st = app.scheduler_state();
     let canceled = signal.is_canceled();
     let recorded = store::write(app, |db| async move {
         let Some(current) = db.get(job.id).await? else { return Ok(()) };
@@ -738,7 +742,7 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
                 value.error = Some(store::truncate(error.clone()));
                 if value.attempts < value.max_attempts {
                     value.state = JobState::Pending;
-                    value.run_at = now + retry_delay(&value, backoff_base).as_secs_f64() * 1000.0;
+                    value.run_at = now + retry_delay(&value, &st.options).as_secs_f64() * 1000.0;
                 } else {
                     value.state = JobState::Failed;
                     value.completed_at = Some(now);
@@ -754,15 +758,28 @@ async fn run_action_job(app: &App, job: Doc<ScheduledJob>, registration: &Regist
     }
 }
 
-/// How long to wait before the next attempt of an action that just failed attempt number `job.attempts`.
-fn retry_delay(job: &ScheduledJob, default_initial: Duration) -> Duration {
+/// How long to wait before the next attempt of an action that just failed attempt number `job.attempts`: its
+/// backoff (at most `MAX_BACKOFF`), cut by a random share of up to its jitter.
+fn retry_delay(job: &ScheduledJob, options: &SchedulerOptions) -> Duration {
     let retry = job.attempts.saturating_sub(1).min(64) as i32;
     let (initial_ms, base) = match job.backoff {
         Some(b) => (b.initial_ms, b.base),
-        None => (default_initial.as_secs_f64() * 1000.0, 2.0),
+        None => (options.retry_backoff.as_secs_f64() * 1000.0, 2.0),
     };
     let ms = initial_ms * base.powi(retry);
-    if ms.is_finite() && ms >= 0.0 { Duration::from_secs_f64(ms / 1000.0).min(MAX_BACKOFF) } else { MAX_BACKOFF }
+    let delay =
+        if ms.is_finite() && ms >= 0.0 { Duration::from_secs_f64(ms / 1000.0).min(MAX_BACKOFF) } else { MAX_BACKOFF };
+    let jitter = job.jitter.unwrap_or(options.retry_jitter);
+    // A row edited by hand (the dashboard) can hold anything: what isn't a valid jitter counts as none.
+    if !valid_jitter(jitter) {
+        return delay;
+    }
+    delay.mul_f64(1.0 - jitter * rand::random::<f64>())
+}
+
+/// A jitter is a share of the delay: 0 to 1.
+pub(crate) fn valid_jitter(jitter: f64) -> bool {
+    (0.0..=1.0).contains(&jitter)
 }
 
 /// When the next job or cron is due, or the next cleanup should run. Actions of a full pool don't count: a slot

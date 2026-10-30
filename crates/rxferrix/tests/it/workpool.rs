@@ -1,5 +1,5 @@
 //! Workpools (`rxferrix::scheduler::Workpool`): a pool's actions run at most `max_parallelism` at once, without holding
-//! up other pools; pool defaults for retries and backoff; `on_complete` runs exactly once with the outcome (success,
+//! up other pools; pool defaults for retries, backoff and jitter; `on_complete` runs exactly once with the outcome (success,
 //! failed for good, canceled), from mutations and actions; `cancel_pool`; and the background loop starts a pool's
 //! next action as soon as a slot frees up.
 
@@ -144,6 +144,21 @@ mod app {
         with.enqueue::<flaky>((0,)).await
     }
 
+    /// `count` always-failing actions in pool `jittered`, with the pool's jitter or `jitter`.
+    #[mutation]
+    pub async fn enqueue_jittered(ctx: &MutationCtx, jitter: Option<f64>, count: u32) -> Result<Vec<Id<ScheduledJob>>> {
+        let mut ids = vec![];
+        for _ in 0..count {
+            let with = ctx.scheduler.pool("jittered");
+            let with = match jitter {
+                Some(j) => with.jitter(j),
+                None => with,
+            };
+            ids.push(with.enqueue::<flaky>((usize::MAX,)).await?);
+        }
+        Ok(ids)
+    }
+
     #[mutation]
     pub async fn into_unknown_pool(ctx: &MutationCtx) -> Result<Id<ScheduledJob>> {
         ctx.scheduler.pool("nope").enqueue::<work>(("x".to_string(), 1)).await
@@ -170,7 +185,8 @@ fn options() -> AppOptions {
         .workpool(Workpool::new("io").max_parallelism(2))
         .workpool(Workpool::new("one").max_parallelism(1))
         .workpool(Workpool::new("other"))
-        .workpool(Workpool::new("retrying").retries(3).backoff(Duration::from_millis(250), 3.0));
+        .workpool(Workpool::new("retrying").retries(3).backoff(Duration::from_millis(250), 3.0))
+        .workpool(Workpool::new("jittered").retries(1).backoff(Duration::from_secs(10), 1.0).jitter(1.0));
     AppOptions { scheduler, ..Default::default() }
 }
 
@@ -284,6 +300,7 @@ async fn pool_defaults_apply_unless_overridden_and_mistakes_are_errors() {
         (vec![Workpool::new("a"), Workpool::new("a")], "two workpools are named `a`"),
         (vec![Workpool::new("a").max_parallelism(0)], "at least 1"),
         (vec![Workpool::new("")], "1 to 64 characters"),
+        (vec![Workpool::new("a").jitter(1.5)], "the jitter must be between 0 and 1"),
     ] {
         let scheduler = SchedulerOptions { pools, ..Default::default() };
         let Err(err) = TestApp::with_options(AppOptions { scheduler, ..Default::default() }).await else {
@@ -291,6 +308,45 @@ async fn pool_defaults_apply_unless_overridden_and_mistakes_are_errors() {
         };
         assert!(format!("{err:#}").contains(msg), "{err:#}");
     }
+}
+
+#[tokio::test]
+async fn jitter_spreads_retries_over_the_backoff() {
+    let _serial = SERIAL.lock().await;
+    reset();
+    let t = TestApp::with_options(options()).await.unwrap();
+    // Pool `jittered`: a 10s backoff with full jitter, so each retry waits anywhere from 0 to 10s.
+    let ids = t.mutation::<enqueue_jittered>((None, 20)).await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 20);
+    let now = t.app().db().clock().now_ms();
+    let mut delays = vec![];
+    for id in &ids {
+        let j = job(&t, *id).await;
+        assert_eq!((j.state, j.jitter), (JobState::Pending, Some(1.0)), "retrying, with the pool's jitter");
+        // The delay was added to a time between the start of the run and now.
+        assert!(j.run_at - now <= 10_000.0 && j.run_at >= j.started_at.unwrap(), "{} within the backoff", j.run_at);
+        delays.push(j.run_at - now);
+    }
+    let (min, max) = delays.iter().fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
+    assert!(max - min > 1000.0, "retries are spread out: {delays:?}");
+
+    // A call's own jitter overrides the pool's: none, so the full 10s.
+    let ids = t.mutation::<enqueue_jittered>((Some(0.0), 3)).await.unwrap();
+    assert_eq!(t.run_due_jobs().await.unwrap(), 3);
+    let now = t.app().db().clock().now_ms();
+    for id in &ids {
+        let j = job(&t, *id).await;
+        assert_eq!(j.jitter, Some(0.0));
+        assert!(j.run_at - now <= 10_000.0 && j.run_at - j.started_at.unwrap() >= 10_000.0, "{}", j.run_at);
+    }
+
+    let err = t.mutation::<enqueue_jittered>((Some(2.0), 1)).await.unwrap_err();
+    assert!(format!("{err:#}").contains("the retry jitter must be between 0 and 1"), "{err:#}");
+    let scheduler = SchedulerOptions { retry_jitter: -0.5, ..Default::default() };
+    let Err(err) = TestApp::with_options(AppOptions { scheduler, ..Default::default() }).await else {
+        panic!("accepted a negative retry_jitter")
+    };
+    assert!(format!("{err:#}").contains("the retry jitter must be between 0 and 1"), "{err:#}");
 }
 
 #[tokio::test]

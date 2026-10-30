@@ -391,6 +391,7 @@ pub(crate) async fn enqueue_now(
         pool: None,
         on_complete: None,
         backoff: None,
+        jitter: None,
         origin: Some(format!("cron:{}", value.name)),
     };
     let id = store::insert(db, job, now).await?;
@@ -444,6 +445,7 @@ pub(crate) async fn fire_due(app: &App, crons: &[ParsedCron], now: f64) -> crate
                         pool: None,
                         on_complete: None,
                         backoff: None,
+                        jitter: None,
                         origin: Some(format!("cron:{}", cron.name)),
                     };
                     let id = store::insert(&db, job, now).await?;

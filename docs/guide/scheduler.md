@@ -59,7 +59,7 @@ Missed runs are coalesced into one run on startup. A cron skips a run if its pre
 | Scheduled action, no retries | One attempt; an interruption may have external side effects and is marked failed on recovery. |
 | Scheduled action with retries | Failures and restart interruptions can retry while attempts remain. External side effects may repeat. |
 
-Opt into action retries with `ctx.scheduler.with_retries(3).run_after::<f>(delay, args)`. Retries use exponential backoff. Retry options do not make failed mutations retry.
+Opt into action retries with `ctx.scheduler.with_retries(3).run_after::<f>(delay, args)`. Retries use exponential backoff. Add `.jitter(0.5)` to randomize each delay by up to half, so actions that fail together don't retry at the same moment. Retry options do not make failed mutations retry.
 
 Give retryable external calls an idempotency key or another duplicate-handling strategy. A failed or canceled action cannot undo mutations it already committed.
 
@@ -71,11 +71,11 @@ Register a pool in `main.rs`:
 use rxferrix::scheduler::Workpool;
 
 rxferrix::RxFerrix::new()
-    .workpool(Workpool::new("emails").max_parallelism(5).retries(3))
+    .workpool(Workpool::new("emails").max_parallelism(5).retries(3).jitter(0.5))
     .run()
 ```
 
-Enqueue an action with `ctx.scheduler.pool("emails").enqueue::<send_email>((to,)).await?`. Each pool has independent slots and retry defaults. `on_complete::<callback>(context)` schedules a mutation after success, final failure, or cancellation; the callback takes the work ID, supplied context, and `WorkResult<Output>`.
+Enqueue an action with `ctx.scheduler.pool("emails").enqueue::<send_email>((to,)).await?`. Each pool has independent slots and retry defaults (retries, backoff and jitter). `on_complete::<callback>(context)` schedules a mutation after success, final failure, or cancellation; the callback takes the work ID, supplied context, and `WorkResult<Output>`.
 
 ## Cancel and inspect jobs
 

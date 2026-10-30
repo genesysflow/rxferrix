@@ -105,7 +105,7 @@ impl Scheduler {
     }
 
     fn options(&self) -> ScheduleWith<'_> {
-        ScheduleWith { scheduler: self, retries: None, pool: None, backoff: None, on_complete: None }
+        ScheduleWith { scheduler: self, retries: None, pool: None, backoff: None, jitter: None, on_complete: None }
     }
 
     /// Opt into retries for an **action**: if it returns an error, it is run again up to `retries` more times, with
@@ -180,6 +180,13 @@ impl Scheduler {
         let retries = with.retries.or(pool.map(|p| p.retries)).unwrap_or(0);
         let max_attempts = if kind == JobKind::Action { retries.saturating_add(1) } else { 1 };
         let backoff = with.backoff.or(pool.and_then(|p| p.backoff));
+        let jitter = with.jitter.or(pool.and_then(|p| p.jitter));
+        if let Some(jitter) = jitter {
+            anyhow::ensure!(
+                super::runner::valid_jitter(jitter),
+                "the retry jitter must be between 0 and 1, not {jitter}"
+            );
+        }
         let on_complete = match with.on_complete {
             Some(on_complete) => {
                 let on_complete = on_complete.map_err(|e| anyhow::anyhow!("on_complete context: {e}"))?;
@@ -197,12 +204,12 @@ impl Scheduler {
                 let now = txn.now();
                 let run_at = when.resolve(now);
                 let pool = with.pool;
-                let job = NewJob { path, kind, args, run_at, max_attempts, origin, pool, on_complete, backoff };
+                let job = NewJob { path, kind, args, run_at, max_attempts, origin, pool, on_complete, backoff, jitter };
                 store::insert(&MutationDb::new(txn.clone()), job, now).await
             }
             Target::Action { app, identity } => {
                 let run_at = when.resolve(app.db().clock().now_ms());
-                let args = (path, args, run_at, max_attempts, origin, with.pool, on_complete, backoff);
+                let args = (path, args, run_at, max_attempts, origin, with.pool, on_complete, backoff, jitter);
                 Ok(app.typed_mutation::<super::schedule>(args.into(), identity).await?.0)
             }
         }
@@ -213,6 +220,7 @@ struct Options {
     retries: Option<u32>,
     pool: Option<String>,
     backoff: Option<Backoff>,
+    jitter: Option<f64>,
     on_complete: Option<Result<OnComplete, String>>,
 }
 
@@ -223,6 +231,7 @@ pub struct ScheduleWith<'a> {
     retries: Option<u32>,
     pool: Option<String>,
     backoff: Option<Backoff>,
+    jitter: Option<f64>,
     on_complete: Option<Result<OnComplete, String>>,
 }
 
@@ -243,6 +252,14 @@ impl<'a> ScheduleWith<'a> {
     /// Overrides the pool's and the scheduler's backoff.
     pub fn backoff(mut self, initial: Duration, base: f64) -> Self {
         self.backoff = Some(Backoff { initial_ms: initial.as_secs_f64() * 1000.0, base });
+        self
+    }
+
+    /// Make each retry wait a random `1 - jitter` to 1 times its backoff (`jitter` from 0 to 1, else scheduling
+    /// fails), so actions that failed together don't all retry at once. Overrides the pool's and the scheduler's
+    /// jitter (`SchedulerOptions::retry_jitter`).
+    pub fn jitter(mut self, jitter: f64) -> Self {
+        self.jitter = Some(jitter);
         self
     }
 
@@ -294,7 +311,7 @@ impl<'a> ScheduleWith<'a> {
     }
 
     fn split(self) -> (&'a Scheduler, Options) {
-        let ScheduleWith { scheduler, retries, pool, backoff, on_complete } = self;
-        (scheduler, Options { retries, pool, backoff, on_complete })
+        let ScheduleWith { scheduler, retries, pool, backoff, jitter, on_complete } = self;
+        (scheduler, Options { retries, pool, backoff, jitter, on_complete })
     }
 }

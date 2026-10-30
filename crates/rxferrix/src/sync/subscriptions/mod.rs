@@ -99,7 +99,9 @@
 //!
 //! ## Backpressure
 //!
-//! The manager never waits on a connection. A mailbox holds the updates the worker has not taken yet. An update that
+//! The manager never waits on a connection. A mailbox holds the updates the worker has not taken yet, and the worker
+//! only takes one when the socket writer has room for it (`worker::OUT_QUEUE`), so a slow client's updates wait here
+//! rather than as frames queued for its socket. An update that
 //! changes no version (commit-driven, or answering a `Cover`) is merged into the last queued one: the merged update
 //! carries the newest result of each query, which is valid at the newest ts (a query not in the newer update did not
 //! change since the older one). So a slow client gets the latest state, coalesced, with memory bounded by its query

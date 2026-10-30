@@ -14,6 +14,7 @@ import Account from "../src/pages/Account.svelte";
 import Analytics from "../src/pages/Analytics.svelte";
 import Backups from "../src/pages/Backups.svelte";
 import Login from "../src/pages/Login.svelte";
+import Logs from "../src/pages/Logs.svelte";
 import Overview from "../src/pages/Overview.svelte";
 import Settings from "../src/pages/Settings.svelte";
 import Workflows from "../src/pages/Workflows.svelte";
@@ -703,7 +704,7 @@ describe("Overview page", () => {
       tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
       files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
     };
-    const fn = (path: string, calls: number) => ({ path, kind: "mutation", calls, errors: 0, userErrors: 0, serverErrors: 0, p50Us: 1, p95Us: 1 });
+    const fn = (path: string, calls: number) => ({ path, kind: "mutation", calls, errors: 0, userErrors: 0, serverErrors: 0, p50Us: 1, p95Us: 1, maxUs: 1 });
     const urls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -734,6 +735,85 @@ describe("Overview page", () => {
     expect(localStorage.getItem("rxferrix.dashboard.hideBackground")).toBe("1");
     background.hidden = false;
     expect(localStorage.getItem("rxferrix.dashboard.hideBackground")).toBeNull();
+  });
+
+  it("ranks the queries and mutations by p95 and links to their slow calls", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+    };
+    const fn = (path: string, kind: string, p95Us: number, maxUs: number) => ({
+      path, kind, calls: 10, errors: 0, userErrors: 0, serverErrors: 0, p50Us: 100, p95Us, maxUs,
+    });
+    const functions = [
+      fn("todos:list", "query", 2_000, 3_000),
+      fn("todos:add", "mutation", 250_000, 1_200_000),
+      fn("todos:search", "query", 2_000, 9_000),
+      fn("mail:send", "action", 5_000_000, 6_000_000),
+      fn("_system/tables:list", "query", 9_000_000, 9_000_000),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("/api/admin/stats/timeseries?")
+          ? new Response(JSON.stringify({ points: [] }))
+          : new Response(JSON.stringify({ since: 0, functions, overview })),
+      ),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const table = target.querySelector("[data-testid=slowest-functions]")!;
+    const rows = [...table.querySelectorAll("tbody tr")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent?.trim()));
+    // Actions and system functions are left out; ties on p95 go to the slower max.
+    expect(rows).toEqual([
+      ["todos:add", "mutation", "10", "100µs", "250ms", "1.20s", "", "Slow calls →"],
+      ["todos:search", "query", "10", "100µs", "2.0ms", "9.0ms", "", "Slow calls →"],
+      ["todos:list", "query", "10", "100µs", "2.0ms", "3.0ms", "", "Slow calls →"],
+    ]);
+    // The bars share one scale: the slowest p95 fills the track.
+    const bars = [...table.querySelectorAll<HTMLElement>(".range .p95")].map((b) => b.style.width);
+    expect(bars).toEqual(["100%", "0.8%", "0.8%"]);
+    const slowCalls = table.querySelector("tbody tr td.action a")!.getAttribute("href");
+    expect(slowCalls).toBe("/_/logs?fn=todos%3Aadd&minUs=250000");
+  });
+});
+
+describe("Logs page", () => {
+  it("shows only the calls at least as slow as asked", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        if (url.startsWith("/api/admin/logs/stream")) return new Response("event: ready\ndata: {}\n\n");
+        return new Response(JSON.stringify({ entries: [] }));
+      }),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    const route = { page: "logs" as const, rest: [], params: new URLSearchParams("fn=todos:add&minUs=250000") };
+    mounted = mount(Logs, { target, props: { route }, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const select = target.querySelector<HTMLSelectElement>("select[aria-label=Duration]")!;
+    expect(select.selectedOptions[0]?.textContent).toBe("≥ 250ms");
+    expect(target.textContent).toContain("No executions took 250ms or longer");
+    const query = (u: string) => new URLSearchParams(u.split("?")[1]);
+    const history = urls.find((u) => u.startsWith("/api/admin/logs?"))!;
+    expect(query(history).get("minDurationUs")).toBe("250000");
+    expect(query(history).get("path")).toBe("todos:add");
+    expect(query(urls.find((u) => u.startsWith("/api/admin/logs/stream"))!).get("minDurationUs")).toBe("250000");
+
+    select.value = "1000000";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(query(urls.filter((u) => u.startsWith("/api/admin/logs?")).at(-1)!).get("minDurationUs")).toBe("1000000");
+    select.value = "";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(query(urls.filter((u) => u.startsWith("/api/admin/logs?")).at(-1)!).has("minDurationUs")).toBe(false);
   });
 });
 

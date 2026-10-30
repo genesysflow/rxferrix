@@ -106,6 +106,13 @@
       .sort((a, b) => b.errors - a.errors)
       .slice(0, 8),
   );
+  /** Queries and mutations by p95: actions are left out, as they mostly wait on other services. */
+  const slowest = $derived(
+    appFunctions
+      .filter((f) => f.kind !== "action")
+      .sort((a, b) => b.p95Us - a.p95Us || b.maxUs - a.maxUs)
+      .slice(0, 8),
+  );
   const appTables = $derived((ctx.tables ?? []).filter((t) => !t.system));
   const totalBytes = $derived((stats?.overview.files ?? []).reduce((n, f) => n + f.bytes, 0));
 
@@ -146,6 +153,48 @@
 
 {#snippet headline(value: string, sub: string, testid?: string)}
   <div class="headline"><span class="value" data-testid={testid}>{value}</span><span class="sub">{sub}</span></div>
+{/snippet}
+
+{#snippet slowTable(rows: FunctionStats[])}
+  {#if rows.length === 0}
+    <p class="muted small">No query or mutation calls in the last 24 hours.</p>
+  {:else}
+    {@const scale = Math.max(1, ...rows.map((f) => f.p95Us))}
+    <table class="grid slow" data-testid="slowest-functions">
+      <thead>
+        <tr>
+          <th>Function</th><th class="col-kind">Kind</th><th class="num col-calls">Calls</th><th class="num col-p50">p50</th><th class="num">p95</th>
+          <th class="num col-max">Max</th><th class="bar-col">Latency</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each rows as f (f.path)}
+          <tr>
+            <td><a href={href("functions", [], { fn: f.path })} onclick={link} class="mono">{f.path}</a></td>
+            <td class="col-kind"><span class="badge {f.kind}">{f.kind}</span></td>
+            <td class="num col-calls">{f.calls}</td>
+            <td class="num col-p50 muted">{formatDuration(f.p50Us)}</td>
+            <td class="num"><strong>{formatDuration(f.p95Us)}</strong></td>
+            <td class="num col-max muted">{formatDuration(f.maxUs)}</td>
+            <td class="bar-col">
+              <div class="range" title="p50 {formatDuration(f.p50Us)} · p95 {formatDuration(f.p95Us)} · max {formatDuration(f.maxUs)}">
+                <span class="p95" style:width="{(f.p95Us / scale) * 100}%"></span>
+                <span class="p50" style:width="{(f.p50Us / scale) * 100}%"></span>
+              </div>
+            </td>
+            <td class="action">
+              <a
+                href={href("logs", [], { fn: f.path, minUs: String(f.p95Us) })}
+                onclick={link}
+                title="The calls of {f.path} that took {formatDuration(f.p95Us)} (its p95) or longer"
+                aria-label="Slow calls of {f.path}"
+              ><span class="label">Slow calls</span> →</a>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
 {/snippet}
 
 {#snippet fnTable(rows: FunctionStats[], empty: string)}
@@ -279,6 +328,22 @@
           </Panel>
           <Panel title="Most errors" help="The app functions that failed most in the last 24 hours.">
             {@render fnTable(byErrors, "No errors in the last 24 hours.")}
+          </Panel>
+        </div>
+        <div class="tables slow-panel">
+          <Panel
+            title="Slowest functions"
+            help="The app queries and mutations whose slowest 5% of calls (p95) take longest, over the last 24 hours. The bar shows the median (p50) and p95 on one scale; Slow calls lists the calls that took at least the p95."
+          >
+            {#snippet actions()}
+              {#if slowest.length}
+                <span class="legend" aria-hidden="true">
+                  <span class="key"><span class="swatch p50"></span>p50</span>
+                  <span class="key"><span class="swatch p95"></span>p95</span>
+                </span>
+              {/if}
+            {/snippet}
+            {@render slowTable(slowest)}
           </Panel>
         </div>
       {/snippet}
@@ -471,5 +536,91 @@
   }
   table.grid tbody tr {
     cursor: default;
+  }
+  table.grid .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.slow td {
+    vertical-align: middle;
+  }
+  table.slow .bar-col {
+    width: 40%;
+    min-width: 80px;
+    max-width: none;
+  }
+  /* One scale for every row: the solid part is the median, the lighter one reaches the p95. */
+  .range {
+    position: relative;
+    height: 8px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .range span {
+    position: absolute;
+    inset: 0 auto 0 0;
+    min-width: 3px;
+    border-radius: 4px;
+  }
+  .range .p95,
+  .swatch.p95 {
+    background: color-mix(in srgb, var(--series-1) 35%, var(--panel));
+  }
+  .range .p50,
+  .swatch.p50 {
+    background: var(--series-1);
+  }
+  table.slow .action {
+    text-align: right;
+    font-size: 12.5px;
+  }
+  table.slow .action a {
+    color: var(--muted);
+  }
+  table.slow tr:hover .action a,
+  table.slow .action a:focus-visible {
+    color: var(--link);
+  }
+  /* The panel's width, not the window's, decides which columns fit: p95 and the way to the slow calls stay. */
+  .slow-panel {
+    container-type: inline-size;
+  }
+  @container (max-width: 790px) {
+    table.slow .col-kind,
+    table.slow .col-max {
+      display: none;
+    }
+  }
+  @container (max-width: 590px) {
+    table.slow .col-calls,
+    table.slow .col-p50 {
+      display: none;
+    }
+    table.slow .action .label {
+      display: none;
+    }
+  }
+  @container (max-width: 430px) {
+    table.slow .bar-col,
+    .slow-panel .legend {
+      display: none;
+    }
+  }
+  .legend {
+    display: inline-flex;
+    gap: 12px;
+    margin-right: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .key {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .swatch {
+    width: 10px;
+    height: 8px;
+    border-radius: 2px;
   }
 </style>

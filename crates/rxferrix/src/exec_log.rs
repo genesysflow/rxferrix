@@ -198,6 +198,8 @@ pub struct LogFilter {
     pub outcome: Option<LogOutcome>,
     /// Only executions that started at or after this time (ms since the epoch).
     pub since: Option<i64>,
+    /// Only executions that took at least this long (µs): the slow calls.
+    pub min_duration_us: Option<u64>,
     /// At most this many rows (default [`DEFAULT_QUERY_LIMIT`], capped at [`MAX_QUERY_LIMIT`]).
     pub limit: Option<usize>,
     /// Only rows with `id < before_id`: pass the last id of the previous page to page backwards.
@@ -221,6 +223,7 @@ impl LogFilter {
             && self.kind.is_none_or(|k| entry.kind == k)
             && self.outcome.is_none_or(|o| entry.outcome == o)
             && self.since.is_none_or(|t| entry.timestamp >= t)
+            && self.min_duration_us.is_none_or(|d| entry.duration_us >= d)
             && self.identity.as_deref().is_none_or(|i| entry.identity.as_deref().unwrap_or(ANONYMOUS) == i)
             && !(self.exclude_system && crate::private::is_system_path(&entry.path))
             && !(self.exclude_background && entry.identity.as_deref() == Some(SCHEDULER))
@@ -272,6 +275,8 @@ pub struct FunctionStats {
     pub p50_us: u64,
     /// 95th percentile duration (nearest rank).
     pub p95_us: u64,
+    /// The slowest execution.
+    pub max_us: u64,
 }
 
 /// Most buckets one [`Logs::timeseries`] call may produce.
@@ -453,7 +458,7 @@ impl Logs {
         self.with_reader(move |conn| query(conn, &filter)).await
     }
 
-    /// Per-function calls, errors and p50/p95 duration for executions that started at or after `since`
+    /// Per-function calls, errors and p50/p95/max duration for executions that started at or after `since`
     /// (ms since the epoch), sorted by path; without background work with `exclude_background`
     /// ([`LogFilter::exclude_background`]).
     pub async fn stats(&self, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
@@ -614,6 +619,9 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     if let Some(since) = f.since {
         arg(&mut sql, " AND timestamp >= ?", since.into());
     }
+    if let Some(min) = f.min_duration_us {
+        arg(&mut sql, " AND duration_us >= ?", (min.min(i64::MAX as u64) as i64).into());
+    }
     if let Some(before) = f.before_id {
         arg(&mut sql, " AND id < ?", before.into());
     }
@@ -662,6 +670,7 @@ fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Res
                 server_errors: 0,
                 p50_us: 0,
                 p95_us: 0,
+                max_us: 0,
             };
             out.push((s, Vec::new()));
         }
@@ -681,6 +690,7 @@ fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Res
             s.errors = s.user_errors + s.server_errors;
             s.p50_us = percentile(&d, 0.50);
             s.p95_us = percentile(&d, 0.95);
+            s.max_us = d.last().copied().unwrap_or(0);
             s
         })
         .collect())
@@ -842,13 +852,17 @@ mod tests {
         assert_eq!(page.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2]);
         let recent = logs.query(LogFilter { since: Some(now - 1000), ..Default::default() }).await.unwrap();
         assert_eq!(recent.len(), 3);
+        let slow = LogFilter { min_duration_us: Some(20), ..Default::default() };
+        assert_eq!(logs.query(slow.clone()).await.unwrap().iter().map(|e| e.id).collect::<Vec<_>>(), vec![3, 2]);
+        assert!(slow.matches(&entry("todos:list", FunctionKind::Query, LogOutcome::Success, 20, now)));
+        assert!(!slow.matches(&entry("todos:list", FunctionKind::Query, LogOutcome::Success, 19, now)));
 
         let stats = logs.stats(now - 1000, false).await.unwrap();
         assert_eq!(stats.len(), 2);
         let add = &stats[0];
         assert_eq!(
-            (add.path.as_str(), add.kind, add.calls, add.errors, add.user_errors, add.p50_us, add.p95_us),
-            ("todos:add", FunctionKind::Mutation, 2, 1, 1, 20, 30)
+            (add.path.as_str(), add.kind, add.calls, add.errors, add.user_errors, add.p50_us, add.p95_us, add.max_us),
+            ("todos:add", FunctionKind::Mutation, 2, 1, 1, 20, 30, 30)
         );
 
         // Retention: the 8-day-old row goes by age, then the oldest rows beyond max_rows = 5.
@@ -867,8 +881,14 @@ mod tests {
         assert_eq!(json["kind"], "query");
         assert_eq!(json["outcome"], "success");
         assert!(json.get("durationUs").is_some() && json.get("logLines").is_some());
-        let filter: LogFilter = serde_json::from_value(serde_json::json!({ "kind": "mutation", "limit": 5 })).unwrap();
-        assert_eq!((filter.kind, filter.limit), (Some(FunctionKind::Mutation), Some(5)));
+        let filter: LogFilter =
+            serde_json::from_value(serde_json::json!({ "kind": "mutation", "limit": 5, "minDurationUs": 1000 }))
+                .unwrap();
+        assert_eq!(
+            (filter.kind, filter.limit, filter.min_duration_us),
+            (Some(FunctionKind::Mutation), Some(5), Some(1000))
+        );
+        assert!(serde_json::to_value(&stats[0]).unwrap().get("maxUs").is_some());
     }
 
     #[tokio::test]

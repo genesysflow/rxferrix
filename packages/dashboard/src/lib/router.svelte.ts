@@ -1,7 +1,7 @@
 /**
  * A tiny path router under `/_/` (the server answers every `/_/…` path with index.html).
  *
- * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs[?fn=<path>]`, `/_/users`,
+ * Routes: `/_/` overview, `/_/data[/<table>][?doc=<id>]`, `/_/functions[?fn=<path>]`, `/_/logs[?fn=<path>&minUs=<µs>]`, `/_/users`,
  * `/_/files[?file=<id>]`, `/_/scheduler[?state=<state>]`, `/_/workflows[?state=<state>&id=<id>]`, `/_/migrations`, `/_/backups`, `/_/analytics`, `/_/environment`, `/_/settings`,
  * `/_/audit[?action=…&table=…&target=…&admin=…]`, `/_/account`, `/_/setup#token=…`.
  */

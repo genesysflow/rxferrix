@@ -737,6 +737,8 @@ export interface LogFilter {
   kind?: LogEntry["kind"] | "";
   outcome?: LogEntry["outcome"] | "";
   identity?: string;
+  /** Only executions that took at least this many µs. */
+  minDurationUs?: number;
   excludeSystem?: boolean;
   /** Leave out scheduled jobs (crons and workflow steps included) and the functions they call. */
   excludeBackground?: boolean;
@@ -753,6 +755,8 @@ export interface FunctionStats {
   serverErrors: number;
   p50Us: number;
   p95Us: number;
+  /** The slowest call. */
+  maxUs: number;
 }
 
 /** A column of an analytics query's result. */

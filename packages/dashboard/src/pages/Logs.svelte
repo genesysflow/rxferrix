@@ -1,17 +1,35 @@
 <script lang="ts">
   import type { LogFilter } from "../lib/api.js";
   import { background } from "../lib/background.svelte.js";
+  import { formatDuration } from "../lib/format.js";
   import { href, link, router, type Route } from "../lib/router.svelte.js";
   import BackgroundToggle from "../components/BackgroundToggle.svelte";
   import LogTail from "../components/LogTail.svelte";
 
-  /** `?fn=<path>`: only that function (the function view links here). */
+  /**
+   * `?fn=<path>`: only that function (the function view links here). `?minUs=<µs>`: only calls at least that slow (the
+   * Overview's slowest functions link here).
+   */
   let { route }: { route: Route } = $props();
   const fn = $derived(route.params.get("fn"));
+  const minParam = $derived(route.params.get("minUs") ?? "");
+
+  /** The "slower than" choices, in µs. */
+  const THRESHOLDS: [string, string][] = [
+    ["10000", "10ms"],
+    ["100000", "100ms"],
+    ["500000", "500ms"],
+    ["1000000", "1s"],
+    ["5000000", "5s"],
+  ];
 
   let pathPrefix = $state("");
   let kind = $state<LogFilter["kind"]>("");
   let outcome = $state<LogFilter["outcome"]>("");
+  let minUs = $state("");
+  $effect.pre(() => {
+    minUs = /^\d+$/.test(minParam) ? minParam : "";
+  });
   let includeSystem = $state(false);
   let paused = $state(false);
   let status = $state<"connecting" | "live" | "error">("connecting");
@@ -24,6 +42,7 @@
     pathPrefix: fn ? undefined : pathPrefix.trim() || undefined,
     kind,
     outcome,
+    minDurationUs: minUs ? Number(minUs) : undefined,
     excludeSystem: !includeSystem && !fn,
     excludeBackground: background.hidden,
   });
@@ -63,6 +82,11 @@
     </select>
     <select bind:value={outcome} aria-label="Outcome">
       <option value="">All outcomes</option><option value="success">success</option><option value="userError">user error</option><option value="serverError">server error</option>
+    </select>
+    <select bind:value={minUs} aria-label="Duration">
+      <option value="">Any duration</option>
+      {#each THRESHOLDS as [us, label] (us)}<option value={us}>≥ {label}</option>{/each}
+      {#if minUs && !THRESHOLDS.some(([us]) => us === minUs)}<option value={minUs}>≥ {formatDuration(Number(minUs))}</option>{/if}
     </select>
     {#if !fn}<label class="inline"><input type="checkbox" bind:checked={includeSystem} /> include system functions</label>{/if}
     <BackgroundToggle />

@@ -730,27 +730,7 @@ impl State {
             }
         }
         let new = self.graph.len() - first_new;
-        let graph = &self.graph;
-        if new < 64 {
-            for n in first_new..graph.len() {
-                graph.link(n as u32);
-            }
-        } else {
-            let next = AtomicUsize::new(first_new);
-            std::thread::scope(|s| {
-                for _ in 0..threads().min(new) {
-                    s.spawn(|| {
-                        loop {
-                            let n = next.fetch_add(1, Ordering::Relaxed);
-                            if n >= graph.len() {
-                                break;
-                            }
-                            graph.link(n as u32);
-                        }
-                    });
-                }
-            });
-        }
+        self.graph.link_all(first_new, if new < 64 { 1 } else { threads() });
     }
 
     fn matches(&self, node: u32, branches: &[Vec<(usize, String)>]) -> bool {

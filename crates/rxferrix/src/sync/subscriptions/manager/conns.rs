@@ -36,13 +36,36 @@ impl Manager {
     /// If every query of `c` has a version valid at one of `candidates` (tried in order; never older than what `c` was
     /// last sent), put its update at that ts in its mailbox, and resume the commands it deferred. Returns whether it
     /// did.
+    ///
+    /// Called for every subscriber of each query that finishes, so a connection whose queries finish one by one is
+    /// checked once per query. Each check starts at the subscription that failed the previous one ([`Conn::blocker`])
+    /// and goes round from there: until it is valid, a check costs one lookup, and the subscriptions it passes once it
+    /// is aren't passed again before the end (finished queries stay valid at the frontier until the next generation).
+    /// Checking from the first subscription every time instead cost a connection with k queries invalidated together
+    /// k²/2 lookups per generation, on the manager's one task.
     pub(super) fn try_flush(&mut self, c: ConnId, candidates: &[u64]) -> bool {
-        let Some(conn) = self.conns.get(&c) else { return false };
-        let valid_at = |ts: u64| {
-            ts >= conn.sent.2
-                && conn.subs.values().all(|sub| self.queries.get(&sub.shared).is_some_and(|q| q.at(ts).is_some()))
-        };
-        let Some(ts) = candidates.iter().copied().find(|ts| valid_at(*ts)) else { return false };
+        let Some(conn) = self.conns.get_mut(&c) else { return false };
+        let queries = &self.queries;
+        let mut valid = None;
+        for &ts in candidates {
+            if ts < conn.sent.2 {
+                continue;
+            }
+            let from = conn.blocker;
+            let blocked = conn
+                .subs
+                .range(from..)
+                .chain(conn.subs.range(..from))
+                .find(|(_, sub)| !queries.get(&sub.shared).is_some_and(|q| q.at(ts).is_some()));
+            match blocked {
+                Some((&qid, _)) => conn.blocker = qid,
+                None => {
+                    valid = Some(ts);
+                    break;
+                }
+            }
+        }
+        let Some(ts) = valid else { return false };
         self.flush(c, ts);
         let Some(conn) = self.conns.get_mut(&c) else { return true }; // dropped: too slow
         conn.updates += 1;

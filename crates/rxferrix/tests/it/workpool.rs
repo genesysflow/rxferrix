@@ -186,7 +186,7 @@ fn options() -> AppOptions {
         .workpool(Workpool::new("one").max_parallelism(1))
         .workpool(Workpool::new("other"))
         .workpool(Workpool::new("retrying").retries(3).backoff(Duration::from_millis(250), 3.0))
-        .workpool(Workpool::new("jittered").retries(1).backoff(Duration::from_secs(10), 1.0).jitter(1.0));
+        .workpool(Workpool::new("jittered").retries(1).backoff(Duration::from_secs(10), 1.0).jitter(0.9));
     AppOptions { scheduler, ..Default::default() }
 }
 
@@ -315,16 +315,21 @@ async fn jitter_spreads_retries_over_the_backoff() {
     let _serial = SERIAL.lock().await;
     reset();
     let t = TestApp::with_options(options()).await.unwrap();
-    // Pool `jittered`: a 10s backoff with full jitter, so each retry waits anywhere from 0 to 10s.
+    // Pool `jittered`: a 10s backoff with 0.9 jitter, so each retry waits anywhere from 1 to 10s. (Not full jitter: a
+    // retry due at once would run again within `run_due_jobs`, and the counts below would be off.)
     let ids = t.mutation::<enqueue_jittered>((None, 20)).await.unwrap();
     assert_eq!(t.run_due_jobs().await.unwrap(), 20);
     let now = t.app().db().clock().now_ms();
     let mut delays = vec![];
     for id in &ids {
         let j = job(&t, *id).await;
-        assert_eq!((j.state, j.jitter), (JobState::Pending, Some(1.0)), "retrying, with the pool's jitter");
+        assert_eq!((j.state, j.jitter), (JobState::Pending, Some(0.9)), "retrying, with the pool's jitter");
         // The delay was added to a time between the start of the run and now.
-        assert!(j.run_at - now <= 10_000.0 && j.run_at >= j.started_at.unwrap(), "{} within the backoff", j.run_at);
+        assert!(
+            j.run_at - now <= 10_000.0 && j.run_at - j.started_at.unwrap() >= 1000.0,
+            "{} within the backoff",
+            j.run_at
+        );
         delays.push(j.run_at - now);
     }
     let (min, max) = delays.iter().fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(*d), hi.max(*d)));

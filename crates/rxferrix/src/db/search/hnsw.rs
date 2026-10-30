@@ -120,23 +120,28 @@ impl Graph {
                 });
             }
         });
-        self.reconnect();
+        self.reconnect((from as u32..n as u32).collect());
     }
 
-    /// Give every node without an incoming link on layer 0 (the entry point aside) one, so searches can reach it.
+    /// Give each of `nodes` that has no incoming link on layer 0 (the entry point aside) one, so searches can reach it.
     ///
     /// Concurrent inserts leave a few such nodes (3 in 288,000 with 64 threads on 4 cores in a debug build). Two close
     /// nodes inserted at the same time don't see each other and choose the same neighbours; when one of those lists
     /// overflows, the heuristic keeps the first node and prunes the second, which is closer to the first than to the
     /// neighbour. The heuristic counts on the first node linking to the second, but it doesn't: it chose its own links
     /// before the second one was reachable. A sequential insert would have found the first node and linked to it.
-    fn reconnect(&self) {
+    ///
+    /// Only the nodes just linked can be left so (and those a forced link drops, checked again in the next round). The
+    /// check is local ([`Graph::linked_back`]): a batch costs in proportion to its size, not to the graph's.
+    fn reconnect(&self, mut nodes: Vec<u32>) {
+        let ep = self.entry.lock().unwrap_or_else(|e| e.into_inner()).map(|(ep, _)| ep);
         // Forcing a link into a full list drops another one, which may leave that node without a way in: a few rounds.
         for _ in 0..4 {
-            let orphans = self.orphans();
+            let orphans: Vec<u32> = nodes.into_iter().filter(|&n| Some(n) != ep && !self.linked_back(n)).collect();
             if orphans.is_empty() {
                 return;
             }
+            nodes = Vec::new();
             let mut visited = self.take_visited();
             for node in orphans {
                 let q = self.vector(node).to_vec();
@@ -162,7 +167,7 @@ impl Graph {
                             da.total_cmp(&db)
                         })
                         .expect("a full list");
-                    list.swap_remove(farthest);
+                    nodes.push(list.swap_remove(farthest));
                 }
                 list.push(node);
             }
@@ -170,7 +175,18 @@ impl Graph {
         }
     }
 
-    /// The nodes no layer-0 list links to, except the entry point.
+    /// Does one of `node`'s layer-0 neighbours link back to it? Links are mostly mutual, so a node with an incoming
+    /// link almost always has one of those; when it has none, [`Graph::reconnect`] gives it one more, which is harmless.
+    /// A node nothing links to never has one.
+    fn linked_back(&self, node: u32) -> bool {
+        self.neighbours(node, 0).into_iter().any(|n| {
+            let links = self.links[n as usize].read().unwrap_or_else(|e| e.into_inner());
+            links[0].contains(&node)
+        })
+    }
+
+    /// The nodes no layer-0 list links to, except the entry point (a scan of the whole graph).
+    #[cfg(test)]
     fn orphans(&self) -> Vec<u32> {
         let mut linked = vec![false; self.len()];
         for links in &self.links {
@@ -799,7 +815,7 @@ mod tests {
         let ep = g.entry.lock().unwrap().unwrap().0;
         let expected: Vec<u32> = cut.into_iter().filter(|&n| n != ep).collect();
         assert_eq!(g.orphans(), expected);
-        g.reconnect();
+        g.reconnect((0..g.len() as u32).collect());
         assert!(g.orphans().is_empty());
         for n in cut {
             assert_eq!(g.search(&vectors[n as usize], 1, 64, |_| true)[0].1, n);

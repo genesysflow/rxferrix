@@ -24,7 +24,7 @@ An index lookup is a byte-range scan over `index_entries`. Recording those range
 
 Index keys use an order-preserving byte encoding. Values sort by type: missing, null, integers, floats, booleans, strings, bytes, arrays, and objects. Ordinary indexes append `_creationTime` and `_id`, giving stable creation ordering within equal declared fields.
 
-IDs contain a four-byte table number and twelve random bytes, encoded as 26 base32 characters. The table number lets the runtime reject a typed ID for the wrong table. It does not authorize access.
+IDs contain a four-byte table number, the document's creation time in milliseconds (six bytes) and six random bytes, encoded as 26 base32 characters. Documents and their index entries are stored in ID order, so IDs that grow with time put each insert next to the previous ones instead of at a random page of a large table. The table number lets the runtime reject a typed ID for the wrong table. An ID does not authorize access, and it reveals when its document was created (as `_creationTime` does). Stored files are the exception: their IDs keep twelve random bytes, because a file URL is an unguessable capability.
 
 SQLite WAL snapshots isolate readers; stored documents need only one current row. `aux.db` separately holds execution logs and finished-job history. File bytes live on disk or in object storage. Optional analytics uses a derived DuckDB copy.
 

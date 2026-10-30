@@ -14,7 +14,7 @@ Install [Rust](https://rustup.rs/) and [Bun](https://bun.sh/), then create a pro
 cargo install rxferrix-cli
 rxferrix new my-app
 cd my-app
-cargo run -- serve --dev
+rxferrix dev
 ```
 
 In a second terminal, from `my-app`:
@@ -101,7 +101,7 @@ export function TaskList() {
 
 Query failures go to a React error boundary; [status hooks](docs/guide/clients.md) let you render them inline.
 
-After changing Rust functions or types, stop and rerun `cargo run -- serve --dev`. The generated app's configuration writes the client API to `web/src/rxferrix` on startup. This is code generation on restart; the backend does not watch source files. Keep generated files generated.
+`rxferrix dev` runs `cargo run -- serve --dev` and rebuilds and restarts the backend when you save Rust code. The generated app's configuration writes the client API to `web/src/rxferrix` on every start, so changed functions and types reach the frontend too. Keep generated files generated.
 
 ## Choose the next guide
 

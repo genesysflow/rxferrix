@@ -2812,8 +2812,10 @@ isn't a wildcard (400 if none); with no names at all, the requested host. Every 
 certificates (`--https`) need the crate's `acme` feature (default); without it, `--https` fails at startup and
 certificate files still work.
 
-**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme` and `thumbnails` are on by default; `olap`, `chrono` and
-`uuid` are off.
+**Cargo features** of `rxferrix`: `dashboard`, `s3`, `acme`, `thumbnails` and `mimalloc` are on by default; `olap`,
+`chrono` and `uuid` are off. `mimalloc` makes mimalloc the global allocator of the binary (musl's own, which the
+release binaries would otherwise use, serializes allocations across threads); an app with its own
+`#[global_allocator]` turns it off.
 `default-features = false` (then `features = [...]` for the ones wanted) leaves out the dependencies of those that
 aren't needed, e.g. about 60 crates for a server behind a TLS-terminating proxy that makes no thumbnails.
 

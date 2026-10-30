@@ -20,6 +20,14 @@
 //! - [`ops`]: backups and restore, export and import, `/metrics`, the app's static frontend, TLS.
 //! - [`codegen`]: TypeScript bindings (`api.ts`, `dataModel.ts`) for the client packages.
 
+/// The global allocator of every binary that links rxferrix (feature `mimalloc`, on by default). The release binaries
+/// are built for musl, whose malloc serializes allocations from all threads behind one lock; a call allocates a lot
+/// (JSON values, identities, log entries, futures). Measured with `bench_network` (2026-10-30), HTTP calls ran
+/// 2.5-4.7x slower on musl's malloc than on glibc's.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // The macros emit `::rxferrix::...` paths; this lets rxferrix define its own system tables and functions with them.
 extern crate self as rxferrix;
 

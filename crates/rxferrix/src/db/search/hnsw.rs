@@ -125,8 +125,8 @@ impl Graph {
 
     /// Give every node without an incoming link on layer 0 (the entry point aside) one, so searches can reach it.
     ///
-    /// Concurrent inserts leave a few such nodes (about one in 20,000 with 64 threads on 4 cores). Two close nodes
-    /// inserted at the same time don't see each other and choose the same neighbours; when one of those lists
+    /// Concurrent inserts leave a few such nodes (3 in 288,000 with 64 threads on 4 cores in a debug build). Two close
+    /// nodes inserted at the same time don't see each other and choose the same neighbours; when one of those lists
     /// overflows, the heuristic keeps the first node and prunes the second, which is closer to the first than to the
     /// neighbour. The heuristic counts on the first node linking to the second, but it doesn't: it chose its own links
     /// before the second one was reachable. A sequential insert would have found the first node and linked to it.
@@ -771,7 +771,7 @@ mod tests {
 
     /// Regression: oversubscribed parallel builds (many more threads than cores, so links are preempted midway) used
     /// to leave nodes unreachable (about 0.2% of them here: a search for their own vector missed them), and still did
-    /// for about one in 20,000 under heavy contention. See `link` and `reconnect`.
+    /// for about one in 100,000 under heavy contention. See `link` and `reconnect`.
     #[test]
     fn oversubscribed_parallel_builds_reach_every_node() {
         let vectors = random_vectors(4800, 24, 11);

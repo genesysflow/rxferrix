@@ -368,9 +368,10 @@ pub struct SubscriptionStats {
     pub idle_queries: u64,
     /// Their estimated memory, bytes.
     pub idle_bytes: u64,
-    /// HTTP queries and `ctx.run_query` calls answered from the cache since start.
+    /// Subscriptions, HTTP queries and `ctx.run_query` calls answered from the cache (a current shared query, live
+    /// or idle) since start.
     pub cache_hits: u64,
-    /// ... and those that ran the query.
+    /// ... and those that waited for a run.
     pub cache_misses: u64,
     /// Idle queries dropped for the memory budget or their age (not for being invalidated), since start.
     pub cache_evictions: u64,

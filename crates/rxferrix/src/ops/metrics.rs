@@ -21,7 +21,7 @@
 //! | `rxferrix_subscription_rounds_total`, `rxferrix_query_reruns_total` | counter | invalidation rounds and query reruns |
 //! | `rxferrix_query_cache_entries`, `rxferrix_query_cache_bytes` | gauge | cached results nobody watches; their size |
 //! | `rxferrix_query_jobs` | gauge | query runs queued or running |
-//! | `rxferrix_query_cache_hits_total`, `_misses_total` | counter | HTTP queries and `ctx.run_query`: cached, or run |
+//! | `rxferrix_query_cache_hits_total`, `_misses_total` | counter | subscriptions, HTTP queries, `ctx.run_query`: cached, or not |
 //! | `rxferrix_query_cache_evictions_total` | counter | cached results dropped for the memory budget or their age |
 //! | `rxferrix_db_file_bytes` | gauge | `file` (`data.db`, `data.db-wal`, `aux.db`, `aux.db-wal`) |
 //! | `rxferrix_scheduler_queue_depth` | gauge | pending scheduled jobs (due or not) |
@@ -265,8 +265,16 @@ pub async fn render(app: &App) -> crate::Result<String> {
     header(&mut out, "rxferrix_query_reruns_total", "counter", "Query reruns caused by commits.");
     let _ = writeln!(out, "rxferrix_query_reruns_total {}", stats.reruns);
     let counters = [
-        ("rxferrix_query_cache_hits_total", "HTTP queries and ctx.run_query calls served cached.", stats.cache_hits),
-        ("rxferrix_query_cache_misses_total", "HTTP queries and ctx.run_query calls that ran.", stats.cache_misses),
+        (
+            "rxferrix_query_cache_hits_total",
+            "Subscriptions, HTTP queries and ctx.run_query calls served cached.",
+            stats.cache_hits,
+        ),
+        (
+            "rxferrix_query_cache_misses_total",
+            "Subscriptions, HTTP queries and ctx.run_query calls not served cached.",
+            stats.cache_misses,
+        ),
         ("rxferrix_query_cache_evictions_total", "Cached results dropped for memory or age.", stats.cache_evictions),
     ];
     for (name, help, v) in counters {

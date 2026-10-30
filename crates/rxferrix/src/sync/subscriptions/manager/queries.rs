@@ -14,6 +14,8 @@ impl Manager {
         let path: Arc<str> = path.into();
         let args_key: Arc<str> = canonical_args(&args).into();
         let id = self.find_or_create(&path, &args_key, args, &identity);
+        // A hit when it is answered without a run: from a current query, live or idle.
+        self.metrics.record_cache_lookup(self.queries[&id].is_current());
         self.wake(id);
         self.queries.get_mut(&id).expect("just found").subscribers.insert((c, qid));
         let conn = self.conns.get_mut(&c).expect("checked");

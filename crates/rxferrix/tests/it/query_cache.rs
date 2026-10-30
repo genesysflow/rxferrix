@@ -111,6 +111,26 @@ async fn a_query_nobody_watches_serves_the_next_subscriber_http_and_run_query() 
 }
 
 #[tokio::test]
+async fn subscriptions_count_as_cache_lookups() {
+    let t = TestApp::new().await.unwrap();
+    let app = t.app().clone();
+    let list = todos::list::path();
+    let mut c = Client::new(&app).await;
+    c.subscribe(1, &list, list_args()).await.unwrap();
+    let s = app.subscription_stats();
+    assert_eq!((s.cache_hits, s.cache_misses), (0, 1), "the first subscriber waits for a run");
+    // Another subscriber of the live query, then one of the idle query after both left.
+    c.subscribe(2, &list, list_args()).await.unwrap();
+    c.unsubscribe(1).await;
+    c.unsubscribe(2).await;
+    wait_stats(&app, "idle", |s| s.idle_queries == 1).await;
+    c.subscribe(3, &list, list_args()).await.unwrap();
+    let s = app.subscription_stats();
+    assert_eq!((s.cache_hits, s.cache_misses), (2, 1), "{s:?}");
+    assert_eq!(total_executions(&app, &list).await, 1);
+}
+
+#[tokio::test]
 async fn an_invalidated_idle_query_is_dropped_without_running() {
     let t = TestApp::new().await.unwrap();
     let app = t.app().clone();

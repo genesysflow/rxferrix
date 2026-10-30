@@ -527,7 +527,7 @@ fn parse_line(
     remap.value(&mut value);
     let Value::Object(mut fields) = value else { bail!("a document must be a JSON object") };
     let id = match fields.remove(ID_FIELD) {
-        None | Some(Value::Null) => DocId::new_random(table.number),
+        None | Some(Value::Null) => DocId::new_ordered(table.number, crate::db::wall_clock_ms()),
         Some(Value::String(s)) => {
             let id = DocId::decode(&s).map_err(|e| anyhow::anyhow!("`_id`: {e}"))?;
             if id.table_number() != table.number {

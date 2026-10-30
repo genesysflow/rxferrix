@@ -1165,7 +1165,7 @@ impl WriteState {
         fields: Map<String, Value>,
         validate: impl FnOnce(&Map<String, Value>) -> anyhow::Result<()>,
     ) -> anyhow::Result<DocId> {
-        self.insert_with_id(table, DocId::new_random(table.number), fields, validate)
+        self.insert_with_id(table, DocId::new_ordered(table.number, self.now), fields, validate)
     }
 
     /// [`WriteState::insert`] with an id chosen by the caller (e.g. a stored file whose id names its blob, which is

@@ -112,7 +112,9 @@ impl UserError { pub fn of(err: &Error) -> Option<&UserError>; }  // the UserErr
 // option.or_user(code, message)?         = option.ok_or_else(|| UserError::new(code, message).into())?  (OrUserError)
 
 /// Typed document id. String form: 26-char lowercase Crockford base32 of 16 bytes:
-/// [table_number: u32 big-endian][12 random bytes]. Serializes as a JSON string.
+/// [table_number: u32 big-endian][creation time: 48-bit ms since the Unix epoch, big-endian][6 random bytes], so new
+/// ids grow with time (ids made before 0.10 have 12 random bytes; both forms are valid). Stored files' ids (`_storage`)
+/// keep 12 random bytes: their URLs are capabilities. Serializes as a JSON string.
 pub struct Id<T> { /* raw: [u8; 16], PhantomData<fn() -> T> */ }
 // Copy, Clone, Eq, Ord, Hash, Debug, Display (the string form), FromStr (validates format, not table),
 // Serialize/Deserialize as string, ts_rs::TS => `Id<"<table name>">` (requires T: Table).

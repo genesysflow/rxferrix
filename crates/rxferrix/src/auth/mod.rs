@@ -30,6 +30,7 @@ pub mod rate_limit;
 pub mod revocation;
 pub(crate) mod secretbox;
 pub mod service;
+pub(crate) mod session_cache;
 pub(crate) mod store;
 pub mod tables;
 pub mod tokens;

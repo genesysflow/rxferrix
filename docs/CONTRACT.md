@@ -752,6 +752,12 @@ fires the watches of deleted ones. So every way a session ends is covered (sign-
 deletions. The sync worker then sends `AuthError("session has ended")` and closes the socket (docs/PROTOCOL.md,
 guarantee 10).
 
+**Session checks of native access tokens** (`auth::session_cache`) are served from a cache of sessions recently
+found active, instead of a read of `_sessions` per call. Before each check the cache applies the write log since its
+last one, dropping every session a commit wrote, and the writer appends a commit before its mutation returns. So a
+session that has ended (any way, as above) is refused by the next call, as with a read; expiry and the session's owner
+are checked on every hit; a write log trimmed past the cache's position drops the whole cache.
+
 **Runtime settings and precedence** (`rxferrix::settings`, §4.1.4). Administrators can configure OAuth providers, SMTP,
 the redirect allowlist, sign-ups, token lifetimes and CORS origins at runtime; they are stored in `_settings` (secrets
 encrypted) and apply without a restart. What `AuthConfig` sets (in code, on the command line or in the environment)

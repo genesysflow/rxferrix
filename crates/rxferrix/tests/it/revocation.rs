@@ -217,3 +217,81 @@ async fn revoked_between_check_and_watch_is_not_missed() {
         assert!(rest.iter().any(|m| m["type"] == "AuthError"), "socket kept a signed-out session: {rest:?}");
     }
 }
+
+/// HTTP calls check their session from a cache (`auth::session_cache`): a call right after the session ends, however
+/// it ends, must be refused, even though the calls before it were served from the cache.
+#[tokio::test]
+async fn http_calls_are_refused_as_soon_as_their_session_ends() {
+    let (t, http, _) = setup().await;
+    let app = t.app().clone();
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let admin = token(&http.admin_sign_in("admin@example.com", "admin password").await, "accessToken");
+    let user = http.sign_up("fay@example.com", "correct horse").await;
+    let user_id = token(&user, "userId");
+    let notes = app::my_notes::path();
+    // Serve the token from the cache, then end its session and call again at once.
+    let warm = |access: String| {
+        let http = &http;
+        let notes = notes.clone();
+        async move {
+            for _ in 0..3 {
+                assert_eq!(http.call("query", &notes, json!({}), Some(&access)).await.0, 200);
+            }
+            access
+        }
+    };
+    let refused = |access: String| {
+        let http = &http;
+        let notes = notes.clone();
+        async move {
+            let (s, b) = http.call("query", &notes, json!({}), Some(&access)).await;
+            assert_eq!(s, 401, "{b}");
+            assert!(b["errorMessage"].as_str().unwrap().contains("session"), "{b}");
+        }
+    };
+
+    // Sign-out.
+    let access = warm(token(&user, "accessToken")).await;
+    assert_eq!(
+        http.post("/api/auth/signout", None, json!({ "refreshToken": token(&user, "refreshToken") })).await.0,
+        200
+    );
+    refused(access).await;
+
+    // A refresh rewrites the session: the access tokens of before still work.
+    let s = http.sign_in("fay@example.com", "correct horse").await;
+    let access = warm(token(&s, "accessToken")).await;
+    let (status, _) = http.post("/api/auth/refresh", None, json!({ "refreshToken": token(&s, "refreshToken") })).await;
+    assert_eq!(status, 200);
+    let access = warm(access).await;
+
+    // revoke_session from the dashboard.
+    let sessions = http.ok("query", "_system/dashboard:user_sessions", json!({ "user": user_id }), &admin).await;
+    for session in sessions.as_array().unwrap() {
+        http.ok("mutation", "_system/dashboard:revoke_session", json!({ "session": session["_id"] }), &admin).await;
+    }
+    refused(access).await;
+
+    // delete_user.
+    let access = warm(token(&http.sign_in("fay@example.com", "correct horse").await, "accessToken")).await;
+    http.ok("mutation", "_system/dashboard:delete_user", json!({ "user": user_id }), &admin).await;
+    refused(access).await;
+}
+
+/// A cached session still expires on time.
+#[tokio::test]
+async fn http_calls_are_refused_once_their_session_expires() {
+    let auth = AuthConfig::password()
+        .rate_limits(None)
+        .access_token_ttl(Duration::from_secs(60))
+        .session_ttl(Duration::from_millis(800));
+    let t = TestApp::with_auth(auth).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+    let access = token(&http.sign_up("gil@example.com", "correct horse").await, "accessToken");
+    for _ in 0..3 {
+        assert_eq!(http.call("query", &app::my_notes::path(), json!({}), Some(&access)).await.0, 200);
+    }
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let (s, b) = http.call("query", &app::my_notes::path(), json!({}), Some(&access)).await;
+    assert_eq!(s, 401, "{b}");
+}

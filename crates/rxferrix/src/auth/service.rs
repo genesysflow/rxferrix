@@ -18,6 +18,7 @@ use super::oauth::OAuthFlows;
 use super::password;
 use super::rate_limit::{RateLimiter, Rule};
 use super::revocation::{Revocations, SessionWatch};
+use super::session_cache::SessionCache;
 use super::store::{self, ClientInfo, Principal, RefreshOutcome};
 use super::tables::{Admin, Session, User};
 use super::tokens::{AccessClaims, Keys, TokenError, ct_eq, random_token};
@@ -247,6 +248,8 @@ pub struct AuthService {
     pub(crate) jwt: JwtVerifier,
     setup_token_hash: Mutex<Option<String>>,
     revocations: Arc<Revocations>,
+    /// Sessions recently found active, so most calls with an access token skip reading theirs.
+    sessions: SessionCache,
 }
 
 /// The longest an impersonation session may last.
@@ -297,6 +300,7 @@ impl AuthService {
             jwt,
             setup_token_hash: Mutex::new(None),
             revocations: Arc::default(),
+            sessions: SessionCache::default(),
         })
     }
 
@@ -481,11 +485,27 @@ impl AuthService {
             (Principal::User(user), Identity::user(user, Some(session)))
         };
         let watch = watch.then(|| self.revocations.watch(app, session.to_string()));
-        match store::session_active(app, session, principal, now_ms()).await {
-            Ok(true) => {
-                Ok((Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) }, watch))
+        let authenticated = Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.exp) };
+        let log = app.db().write_log();
+        let by_id = match app.db().catalog().table(<Session as crate::Table>::NAME) {
+            Ok(table) => table.by_id().id,
+            Err(e) => {
+                tracing::error!("auth: session lookup failed: {e:#}");
+                return Err(TokenError::SessionEnded);
             }
-            Ok(false) => Err(TokenError::SessionEnded),
+        };
+        let now = now_ms();
+        if self.sessions.is_active(log, by_id, session.as_bytes(), principal, now) {
+            return Ok((authenticated, watch));
+        }
+        // Read before the session: the snapshot has every commit up to it (see `session_cache`).
+        let read_from = log.latest();
+        match store::session_active(app, session, principal, now).await {
+            Ok(Some(expires_at)) => {
+                self.sessions.insert(log, by_id, *session.as_bytes(), principal, expires_at, read_from);
+                Ok((authenticated, watch))
+            }
+            Ok(None) => Err(TokenError::SessionEnded),
             Err(e) => {
                 tracing::error!("auth: session lookup failed: {e:#}");
                 Err(TokenError::SessionEnded)

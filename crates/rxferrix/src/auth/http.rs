@@ -387,7 +387,7 @@ async fn magic_request(State(app): State<App>, caller: Caller, body: Bytes) -> R
     let result = async {
         app.auth().limit(Limit::Email, &caller.rate_limit_key())?;
         let b: EmailBody = parse(&body)?;
-        app.auth().request_magic_link(&app, &b.email, b.redirect_to.as_deref()).await?;
+        app.auth().request_magic_link_from(&app, &b.email, b.redirect_to.as_deref(), caller.client()).await?;
         Ok(json!({}))
     }
     .await;

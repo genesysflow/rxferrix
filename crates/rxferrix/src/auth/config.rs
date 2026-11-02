@@ -318,8 +318,10 @@ impl AuthConfig {
     ///
     /// Keep it a check: the account can still fail to be created after it allowed the sign-up (the address was taken
     /// meanwhile), so record what the sign-up used (accept the invite) from the app once the user is signed in. For a
-    /// magic link it runs when the link or code is used, not when it is requested (the address is proven then, and a
-    /// refusal reveals nothing to someone who doesn't own the inbox). The response waits for it.
+    /// magic link it runs twice: when the link is requested, so no email goes to an address it would refuse (the
+    /// request answers the same either way), and again when the link or code is used, which decides (the address is
+    /// proven then, and the answer may have changed). Both see the sign-up the link makes: a proven address. The
+    /// response waits for it.
     pub fn before_sign_up<F, Fut>(mut self, hook: F) -> Self
     where
         F: Fn(crate::App, SignUpAttempt) -> Fut + Send + Sync + 'static,

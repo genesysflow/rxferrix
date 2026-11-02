@@ -665,16 +665,17 @@ by OAuth) and only when `signups` allows sign-ups: first the allowlists, then `b
 (`allowed_emails`, `allowed_domains`: exact, case-insensitive; a domain list doesn't include subdomains) refuse with
 403 `signup_not_allowed` an address that isn't listed, or isn't proven (an OAuth address the provider didn't verify,
 or none); while one is set, password accounts must verify their address before signing in (`verification_required`:
-`require_email_verification` or a list) and sign-up answers `verificationRequired`, and a magic link is only sent to
-an address without an account if it is listed. The hook gets `SignUpAttempt { email: Option<String>, email_verified,
+`require_email_verification` or a list) and sign-up answers `verificationRequired`. The hook gets `SignUpAttempt { email: Option<String>, email_verified,
 method: SignUpMethod::{Password, MagicLink, OAuth(provider)}, redirect_to: Option<String>, name, client }`: `email` is
 the address the account gets (normalized; for OAuth only a verified one), `redirect_to` the sign-up's app URL (the
 client's `redirectTo` to `signUp` / `requestMagicLink` or the OAuth start's `redirect_to`, which passed the redirect
 allowlist, else the default target). A `UserError` from it refuses the sign-up with status 403 and its code and
 message (for OAuth: `rxferrix_error` / `rxferrix_error_description` in the redirect's fragment); another error is a
 500 `server_error`. Nothing is created when it refuses. It runs: for a password sign-up after the address was found
-free (a taken one answers `email_in_use` without it); for a magic link when the link or code is used (the code row
-keeps `redirectTo`), not when it is requested; for OAuth when the callback finds neither a linked account nor a user
+free (a taken one answers `email_in_use` without it); for a magic link to an address without an account twice:
+when it is requested, where a refusal sends no email and the request answers 200 as always (another error is still a
+500), and when the link or code is used, which decides (the code row keeps `redirectTo`); both see `email_verified:
+true`, the sign-up the link makes; for OAuth when the callback finds neither a linked account nor a user
 with the address (`store::oauth_would_create`). If an account appears or disappears between that look and the write,
 the write neither creates an account nor runs the check again (`signups_disabled`). Sign-ins to existing accounts,
 `sign_in_as`, `TestApp::create_user` and external JWT users never run it. `AuthService::sign_up(app, email, password,

@@ -1,7 +1,7 @@
 //! Gating access to an app: the function guard (`AppOptions::guard`), the sign-up check (`AuthConfig::before_sign_up`,
 //! `allowed_emails` / `allowed_domains`), and deleting users or ending sessions from app code (`ctx.users`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -306,7 +306,7 @@ async fn before_sign_up_gates_password_sign_ups() {
 }
 
 #[tokio::test]
-async fn before_sign_up_gates_magic_link_sign_ups_when_the_link_is_used() {
+async fn before_sign_up_gates_magic_link_sign_ups_when_requested_and_used() {
     let mailer = MemoryMailer::new();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let t = TestApp::with_auth(invite_only(mail_config(&mailer), seen.clone())).await.unwrap();
@@ -317,31 +317,67 @@ async fn before_sign_up_gates_magic_link_sign_ups_when_the_link_is_used() {
         async move { http.post("/api/auth/magic/request", None, body).await }
     };
 
-    // Requesting reveals nothing; using the link runs the hook, which refuses, and no account is made.
-    assert_eq!(request("dee@example.com", "http://app.test/").await.0, 200);
-    let link = email_token(&wait_for_email(&mailer, "dee@example.com", 1).await.body, "rxferrix_magic_token");
-    let (s, b) = http.post("/api/auth/magic/verify", None, json!({ "token": link })).await;
-    assert_eq!((s, code_of(&b)), (403, "invite_required"), "{b}");
-    assert!(t.create_user("dee@example.com", None).await.is_ok(), "no account was created");
-    let dee_calls = seen.lock().unwrap().len();
+    // Requesting without an invite answers as always, but the hook refuses and no email goes out.
+    let (s, b) = request("dee@example.com", "http://app.test/").await;
+    assert_eq!(s, 200, "{b}");
+    {
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        // It sees the sign-up the link would make.
+        assert_eq!((last.email.as_deref(), last.email_verified), (Some("dee@example.com"), true));
+        assert_eq!(last.method, SignUpMethod::MagicLink);
+        assert_eq!(last.redirect_to.as_deref(), Some("http://app.test/"));
+    }
 
-    // With the invite in the app URL, the link signs the new user up; the hook saw a proven address.
+    // With the invite in the app URL, the link goes out and signs the new user up; the hook is asked again.
+    let calls = seen.lock().unwrap().len();
     assert_eq!(request("eve@example.com", "http://app.test/?invite=yes").await.0, 200);
     let link = email_token(&wait_for_email(&mailer, "eve@example.com", 1).await.body, "rxferrix_magic_token");
     let (s, b) = http.post("/api/auth/magic/verify", None, json!({ "token": link })).await;
     assert_eq!(s, 200, "{b}");
     {
         let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), calls + 2, "asked when requested and when used");
         let last = seen.last().unwrap();
         assert_eq!((last.email.as_deref(), last.email_verified), (Some("eve@example.com"), true));
         assert_eq!(last.method, SignUpMethod::MagicLink);
         assert_eq!(last.redirect_to.as_deref(), Some("http://app.test/?invite=yes"));
     }
-    // An existing account signs in by magic link without the hook (Dee's account now exists too).
+    assert!(mailer.emails().iter().all(|e| e.to != "dee@example.com"), "Dee got no email");
+
+    // An existing account signs in by magic link without the hook.
+    t.create_user("dee@example.com", None).await.unwrap();
+    let calls = seen.lock().unwrap().len();
     assert_eq!(request("dee@example.com", "http://app.test/").await.0, 200);
-    let link = email_token(&wait_for_email(&mailer, "dee@example.com", 2).await.body, "rxferrix_magic_token");
+    let link = email_token(&wait_for_email(&mailer, "dee@example.com", 1).await.body, "rxferrix_magic_token");
     assert_eq!(http.post("/api/auth/magic/verify", None, json!({ "token": link })).await.0, 200);
-    assert_eq!(seen.lock().unwrap().len(), dee_calls + 1, "only Eve's sign-up asked the hook");
+    assert_eq!(seen.lock().unwrap().len(), calls, "signing in didn't ask the hook");
+}
+
+/// The hook decides when the link is used: an invite withdrawn after the email went out refuses the sign-up.
+#[tokio::test]
+async fn a_magic_link_sign_up_is_checked_again_when_the_link_is_used() {
+    let mailer = MemoryMailer::new();
+    let open = Arc::new(AtomicBool::new(true));
+    let gate = open.clone();
+    let auth = mail_config(&mailer).before_sign_up(move |_app, _attempt| {
+        let open = gate.load(Ordering::SeqCst);
+        async move {
+            if !open {
+                return Err(UserError::new("invite_required", "You need an invite to sign up").into());
+            }
+            Ok(())
+        }
+    });
+    let t = TestApp::with_auth(auth).await.unwrap();
+    let http = Http::new(t.serve().await.unwrap());
+
+    assert_eq!(http.post("/api/auth/magic/request", None, json!({ "email": "gus@example.com" })).await.0, 200);
+    let link = email_token(&wait_for_email(&mailer, "gus@example.com", 1).await.body, "rxferrix_magic_token");
+    open.store(false, Ordering::SeqCst);
+    let (s, b) = http.post("/api/auth/magic/verify", None, json!({ "token": link })).await;
+    assert_eq!((s, code_of(&b)), (403, "invite_required"), "{b}");
+    assert!(t.create_user("gus@example.com", None).await.is_ok(), "no account was created");
 }
 
 #[tokio::test]
@@ -383,7 +419,8 @@ async fn allowed_domains_and_emails_limit_sign_ups_to_proven_addresses() {
 async fn a_failing_hook_is_a_server_error_and_creates_nothing() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
-    let auth = AuthConfig::password().rate_limits(None).before_sign_up(move |_app, _attempt| {
+    let mailer = MemoryMailer::new();
+    let auth = mail_config(&mailer).before_sign_up(move |_app, _attempt| {
         counted.fetch_add(1, Ordering::SeqCst);
         async { Err(anyhow::anyhow!("the invites service is down")) }
     });
@@ -393,6 +430,11 @@ async fn a_failing_hook_is_a_server_error_and_creates_nothing() {
         http.post("/api/auth/signup", None, json!({ "email": "fay@example.com", "password": "correct horse" })).await;
     assert_eq!((s, code_of(&b)), (500, "server_error"), "{b}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // Requesting a magic link isn't answered as a refusal either.
+    let (s, b) = http.post("/api/auth/magic/request", None, json!({ "email": "fay@example.com" })).await;
+    assert_eq!((s, code_of(&b)), (500, "server_error"), "{b}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(mailer.emails().is_empty());
     assert!(t.create_user("fay@example.com", None).await.is_ok(), "no account was created");
 }
 

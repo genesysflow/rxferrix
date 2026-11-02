@@ -991,8 +991,19 @@ impl AuthService {
     }
 
     /// Send a magic link + one-time code. Always succeeds (no enumeration): unknown emails get one too when
-    /// sign-ups are allowed, and nothing otherwise.
+    /// sign-ups are allowed and the sign-up check would let the link create the account, and nothing otherwise.
     pub async fn request_magic_link(&self, app: &App, email: &str, redirect_to: Option<&str>) -> AuthResult<()> {
+        self.request_magic_link_from(app, email, redirect_to, ClientInfo::default()).await
+    }
+
+    /// [`Self::request_magic_link`] for a client, which the sign-up check sees.
+    pub(crate) async fn request_magic_link_from(
+        &self,
+        app: &App,
+        email: &str,
+        redirect_to: Option<&str>,
+        client: ClientInfo,
+    ) -> AuthResult<()> {
         if !self.config.magic_link {
             return Err(AuthFailure::not_found("Magic link sign-in"));
         }
@@ -1000,10 +1011,28 @@ impl AuthService {
         let redirect = self.resolve_redirect(redirect_to)?;
         let email = store::normalize_email(email)?;
         self.limit(Limit::Email, &email)?;
-        // No email for an address that couldn't sign up anyway (the same answer either way: no enumeration).
+        // No email for an address that couldn't sign up anyway (the same answer either way: no enumeration), so an
+        // invite-only app doesn't mail strangers. Using the link runs the check again: the answer may have changed.
         let signups = self.current().signups;
-        if (!signups || !self.config.allowlist_admits(Some(&email))) && self.new_email(app, &email).await? {
-            return Ok(());
+        if (!signups || self.sign_ups_checked()) && self.new_email(app, &email).await? {
+            if !signups {
+                return Ok(());
+            }
+            let attempt = SignUpAttempt {
+                email: Some(email.clone()),
+                // The sign-up the link would make, which only the owner of the inbox can use.
+                email_verified: true,
+                method: SignUpMethod::MagicLink,
+                redirect_to: redirect.clone(),
+                name: None,
+                client,
+            };
+            match self.check_sign_up(app, attempt).await {
+                Ok(()) => {}
+                // A refusal (a failing hook is a server error, and stays one).
+                Err(refused) if refused.status == 403 => return Ok(()),
+                Err(e) => return Err(e),
+            }
         }
         self.send_code(app, email, Purpose::SignIn, None, redirect).await
     }

@@ -82,9 +82,7 @@ impl WriteLog {
             inner.trim();
             inner.latest
         };
-        if latest > *self.latest_tx.borrow() {
-            self.latest_tx.send_replace(latest);
-        }
+        self.latest_tx.send_replace(latest);
     }
 
     /// Drop entries past the retention limits. Appending does this too; this is for when commits stop (the

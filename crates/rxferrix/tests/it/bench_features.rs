@@ -2,12 +2,16 @@
 //!
 //! ```sh
 //! cargo test --release -p rxferrix --test it bench_aggregates -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
 //!
 //! `bench_aggregates`: the same one-document inserts into a table without aggregates and into one with three (16
 //! writers, `BENCH_SECS` each), then reading one group's count and sum: an aggregate `get` against counting the
 //! group's documents through an index (`Query::count`) and summing them (`collect`), at 10k documents per group.
+//! `bench_search_patches`: 16 writers patch a counter of documents (`BENCH_DOCS`, 2000) that also carry a 2 KB text
+//! and a 1536-dimension embedding, in a table without search indexes and in one with a search index on the text and a
+//! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
 
 use std::time::{Duration, Instant};
@@ -50,6 +54,46 @@ pub mod fns {
         quantity: i64,
     ) -> Result<Id<Aggregated>> {
         ctx.db.insert(Aggregated { group, amount, quantity }).await
+    }
+
+    #[table(name = "bench_unindexed_posts")]
+    pub struct UnindexedPost {
+        pub channel: String,
+        pub body: String,
+        pub embedding: Vec<f32>,
+        pub views: i64,
+    }
+
+    #[table(name = "bench_indexed_posts")]
+    #[search_index(search_body, search = body, filter = [channel])]
+    #[vector_index(by_embedding, field = embedding, dims = 1536, filter = [channel])]
+    pub struct IndexedPost {
+        pub channel: String,
+        pub body: String,
+        pub embedding: Vec<f32>,
+        pub views: i64,
+    }
+
+    #[internal_mutation]
+    pub async fn insert_post(ctx: &MutationCtx, indexed: bool, n: i64) -> Result<String> {
+        let body = (0..300).map(|w| format!("word{} ", (n * 7 + w) % 997)).collect::<String>();
+        let embedding = (0..1536).map(|i| ((n * 31 + i) % 101) as f32 / 101.0).collect();
+        let channel = format!("c{}", n % 10);
+        Ok(if indexed {
+            ctx.db.insert(IndexedPost { channel, body, embedding, views: 0 }).await?.to_string()
+        } else {
+            ctx.db.insert(UnindexedPost { channel, body, embedding, views: 0 }).await?.to_string()
+        })
+    }
+
+    #[internal_mutation]
+    pub async fn view_post(ctx: &MutationCtx, indexed: bool, id: String, views: i64) -> Result<()> {
+        let patch = json!({ "views": views });
+        if indexed {
+            ctx.db.patch(id.parse::<Id<IndexedPost>>().map_err(|e| anyhow::anyhow!("{e}"))?, patch).await
+        } else {
+            ctx.db.patch(id.parse::<Id<UnindexedPost>>().map_err(|e| anyhow::anyhow!("{e}"))?, patch).await
+        }
     }
 
     /// Count and sum a group by reading its documents (what an app does without aggregates).
@@ -134,6 +178,45 @@ async fn bench_aggregates() {
             assert_eq!((count, sum), (10_000, (0..10_000).sum::<i64>() as f64));
         }
         println!("one group of 10k documents, {label:<23}: {:>9.1?} per query", started.elapsed() / runs);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_search_patches() {
+    let docs: i64 = std::env::var("BENCH_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
+    for (label, indexed) in [("no search indexes", false), ("search + vector index", true)] {
+        let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+        let mut ids = Vec::new();
+        for n in 0..docs {
+            ids.push(t.mutation::<fns::insert_post>((indexed, n)).await.unwrap());
+        }
+        let ids = std::sync::Arc::new(ids);
+        let stop = Instant::now() + Duration::from_secs_f64(secs());
+        let started = Instant::now();
+        let tasks: Vec<_> = (0..16)
+            .map(|w| {
+                let (app, ids) = (t.app().clone(), ids.clone());
+                tokio::spawn(async move {
+                    let mut lat = Vec::new();
+                    while Instant::now() < stop {
+                        let id = ids[(w * 997 + lat.len() * 31) % ids.len()].clone();
+                        let t0 = Instant::now();
+                        app.mutation::<fns::view_post>((indexed, id, lat.len() as i64)).await.unwrap();
+                        lat.push(t0.elapsed());
+                    }
+                    lat
+                })
+            })
+            .collect();
+        let mut lat = Vec::new();
+        for task in tasks {
+            lat.extend(task.await.unwrap());
+        }
+        lat.sort();
+        let p = |q: f64| lat[((lat.len() as f64 - 1.0) * q) as usize];
+        let rate = lat.len() as f64 / started.elapsed().as_secs_f64();
+        println!("patches, {label:<21}: {rate:>8.0}/s, p50 {:>9.1?}, p99 {:>9.1?}", p(0.5), p(0.99));
     }
 }
 

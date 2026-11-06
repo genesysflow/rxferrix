@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! cargo test --release -p rxferrix --test it bench_aggregates -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
 //!

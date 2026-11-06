@@ -221,10 +221,10 @@ async fn a_version_that_cant_serve_the_data_gives_up_and_the_old_server_carries_
     // The old server turns its journal off once it sees the new process's connection close, which can be just after
     // `take_over` returned.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while old.app.db().journal().is_enabled() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    while old.app.db().journal().is_enabled() {
+        assert!(std::time::Instant::now() < deadline, "the old server's journal is still on 5 s after the refusal");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(!old.app.db().journal().is_enabled());
     assert!(!dir.path().join(takeover::STAGING_DIR).exists());
     assert!(!old.stopped.is_finished());
     let new = take_over(dir.path(), old.addr, rxferrix::runtime::registered_tables()).await.unwrap();

@@ -108,9 +108,10 @@ impl QueryValue {
         QueryValue(Arc::new(QueryValueInner { id, value, json, diffs: std::sync::Mutex::new(Vec::new()) }))
     }
 
-    /// The diff ([`crate::sync::diff`]) that turns `base` into this result, as JSON text: computed by the first
-    /// connection that needs it and shared by every other client that has the same `base`. `None` if sending the value
-    /// is better (the diff isn't clearly smaller).
+    /// The diff ([`crate::sync::diff`]) that turns `base` into this result, as JSON text: computed once and shared by
+    /// every client that has the same `base`. The subscription manager's runner computes the one from the query's
+    /// previous result as soon as the result is in; any other is computed by the first connection that needs it. `None`
+    /// if sending the value is better (the diff isn't clearly smaller).
     pub fn diff_from(&self, base: &QueryValue) -> Option<Arc<str>> {
         let cell = {
             let mut diffs = self.0.diffs.lock().unwrap_or_else(|e| e.into_inner());

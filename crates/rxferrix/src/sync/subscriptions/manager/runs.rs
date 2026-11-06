@@ -15,11 +15,19 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
-    pub(super) fn new(run: QueryRun, dev: bool) -> Prepared {
+    /// `base`: the query's newest result before this run, if any.
+    pub(super) fn new(run: QueryRun, dev: bool, base: Option<&QueryValue>) -> Prepared {
         let timed_out = run.result.as_ref().is_err_and(|e| e.chain().any(|c| c.is::<crate::error::QueryTimeout>()));
         let log_lines = crate::log::for_client(dev, run.log_lines);
         // Serialized here, once: the hash and every subscriber's frame use this text.
         let outcome = run.result.map(QueryValue::new).map_err(|e| ClientError::from_anyhow(&e, dev));
+        // Subscribers almost all have `base` (clients accept diffs): computed here, the diff is ready when their
+        // frames are written, instead of the first socket writer computing it while the others wait for it.
+        if let (Ok(value), Some(base)) = (&outcome, base)
+            && value.json() != base.json()
+        {
+            value.diff_from(base);
+        }
         // Log lines don't count towards the hash: a rerun with the same result sends nothing.
         let hash = match &outcome {
             Ok(value) => hash_bytes(b"ok", value.json().as_bytes()),
@@ -297,7 +305,7 @@ impl Manager {
                         }
                     }
                 };
-                let Some((id, seq, (path, args, identity))) = next else { break };
+                let Some((id, seq, (path, args, identity, base))) = next else { break };
                 guard.job = Some((id, seq));
                 let Some(app) = app.upgrade() else { break };
                 let started = std::time::Instant::now();
@@ -305,7 +313,7 @@ impl Manager {
                 let elapsed = started.elapsed();
                 drop(app);
                 // Serialized, hashed and its read set sorted here, not on the manager's one task.
-                let run = Prepared::new(run, dev);
+                let run = Prepared::new(run, dev, base.as_ref());
                 guard.job = None;
                 if tx.send(Event::Ran { id, seq, run, elapsed }).is_err() {
                     break;

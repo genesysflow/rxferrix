@@ -81,7 +81,7 @@ impl Manager {
             return;
         }
         let id = self.create(key, args, identity);
-        self.apply_run(id, Prepared::new(run, self.dev));
+        self.apply_run(id, Prepared::new(run, self.dev, None));
         // Idle if still current (else dropped), then published.
         self.release(id);
         self.sync_published(id);

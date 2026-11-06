@@ -64,7 +64,8 @@ impl SharedQuery {
     }
 
     fn job(&self) -> Job {
-        (self.key.path.clone(), self.args.clone(), self.identity.clone())
+        let newest = self.versions.back().and_then(|v| v.result.outcome.as_ref().ok()).cloned();
+        (self.key.path.clone(), self.args.clone(), self.identity.clone(), newest)
     }
 }
 

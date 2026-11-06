@@ -16,6 +16,8 @@
 //! * `bench_ws_fanout_lists`: the same with `BENCH_QUERIES` (10) queries that each return the items of one group,
 //!   `BENCH_ITEMS` (500) to start with, each commit adding one; the clients accept result diffs, as the JS client
 //!   does.
+//! * `bench_ws_fanout_signed_in`: `bench_ws_fanout` with every socket signed in (as one of `BENCH_USERS` (8) users);
+//!   the queries don't read the identity, so the sockets still share them.
 //! * `bench_ws_slow_reader`: a socket watching a large result (`BENCH_ITEMS` (2000) strings, all changed by every
 //!   commit) stops reading for `BENCH_PAUSE_SECS` (3) while `BENCH_RATE` (50) commits per second change it, next to a
 //!   socket that keeps reading. Reported: the process's resident memory gained during the pause, and the frames and
@@ -96,11 +98,17 @@ struct Version {
 
 /// Connect, subscribe to `queries` (path, args), and wait for their first results.
 async fn subscribe(addr: SocketAddr, session: u64, queries: &[(String, Value)]) -> Socket {
-    subscribe_with(addr, session, queries, false).await
+    subscribe_with(addr, session, queries, false, None).await
 }
 
-/// [`subscribe`], accepting result diffs if `diffs`.
-async fn subscribe_with(addr: SocketAddr, session: u64, queries: &[(String, Value)], diffs: bool) -> Socket {
+/// [`subscribe`], accepting result diffs if `diffs`, signed in with `token` if given.
+async fn subscribe_with(
+    addr: SocketAddr,
+    session: u64,
+    queries: &[(String, Value)],
+    diffs: bool,
+    token: Option<&str>,
+) -> Socket {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
     let features: &[&str] = if diffs { &["diffs"] } else { &[] };
     let connect = json!({ "type": "Connect", "sessionId": format!("bench{session}"), "connectionCount": 0,
@@ -112,6 +120,10 @@ async fn subscribe_with(addr: SocketAddr, session: u64, queries: &[(String, Valu
         .collect();
     let modify = json!({ "type": "ModifyQuerySet", "baseVersion": 0, "newVersion": 1, "modifications": modifications });
     ws.send(Message::text(connect.to_string())).await.unwrap();
+    if let Some(token) = token {
+        let authenticate = json!({ "type": "Authenticate", "baseVersion": 0, "token": token });
+        ws.send(Message::text(authenticate.to_string())).await.unwrap();
+    }
     ws.send(Message::text(modify.to_string())).await.unwrap();
     while let Some(msg) = ws.next().await {
         if let Some((1, _)) = transition(&msg.unwrap()) {
@@ -184,17 +196,9 @@ async fn load(
     (latencies.len() as u64, latencies)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "benchmark; run with --release --ignored --nocapture"]
-async fn bench_http_calls() {
-    let (concurrency, secs, users) = (env("BENCH_CONCURRENCY", 64), env("BENCH_SECS", 5), env("BENCH_USERS", 8));
-    let t = TestApp::with_auth(AuthConfig::password().rate_limits(None)).await.unwrap();
-    let addr = t.serve().await.unwrap();
-    let client = reqwest::Client::builder().pool_max_idle_per_host(concurrency as usize).build().unwrap();
-    let base = format!("http://{addr}");
-
-    let id = t.mutation::<bench_fns::bench_new_counter>(()).await.unwrap();
-    let mut signed_in = Vec::new();
+/// Create `users` users and sign each in over HTTP: their access tokens.
+async fn sign_in(t: &TestApp, client: &reqwest::Client, base: &str, users: u64) -> Vec<String> {
+    let mut tokens = Vec::new();
     for u in 0..users {
         let email = format!("bench{u}@example.com");
         t.create_user(&email, Some("correct horse battery")).await.unwrap();
@@ -205,8 +209,22 @@ async fn bench_http_calls() {
             .await
             .unwrap();
         let body: Value = res.json().await.unwrap();
-        signed_in.push(Some(body["accessToken"].as_str().unwrap_or_else(|| panic!("{body}")).to_string()));
+        tokens.push(body["accessToken"].as_str().unwrap_or_else(|| panic!("{body}")).to_string());
     }
+    tokens
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_http_calls() {
+    let (concurrency, secs, users) = (env("BENCH_CONCURRENCY", 64), env("BENCH_SECS", 5), env("BENCH_USERS", 8));
+    let t = TestApp::with_auth(AuthConfig::password().rate_limits(None)).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let client = reqwest::Client::builder().pool_max_idle_per_host(concurrency as usize).build().unwrap();
+    let base = format!("http://{addr}");
+
+    let id = t.mutation::<bench_fns::bench_new_counter>(()).await.unwrap();
+    let signed_in: Vec<_> = sign_in(&t, &client, &base, users).await.into_iter().map(Some).collect();
     let anonymous = vec![None];
 
     let query = json!({ "path": fns::net_get::path(), "args": { "id": id } }).to_string();
@@ -235,20 +253,34 @@ async fn bench_http_calls() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_ws_fanout() {
-    fanout("ws fanout", fns::net_count::path(), env("BENCH_QUERIES", 50), 0, false).await;
+    fanout("ws fanout", fns::net_count::path(), env("BENCH_QUERIES", 50), 0, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_ws_fanout_signed_in() {
+    fanout("ws fanout, signed in", fns::net_count::path(), env("BENCH_QUERIES", 50), 0, false, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_ws_fanout_lists() {
-    fanout("ws fanout, lists", fns::net_items::path(), env("BENCH_QUERIES", 10), env("BENCH_ITEMS", 500), true).await;
+    let queries = env("BENCH_QUERIES", 10);
+    fanout("ws fanout, lists", fns::net_items::path(), queries, env("BENCH_ITEMS", 500), true, false).await;
 }
 
 /// Every socket subscribes to `queries` queries `path` (args `group` 0 and a salt); `items` items are inserted first.
-async fn fanout(name: &str, path: String, queries: u64, items: u64, diffs: bool) {
+/// With `signed_in`, the sockets sign in first, spread over `BENCH_USERS` (8) users.
+async fn fanout(name: &str, path: String, queries: u64, items: u64, diffs: bool, signed_in: bool) {
     let (conns, rate, secs) = (env("BENCH_CONNS", 1000), env("BENCH_RATE", 50), env("BENCH_SECS", 5));
-    let t = TestApp::with_options(rxferrix::AppOptions { dev: false, ..Default::default() }).await.unwrap();
+    let auth = AuthConfig::password().rate_limits(None);
+    let t = TestApp::with_options(rxferrix::AppOptions { dev: false, auth, ..Default::default() }).await.unwrap();
     let addr = t.serve().await.unwrap();
+    let tokens: Arc<Vec<String>> = Arc::new(if signed_in {
+        sign_in(&t, &reqwest::Client::new(), &format!("http://{addr}"), env("BENCH_USERS", 8)).await
+    } else {
+        Vec::new()
+    });
     for from in (0..items).step_by(100) {
         t.mutation::<bench_fns::bench_insert_many>((0, (items - from).min(100) as u32)).await.unwrap();
     }
@@ -265,12 +297,13 @@ async fn fanout(name: &str, path: String, queries: u64, items: u64, diffs: bool)
     let mut clients = Vec::new();
     for c in 0..conns {
         let (subscriptions, connecting, mut stop) = (subscriptions.clone(), connecting.clone(), stop_rx.clone());
-        let (seen, received) = (seen.clone(), received.clone());
+        let (seen, received, tokens) = (seen.clone(), received.clone(), tokens.clone());
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         ready.push(ready_rx);
         clients.push(tokio::spawn(async move {
             let permit = connecting.acquire_owned().await.unwrap();
-            let mut ws = subscribe_with(addr, c, &subscriptions, diffs).await;
+            let token = (!tokens.is_empty()).then(|| tokens[c as usize % tokens.len()].as_str());
+            let mut ws = subscribe_with(addr, c, &subscriptions, diffs, token).await;
             drop(permit);
             let _ = ready_tx.send(());
             let mut receipts = Vec::new();

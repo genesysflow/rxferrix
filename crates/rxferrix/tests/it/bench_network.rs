@@ -9,7 +9,8 @@
 //!
 //! * `bench_http_calls`: `BENCH_CONCURRENCY` (64) callers over keep-alive connections for `BENCH_SECS` (5) per
 //!   scenario: a query and a mutation, each anonymous and signed in (`BENCH_USERS` (8) users, the callers spread over
-//!   their access tokens). Reported: calls per second and latency percentiles.
+//!   their access tokens), and an action returning a large result (1000 strings, 17 KB). Reported: calls per second
+//!   and latency percentiles.
 //! * `bench_ws_fanout`: `BENCH_CONNS` (1000) sockets each subscribe to the same `BENCH_QUERIES` (50) queries, all
 //!   reading one index range, so every commit (`BENCH_RATE` (50) per second for `BENCH_SECS`) invalidates every query
 //!   of every connection. Reported: commit-to-client latency and Transitions per connection.
@@ -68,6 +69,13 @@ mod fns {
     pub async fn net_items(ctx: &QueryCtx, group: i64, salt: u32) -> Result<Vec<Doc<Item>>> {
         let _ = salt;
         ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await
+    }
+
+    /// `n` short strings: a large result that comes from no table.
+    #[action]
+    pub async fn net_list(ctx: &ActionCtx, n: u32) -> Result<Vec<String>> {
+        let _ = ctx;
+        Ok((0..n).map(|i| format!("item {i:08}")).collect())
     }
 
     /// `n` strings that all change when the counter `id` does: a large result no diff can shrink.
@@ -229,11 +237,13 @@ async fn bench_http_calls() {
 
     let query = json!({ "path": fns::net_get::path(), "args": { "id": id } }).to_string();
     let mutation = json!({ "path": fns::net_set::path(), "args": { "id": id, "score": 1 } }).to_string();
+    let action = json!({ "path": fns::net_list::path(), "args": { "n": 1000 } }).to_string();
     for (name, kind, body, tokens) in [
         ("query, anonymous", "query", &query, &anonymous),
         ("query, signed in", "query", &query, &signed_in),
         ("mutation, anonymous", "mutation", &mutation, &anonymous),
         ("mutation, signed in", "mutation", &mutation, &signed_in),
+        ("action returning 1000 strings, anonymous", "action", &action, &anonymous),
     ] {
         let (calls, latencies) = load(&client, &format!("{base}/api/{kind}"), body, tokens, concurrency, secs).await;
         println!(

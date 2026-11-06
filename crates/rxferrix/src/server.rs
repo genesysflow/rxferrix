@@ -235,6 +235,21 @@ fn error_response(error: &ClientError, log_lines: Vec<String>) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+/// A successful call's response body. Serialized from borrowed parts: `json!` would copy the whole result first.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Success<'a> {
+    status: &'static str,
+    value: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts: Option<u64>,
+    log_lines: &'a [String],
+}
+
+fn success_response(value: &Value, ts: Option<u64>, log_lines: &[String]) -> Response {
+    axum::Json(Success { status: "success", value, ts, log_lines }).into_response()
+}
+
 fn client_log_lines(app: &App, lines: Vec<String>) -> Vec<String> {
     crate::log::for_client(app.options().dev, lines)
 }
@@ -284,7 +299,7 @@ async fn http_query(
     };
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {
-        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": log_lines })).into_response(),
+        Ok(value) => success_response(&value, None, &log_lines),
         Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }
@@ -311,9 +326,7 @@ async fn http_mutation(
     let run = app.execute_mutation(&call.path, call.args, &identity, None).await;
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {
-        Ok((value, ts)) => {
-            axum::Json(json!({ "status": "success", "value": value, "ts": ts, "logLines": log_lines })).into_response()
-        }
+        Ok((value, ts)) => success_response(&value, Some(ts), &log_lines),
         Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }
@@ -340,7 +353,7 @@ async fn http_action(
     let run = app.execute_action(&call.path, call.args, &identity).await;
     let log_lines = client_log_lines(&app, run.log_lines);
     match run.result {
-        Ok(value) => axum::Json(json!({ "status": "success", "value": value, "logLines": log_lines })).into_response(),
+        Ok(value) => success_response(&value, None, &log_lines),
         Err(e) => error_response(&ClientError::from_anyhow(&e, app.options().dev), log_lines),
     }
 }

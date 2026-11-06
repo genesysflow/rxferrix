@@ -433,7 +433,8 @@ impl JwtVerifier {
         }
         static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut next = KeyCache {
-            generation: GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            // A new one only with new keys: a failed fetch keeps the set, and what it verified stays verified.
+            generation: current.generation,
             keys: current.keys.clone(),
             fetched_at: current.fetched_at,
             attempted_at: Some(Instant::now()),
@@ -444,6 +445,7 @@ impl JwtVerifier {
                 tracing::debug!(issuer = provider.config.issuer, keys = keys.len(), "auth: fetched JWKS");
                 next.keys = keys;
                 next.fetched_at = Some(Instant::now());
+                next.generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => tracing::warn!("auth: fetching the JWKS of `{}` failed: {e:#}", provider.config.issuer),
         }

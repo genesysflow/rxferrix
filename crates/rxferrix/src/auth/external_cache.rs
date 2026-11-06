@@ -93,10 +93,13 @@ impl ExternalCache {
             inner.tokens.clear();
             inner.by_doc.clear();
         }
-        for doc in docs {
-            inner.by_doc.entry(doc).or_default().push(key);
+        let old = inner.tokens.insert(key, Arc::new(verified));
+        // Verified again (e.g. after a key refresh): it maps to the same documents, which already point to it.
+        if old.is_none_or(|old| [*old.user.as_bytes(), old.account] != docs) {
+            for doc in docs {
+                inner.by_doc.entry(doc).or_default().push(key);
+            }
         }
-        inner.tokens.insert(key, Arc::new(verified));
     }
 }
 
@@ -169,6 +172,15 @@ mod tests {
             write(&log, index, doc);
             assert!(cache.get(&log, WATCHED, &key, 1).is_none());
         }
+    }
+
+    #[test]
+    fn verifying_a_token_again_adds_no_mappings() {
+        let (log, cache, key) = (WriteLog::new(0), ExternalCache::default(), token_key("t"));
+        cache.insert(&log, WATCHED, key, verified(100), 0);
+        cache.insert(&log, WATCHED, key, verified(100), 0);
+        let inner = cache.inner.read().unwrap();
+        assert_eq!((inner.by_doc[&USER].len(), inner.by_doc[&ACCOUNT].len()), (1, 1));
     }
 
     #[test]

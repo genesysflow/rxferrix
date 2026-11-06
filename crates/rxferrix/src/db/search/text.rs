@@ -332,7 +332,13 @@ pub(crate) fn fetch_ranked(
     limit: Option<usize>,
 ) -> anyhow::Result<Vec<RankedRow>> {
     let fts = plan.index.storage_table();
-    let mut values: Vec<rusqlite::types::Value> = vec![expression.to_string().into()];
+    // The text in `t` only (with filter fields, `g` holds tokens), and each `eq`'s token in `g`, so FTS5 only visits
+    // the documents with those filter values; the `f<i>` comparisons below decide.
+    let mut matched = format!("t : ({expression})");
+    for (col, hex) in &plan.eqs {
+        matched.push_str(&format!(" AND g : \"{}\"", super::filter_token(*col, hex)));
+    }
+    let mut values: Vec<rusqlite::types::Value> = vec![matched.into()];
     let mut param = |v: rusqlite::types::Value| {
         values.push(v);
         format!("?{}", values.len())

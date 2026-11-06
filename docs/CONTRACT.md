@@ -1489,15 +1489,18 @@ returned as is (TS `Array<[Id<"x">, number]>`), though a named `#[object]` struc
     file ~0.2 s, loading it ~0.2 s.
 
 **Storage and consistency (search).** Each search index is an FTS5 table (`_search_<n>`: the text plus the filter fields as
-`UNINDEXED` columns, each the hex of its memcomparable encoding, and `_search_<n>_docs` mapping FTS rowids to doc
-ids); each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filter fields as metadata columns). They
+`UNINDEXED` columns, each the hex of its memcomparable encoding, and with filter fields a column `g` of one
+digits-only token per filter value, 64 bits of its BLAKE3; `_search_<n>_docs` maps FTS rowids to doc ids). A search
+matches its text in the text column only and each `eq` filter's token in `g`, so FTS5 visits only the documents with
+those filter values; the filter columns then decide. Each vector index is a `vec0` table (`_vector_<n>`, cosine distance, filter fields as metadata columns). They
 are listed in `_search_indexes` and updated inside the mutation's write transaction by both the typed and untyped
 write paths, so search results are always consistent with document reads and roll back with the mutation.
 `App::open` reconciles them like ordinary indexes: creates and backfills new ones, rebuilds (drop, create, backfill)
 indexes whose definition changed (fields, dimensions, tokenizer), and drops removed ones (a backfill skips documents
 whose vector has the wrong length, with a warning). Switching a vector index between `exact` and `hnsw`, or changing
 its HNSW parameters, only updates its stored definition (the `vec0` table is kept). Stored definitions from before tokenizers existed read as the
-default tokenizer, so they are not rebuilt. `Database::verify_indexes` also recomputes every search and vector index
+default tokenizer, so they are not rebuilt. A search index with filter fields created before `g` existed is rebuilt
+once at startup (measured: 50k documents in about 0.3 s). `Database::verify_indexes` also recomputes every search and vector index
 and compares each ready HNSW graph's live nodes with its `vec0` table.
 
 **Reactivity (per filter value).** Search and vector indexes have ids in the upper half of the index id space

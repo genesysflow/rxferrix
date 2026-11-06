@@ -9,9 +9,12 @@
 //!
 //! - A **search index** `n` (`id = SPECIAL_INDEX_BASE + n`) is the FTS5 table `_search_<n>(t, f0 UNINDEXED, ...)`:
 //!   `t` is the search field's text, `f<i>` the hex of the memcomparable encoding (`keys::encode_opt`) of the i-th
-//!   filter field (so equality on the column is equality of values, of any JSON type). The FTS rowid maps to the
-//!   document through `_search_<n>_docs(rowid INTEGER PRIMARY KEY, doc_id BLOB UNIQUE)`. Documents whose search field
-//!   is missing, null or not a string are not indexed.
+//!   filter field (so equality on the column is equality of values, of any JSON type). With filter fields, the
+//!   indexed column `g` holds one token per filter value ([`filter_token`], digits only, so every tokenizer keeps it
+//!   whole): a search with `eq` filters matches their tokens too, so FTS5 only visits the documents with those values
+//!   (the `f<i>` columns still decide; a token shared by another value only costs a row more). The search text is
+//!   matched in `t` only. The FTS rowid maps to the document through `_search_<n>_docs(rowid INTEGER PRIMARY KEY,
+//!   doc_id BLOB UNIQUE)`. Documents whose search field is missing, null or not a string are not indexed.
 //! - A **vector index** `n` is the `vec0` virtual table `_vector_<n>(doc_id TEXT PRIMARY KEY, v float[dims]
 //!   distance_metric=cosine, f0 TEXT, ...)`, with the filter fields as vec0 metadata columns (same hex encoding).
 //!   Documents whose vector field is missing or null are not indexed.
@@ -261,6 +264,19 @@ impl SearchIndexInfo {
     pub(crate) fn docs_table(&self) -> String {
         format!("\"_search_{}_docs\"", self.number())
     }
+
+    /// A search index with filter fields: its FTS5 table has the filter tokens' column `g`.
+    fn has_filter_tokens(&self) -> bool {
+        !self.is_vector() && !self.filter_fields().is_empty()
+    }
+}
+
+/// The token of a filter value (its hex, [`encode_filter_value`]) in filter column `col`, in the `g` column of a
+/// search index: the column and 64 bits of the value's BLAKE3, as 22 digits.
+pub(crate) fn filter_token(col: usize, hex: &str) -> String {
+    let hash = blake3::hash(hex.as_bytes());
+    let bits = u64::from_be_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+    format!("{col:02}{bits:020}")
 }
 
 /// A search or vector index as the dashboard lists it (`_system/dashboard:tables`).
@@ -447,7 +463,14 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
     let desired = desired(def);
     for (name, kind) in &desired {
         let existing = current.iter().find(|c| &c.name == name);
-        if existing.is_some_and(|c| &c.kind == kind) {
+        if let Some(c) = existing
+            && &c.kind == kind
+        {
+            // Created by an older version, without the filter tokens' column.
+            if c.has_filter_tokens() && !has_column(conn, &c.storage_table(), "g")? {
+                tracing::info!(table = def.name, index = %name, "adding filter tokens to the search index; rebuilding");
+                rebuild(conn, def.name, table_number, c)?;
+            }
             continue;
         }
         // Switching a vector index between exact and HNSW, or changing its HNSW parameters, keeps its vec0 table
@@ -496,6 +519,16 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
     Ok(())
 }
 
+/// Does `table` (quoted, as [`SearchIndexInfo::storage_table`] gives it) have a column `column`?
+fn has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table.trim_matches('"'), column],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Do two definitions share the same storage, i.e. differ only in the vector search method and HNSW parameters?
 fn same_storage(a: &SpecialIndexKind, b: &SpecialIndexKind) -> bool {
     match (a, b) {
@@ -525,7 +558,10 @@ fn create_storage(conn: &Connection, info: &SearchIndexInfo) -> anyhow::Result<(
     let filters: Vec<String> = (0..info.filter_fields().len()).map(|i| format!("f{i}")).collect();
     match &info.kind {
         SpecialIndexKind::Search { tokenizer, .. } => {
-            let cols: String = filters.iter().map(|f| format!(", {f} UNINDEXED")).collect();
+            let mut cols: String = filters.iter().map(|f| format!(", {f} UNINDEXED")).collect();
+            if info.has_filter_tokens() {
+                cols.push_str(", g");
+            }
             // Prefix indexes speed up the last term's prefix match; trigram queries are substring matches instead.
             let prefix = if tokenizer.kind == TokenizerKind::Trigram { "" } else { ", prefix = '2 3'" };
             conn.execute_batch(&format!(
@@ -664,13 +700,21 @@ impl Entry {
                         conn.last_insert_rowid()
                     }
                 };
-                let placeholders: String = (0..filters.len()).map(|i| format!(", ?{}", i + 3)).collect();
-                let cols: String = (0..filters.len()).map(|i| format!(", f{i}")).collect();
+                let mut placeholders: String = (0..filters.len()).map(|i| format!(", ?{}", i + 3)).collect();
+                let mut cols: String = (0..filters.len()).map(|i| format!(", f{i}")).collect();
+                if info.has_filter_tokens() {
+                    placeholders.push_str(&format!(", ?{}", filters.len() + 3));
+                    cols.push_str(", g");
+                }
                 let sql =
                     format!("INSERT INTO {} (rowid, t{cols}) VALUES (?1, ?2{placeholders})", info.storage_table());
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let mut values: Vec<rusqlite::types::Value> = vec![rowid.into(), text.clone().into()];
                 values.extend(filters.iter().map(|f| f.clone().into()));
+                if info.has_filter_tokens() {
+                    let tokens: Vec<String> = filters.iter().enumerate().map(|(i, f)| filter_token(i, f)).collect();
+                    values.push(tokens.join(" ").into());
+                }
                 stmt.execute(rusqlite::params_from_iter(values))?;
             }
             Entry::Vector { vector, filters } => {

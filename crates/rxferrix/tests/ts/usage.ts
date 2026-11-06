@@ -50,6 +50,7 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
       | "bench_plain"
       | "bench_probe"
       | "bench_reads"
+      | "bench_tenant_posts"
       | "bench_unindexed_posts"
       | "blobs"
       | "dash_items"

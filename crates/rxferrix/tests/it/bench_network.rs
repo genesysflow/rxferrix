@@ -13,6 +13,9 @@
 //! * `bench_ws_fanout`: `BENCH_CONNS` (1000) sockets each subscribe to the same `BENCH_QUERIES` (50) queries, all
 //!   reading one index range, so every commit (`BENCH_RATE` (50) per second for `BENCH_SECS`) invalidates every query
 //!   of every connection. Reported: commit-to-client latency and Transitions per connection.
+//! * `bench_ws_fanout_lists`: the same with `BENCH_QUERIES` (10) queries that each return the items of one group,
+//!   `BENCH_ITEMS` (500) to start with, each commit adding one; the clients accept result diffs, as the JS client
+//!   does.
 //! * `bench_ws_slow_reader`: a socket watching a large result (`BENCH_ITEMS` (2000) strings, all changed by every
 //!   commit) stops reading for `BENCH_PAUSE_SECS` (3) while `BENCH_RATE` (50) commits per second change it, next to a
 //!   socket that keeps reading. Reported: the process's resident memory gained during the pause, and the frames and
@@ -58,6 +61,13 @@ mod fns {
         Ok(ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await?.len())
     }
 
+    /// The items of `group`. `salt` only makes otherwise identical queries distinct.
+    #[query]
+    pub async fn net_items(ctx: &QueryCtx, group: i64, salt: u32) -> Result<Vec<Doc<Item>>> {
+        let _ = salt;
+        ctx.db.query::<Item>().with_index(Item::by_group_score, |q| q.eq(Item::group, group)).collect().await
+    }
+
     /// `n` strings that all change when the counter `id` does: a large result no diff can shrink.
     #[query]
     pub async fn net_blob(ctx: &QueryCtx, id: Id<Item>, n: u32) -> Result<Vec<String>> {
@@ -86,9 +96,15 @@ struct Version {
 
 /// Connect, subscribe to `queries` (path, args), and wait for their first results.
 async fn subscribe(addr: SocketAddr, session: u64, queries: &[(String, Value)]) -> Socket {
+    subscribe_with(addr, session, queries, false).await
+}
+
+/// [`subscribe`], accepting result diffs if `diffs`.
+async fn subscribe_with(addr: SocketAddr, session: u64, queries: &[(String, Value)], diffs: bool) -> Socket {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
+    let features: &[&str] = if diffs { &["diffs"] } else { &[] };
     let connect = json!({ "type": "Connect", "sessionId": format!("bench{session}"), "connectionCount": 0,
-        "lastCloseReason": null, "clientVersion": "0.1.0" });
+        "lastCloseReason": null, "clientVersion": "0.1.0", "features": features });
     let modifications: Vec<Value> = queries
         .iter()
         .enumerate()
@@ -219,28 +235,42 @@ async fn bench_http_calls() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_ws_fanout() {
-    let (conns, queries, rate, secs) =
-        (env("BENCH_CONNS", 1000), env("BENCH_QUERIES", 50), env("BENCH_RATE", 50), env("BENCH_SECS", 5));
+    fanout("ws fanout", fns::net_count::path(), env("BENCH_QUERIES", 50), 0, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_ws_fanout_lists() {
+    fanout("ws fanout, lists", fns::net_items::path(), env("BENCH_QUERIES", 10), env("BENCH_ITEMS", 500), true).await;
+}
+
+/// Every socket subscribes to `queries` queries `path` (args `group` 0 and a salt); `items` items are inserted first.
+async fn fanout(name: &str, path: String, queries: u64, items: u64, diffs: bool) {
+    let (conns, rate, secs) = (env("BENCH_CONNS", 1000), env("BENCH_RATE", 50), env("BENCH_SECS", 5));
     let t = TestApp::with_options(rxferrix::AppOptions { dev: false, ..Default::default() }).await.unwrap();
     let addr = t.serve().await.unwrap();
+    for from in (0..items).step_by(100) {
+        t.mutation::<bench_fns::bench_insert_many>((0, (items - from).min(100) as u32)).await.unwrap();
+    }
     let subscriptions: Arc<Vec<(String, Value)>> =
-        Arc::new((0..queries).map(|q| (fns::net_count::path(), json!({ "group": 0, "salt": q }))).collect());
+        Arc::new((0..queries).map(|q| (path.clone(), json!({ "group": 0, "salt": q }))).collect());
 
     // Connect everyone (64 at a time) and wait for their first results.
     let started = Instant::now();
     let connecting = Arc::new(tokio::sync::Semaphore::new(64));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let seen: Arc<Vec<AtomicU64>> = Arc::new((0..conns).map(|_| AtomicU64::new(0)).collect());
+    let received = Arc::new(AtomicU64::new(0));
     let mut ready = Vec::new();
     let mut clients = Vec::new();
     for c in 0..conns {
         let (subscriptions, connecting, mut stop) = (subscriptions.clone(), connecting.clone(), stop_rx.clone());
-        let seen = seen.clone();
+        let (seen, received) = (seen.clone(), received.clone());
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         ready.push(ready_rx);
         clients.push(tokio::spawn(async move {
             let permit = connecting.acquire_owned().await.unwrap();
-            let mut ws = subscribe(addr, c, &subscriptions).await;
+            let mut ws = subscribe_with(addr, c, &subscriptions, diffs).await;
             drop(permit);
             let _ = ready_tx.send(());
             let mut receipts = Vec::new();
@@ -248,6 +278,7 @@ async fn bench_ws_fanout() {
                 tokio::select! {
                     msg = ws.next() => match msg {
                         Some(Ok(msg)) => {
+                            received.fetch_add(msg.len() as u64, Ordering::Relaxed);
                             if let Some((_, ts)) = transition(&msg) {
                                 receipts.push((ts, Instant::now()));
                                 seen[c as usize].store(ts, Ordering::Relaxed);
@@ -290,12 +321,13 @@ async fn bench_ws_fanout() {
     }
     let transitions = receipts.iter().map(Vec::len).sum::<usize>() as f64 / conns as f64;
     println!(
-        "[ws fanout] {conns} sockets x {queries} queries, connected in {:.2}s; {} commits in {:.2}s ({:.0}/s), {transitions:.1} \
-         Transitions per socket; {}",
+        "[{name}] {conns} sockets x {queries} queries, connected in {:.2}s; {} commits in {:.2}s ({:.0}/s), {transitions:.1} \
+         Transitions per socket ({:.0} KiB received); {}",
         setup.as_secs_f64(),
         commits.len(),
         elapsed.as_secs_f64(),
         commits.len() as f64 / elapsed.as_secs_f64(),
+        received.load(Ordering::Relaxed) as f64 / conns as f64 / 1024.0,
         report("", &receipts, &commits),
     );
 }

@@ -65,6 +65,11 @@ impl WriteLog {
 
     /// Append the commits of a batch, in ts order, with one lock, trim and notification.
     pub fn append_all(&self, entries: impl IntoIterator<Item = CommitEntry>) {
+        let mut entries = entries.into_iter().peekable();
+        // A batch of reads only (or of failed mutations) commits nothing: leave the log alone.
+        if entries.peek().is_none() {
+            return;
+        }
         let latest = {
             let mut inner = self.inner.lock().unwrap();
             let now = Instant::now();

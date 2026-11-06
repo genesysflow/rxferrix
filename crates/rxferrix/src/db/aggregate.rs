@@ -455,15 +455,11 @@ impl QueryDb {
         order: Order,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<GroupRow>> {
-        let dir = if order == Order::Desc { "DESC" } else { "ASC" };
         let wanted = limit;
         let limit = limit.map_or(-1, |n| n as i64);
         let rows = self.with_conn(|c| {
-            let sql = format!(
-                "SELECT key, count, sums FROM aggregate_values WHERE agg_id = ?1 AND key >= ?2 AND (?3 IS NULL OR key < ?3)
-                 ORDER BY key {dir} LIMIT ?4"
-            );
-            let mut stmt = c.prepare_cached(&sql)?;
+            let mut stmt = c.prepare_cached(&rows_sql(order, range.end.is_some()))?;
+            // ?3 is unused without an upper bound, but numbered parameters must all be bound.
             let rows = stmt.query_map(params![info.id, range.start, range.end, limit], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
             })?;
@@ -491,6 +487,17 @@ impl QueryDb {
         self.record(info.id, recorded);
         rows
     }
+}
+
+/// The groups of aggregate ?1 from key ?2 (inclusive) to ?3 (exclusive, if `bounded`) in `order`, at most ?4.
+fn rows_sql(order: Order, bounded: bool) -> String {
+    let dir = if order == Order::Desc { "DESC" } else { "ASC" };
+    // Only a plain `key < ?3` bounds the search: SQLite can't seek on `(?3 IS NULL OR key < ?3)`, and would walk on to
+    // the aggregate's last group (or, descending, start from it).
+    let upper = if bounded { "AND key < ?3" } else { "" };
+    format!(
+        "SELECT key, count, sums FROM aggregate_values WHERE agg_id = ?1 AND key >= ?2 {upper} ORDER BY key {dir} LIMIT ?4"
+    )
 }
 
 /// A read of one aggregate ([`QueryDb::aggregate`]).
@@ -570,6 +577,28 @@ impl<T: Table> AggregateQuery<'_, T> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn range_reads_seek_on_both_bounds() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap();
+        let plan = |order, bounded| -> String {
+            let sql = format!("EXPLAIN QUERY PLAN {}", rows_sql(order, bounded));
+            conn.query_row(&sql, params![1, &[0u8][..], &[9u8][..], 10], |r| r.get(3)).unwrap()
+        };
+        for order in [Order::Asc, Order::Desc] {
+            assert_eq!(
+                plan(order, true),
+                "SEARCH aggregate_values USING PRIMARY KEY (agg_id=? AND key>? AND key<?)",
+                "{order:?}"
+            );
+            assert_eq!(
+                plan(order, false),
+                "SEARCH aggregate_values USING PRIMARY KEY (agg_id=? AND key>?)",
+                "{order:?}"
+            );
+        }
+    }
 
     #[test]
     fn sums_stay_exact_until_a_float_joins() {

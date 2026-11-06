@@ -132,7 +132,13 @@ impl Manager {
     pub(super) fn settle_key(&mut self, id: SharedId, split: &mut Vec<SharedId>) {
         let Some(q) = self.queries.get(&id) else { return };
         let deps = q.deps;
-        let own = QueryKey { path: q.key.path.clone(), args: q.key.args.clone(), scope: Scope::of(deps, &q.identity) };
+        let scope = Scope::of(deps, &q.identity);
+        // The usual case: the run read as much of the identity as the key says, so the key stays and every subscriber
+        // (each matches it, see `check_invariants`) stays too. Nothing to do, without visiting them.
+        if deps == q.key.scope.deps() && scope == q.key.scope {
+            return;
+        }
+        let own = QueryKey { path: q.key.path.clone(), args: q.key.args.clone(), scope };
         let mut movers: HashMap<QueryKey, Vec<(ConnId, QueryId)>> = HashMap::new();
         for &(c, qid) in &q.subscribers {
             let scope = Scope::of(deps, &self.conns[&c].identity);

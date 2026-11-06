@@ -132,6 +132,15 @@ pub fn write_meta(conn: &Connection, key: &str, value: rusqlite::types::Value) -
     Ok(())
 }
 
+/// Write the `_meta` values a batch of writes moves on: [`META_TS`], [`META_TIME`] and [`META_LAST_CREATION_TIME`].
+pub fn write_batch_meta(conn: &Connection, ts: u64, time: f64, last_creation_time: f64) -> anyhow::Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO _meta (k, v) VALUES (?1, ?2), (?3, ?4), (?5, ?6) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+    )?
+    .execute(params![META_TS, ts as i64, META_TIME, time, META_LAST_CREATION_TIME, last_creation_time])?;
+    Ok(())
+}
+
 pub fn get_document(conn: &Connection, id: &[u8; 16]) -> anyhow::Result<Option<String>> {
     Ok(conn
         .prepare_cached("SELECT json FROM documents WHERE id = ?1")?

@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! cargo test --release -p rxferrix --test it bench_aggregates -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
@@ -9,6 +10,8 @@
 //! `bench_aggregates`: the same one-document inserts into a table without aggregates and into one with three (16
 //! writers, `BENCH_SECS` each), then reading one group's count and sum: an aggregate `get` against counting the
 //! group's documents through an index (`Query::count`) and summing them (`collect`), at 10k documents per group.
+//! `bench_aggregate_ranges`: reads of an aggregate with `BENCH_GROUPS` (20k) groups that each touch a few of them: a
+//! group's `get` (one that exists, and one that doesn't), a `sum_over` 10 groups and the last 10 `groups` of a range.
 //! `bench_search_patches`: 16 writers patch a counter of documents (`BENCH_DOCS`, 2000) that also carry a 2 KB text
 //! and a 1536-dimension embedding, in a table without search indexes and in one with a search index on the text and a
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
@@ -110,6 +113,28 @@ pub mod fns {
         let a = ctx.db.aggregate(Aggregated::per_group).get(|g| g.eq(Aggregated::group, group)).await?;
         Ok((a.count, a.sum(Aggregated::amount)))
     }
+
+    /// The groups from `from` (inclusive) to `to` (exclusive), combined.
+    #[internal_query]
+    pub async fn aggregate_sum_over(ctx: &QueryCtx, from: String, to: String) -> Result<u64> {
+        let a = ctx
+            .db
+            .aggregate(Aggregated::per_group)
+            .sum_over(|g| g.gte(Aggregated::group, from).lt(Aggregated::group, to))
+            .await?;
+        Ok(a.count)
+    }
+
+    /// The last `limit` groups before `to`, newest first.
+    #[internal_query]
+    pub async fn aggregate_last_groups(ctx: &QueryCtx, to: String, limit: u32) -> Result<usize> {
+        let groups = ctx
+            .db
+            .aggregate(Aggregated::per_group)
+            .groups(|g| g.lt(Aggregated::group, to), Order::Desc, limit as usize)
+            .await?;
+        Ok(groups.len())
+    }
 }
 
 fn secs() -> f64 {
@@ -179,6 +204,45 @@ async fn bench_aggregates() {
         }
         println!("one group of 10k documents, {label:<23}: {:>9.1?} per query", started.elapsed() / runs);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_aggregate_ranges() {
+    let groups: usize = std::env::var("BENCH_GROUPS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    let group = |n: usize| format!("g{n:06}");
+    for n in 0..groups {
+        t.mutation::<fns::insert_aggregated>((group(n), n as f64, 1)).await.unwrap();
+    }
+    let runs = 500u32;
+    let time =
+        |label: &str, elapsed: Duration| println!("{groups} groups, {label:<36}: {:>9.1?} per query", elapsed / runs);
+    let started = Instant::now();
+    for _ in 0..runs {
+        let run = t.query_run::<fns::aggregate_group>((group(10),)).await.unwrap();
+        assert_eq!(serde_json::from_value::<(u64, f64)>(run.result.unwrap()).unwrap().0, 1);
+    }
+    time("get, an existing group", started.elapsed());
+    let started = Instant::now();
+    for _ in 0..runs {
+        // Sorts before every group: nothing matches.
+        let run = t.query_run::<fns::aggregate_group>(("a".to_string(),)).await.unwrap();
+        assert_eq!(serde_json::from_value::<(u64, f64)>(run.result.unwrap()).unwrap().0, 0);
+    }
+    time("get, a missing group", started.elapsed());
+    let started = Instant::now();
+    for _ in 0..runs {
+        let run = t.query_run::<fns::aggregate_sum_over>((group(10), group(20))).await.unwrap();
+        assert_eq!(serde_json::from_value::<u64>(run.result.unwrap()).unwrap(), 10);
+    }
+    time("sum_over 10 groups", started.elapsed());
+    let started = Instant::now();
+    for _ in 0..runs {
+        let run = t.query_run::<fns::aggregate_last_groups>((group(20), 10u32)).await.unwrap();
+        assert_eq!(serde_json::from_value::<usize>(run.result.unwrap()).unwrap(), 10);
+    }
+    time("groups, the last 10 of a range (desc)", started.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

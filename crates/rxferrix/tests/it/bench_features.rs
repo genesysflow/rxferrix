@@ -243,6 +243,10 @@ async fn bench_aggregate_ranges() {
         assert_eq!(serde_json::from_value::<usize>(run.result.unwrap()).unwrap(), 10);
     }
     time("groups, the last 10 of a range (desc)", started.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_search_patches() {
     let docs: i64 = std::env::var("BENCH_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
     for (label, indexed) in [("no search indexes", false), ("search + vector index", true)] {

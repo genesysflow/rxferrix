@@ -394,11 +394,11 @@ enum Scope {
 
 impl Scope {
     fn of(deps: AuthDeps, identity: &Identity) -> Scope {
-        let (user, admin) = (identity.user_id.clone(), identity.admin_id.clone());
+        let (user, admin) = (|| identity.user_id.clone(), || identity.admin_id.clone());
         match deps {
             AuthDeps::None => Scope::Any,
-            AuthDeps::Principal => Scope::Principal { user, admin },
-            AuthDeps::Session => Scope::Session { user, admin, session: identity.session_id.clone() },
+            AuthDeps::Principal => Scope::Principal { user: user(), admin: admin() },
+            AuthDeps::Session => Scope::Session { user: user(), admin: admin(), session: identity.session_id.clone() },
         }
     }
 

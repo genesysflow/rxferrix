@@ -55,7 +55,7 @@ impl Mailbox {
         (Arc::new(Mailbox { state: Mutex::default(), doorbell, diffs: Default::default() }), rx)
     }
 
-    pub fn set_accepts_diffs(&self, diffs: bool) {
+    pub(crate) fn set_accepts_diffs(&self, diffs: bool) {
         self.diffs.store(diffs, std::sync::atomic::Ordering::Relaxed);
     }
 

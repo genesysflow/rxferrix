@@ -727,6 +727,14 @@ impl<'a> SpecialWrites<'a> {
     ) -> anyhow::Result<Self> {
         let mut changes = Vec::new();
         for info in &table.search_indexes {
+            // An entry depends on these fields only: if none changed, neither did the entry (nor whether it is valid).
+            if let (Some(old), Some(new)) = (old, new)
+                && std::iter::once(info.field())
+                    .chain(info.filter_fields().iter().map(String::as_str))
+                    .all(|f| old.get(f) == new.get(f))
+            {
+                continue;
+            }
             let new_entry = match new.map(|d| Entry::of(info, d)).transpose() {
                 Ok(entry) => entry.flatten(),
                 // A vector that was already unindexable and is left unchanged (e.g. written before the index's

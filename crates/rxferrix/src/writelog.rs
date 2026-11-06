@@ -60,16 +60,26 @@ impl WriteLog {
 
     /// Append a commit. Called by the writer, in ts order, while holding the writer lock.
     pub fn append(&self, entry: CommitEntry) {
-        let ts = entry.ts;
-        {
+        self.append_all([entry]);
+    }
+
+    /// Append the commits of a batch, in ts order, with one lock, trim and notification.
+    pub fn append_all(&self, entries: impl IntoIterator<Item = CommitEntry>) {
+        let latest = {
             let mut inner = self.inner.lock().unwrap();
-            debug_assert!(ts > inner.latest, "write log entries must be appended in ts order");
-            inner.bytes += entry_bytes(&entry);
-            inner.entries.push_back((Instant::now(), Arc::new(entry)));
-            inner.latest = ts;
+            let now = Instant::now();
+            for entry in entries {
+                debug_assert!(entry.ts > inner.latest, "write log entries must be appended in ts order");
+                inner.bytes += entry_bytes(&entry);
+                inner.latest = entry.ts;
+                inner.entries.push_back((now, Arc::new(entry)));
+            }
             inner.trim();
+            inner.latest
+        };
+        if latest > *self.latest_tx.borrow() {
+            self.latest_tx.send_replace(latest);
         }
-        self.latest_tx.send_replace(ts);
     }
 
     /// Drop entries past the retention limits. Appending does this too; this is for when commits stop (the
@@ -173,6 +183,17 @@ mod tests {
         assert!(bytes <= MAX_BYTES && entries < 40, "{bytes} bytes in {entries} entries");
         assert_eq!(log.entries_between(0, 100), None, "trimmed entries are reported as unknown");
         assert_eq!(log.entries_between(99, 100).map(|e| e.len()), Some(1));
+    }
+
+    #[test]
+    fn a_batch_appends_in_one_step() {
+        let log = WriteLog::new(10);
+        let mut rx = log.subscribe();
+        log.append_all((11..=13).map(|ts| CommitEntry { ts, writes: vec![(1, vec![ts as u8])] }));
+        assert_eq!(log.entries_between(10, 13).unwrap().len(), 3);
+        assert_eq!((log.latest(), *rx.borrow_and_update()), (13, 13));
+        log.append_all([]);
+        assert!(!rx.has_changed().unwrap(), "nothing appended, no notification");
     }
 
     #[tokio::test]

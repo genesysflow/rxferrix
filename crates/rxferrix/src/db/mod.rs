@@ -689,12 +689,10 @@ impl WriterShared {
         })();
         match committed {
             Ok(()) => {
-                for member in &mut batch.members {
+                for member in &batch.members {
                     self.journal.add_pending_bytes(member.journaled);
-                    if let Some(entry) = member.entry.take() {
-                        self.write_log.append(entry);
-                    }
                 }
+                self.write_log.append_all(batch.members.iter_mut().filter_map(|m| m.entry.take()));
             }
             Err(e) => {
                 tracing::error!("commit failed: {e:#}");

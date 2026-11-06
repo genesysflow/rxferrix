@@ -218,6 +218,12 @@ async fn a_version_that_cant_serve_the_data_gives_up_and_the_old_server_carries_
     assert!(msg.contains("can't take over") && msg.contains("legacy:"), "{msg}");
     // Still serving, journal off again, nothing left behind; a later takeover can happen.
     add(&client, old.addr, "still served").await.unwrap();
+    // The old server turns its journal off once it sees the new process's connection close, which can be just after
+    // `take_over` returned.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while old.app.db().journal().is_enabled() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert!(!old.app.db().journal().is_enabled());
     assert!(!dir.path().join(takeover::STAGING_DIR).exists());
     assert!(!old.stopped.is_finished());

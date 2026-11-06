@@ -204,6 +204,7 @@ impl Database {
                 lock: Arc::new(tokio::sync::Mutex::new(Writer {
                     conn: writer,
                     batch: None,
+                    committed_meta: None,
                     checkpoint: checkpointer.signal().clone(),
                 })),
                 waiting: AtomicUsize::new(0),
@@ -283,6 +284,8 @@ impl Database {
         if !guard.is_autocommit() {
             guard.execute_batch("ROLLBACK")?;
         }
+        // `f` may write anything, the batch `_meta` values included.
+        guard.committed_meta = None;
         guard.execute_batch("BEGIN IMMEDIATE")?;
         let result = match f(&guard) {
             Ok(r) => guard.execute_batch("COMMIT").map(|()| r).map_err(Into::into),
@@ -508,6 +511,9 @@ impl Database {
 pub(crate) struct Writer {
     conn: Connection,
     batch: Option<Batch>,
+    /// The batch `_meta` values (ts, time, last creation time) as last committed through this writer, so a batch
+    /// begins without reading them; `None` when unknown (after [`Database::with_writer`], which may write them).
+    committed_meta: Option<(u64, f64, f64)>,
     /// What the connection's WAL hook nudges ([`checkpoint::install_hook`]); dropped after `conn`.
     checkpoint: Arc<checkpoint::Signal>,
 }
@@ -530,6 +536,9 @@ impl Writer {
         checkpoint::finish_if_asked(&self.conn, &self.checkpoint);
         storage::exec_cached(&self.conn, "BEGIN IMMEDIATE")?;
         let begun = (|| -> anyhow::Result<(u64, f64, f64)> {
+            if let Some(meta) = self.committed_meta {
+                return Ok(meta);
+            }
             Ok((
                 storage::read_meta_u64(&self.conn, storage::META_TS)?,
                 storage::read_meta_f64(&self.conn, storage::META_TIME)?,
@@ -681,14 +690,13 @@ impl WriterShared {
         let Some(mut batch) = writer.batch.take() else { return Vec::new() };
         let committed = (|| -> anyhow::Result<()> {
             if batch.ts != batch.begin_ts {
-                storage::write_meta(&writer.conn, storage::META_TS, (batch.ts as i64).into())?;
-                storage::write_meta(&writer.conn, storage::META_TIME, batch.time.into())?;
-                storage::write_meta(&writer.conn, storage::META_LAST_CREATION_TIME, batch.last_creation_time.into())?;
+                storage::write_batch_meta(&writer.conn, batch.ts, batch.time, batch.last_creation_time)?;
             }
             storage::exec_cached(&writer.conn, "COMMIT")
         })();
         match committed {
             Ok(()) => {
+                writer.committed_meta = Some((batch.ts, batch.time, batch.last_creation_time));
                 for member in &mut batch.members {
                     self.journal.add_pending_bytes(member.journaled);
                     if let Some(entry) = member.entry.take() {
@@ -698,6 +706,7 @@ impl WriterShared {
             }
             Err(e) => {
                 tracing::error!("commit failed: {e:#}");
+                writer.committed_meta = None;
                 if !writer.conn.is_autocommit()
                     && let Err(e) = writer.conn.execute_batch("ROLLBACK")
                 {
@@ -1341,6 +1350,16 @@ mod tests {
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert_eq!(out.matches("held the database writer").count(), 1, "{out}");
         assert!(out.contains("app:slow") && out.contains("150 ms"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn batches_see_meta_written_outside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(dir.path(), &[], &OpenOptions::default()).unwrap();
+        // A write transaction without writes commits at the current ts; this one also leaves the writer's copy set.
+        assert_eq!(db.begin_write().await.unwrap().commit_with(|_, _| Ok(())).await.unwrap(), 0);
+        db.with_writer(|c| storage::write_meta(c, storage::META_TS, 41i64.into())).await.unwrap();
+        assert_eq!(db.begin_write().await.unwrap().commit_with(|_, _| Ok(())).await.unwrap(), 41);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

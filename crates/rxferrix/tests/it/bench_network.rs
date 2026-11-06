@@ -249,8 +249,8 @@ async fn fanout(name: &str, path: String, queries: u64, items: u64, diffs: bool)
     let (conns, rate, secs) = (env("BENCH_CONNS", 1000), env("BENCH_RATE", 50), env("BENCH_SECS", 5));
     let t = TestApp::with_options(rxferrix::AppOptions { dev: false, ..Default::default() }).await.unwrap();
     let addr = t.serve().await.unwrap();
-    for _ in 0..items.div_ceil(100) {
-        t.mutation::<bench_fns::bench_insert_many>((0, 100)).await.unwrap();
+    for from in (0..items).step_by(100) {
+        t.mutation::<bench_fns::bench_insert_many>((0, (items - from).min(100) as u32)).await.unwrap();
     }
     let subscriptions: Arc<Vec<(String, Value)>> =
         Arc::new((0..queries).map(|q| (path.clone(), json!({ "group": 0, "salt": q }))).collect());

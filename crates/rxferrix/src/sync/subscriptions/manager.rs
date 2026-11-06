@@ -63,8 +63,9 @@ impl SharedQuery {
         self.versions.iter().rev().find(|v| v.ts <= ts && ts <= v.through)
     }
 
-    fn job(&self) -> Job {
-        let newest = self.versions.back().and_then(|v| v.result.outcome.as_ref().ok()).cloned();
+    /// Its next run. With `diffs` (a subscriber accepts them), the newest result goes along to diff the new one from.
+    fn job(&self, diffs: bool) -> Job {
+        let newest = self.versions.back().filter(|_| diffs).and_then(|v| v.result.outcome.as_ref().ok()).cloned();
         (self.key.path.clone(), self.args.clone(), self.identity.clone(), newest)
     }
 }

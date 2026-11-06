@@ -140,8 +140,8 @@ use manager::Manager;
 pub type ConnId = u64;
 type SharedId = u64;
 type Hash = [u8; 32];
-/// What a query run needs: path, args and the identity to run as; and its newest result, if any, which the diff for
-/// clients is computed from (`Prepared::new`).
+/// What a query run needs: path, args and the identity to run as; and its newest result, if any subscriber accepts
+/// diffs: the diff for them is computed from it (`Prepared::new`).
 type Job = (Arc<str>, Value, Identity, Option<QueryValue>);
 
 /// How many version-changing updates (or commands waiting for its queries) a connection may have outstanding before

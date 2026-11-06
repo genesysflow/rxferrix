@@ -65,7 +65,8 @@ impl Manager {
             q.job = Some(seq);
             self.in_flight.insert(seq, self.ts);
             let lane = if q.cost_us >= SLOW_RUN_US { SLOW } else { FAST };
-            queue.lanes[lane].push_back((id, seq, q.job()));
+            let diffs = q.subscribers.iter().any(|(c, _)| self.conns.get(c).is_some_and(|c| c.mailbox.accepts_diffs()));
+            queue.lanes[lane].push_back((id, seq, q.job(diffs)));
             n += 1;
         }
         drop(queue);

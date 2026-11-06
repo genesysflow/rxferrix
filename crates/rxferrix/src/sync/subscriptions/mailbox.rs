@@ -37,6 +37,9 @@ impl Update {
 pub struct Mailbox {
     state: Mutex<MailboxState>,
     doorbell: mpsc::Sender<()>,
+    /// The client accepts result diffs (set by the worker when the client connects): the manager has the diffs from a
+    /// query's previous result computed for its subscribers only if one of them does.
+    diffs: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -49,7 +52,15 @@ impl Mailbox {
     /// A mailbox and the doorbell that rings when something is put in it.
     pub fn new() -> (Arc<Mailbox>, mpsc::Receiver<()>) {
         let (doorbell, rx) = mpsc::channel(1);
-        (Arc::new(Mailbox { state: Mutex::default(), doorbell }), rx)
+        (Arc::new(Mailbox { state: Mutex::default(), doorbell, diffs: Default::default() }), rx)
+    }
+
+    pub fn set_accepts_diffs(&self, diffs: bool) {
+        self.diffs.store(diffs, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(super) fn accepts_diffs(&self) -> bool {
+        self.diffs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Queue `update`. `step` says it changes a version and must stay a Transition of its own; otherwise it is merged

@@ -292,6 +292,7 @@ impl SyncWorker {
                 tracing::debug!(%session_id, connection_count, ?features, "sync client connected");
                 self.session_id = Some(session_id);
                 self.diffs = features.iter().any(|f| f == "diffs");
+                self.mailbox.set_accepts_diffs(self.diffs);
             }
             ClientMessage::ModifyQuerySet { base_version, new_version, modifications } => {
                 if base_version != self.query_set || new_version != base_version + 1 {

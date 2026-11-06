@@ -570,11 +570,16 @@ impl StorageService {
         let inserted = txn.with_state(|s| {
             if let Some(token) = token {
                 let now = now_s() as i64;
-                s.conn().execute(&format!("DELETE FROM {USED_TOKENS_TABLE} WHERE expires_at < ?1"), [now])?;
-                let fresh = s.conn().execute(
-                    &format!("INSERT OR IGNORE INTO {USED_TOKENS_TABLE} (nonce, expires_at) VALUES (?1, ?2)"),
-                    rusqlite::params![token.n, token.e as i64],
-                )?;
+                // An index seek (`ensure_schema`): nearly always nothing to delete.
+                s.conn()
+                    .prepare_cached(&format!("DELETE FROM {USED_TOKENS_TABLE} WHERE expires_at < ?1"))?
+                    .execute([now])?;
+                let fresh = s
+                    .conn()
+                    .prepare_cached(&format!(
+                        "INSERT OR IGNORE INTO {USED_TOKENS_TABLE} (nonce, expires_at) VALUES (?1, ?2)"
+                    ))?
+                    .execute(rusqlite::params![token.n, token.e as i64])?;
                 if fresh == 0 {
                     return Ok(Err(TokenProblem::Used));
                 }
@@ -739,7 +744,8 @@ pub(crate) async fn ensure_schema(app: &App) -> crate::Result<()> {
     txn.with_state(|s| {
         s.conn().execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS {USED_TOKENS_TABLE} (nonce TEXT PRIMARY KEY, expires_at INTEGER NOT NULL) \
-             WITHOUT ROWID"
+             WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS {USED_TOKENS_TABLE}_by_expiry ON {USED_TOKENS_TABLE} (expires_at);"
         ))?;
         Ok(())
     })?;

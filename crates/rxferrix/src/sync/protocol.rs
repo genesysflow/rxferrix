@@ -331,8 +331,45 @@ impl ServerMessage {
                 out.push_str("]}");
                 out
             }
+            // Serialized from borrowed parts: `to_json` would copy the result first.
+            ServerMessage::MutationResponse { request_id, result: Ok((value, ts)), log_lines } => {
+                Success::new("MutationResponse", request_id, value, Some(*ts), log_lines).text()
+            }
+            ServerMessage::ActionResponse { request_id, result: Ok(value), log_lines } => {
+                Success::new("ActionResponse", request_id, value, None, log_lines).text()
+            }
             other => other.to_json().to_string(),
         }
+    }
+}
+
+/// A successful `MutationResponse` or `ActionResponse`, as [`ServerMessage::to_json`] writes it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Success<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    request_id: &'a RequestId,
+    success: bool,
+    result: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts: Option<u64>,
+    log_lines: &'a [String],
+}
+
+impl<'a> Success<'a> {
+    fn new(
+        kind: &'static str,
+        request_id: &'a RequestId,
+        result: &'a Value,
+        ts: Option<u64>,
+        log_lines: &'a [String],
+    ) -> Self {
+        Success { kind, request_id, success: true, result, ts, log_lines }
+    }
+
+    fn text(&self) -> String {
+        serde_json::to_string(self).expect("a response serializes")
     }
 }
 
@@ -368,6 +405,23 @@ mod tests {
             serde_json::from_str(r#"{ "type": "Authenticate", "baseVersion": 0, "token": null }"#).unwrap();
         assert_eq!(m, ClientMessage::Authenticate { base_version: 0, token: None });
         assert!(serde_json::from_str::<ClientMessage>(r#"{ "type": "Nope" }"#).is_err());
+    }
+
+    #[test]
+    fn response_text_matches_the_json_form() {
+        let error = ClientError { kind: crate::error::ErrorKind::User, message: "no".into(), data: Some(json!(1)) };
+        let lines = vec!["a line".to_string()];
+        for value in [json!(null), json!({ "items": [1, "two", { "three": 3.5 }] })] {
+            let messages = [
+                ServerMessage::MutationResponse { request_id: 7, result: Ok((value.clone(), 42)), log_lines: vec![] },
+                ServerMessage::MutationResponse { request_id: 7, result: Err(error.clone()), log_lines: lines.clone() },
+                ServerMessage::ActionResponse { request_id: 8, result: Ok(value.clone()), log_lines: lines.clone() },
+                ServerMessage::ActionResponse { request_id: 8, result: Err(error.clone()), log_lines: vec![] },
+            ];
+            for m in messages {
+                assert_eq!(serde_json::from_str::<Value>(&m.to_text()).unwrap(), m.to_json(), "{m:?}");
+            }
+        }
     }
 
     #[test]

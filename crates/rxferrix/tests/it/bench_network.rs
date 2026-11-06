@@ -283,7 +283,10 @@ async fn bench_uploads() {
                     let url = if url.starts_with('/') { format!("http://{addr}{url}") } else { url };
                     let res = client.post(&url).header("content-type", "text/plain").body(vec![b'x'; 1024]);
                     let res = res.send().await.unwrap();
-                    assert!(res.status().is_success(), "{}", res.status());
+                    let status = res.status();
+                    // Read to the end, so the connection is kept alive for the next upload.
+                    let body = res.text().await.unwrap();
+                    assert!(status.is_success(), "{status}: {body}");
                     let window = (started.elapsed().as_secs() / 2) as usize;
                     if let Some(w) = windows.get(window) {
                         w.fetch_add(1, Ordering::Relaxed);

@@ -571,15 +571,12 @@ impl StorageService {
             if let Some(token) = token {
                 let now = now_s() as i64;
                 // An index seek (`ensure_schema`): nearly always nothing to delete.
-                s.conn()
-                    .prepare_cached(&format!("DELETE FROM {USED_TOKENS_TABLE} WHERE expires_at < ?1"))?
-                    .execute([now])?;
-                let fresh = s
-                    .conn()
-                    .prepare_cached(&format!(
-                        "INSERT OR IGNORE INTO {USED_TOKENS_TABLE} (nonce, expires_at) VALUES (?1, ?2)"
-                    ))?
-                    .execute(rusqlite::params![token.n, token.e as i64])?;
+                // `USED_TOKENS_TABLE`, spelled out: no SQL string to build per upload.
+                const PURGE: &str = "DELETE FROM _storage_used_upload_tokens WHERE expires_at < ?1";
+                const MARK: &str =
+                    "INSERT OR IGNORE INTO _storage_used_upload_tokens (nonce, expires_at) VALUES (?1, ?2)";
+                s.conn().prepare_cached(PURGE)?.execute([now])?;
+                let fresh = s.conn().prepare_cached(MARK)?.execute(rusqlite::params![token.n, token.e as i64])?;
                 if fresh == 0 {
                     return Ok(Err(TokenProblem::Used));
                 }

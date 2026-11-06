@@ -746,6 +746,10 @@ AuthConfig::default()
   user has it yet, plus `name` and an https `picture`. The profile isn't updated on later sign-ins. The identity has
   no session id; the connection's identity ends at the token's `exp` (plus leeway), or as soon as the user is
   deleted. Deleting a user doesn't block the subject: its next token provisions a new user (block it at the issuer).
+- Cache: a verified token and its user are remembered (up to 100k tokens), so later calls with it skip the signature
+  check and the account lookup. That never changes the outcome: an entry is dropped once the token expires, once the
+  issuer's keys are refreshed (every token is verified again with the new set), and as soon as a commit writes its
+  user or account.
 
 **Live revocation** (`rxferrix::auth::revocation`). Connections that outlive a request (sync sockets, the admin SSE
 log stream) authenticate with `authenticate_watched`, which registers the token's session id (or, for external

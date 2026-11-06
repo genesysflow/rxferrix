@@ -311,6 +311,9 @@ pub(super) fn usable_keys(body: &[u8]) -> crate::Result<usize> {
 
 #[derive(Default)]
 struct KeyCache {
+    /// Unique per key set fetched (0: none yet): a token verified with one set is only known good while it is current
+    /// ([`JwtVerifier::key_generation`]).
+    generation: u64,
     keys: Vec<Key>,
     fetched_at: Option<Instant>,
     /// Last fetch attempt (successful or not), for rate limiting.
@@ -356,13 +359,26 @@ impl JwtVerifier {
         self.providers.is_empty()
     }
 
-    /// Verify an external token (`now_s`: seconds since the epoch).
-    pub async fn verify(&self, token: &str, now_s: u64) -> Result<ExternalClaims, TokenError> {
-        self.verify_with_claims(token, now_s).await.map(|(c, _)| c)
+    /// Verify an external token (`now_s`: seconds since the epoch), also returning the whole verified claim set (e.g.
+    /// for a `nonce`, `super::apple`).
+    pub async fn verify_with_claims(&self, token: &str, now_s: u64) -> Result<(ExternalClaims, Value), TokenError> {
+        self.verify_inner(token, now_s).await.map(|(c, v, _)| (c, v))
     }
 
-    /// [`Self::verify`], also returning the whole verified claim set (e.g. for a `nonce`, `super::apple`).
-    pub async fn verify_with_claims(&self, token: &str, now_s: u64) -> Result<(ExternalClaims, Value), TokenError> {
+    /// Verify an external token, also returning the generation of the keys it was verified with
+    /// ([`Self::key_generation`]).
+    pub(crate) async fn verify_keyed(&self, token: &str, now_s: u64) -> Result<(ExternalClaims, u64), TokenError> {
+        self.verify_inner(token, now_s).await.map(|(c, _, generation)| (c, generation))
+    }
+
+    /// The generation of `issuer`'s current keys, refreshed first when due as for a verification. While it is the one
+    /// a token was verified with, verifying the token again gives the same claims (until they expire).
+    pub(crate) async fn key_generation(&self, issuer: &str) -> Option<u64> {
+        let provider = self.providers.get(issuer)?;
+        Some(self.keys(provider, false).await.generation)
+    }
+
+    async fn verify_inner(&self, token: &str, now_s: u64) -> Result<(ExternalClaims, Value, u64), TokenError> {
         let mut parts = token.split('.');
         let (Some(header), Some(payload), Some(sig), None) = (parts.next(), parts.next(), parts.next(), parts.next())
         else {
@@ -400,7 +416,7 @@ impl JwtVerifier {
             return Err(TokenError::BadSignature);
         }
         let checked = check_claims(cfg, &claims, now_s)?;
-        Ok((checked, claims))
+        Ok((checked, claims, cache.generation))
     }
 
     /// The provider's keys: cached, refreshed after the TTL, or refetched now (`unknown_kid`, rate limited).
@@ -415,7 +431,9 @@ impl JwtVerifier {
         if !needs_fetch(&current, &provider.config, unknown_kid) {
             return current;
         }
+        static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut next = KeyCache {
+            generation: GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             keys: current.keys.clone(),
             fetched_at: current.fetched_at,
             attempted_at: Some(Instant::now()),

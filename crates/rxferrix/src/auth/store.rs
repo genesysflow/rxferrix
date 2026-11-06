@@ -340,7 +340,11 @@ pub(crate) async fn oauth_would_create(app: &App, provider: &str, profile: &Exte
 /// sign-ins (apps can do that from the claims they receive through their own functions).
 ///
 /// Returns the user id; looks up first in a snapshot so that known subjects cost no write.
-pub(crate) async fn external_user(app: &App, claims: &super::jwt::ExternalClaims) -> crate::Result<Id<User>> {
+/// The user (and its `_accounts` row) of an external token's `(issuer, subject)`, provisioned on first sight.
+pub(crate) async fn external_user(
+    app: &App,
+    claims: &super::jwt::ExternalClaims,
+) -> crate::Result<(Id<User>, Id<Account>)> {
     let (provider, subject) = (claims.issuer.clone(), claims.subject.clone());
     let lookup = |db: QueryDb, provider: String, subject: String| async move {
         let account = db
@@ -351,19 +355,19 @@ pub(crate) async fn external_user(app: &App, claims: &super::jwt::ExternalClaims
             .first()
             .await?;
         Ok::<_, crate::Error>(match account {
-            Some(a) if db.get(a.user).await?.is_some() => Some(Ok(a.user)),
+            Some(a) if db.get(a.user).await?.is_some() => Some(Ok((a.user, a.id))),
             Some(a) => Some(Err(a.id)),
             None => None,
         })
     };
     let (p, s) = (provider.clone(), subject.clone());
-    if let Some(Ok(user)) = read(app, |db| lookup(db, p, s)).await? {
-        return Ok(user);
+    if let Some(Ok(found)) = read(app, |db| lookup(db, p, s)).await? {
+        return Ok(found);
     }
     let claims = claims.clone();
     write(app, |db| async move {
         match lookup(db.share(), provider.clone(), subject.clone()).await? {
-            Some(Ok(user)) => return Ok(user),
+            Some(Ok(found)) => return Ok(found),
             // An account whose user is gone (shouldn't happen: delete_user removes accounts): replace it.
             Some(Err(stale)) => db.delete(stale).await?,
             None => {}
@@ -377,8 +381,8 @@ pub(crate) async fn external_user(app: &App, claims: &super::jwt::ExternalClaims
         let image = profile_image(claims.picture);
         let name = claims.name.map(|n| n.chars().take(200).collect());
         let user = db.insert(User { email_verified: email.is_some(), email, name, image }).await?;
-        db.insert(Account { user, provider, provider_account_id: subject }).await?;
-        Ok(user)
+        let account = db.insert(Account { user, provider, provider_account_id: subject }).await?;
+        Ok((user, account))
     })
     .await
 }

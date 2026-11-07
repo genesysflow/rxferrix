@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use futures::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use rusqlite::{Connection, params};
@@ -281,6 +282,56 @@ impl BlobStore {
     }
 }
 
+/// How many blobs an export or import copies at once.
+const BLOB_CONCURRENCY: usize = 8;
+
+/// Files larger than this are imported in parts of this size.
+const BLOB_PART: usize = 8 << 20;
+
+/// Store the file at `source` as the blob `path`: at once if small, else in parts read one after another.
+async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate::Result<()> {
+    let size = tokio::fs::metadata(source).await?.len();
+    if size <= BLOB_PART as u64 {
+        let bytes = tokio::fs::read(source).await?;
+        blobs.store.put(path, PutPayload::from(bytes)).await.context("storing a blob")?;
+        return Ok(());
+    }
+    let mut file = tokio::fs::File::open(source).await?;
+    let mut upload = object_store::WriteMultipart::new_with_chunk_size(
+        blobs.store.put_multipart(path).await.context("storing a blob")?,
+        BLOB_PART,
+    );
+    let sent = async {
+        loop {
+            let mut part = vec![0u8; BLOB_PART];
+            let mut filled = 0;
+            while filled < part.len() {
+                match tokio::io::AsyncReadExt::read(&mut file, &mut part[filled..]).await? {
+                    0 => break,
+                    n => filled += n,
+                }
+            }
+            if filled == 0 {
+                return Ok::<_, crate::Error>(());
+            }
+            part.truncate(filled);
+            // At most two parts in flight besides the one being read.
+            upload.wait_for_capacity(2).await.context("storing a blob")?;
+            upload.put(part.into());
+        }
+    }
+    .await
+    .with_context(|| format!("importing {}", source.display()));
+    match sent {
+        Ok(()) => upload.finish().await.context("storing a blob").map(drop),
+        Err(e) => {
+            // Leave no unfinished upload behind (an object store's parts, a local temporary file).
+            let _ = upload.abort().await;
+            Err(e)
+        }
+    }
+}
+
 /// `manifest.json` of an export.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -371,15 +422,46 @@ pub async fn export_to_dir(
         let blobs = blobs.context("no file storage to read the blobs of `_storage` from")?;
         let files_dir = out.join("files");
         std::fs::create_dir_all(&files_dir)?;
-        for id in storage_ids {
-            match blobs.store.get(&blobs.path(&id)).await {
-                Ok(r) => {
-                    let bytes = r.bytes().await.with_context(|| format!("reading the blob of {id}"))?;
-                    tokio::fs::write(files_dir.join(&id), &bytes).await?;
-                    manifest.files += 1;
+        // A few at a time (an object store's latency adds up otherwise), each copied to its file without holding it:
+        // a local file directly, other stores' bodies streamed.
+        let mut copies = futures::stream::iter(storage_ids)
+            .map(|id| {
+                let (blobs, path) = (&blobs, files_dir.join(&id));
+                async move {
+                    let result = match blobs.store.get(&blobs.path(&id)).await {
+                        Ok(r) => r,
+                        Err(object_store::Error::NotFound { .. }) => return Ok(false),
+                        Err(e) => return Err(e).with_context(|| format!("reading the blob of {id}")),
+                    };
+                    match result.payload {
+                        object_store::GetResultPayload::File(mut source, _) => {
+                            tokio::task::spawn_blocking(move || {
+                                std::io::copy(&mut source, &mut std::fs::File::create(&path)?).map(drop)
+                            })
+                            .await?
+                            .with_context(|| format!("exporting the blob of {id}"))?;
+                        }
+                        object_store::GetResultPayload::Stream(mut chunks) => {
+                            // Buffered: each write of a `tokio::fs::File` is a trip to the blocking pool.
+                            let writing = || format!("exporting the blob of {id} to {}", path.display());
+                            let file = tokio::fs::File::create(&path).await.with_context(writing)?;
+                            let mut file = tokio::io::BufWriter::with_capacity(1 << 20, file);
+                            while let Some(chunk) = chunks.next().await {
+                                let chunk = chunk.with_context(|| format!("reading the blob of {id}"))?;
+                                tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.with_context(writing)?;
+                            }
+                            tokio::io::AsyncWriteExt::flush(&mut file).await.with_context(writing)?;
+                        }
+                    }
+                    Ok::<_, crate::Error>(true)
                 }
-                Err(object_store::Error::NotFound { .. }) => manifest.missing_files += 1,
-                Err(e) => return Err(e).with_context(|| format!("reading the blob of {id}")),
+            })
+            .buffer_unordered(BLOB_CONCURRENCY);
+        while let Some(copied) = copies.next().await {
+            if copied? {
+                manifest.files += 1;
+            } else {
+                manifest.missing_files += 1;
             }
         }
     }
@@ -739,21 +821,31 @@ pub async fn import_file(
             break;
         }
         if is_storage {
-            for doc in &pending {
-                let id = doc.id.encode();
-                let source = doc.source_id.as_deref().and_then(|s| files.map(|f| f.join(s))).filter(|p| p.is_file());
-                match source {
-                    Some(path) => {
-                        let bytes = tokio::fs::read(&path).await?;
-                        blobs.store.put(&blobs.path(&id), PutPayload::from(bytes)).await.context("storing a blob")?;
-                        report.files += 1;
+            // A few at a time, as for exports; a large file is sent in parts, so memory holds parts, not files.
+            // Owned (blob path, source file) pairs: the copies run several at a time.
+            let copies: Vec<(ObjectPath, Option<PathBuf>)> = pending
+                .iter()
+                .map(|doc| {
+                    let source =
+                        doc.source_id.as_deref().and_then(|s| files.map(|f| f.join(s))).filter(|p| p.is_file());
+                    (blobs.path(&doc.id.encode()), source)
+                })
+                .collect();
+            let blobs = &blobs;
+            let mut copies = futures::stream::iter(copies)
+                .map(|(path, source)| async move {
+                    match source {
+                        Some(source) => put_blob(blobs, &path, &source).await.map(|()| (1, 0)),
+                        None => match blobs.store.head(&path).await {
+                            Err(object_store::Error::NotFound { .. }) => Ok((0, 1)),
+                            _ => Ok((0, 0)),
+                        },
                     }
-                    None => {
-                        if let Err(object_store::Error::NotFound { .. }) = blobs.store.head(&blobs.path(&id)).await {
-                            report.missing_files += 1;
-                        }
-                    }
-                }
+                })
+                .buffer_unordered(BLOB_CONCURRENCY);
+            while let Some(copied) = copies.next().await {
+                let (files, missing) = copied?;
+                (report.files, report.missing_files) = (report.files + files, report.missing_files + missing);
             }
         }
         let txn = app.db().begin_write().await?;
@@ -893,5 +985,22 @@ mod tests {
         assert_eq!(v["list"][0], remap.id(a).encode());
         assert_eq!(v["list"][1], b.encode());
         assert_eq!(v["text"], "hello");
+    }
+
+    /// Small files are stored at once, large ones in parts: either way the blob is the file.
+    #[tokio::test]
+    async fn imported_blobs_are_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("blobs")).unwrap();
+        let store = object_store::local::LocalFileSystem::new_with_prefix(dir.path().join("blobs"));
+        let blobs = BlobStore { store: Arc::new(store.unwrap()), prefix: String::new() };
+        for (name, size) in [("small", 1000usize), ("exact", BLOB_PART), ("large", 2 * BLOB_PART + 12345)] {
+            let source = dir.path().join(name);
+            let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&source, &content).unwrap();
+            put_blob(&blobs, &ObjectPath::from(name), &source).await.unwrap();
+            let stored = blobs.store.get(&ObjectPath::from(name)).await.unwrap().bytes().await.unwrap();
+            assert!(stored[..] == content[..], "{name}");
+        }
     }
 }

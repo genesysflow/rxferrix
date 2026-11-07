@@ -6,6 +6,7 @@
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_log_stats -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_filtered_first -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_scheduler -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_backup -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_freshness -- --ignored --nocapture
@@ -23,6 +24,8 @@
 //! `BENCH_ROWS` (200k, the default retention) rows of 40 functions.
 //! `bench_filtered_first`: `first()`, `take(10)` and a page of 10 of a filtered scan over 1 KiB documents, whose
 //! first match is the 1st (or 8th) document of the range.
+//! `bench_scheduler`: `BENCH_JOBS` (5000) mutations, then as many actions, scheduled to run at once by one mutation
+//! each: how long the scheduler takes to run them all.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
 //! `bench_backup`: a backup of `BENCH_DOCS` (200k) documents while the change journal holds a few commits (as with
 //! `--olap` or replication running): how long it takes and how big the archive is.
@@ -150,6 +153,29 @@ pub mod fns {
         Ok((n, docs.iter().map(|d| d.value.amount).sum()))
     }
 
+    #[internal_mutation]
+    pub async fn job_mutation(ctx: &MutationCtx, n: i64) -> Result<()> {
+        ctx.db.insert(Plain { group: "jobs".into(), amount: n as f64, quantity: 1 }).await.map(drop)
+    }
+
+    #[internal_action]
+    pub async fn job_action(ctx: &ActionCtx, n: i64) -> Result<()> {
+        ctx.run_mutation::<job_mutation>((n,)).await
+    }
+
+    /// Schedule `n` jobs (of `job_action` if `actions`, else `job_mutation`) to run now.
+    #[internal_mutation]
+    pub async fn schedule_jobs(ctx: &MutationCtx, n: i64, actions: bool) -> Result<()> {
+        for i in 0..n {
+            if actions {
+                ctx.scheduler.run_after::<job_action>(std::time::Duration::ZERO, (i,)).await?;
+            } else {
+                ctx.scheduler.run_after::<job_mutation>(std::time::Duration::ZERO, (i,)).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// `n` plain rows in one transaction.
     #[internal_mutation]
     pub async fn insert_plains(ctx: &MutationCtx, from: i64, n: i64) -> Result<()> {
@@ -157,6 +183,12 @@ pub mod fns {
             ctx.db.insert(Plain { group: format!("g{}", i % 100), amount: i as f64, quantity: i }).await?;
         }
         Ok(())
+    }
+
+    #[internal_query]
+    pub async fn count_jobs_done(ctx: &QueryCtx) -> Result<u64> {
+        let q = ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, "jobs".to_string()));
+        q.count().await
     }
 
     /// How many plain rows the analytics copy has once it has applied commit `ts`.
@@ -405,6 +437,25 @@ async fn bench_filtered_first() {
         assert_eq!(run.result.unwrap(), serde_json::json!(10));
     }
     println!("filtered scan, {:<22}: {:>9.1?} per query", "page of 10, every 8th", started.elapsed() / runs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_scheduler() {
+    let jobs: u64 = std::env::var("BENCH_JOBS").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    t.start_scheduler().await.unwrap();
+    let mut done = 0;
+    for (label, actions) in [("mutations", false), ("actions", true)] {
+        let started = Instant::now();
+        t.mutation::<fns::schedule_jobs>((jobs as i64, actions)).await.unwrap();
+        done += jobs;
+        while t.query_run::<fns::count_jobs_done>(()).await.unwrap().result.unwrap() != serde_json::json!(done) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let elapsed = started.elapsed();
+        println!("scheduler: {jobs} {label:<9} run in {elapsed:>8.2?} ({:.0}/s)", jobs as f64 / elapsed.as_secs_f64());
+    }
 }
 
 #[cfg(feature = "olap")]

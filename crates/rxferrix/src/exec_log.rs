@@ -658,46 +658,52 @@ fn query(conn: &Connection, f: &LogFilter) -> anyhow::Result<Vec<LogEntry>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// The rows [`stats`] aggregates, grouped by path. `+path` keeps SQLite from ordering by walking `_logs_by_path`,
-/// which reads every row of the log (with a table lookup each) to keep the few in the window; this way it searches
-/// `_logs_by_timestamp` and sorts only those.
+/// The rows [`stats`] aggregates: those of the window, through `_logs_by_timestamp`. Grouped by path in memory, not
+/// by SQLite: sorting them (or walking `_logs_by_path`, which reads every row of the log) cost more than the rest.
 fn stats_sql(exclude_background: bool) -> String {
     let filter = if exclude_background { NOT_BACKGROUND } else { "" };
-    format!("SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1{filter} ORDER BY +path")
+    format!("SELECT path, kind, outcome, duration_us FROM _logs WHERE timestamp >= ?1{filter}")
 }
 
 fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Result<Vec<FunctionStats>> {
     let mut stmt = conn.prepare(&stats_sql(exclude_background))?;
     let mut rows = stmt.query([since])?;
-    let mut out: Vec<(FunctionStats, Vec<u64>)> = Vec::new();
+    let mut by_path: std::collections::HashMap<String, (FunctionStats, Vec<u64>)> = Default::default();
     while let Some(r) = rows.next()? {
-        let path: String = r.get(0)?;
-        let kind: String = r.get(1)?;
-        let outcome = LogOutcome::parse(&r.get::<_, String>(2)?);
+        // Read in place: only a path seen for the first time is copied.
+        let path = r.get_ref(0)?.as_str()?;
+        let outcome = LogOutcome::parse(r.get_ref(2)?.as_str()?);
         let duration = r.get::<_, i64>(3)? as u64;
-        if out.last().is_none_or(|(s, _)| s.path != path) {
-            let s = FunctionStats {
-                path,
-                kind: parse_kind(&kind),
-                calls: 0,
-                errors: 0,
-                user_errors: 0,
-                server_errors: 0,
-                p50_us: 0,
-                p95_us: 0,
-                max_us: 0,
-            };
-            out.push((s, Vec::new()));
+        let add = |(s, durations): &mut (FunctionStats, Vec<u64>)| {
+            s.calls += 1;
+            match outcome {
+                LogOutcome::Success => {}
+                LogOutcome::UserError => s.user_errors += 1,
+                LogOutcome::ServerError => s.server_errors += 1,
+            }
+            durations.push(duration);
+        };
+        if let Some(entry) = by_path.get_mut(path) {
+            add(entry);
+            continue;
         }
-        let (s, durations) = out.last_mut().expect("pushed above");
-        s.calls += 1;
-        match outcome {
-            LogOutcome::Success => {}
-            LogOutcome::UserError => s.user_errors += 1,
-            LogOutcome::ServerError => s.server_errors += 1,
-        }
-        durations.push(duration);
+        let s = FunctionStats {
+            path: path.to_string(),
+            kind: parse_kind(r.get_ref(1)?.as_str()?),
+            calls: 0,
+            errors: 0,
+            user_errors: 0,
+            server_errors: 0,
+            p50_us: 0,
+            p95_us: 0,
+            max_us: 0,
+        };
+        let mut entry = (s, Vec::new());
+        add(&mut entry);
+        by_path.insert(path.to_string(), entry);
     }
+    let mut out: Vec<_> = by_path.into_values().collect();
+    out.sort_unstable_by(|(a, _), (b, _)| a.path.cmp(&b.path));
     Ok(out
         .into_iter()
         .map(|(mut s, mut d)| {

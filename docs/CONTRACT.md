@@ -1771,8 +1771,10 @@ pub struct OlapColumn { pub name: String, pub type_name: String }
   `olap_query_failed` (not one SELECT, DuckDB's message, more than `max_result_rows` rows, or a row `query_as` can't
   deserialize), `olap_timeout` (interrupted, or `at_least` waited too
   long).
-- **How the copy follows the data.** It reads the change journal (§4.4, consumer `olap`) every `apply_every`
-  (250ms) and applies each batch (the final state of every document written) in one DuckDB transaction. A journal
+- **How the copy follows the data.** It reads the change journal (§4.4, consumer `olap`) as soon as a commit
+  arrives, but at most once every `apply_every` (250ms) while it keeps finding work (so commits arriving together
+  are applied together; with nothing new it still looks every `apply_every`), and applies each batch (the final state
+  of every document written) in one DuckDB transaction. A journal
   row is deleted once every active consumer (replication, the copy, a takeover in progress) has applied or shipped it;
   journaling is on while any is. A table is **rebuilt** from one snapshot when there is no copy yet, after a restore (`journal::scrub`
   removes the copy's id), when the journal can't continue the copy (commits made without `--olap` or replication),

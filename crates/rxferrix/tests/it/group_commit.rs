@@ -185,7 +185,10 @@ async fn a_slow_mutation_commits_the_batch_before_it_runs() {
     });
     // Only once the quick one runs (holds the writer): on a loaded runner a fixed pause wasn't always enough, and a
     // slow mutation that took the lock first made the quick one wait for it rightly.
+    let deadline = Instant::now() + Duration::from_secs(5);
     while !fns::QUICK_STARTED.lock().unwrap().iter().any(|m| m == "quick") {
+        assert!(!quick.is_finished(), "the quick mutation ended without running");
+        assert!(Instant::now() < deadline, "the quick mutation didn't start within 5 s");
         tokio::time::sleep(Duration::from_micros(50)).await;
     }
     let slow = tokio::spawn(call(fns::gc_slow::path(), json!({ "marker": "slow", "ms": 150 })));

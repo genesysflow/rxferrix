@@ -275,10 +275,15 @@ fn prepare_copy(db: &Path) -> crate::Result<(u64, f64)> {
     let conn = Connection::open(db)?;
     let ts = crate::db::storage::read_meta_u64(&conn, crate::db::storage::META_TS)?;
     let time = crate::db::storage::read_meta_f64(&conn, crate::db::storage::META_TIME)?;
-    let journaled = crate::db::journal::stats(&conn).ok().flatten().is_some();
+    let journal_bytes = crate::db::journal::stats(&conn).ok().flatten().map(|(.., bytes)| bytes);
+    // The pages the journal rows free are zeroed (they compress to nearly nothing)...
+    conn.pragma_update(None, "secure_delete", true)?;
     crate::db::journal::scrub(&conn)?;
-    if journaled {
-        // Unshipped journal rows can be large: don't archive their free pages.
+    // ...and only when they are a large part of the file is it rewritten without them (a restored database would
+    // otherwise keep them as free space): rewriting all of it to drop a few unapplied commits took longer than the
+    // rest of the backup.
+    let file_bytes = std::fs::metadata(db)?.len();
+    if journal_bytes.is_some_and(|bytes| bytes.saturating_mul(4) > file_bytes) {
         conn.execute_batch("VACUUM")?;
     }
     Ok((ts, time))
@@ -1028,6 +1033,30 @@ pub(crate) fn sync_dir(dir: &Path) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy's journal rows are removed; the file is only rewritten (VACUUM) when they were a large part of it.
+    #[test]
+    fn copies_are_compacted_only_for_a_large_journal() {
+        for (rows, compacted) in [(3, false), (300, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("data.db");
+            let conn = crate::db::storage::open_writer(&db).unwrap();
+            conn.execute_batch(crate::db::journal::DDL).unwrap();
+            conn.execute_batch("CREATE TABLE filler (b BLOB)").unwrap();
+            conn.execute("INSERT INTO filler VALUES (zeroblob(1 << 20))", []).unwrap();
+            for ts in 1..=rows {
+                crate::db::journal::insert(&conn, ts, 0.0, &"x".repeat(8 << 10)).unwrap();
+            }
+            conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+            drop(conn);
+            let before = std::fs::metadata(&db).unwrap().len();
+            prepare_copy(&db).unwrap();
+            let after = std::fs::metadata(&db).unwrap().len();
+            assert_eq!(after < before, compacted, "{rows} rows: {before} -> {after} bytes");
+            let conn = Connection::open(&db).unwrap();
+            assert_eq!(crate::db::journal::stats(&conn).unwrap(), None, "the journal is gone");
+        }
+    }
 
     #[test]
     fn a_restore_interrupted_part_way_is_finished_at_the_next_start() {

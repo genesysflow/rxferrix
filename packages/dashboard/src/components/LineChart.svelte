@@ -45,7 +45,7 @@
 
   let width = $state(320);
   let hover = $state<number | null>(null);
-  const M = { top: 8, right: 6, bottom: 20, left: 40 };
+  const M = { top: 8, right: 14, bottom: 20, left: 44 };
 
   const pts = $derived(times.map((t, i) => ({ t, i })));
   /** Every value null (nothing to measure in the window): the empty message, not a bare axis. */
@@ -96,7 +96,7 @@
         {#each s.values as v, i (i)}
           <!-- Isolated values (no neighbors) would be invisible as a line: draw a dot. -->
           {#if v !== null && (s.values[i - 1] ?? null) === null && (s.values[i + 1] ?? null) === null}
-            <circle cx={cx(times[i]!)} cy={y(v)} r="2.5" style:fill={s.color} />
+            <circle class="mark" cx={cx(times[i]!)} cy={y(v)} r="3.5" style:fill={s.color} />
           {/if}
         {/each}
       {/each}
@@ -161,8 +161,8 @@
     stroke-width: 1;
   }
   .axis {
-    fill: var(--faint);
-    font-size: 10.5px;
+    fill: var(--muted);
+    font-size: 11px;
     font-family: var(--sans);
     font-variant-numeric: tabular-nums;
   }

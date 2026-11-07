@@ -219,15 +219,15 @@
 {/if}
 
 <style>
+  /* Bottom left of the page, clear of the toasts on the right. */
   .banner {
     position: fixed;
-    left: 50%;
+    left: 216px;
     bottom: 16px;
-    transform: translateX(-50%);
     display: flex;
     gap: 10px;
     align-items: center;
-    max-width: min(760px, calc(100vw - 260px));
+    max-width: min(760px, max(320px, calc(100vw - 216px - 420px)));
     padding: 8px 12px;
     border-radius: 8px;
     background: var(--warn-soft);
@@ -270,6 +270,11 @@
   @media (max-width: 760px) {
     .search {
       width: 100%;
+    }
+    .banner {
+      left: 12px;
+      right: 12px;
+      max-width: none;
     }
   }
 </style>

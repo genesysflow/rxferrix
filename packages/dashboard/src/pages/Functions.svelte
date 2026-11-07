@@ -301,8 +301,17 @@
       font-size: 15px;
       word-break: break-all;
     }
+    /* Compact, so the run box and its activity come into view sooner. */
     .sig {
       grid-template-columns: 1fr;
+      gap: 0;
+    }
+    .sig h3,
+    .page-body > h3 {
+      margin: 10px 0 4px;
+    }
+    .page-body :global(textarea) {
+      height: 116px;
     }
   }
   .logs-head {

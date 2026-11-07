@@ -109,7 +109,8 @@ async function step<T>(label: string, f: () => Promise<T>): Promise<T> {
 async function shot(page: Page, name: string) {
   if (!shots) return;
   const path = join(shots, `${shotPrefix}${name}.png`);
-  await page.screenshot({ path });
+  // Finished animations, not a frame of one (the phone drawer sliding shut, a row flashing in).
+  await page.screenshot({ path, animations: "disabled" });
   console.log(`  screenshot: ${path}`);
 }
 
@@ -651,7 +652,7 @@ try {
     await status.getByText(/^1 of \d+ loaded rows match/).waitFor();
     await grid.getByText("seed 1234").waitFor();
     await page.getByLabel("Filter loaded rows").fill("");
-    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "⇩ CSV" }).click()]);
+    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "CSV", exact: true }).click()]);
     const csvLines = readFileSync((await csv.path())!, "utf8").trim().split("\r\n");
     if (csvLines.length !== total + 3) throw new Error(`grid CSV export has ${csvLines.length} lines, want ${total + 3}`); // header, two new todos
   });

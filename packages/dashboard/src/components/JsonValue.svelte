@@ -22,7 +22,7 @@
 {:else if typeof value === "string"}
   <span class="string" title={value.length > max ? value : undefined}>{compactJson(value, max)}</span>
 {:else if typeof value === "number" && field === "_creationTime"}
-  <span class="number" title={String(value)}>{formatTime(value)}</span>
+  <span class="number time" title={String(value)}>{formatTime(value)}</span>
 {:else if typeof value === "number"}
   <span class="number" title={/At$|Time$/.test(field) ? formatTime(value) : undefined}
     >{value}</span
@@ -35,15 +35,20 @@
 
 <style>
   .null,
+  .bool,
+  .number {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .null {
+    color: var(--faint);
+  }
   .bool {
     color: var(--accent-text);
-    font-family: var(--mono);
-    font-size: 12.5px;
   }
-  .number {
-    color: var(--link);
-    font-family: var(--mono);
-    font-size: 12.5px;
+  .time {
+    color: var(--muted);
   }
   .other {
     color: var(--muted);

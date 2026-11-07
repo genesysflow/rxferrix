@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import Icon from "./Icon.svelte";
 
   /**
    * A modal dialog (native `<dialog>`: focus trapping, Escape closes). Mounted = open; `onclose` unmounts it. With
@@ -49,7 +50,7 @@
   <div class="content">
     <header>
       <h2>{title}</h2>
-      <button class="small ghost" onclick={onclose} aria-label="Close">✕</button>
+      <button class="ghost close" onclick={onclose} aria-label="Close"><Icon name="close" size={16} /></button>
     </header>
     <div class="body">{@render children()}</div>
     {#if actions}<footer class="row">{@render actions()}</footer>{/if}
@@ -68,7 +69,7 @@
     max-height: calc(100vh - 64px);
   }
   dialog.wide {
-    width: min(960px, calc(100vw - 32px));
+    width: min(800px, calc(100vw - 32px));
   }
   dialog::backdrop {
     background: rgb(0 0 0 / 0.35);
@@ -82,8 +83,17 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 16px;
+    padding: 12px 12px 12px 20px;
     border-bottom: 1px solid var(--border);
+  }
+  .close {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+    color: var(--muted);
+  }
+  .close:hover {
+    color: var(--text);
   }
   h2 {
     flex: 1;
@@ -91,12 +101,15 @@
     font-size: 15px;
   }
   .body {
-    padding: 14px 16px;
+    padding: 16px 20px 20px;
     overflow: auto;
+    line-height: 1.5;
   }
   footer {
     justify-content: flex-end;
-    padding: 10px 16px;
+    padding: 12px 20px;
     border-top: 1px solid var(--border);
+    background: var(--panel-2);
+    border-radius: 0 0 10px 10px;
   }
 </style>

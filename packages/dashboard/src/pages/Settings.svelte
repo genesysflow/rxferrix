@@ -194,7 +194,7 @@
       <span class="faint small">stored, never shown</span>
       {#if !disabled}
         <button class="small" type="button" onclick={() => onchange({ ...s, mode: "replace", value: "" })}>Replace</button>
-        {#if allowNone}<button class="small ghost" type="button" onclick={() => onchange({ ...s, mode: "none", value: "" })}>Remove</button>{/if}
+        {#if allowNone}<button class="small danger" type="button" onclick={() => onchange({ ...s, mode: "none", value: "" })}>Remove</button>{/if}
       {/if}
     {:else if s.mode === "none"}
       <span class="muted small">No {label.toLowerCase()} will be stored.</span>
@@ -506,7 +506,7 @@
         {/if}
         <button class="add-rule" type="button" onclick={addRateLimitRule} disabled={form.rateLimits.rules.length >= 50}>+ Add rate limit rule</button>
         {@render fieldError(err("rateLimits") ?? sectionError("rateLimits"))}
-        <details class="small muted rules-help">
+        <details class="help rules-help">
           <summary>How rules match</summary>
           <ul>
             <li>
@@ -773,23 +773,24 @@
     max-width: 900px;
   }
   .section {
-    padding: 14px 16px;
+    padding: 16px 20px 18px;
   }
   .section h2 {
     margin-bottom: 4px;
   }
   .section > p {
-    margin: 0 0 10px;
+    margin: 0 0 12px;
+    line-height: 1.5;
   }
   .field {
     display: grid;
-    grid-template-columns: 170px 1fr;
-    gap: 8px 12px;
+    grid-template-columns: 160px 1fr;
+    gap: 8px 16px;
     align-items: start;
-    margin: 6px 0;
+    margin: 10px 0;
   }
   .field > label {
-    padding-top: 6px;
+    padding-top: 7px;
     color: var(--muted);
     font-size: 13px;
   }
@@ -955,11 +956,7 @@
   .add-rule {
     width: 100%;
   }
-  .rules-help {
-    margin-top: 8px;
-  }
   .rules-help ul {
-    margin: 6px 0 0;
     padding-left: 18px;
   }
 

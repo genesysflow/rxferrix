@@ -13,7 +13,8 @@
 //!
 //! `bench_reads_while_writing`: the same fast and slow queries, on the default number of readers, while
 //! `BENCH_WRITERS` (0,1,4) tasks patch documents back to back. Every commit makes the readers start over with an
-//! empty page cache. Reported: fast and slow queries per second, and patches per second.
+//! empty page cache. Reported: fast and slow queries per second, and patches per second. `BENCH_THREADS` as for
+//! `bench_readers`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,7 +159,9 @@ async fn run(threads: usize) {
 #[test]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 fn bench_reads_while_writing() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = env("BENCH_THREADS", cores as u64) as usize;
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(threads).enable_all().build().unwrap();
     rt.block_on(async {
         let secs = Duration::from_secs(env("BENCH_SECS", 2));
         let slow_tasks = env("BENCH_SLOW", 8) as usize;

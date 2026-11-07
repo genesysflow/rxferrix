@@ -50,6 +50,7 @@ describe("parseTsType", () => {
     expect(fields(parseTsType(`{ address: Address, }`))![0]!.type).toEqual({ kind: "unknown", text: "Address" });
     expect(parseTsType(`{ a: string`)).toBeNull();
     expect(parseTsType(`{ a: % }`)).toBeNull();
+    expect(parseTsType(`{ [key in string`)).toBeNull(); // an unclosed index signature ends, not loops
     expect(parseTsType(null)).toBeNull();
   });
 });

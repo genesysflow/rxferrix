@@ -217,7 +217,10 @@ class Parser {
       if (this.eat("}")) break;
       if (this.eat("[")) {
         // An index signature: `[key in string]?: T` or `[key: string]: T`.
-        while (!this.eat("]")) this.i++;
+        while (!this.eat("]")) {
+          if (this.i >= this.tokens.length) throw new Error("expected ]");
+          this.i++;
+        }
         this.eat("?");
         this.expect(":");
         record = this.type();

@@ -297,10 +297,13 @@ async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate:
         return Ok(());
     }
     let mut file = tokio::fs::File::open(source).await?;
-    let mut upload = object_store::WriteMultipart::new_with_chunk_size(
+    let upload = object_store::WriteMultipart::new_with_chunk_size(
         blobs.store.put_multipart(path).await.context("storing a blob")?,
         BLOB_PART,
     );
+    // Aborted unless finished, also when this future is dropped part way (another file of the import failed, or the
+    // import was canceled): an object store keeps an abandoned upload's parts.
+    let mut upload = AbortUnlessFinished(Some(upload));
     let sent = async {
         loop {
             let mut part = vec![0u8; BLOB_PART];
@@ -315,6 +318,7 @@ async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate:
                 return Ok::<_, crate::Error>(());
             }
             part.truncate(filled);
+            let upload = upload.0.as_mut().expect("taken only below");
             // At most two parts in flight besides the one being read.
             upload.wait_for_capacity(2).await.context("storing a blob")?;
             upload.put(part.into());
@@ -322,12 +326,28 @@ async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate:
     }
     .await
     .with_context(|| format!("importing {}", source.display()));
+    let upload = upload.0.take().expect("taken only here");
     match sent {
         Ok(()) => upload.finish().await.context("storing a blob").map(drop),
         Err(e) => {
             // Leave no unfinished upload behind (an object store's parts, a local temporary file).
             let _ = upload.abort().await;
             Err(e)
+        }
+    }
+}
+
+/// A multipart upload that is aborted (in a task of its own) if it is dropped before being taken out.
+struct AbortUnlessFinished(Option<object_store::WriteMultipart>);
+
+impl Drop for AbortUnlessFinished {
+    fn drop(&mut self) {
+        if let Some(upload) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                let _ = upload.abort().await;
+            });
         }
     }
 }

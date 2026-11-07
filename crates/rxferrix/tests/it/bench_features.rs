@@ -4,6 +4,7 @@
 //! cargo test --release -p rxferrix --test it bench_aggregates -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_filtered_search -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_log_stats -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_filtered_first -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_scheduler -- --ignored --nocapture
@@ -20,6 +21,8 @@
 //! `bench_search_patches`: 16 writers patch a counter of documents (`BENCH_DOCS`, 2000) that also carry a 2 KB text
 //! and a 1536-dimension embedding, in a table without search indexes and in one with a search index on the text and a
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
+//! `bench_filtered_search`: `BENCH_TENANTS` (100) tenants with 500 posts each, all containing a common word; a search
+//! for it (and for a rarer one) scoped to one tenant, taking 10.
 //! `bench_log_stats`: the dashboard's per-function stats (`Logs::stats`) over a day of an execution log holding
 //! `BENCH_ROWS` (200k, the default retention) rows of 40 functions.
 //! `bench_filtered_first`: `first()`, `take(10)` and a page of 10 of a filtered scan over 1 KiB documents, whose
@@ -92,6 +95,23 @@ pub mod fns {
         pub views: i64,
     }
 
+    #[table(name = "bench_tenant_posts")]
+    #[search_index(search_body, search = body, filter = [tenant])]
+    pub struct TenantPost {
+        pub tenant: String,
+        pub body: String,
+    }
+
+    /// `n` posts of `tenant`, each with the word "common" and one of 50 rarer ones.
+    #[internal_mutation]
+    pub async fn insert_tenant_posts(ctx: &MutationCtx, tenant: String, n: i64) -> Result<()> {
+        for i in 0..n {
+            let body = format!("common words about topic{} number {i}", i % 50);
+            ctx.db.insert(TenantPost { tenant: tenant.clone(), body }).await?;
+        }
+        Ok(())
+    }
+
     #[table(name = "bench_notes")]
     #[index(by_n = [n])]
     pub struct Note {
@@ -105,6 +125,19 @@ pub mod fns {
             ctx.db.insert(Note { n, body: "x".repeat(1024) }).await?;
         }
         Ok(())
+    }
+
+    #[internal_query]
+    pub async fn search_tenant(ctx: &QueryCtx, tenant: String, text: String) -> Result<usize> {
+        let hits = ctx
+            .db
+            .query::<TenantPost>()
+            .with_search_index(TenantPost::search_body, |q| {
+                q.search(TenantPost::body, text).eq(TenantPost::tenant, tenant)
+            })
+            .take(10)
+            .await?;
+        Ok(hits.len())
     }
 
     /// The first `take` notes from `from` whose `n` is a multiple of `every`.
@@ -371,6 +404,27 @@ async fn bench_search_patches() {
         let p = |q: f64| lat[((lat.len() as f64 - 1.0) * q) as usize];
         let rate = lat.len() as f64 / started.elapsed().as_secs_f64();
         println!("patches, {label:<21}: {rate:>8.0}/s, p50 {:>9.1?}, p99 {:>9.1?}", p(0.5), p(0.99));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_filtered_search() {
+    let tenants: i64 = std::env::var("BENCH_TENANTS").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    let started = Instant::now();
+    for tenant in 0..tenants {
+        t.mutation::<fns::insert_tenant_posts>((format!("tenant-{tenant}"), 500)).await.unwrap();
+    }
+    println!("{tenants} tenants: {} posts written in {:.2?}", tenants * 500, started.elapsed());
+    for (label, text) in [("a word in every post", "common"), ("a word in 1 post of 50", "topic7")] {
+        let runs = 100u32;
+        let started = Instant::now();
+        for _ in 0..runs {
+            let run = t.query_run::<fns::search_tenant>(("tenant-42".to_string(), text.to_string())).await.unwrap();
+            assert_eq!(run.result.unwrap(), serde_json::json!(10));
+        }
+        println!("{tenants} tenants, search one for {label:<22}: {:>9.1?} per query", started.elapsed() / runs);
     }
 }
 

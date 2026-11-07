@@ -268,3 +268,54 @@ async fn indexes_written_with_the_v2_layout_are_rebuilt_on_open() {
     let p = t.query::<page>(("a".to_string(), true, PaginationOpts::after(old_cursor, 2))).await.unwrap();
     assert_eq!(p.page.iter().map(|d| d.body.clone()).collect::<Vec<_>>(), desc[2..4]);
 }
+
+/// The search index of `posts`: its FTS5 table's name and `CREATE` statement.
+fn posts_search_table(conn: &rusqlite::Connection) -> (String, String) {
+    let n: i64 = conn
+        .query_row(
+            "SELECT s.index_id - ?1 FROM _search_indexes s JOIN _tables t ON t.table_number = s.table_number \
+             WHERE t.name = 'posts' AND s.name = 'search_body'",
+            [rxferrix::db::search::SPECIAL_INDEX_BASE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let name = format!("_search_{n}");
+    let sql = conn.query_row("SELECT sql FROM sqlite_master WHERE name = ?1", [&name], |r| r.get(0)).unwrap();
+    (name, sql)
+}
+
+#[tokio::test]
+async fn search_text_never_matches_filter_tokens() {
+    let t = TestApp::new().await.unwrap();
+    seed(&t, 6).await;
+    // Every filter token starts with its column's number, `00`: a prefix search for it must find no text.
+    assert_eq!(t.query::<search>(("a".to_string(), "00".to_string())).await.unwrap(), Vec::<String>::new());
+    assert_eq!(t.query::<search>(("a".to_string(), "n2".to_string())).await.unwrap(), ["n2"]);
+    assert_eq!(t.query::<search>(("b".to_string(), "n2".to_string())).await.unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn search_indexes_without_filter_tokens_are_rebuilt_on_open() {
+    let t = TestApp::new().await.unwrap();
+    seed(&t, 10).await;
+    // Rewrite the search index as older versions created it: the filter columns, no `g`.
+    let conn = rusqlite::Connection::open(t.dir().join("data.db")).unwrap();
+    let (name, sql) = posts_search_table(&conn);
+    assert!(sql.contains(", g"), "{sql}");
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE old AS SELECT rowid AS r, t, f0 FROM \"{name}\";
+         DROP TABLE \"{name}\";
+         {};
+         INSERT INTO \"{name}\" (rowid, t, f0) SELECT r, t, f0 FROM old;",
+        sql.replace(", g", "")
+    ))
+    .unwrap();
+    drop(conn);
+    let t = t.restart().await.unwrap();
+    let conn = rusqlite::Connection::open(t.dir().join("data.db")).unwrap();
+    assert!(posts_search_table(&conn).1.contains(", g"), "rebuilt with the column");
+    drop(conn);
+    assert!(t.app().db().verify_indexes().await.unwrap().is_empty());
+    assert_eq!(t.query::<search>(("a".to_string(), "n4".to_string())).await.unwrap(), ["n4"]);
+    assert_eq!(t.query::<search>(("b".to_string(), "n4".to_string())).await.unwrap(), Vec::<String>::new());
+}

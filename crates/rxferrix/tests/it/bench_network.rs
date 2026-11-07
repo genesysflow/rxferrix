@@ -13,6 +13,9 @@
 //!   and latency percentiles.
 //! * `bench_http_jwt`: the query of `bench_http_calls` with external JWTs (RS256, ES256 and EdDSA, `BENCH_USERS` (8)
 //!   subjects each) from a mock identity provider.
+//! * `bench_uploads`: `BENCH_UPLOADERS` (16) tasks each get an upload URL (a mutation) and post a 1 KiB file to it, back
+//!   to back for `BENCH_SECS` (10). Reported: uploads per second in each 2 s window, as the table of used upload tokens
+//!   grows.
 //! * `bench_ws_fanout`: `BENCH_CONNS` (1000) sockets each subscribe to the same `BENCH_QUERIES` (50) queries, all
 //!   reading one index range, so every commit (`BENCH_RATE` (50) per second for `BENCH_SECS`) invalidates every query
 //!   of every connection. Reported: commit-to-client latency and Transitions per connection.
@@ -78,6 +81,11 @@ mod fns {
     pub async fn net_list(ctx: &ActionCtx, n: u32) -> Result<Vec<String>> {
         let _ = ctx;
         Ok((0..n).map(|i| format!("item {i:08}")).collect())
+    }
+
+    #[mutation]
+    pub async fn net_upload_url(ctx: &MutationCtx) -> Result<String> {
+        ctx.storage.generate_upload_url().await
     }
 
     /// `n` strings that all change when the counter `id` does: a large result no diff can shrink.
@@ -256,6 +264,45 @@ async fn bench_http_calls() {
             latencies.last().copied().unwrap_or_default(),
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_uploads() {
+    let (uploaders, secs) = (env("BENCH_UPLOADERS", 16), env("BENCH_SECS", 10));
+    let storage = rxferrix::storage::StorageConfig::default().upload_rate_limit(None);
+    let t = TestApp::with_options(rxferrix::AppOptions { dev: false, storage, ..Default::default() }).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let client = reqwest::Client::new();
+    let started = Instant::now();
+    let windows: Arc<Vec<AtomicU64>> = Arc::new((0..secs.div_ceil(2)).map(|_| AtomicU64::new(0)).collect());
+    let tasks: Vec<_> = (0..uploaders)
+        .map(|_| {
+            let (app, client, windows) = (t.app().clone(), client.clone(), windows.clone());
+            tokio::spawn(async move {
+                while started.elapsed() < Duration::from_secs(secs) {
+                    let url = app.mutation::<fns::net_upload_url>(()).await.unwrap();
+                    let url = if url.starts_with('/') { format!("http://{addr}{url}") } else { url };
+                    let res = client.post(&url).header("content-type", "text/plain").body(vec![b'x'; 1024]);
+                    let res = res.send().await.unwrap();
+                    let status = res.status();
+                    // Read to the end, so the connection is kept alive for the next upload.
+                    let body = res.text().await.unwrap();
+                    assert!(status.is_success(), "{status}: {body}");
+                    let window = (started.elapsed().as_secs() / 2) as usize;
+                    if let Some(w) = windows.get(window) {
+                        w.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let rates: Vec<String> = windows.iter().map(|w| format!("{:.0}", w.load(Ordering::Relaxed) as f64 / 2.0)).collect();
+    let total: u64 = windows.iter().map(|w| w.load(Ordering::Relaxed)).sum();
+    println!("[uploads] {uploaders} uploaders: {total} uploads; per 2 s window: {} uploads/s", rates.join(", "));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

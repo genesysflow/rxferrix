@@ -11,6 +11,8 @@
 //!   scenario: a query and a mutation, each anonymous and signed in (`BENCH_USERS` (8) users, the callers spread over
 //!   their access tokens), and an action returning a large result (1000 strings, 17 KB). Reported: calls per second
 //!   and latency percentiles.
+//! * `bench_http_jwt`: the query of `bench_http_calls` with external JWTs (RS256, ES256 and EdDSA, `BENCH_USERS` (8)
+//!   subjects each) from a mock identity provider.
 //! * `bench_uploads`: `BENCH_UPLOADERS` (16) tasks each get an upload URL (a mutation) and post a 1 KiB file to it, back
 //!   to back for `BENCH_SECS` (10). Reported: uploads per second in each 2 s window, as the table of used upload tokens
 //!   grows.
@@ -301,6 +303,38 @@ async fn bench_uploads() {
     let rates: Vec<String> = windows.iter().map(|w| format!("{:.0}", w.load(Ordering::Relaxed) as f64 / 2.0)).collect();
     let total: u64 = windows.iter().map(|w| w.load(Ordering::Relaxed)).sum();
     println!("[uploads] {uploaders} uploaders: {total} uploads; per 2 s window: {} uploads/s", rates.join(", "));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_http_jwt() {
+    use crate::jwt::{TestKey, claims, mock_idp};
+    let (concurrency, secs, users) = (env("BENCH_CONCURRENCY", 64), env("BENCH_SECS", 5), env("BENCH_USERS", 8));
+    let (issuer, idp) = mock_idp().await;
+    let provider = rxferrix::auth::JwtProvider::new(&issuer).audience("my-api");
+    let auth = AuthConfig::password().rate_limits(None).jwt(provider);
+    let t = TestApp::with_options(rxferrix::AppOptions { dev: false, auth, ..Default::default() }).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let client = reqwest::Client::builder().pool_max_idle_per_host(concurrency as usize).build().unwrap();
+    let id = t.mutation::<bench_fns::bench_new_counter>(()).await.unwrap();
+    let query = json!({ "path": fns::net_get::path(), "args": { "id": id } }).to_string();
+    let url = format!("http://{addr}/api/query");
+    let keys = [TestKey::rsa("r1"), TestKey::ec("e1"), TestKey::ed("d1")];
+    idp.lock().unwrap().jwks = keys.iter().map(TestKey::jwk).collect();
+    for key in keys {
+        let tokens: Vec<_> = (0..users).map(|u| Some(key.sign(&claims(&issuer, &format!("bench-{u}"))))).collect();
+        // Provision the users first.
+        load(&client, &url, &query, &tokens, 1, 1).await;
+        let (calls, latencies) = load(&client, &url, &query, &tokens, concurrency, secs).await;
+        println!(
+            "[http query, external JWT {}] {concurrency} callers: {:.0} calls/s, p50 {:?} p99 {:?} max {:?}",
+            key.alg(),
+            calls as f64 / secs as f64,
+            percentile(&latencies, 0.5),
+            percentile(&latencies, 0.99),
+            latencies.last().copied().unwrap_or_default(),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -10,6 +10,11 @@
 //! tasks run a slow one (all of a 20k-document table) back to back. Reported: fast queries per second and their
 //! latency; slow queries per second. The runtime has `BENCH_THREADS` worker threads (default: one per core, as
 //! `rxferrix serve` has).
+//!
+//! `bench_reads_while_writing`: the same fast and slow queries, on the default number of readers, while
+//! `BENCH_WRITERS` (0,1,4) tasks patch documents back to back. Every commit makes the readers start over with an
+//! empty page cache. Reported: fast and slow queries per second, and patches per second. `BENCH_THREADS` as for
+//! `bench_readers`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +47,17 @@ pub mod fns {
     pub async fn group(ctx: &QueryCtx, group: i64) -> Result<usize> {
         let q = ctx.db.query::<Reading>().with_index(Reading::by_group, |r| r.eq(Reading::group, group));
         Ok(q.collect().await?.len())
+    }
+
+    #[internal_mutation]
+    pub async fn bump(ctx: &MutationCtx, n: i64) -> Result<()> {
+        let group = n % 2000;
+        let doc =
+            ctx.db.query::<Reading>().with_index(Reading::by_group, |r| r.eq(Reading::group, group)).first().await?;
+        if let Some(doc) = doc {
+            ctx.db.patch(doc.id, json!({ "n": doc.value.n + 1 })).await?;
+        }
+        Ok(())
     }
 
     /// Every document.
@@ -138,4 +154,95 @@ async fn run(threads: usize) {
             );
         }
     }
+}
+
+#[test]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+fn bench_reads_while_writing() {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = env("BENCH_THREADS", cores as u64) as usize;
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(threads).enable_all().build().unwrap();
+    rt.block_on(async {
+        let secs = Duration::from_secs(env("BENCH_SECS", 2));
+        let slow_tasks = env("BENCH_SLOW", 8) as usize;
+        let clients = env("BENCH_CLIENTS", 64) as i64;
+        let writers: Vec<usize> = match std::env::var("BENCH_WRITERS") {
+            Ok(list) => list.split(',').map(|r| r.parse().unwrap()).collect(),
+            Err(_) => vec![0, 1, 4],
+        };
+        let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+        for from in (0..20_000).step_by(1000) {
+            t.mutation::<fns::fill>((from, 1000)).await.unwrap();
+        }
+        let app = t.app().clone();
+        for writers in writers {
+            let stop = Arc::new(AtomicBool::new(false));
+            let slow_runs: Vec<_> = (0..slow_tasks)
+                .map(|_| {
+                    let (app, stop) = (app.clone(), stop.clone());
+                    tokio::spawn(async move {
+                        let mut n = 0u64;
+                        while !stop.load(Ordering::Relaxed) {
+                            let run = app.run_query(&fns::everything::path(), json!({}), &Identity::default()).await;
+                            assert_eq!(run.result.unwrap(), json!(20_000));
+                            n += 1;
+                        }
+                        n
+                    })
+                })
+                .collect();
+            let write_runs: Vec<_> = (0..writers)
+                .map(|w| {
+                    let (app, stop) = (app.clone(), stop.clone());
+                    tokio::spawn(async move {
+                        let mut n = 0i64;
+                        while !stop.load(Ordering::Relaxed) {
+                            app.mutation::<fns::bump>(((w as i64 * 7919 + n * 13) % 2000,)).await.unwrap();
+                            n += 1;
+                        }
+                        n as u64
+                    })
+                })
+                .collect();
+            let started = Instant::now();
+            let fast_runs: Vec<_> = (0..clients)
+                .map(|c| {
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        let mut lat = Vec::new();
+                        while started.elapsed() < secs {
+                            let args = json!({ "group": (c * 31 + lat.len() as i64) % 2000 });
+                            let t0 = Instant::now();
+                            let run = app.run_query(&fns::group::path(), args, &Identity::default()).await;
+                            lat.push(t0.elapsed());
+                            assert_eq!(run.result.unwrap(), json!(10));
+                        }
+                        lat
+                    })
+                })
+                .collect();
+            let mut lat = Vec::new();
+            for f in fast_runs {
+                lat.extend(f.await.unwrap());
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            stop.store(true, Ordering::Relaxed);
+            let (mut slow, mut writes) = (0, 0);
+            for s in slow_runs {
+                slow += s.await.unwrap();
+            }
+            for w in write_runs {
+                writes += w.await.unwrap();
+            }
+            lat.sort();
+            println!(
+                "{writers} writers: fast queries {:>7.0}/s, p50 {:>8.1?}, p99 {:>8.1?}; slow queries {:>5.0}/s; patches {:>6.0}/s",
+                lat.len() as f64 / elapsed,
+                percentile(&lat, 0.5),
+                percentile(&lat, 0.99),
+                slow as f64 / elapsed,
+                writes as f64 / elapsed,
+            );
+        }
+    });
 }

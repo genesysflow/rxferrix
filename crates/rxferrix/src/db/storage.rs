@@ -110,6 +110,9 @@ pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
     })
     .with_context(|| format!("opening reader for {}", path.display()))?;
     apply_pragmas(&conn)?;
+    // No `mmap_size`: measured with `bench_reads_while_writing` (2026-11-06), it made reads alone 12% faster, but with
+    // writers committing it cut reads by a quarter (245k -> 180k/s) and patches by half (5.4k -> 2.4k/s), the readers'
+    // mappings following the file as checkpoints grow it.
     conn.set_prepared_statement_cache_capacity(64);
     Ok(conn)
 }

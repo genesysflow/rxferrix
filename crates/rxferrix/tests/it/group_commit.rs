@@ -31,9 +31,13 @@ pub mod fns {
         Ok(ctx.db.query::<Item>().with_index(Item::by_name, |q| q.eq(Item::name, marker)).collect().await?.len())
     }
 
+    /// The markers of the `gc_quick` runs that have started (they hold the writer from then on).
+    pub static QUICK_STARTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
     /// Blocks for `us` microseconds inside the transaction (precise, unlike a timer), then inserts.
     #[mutation]
     pub async fn gc_quick(ctx: &MutationCtx, marker: String, us: u64) -> Result<()> {
+        QUICK_STARTED.lock().unwrap().push(marker.clone());
         std::thread::sleep(std::time::Duration::from_micros(us));
         ctx.db.insert(Item { group: 8, score: 0, name: marker }).await.map(drop)
     }
@@ -179,7 +183,11 @@ async fn a_slow_mutation_commits_the_batch_before_it_runs() {
             started.elapsed()
         }
     });
-    tokio::time::sleep(Duration::from_micros(200)).await;
+    // Only once the quick one runs (holds the writer): on a loaded runner a fixed pause wasn't always enough, and a
+    // slow mutation that took the lock first made the quick one wait for it rightly.
+    while !fns::QUICK_STARTED.lock().unwrap().iter().any(|m| m == "quick") {
+        tokio::time::sleep(Duration::from_micros(50)).await;
+    }
     let slow = tokio::spawn(call(fns::gc_slow::path(), json!({ "marker": "slow", "ms": 150 })));
     let quick_took = quick.await.unwrap();
     slow.await.unwrap().unwrap();

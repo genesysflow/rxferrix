@@ -5,6 +5,7 @@
 //! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
+//! cargo test --release -p rxferrix --features olap --test it bench_olap_freshness -- --ignored --nocapture
 //! ```
 //!
 //! `bench_aggregates`: the same one-document inserts into a table without aggregates and into one with three (16
@@ -16,6 +17,8 @@
 //! and a 1536-dimension embedding, in a table without search indexes and in one with a search index on the text and a
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
+//! `bench_olap_freshness`: one insert every 300 ms (the copy idle in between), then an action querying the copy
+//! `at_least` its commit: how long until the copy has it.
 
 use std::time::{Duration, Instant};
 
@@ -106,6 +109,13 @@ pub mod fns {
             ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, group.clone())).count().await?;
         let docs = ctx.db.query::<Plain>().with_index(Plain::by_group, |r| r.eq(Plain::group, group)).collect().await?;
         Ok((n, docs.iter().map(|d| d.value.amount).sum()))
+    }
+
+    /// How many plain rows the analytics copy has once it has applied commit `ts`.
+    #[internal_action]
+    pub async fn olap_count_at(ctx: &ActionCtx, ts: u64) -> Result<serde_json::Value> {
+        let result = ctx.olap.at_least(ts).query("SELECT count(*) AS n FROM bench_plain", ()).await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     #[internal_query]
@@ -313,4 +323,28 @@ async fn bench_olap_writes() {
         };
         println!("inserts, {label:<34}: {rate:>8.0}/s, p50 {p50:>9.1?}, p99 {p99:>9.1?}{lag}");
     }
+}
+
+#[cfg(feature = "olap")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_olap_freshness() {
+    let olap = rxferrix::olap::OlapOptions { enabled: true, ..Default::default() };
+    let t = TestApp::with_options(AppOptions { olap, ..Default::default() }).await.unwrap();
+    t.olap_sync().await.unwrap();
+    let mut lat = Vec::new();
+    for n in 0..40 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (_, ts) = t.mutation_ts::<fns::insert_plain>(("g".to_string(), n as f64, 1)).await.unwrap();
+        let started = Instant::now();
+        t.action::<fns::olap_count_at>((ts,)).await.unwrap();
+        lat.push(started.elapsed());
+    }
+    lat.sort();
+    let mean = lat.iter().sum::<Duration>() / lat.len() as u32;
+    println!(
+        "olap: commit visible after p50 {:.1?}, max {:.1?}, mean {mean:.1?}",
+        lat[lat.len() / 2],
+        lat[lat.len() - 1]
+    );
 }

@@ -46,7 +46,8 @@ pub struct OlapOptions {
     /// Past this many bytes of journal waiting to be applied, the copy gives up following and is rebuilt instead, so
     /// the journal never grows without bound (`--olap-max-lag`). Default: 512 MiB.
     pub max_lag_bytes: u64,
-    /// How often the copy looks for new commits. Default: 250ms.
+    /// The least time between two reads of the journal that found commits to apply (a commit arriving later is applied
+    /// at once), and how often the copy looks with nothing new. Default: 250ms.
     pub apply_every: Duration,
     /// Follow the database in the background. Off in tests that drive the copy with [`OlapService::sync`].
     pub background: bool,

@@ -325,12 +325,17 @@ pub(super) async fn paginate<D: Send>(
         if scan.is_empty() {
             return Ok(());
         }
+        // With a filter, how many rows a page takes is unknown: start with a few and double (as `query::scan` does).
+        let mut filtered_batch = limit.map_or(SCAN_BATCH, |n| n.saturating_mul(2).clamp(8, SCAN_BATCH));
         loop {
             let mut batch = SCAN_BATCH;
             if let Some(n) = limit {
                 batch = batch.min(MAX_PAGE_SCAN - scanned);
                 if filter.is_none() {
                     batch = batch.min(n - page.len());
+                } else {
+                    batch = batch.min(filtered_batch);
+                    filtered_batch = filtered_batch.saturating_mul(2).min(SCAN_BATCH);
                 }
             }
             let rows =

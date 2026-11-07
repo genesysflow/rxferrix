@@ -1078,6 +1078,8 @@ impl App {
         // replay that client's responses, nor can a socket that changed identity see its earlier identity's.
         let scoped_key = idempotency_key.map(|k| k.scoped_to(identity));
         let idempotency_key = scoped_key.as_ref();
+        // The log's copy of the arguments, made before taking the writer lock (every other mutation waits for it).
+        let logged_args = Execution::logged_args(path, &args);
         let txn = match self.db().begin_write_as(path).await {
             Ok(t) => t,
             Err(e) => return not_run(e),
@@ -1127,7 +1129,7 @@ impl App {
             (guard, GuardCtx { db: ctx.db.share(), auth: ctx.auth.clone(), env }, function)
         });
         let timeout = self.options().mutation_timeout;
-        let exec = Execution::start(path, FunctionKind::Mutation, identity, &args);
+        let exec = Execution::start_with(path, FunctionKind::Mutation, identity, logged_args);
         let run = async {
             let handled = catch_panics(after_guard(guard, handler(ctx, args)));
             let mut result = match tokio::time::timeout(timeout, handled).await {
@@ -1265,15 +1267,25 @@ struct Execution {
 
 impl Execution {
     fn start(path: &str, kind: FunctionKind, identity: &Identity, args: &Value) -> Execution {
+        Self::start_with(path, kind, identity, Self::logged_args(path, args))
+    }
+
+    /// [`Execution::start`] with the arguments made already ([`Execution::logged_args`]).
+    fn start_with(path: &str, kind: FunctionKind, identity: &Identity, args: (String, bool)) -> Execution {
         Execution {
             timestamp: crate::db::wall_clock_ms() as i64,
             started: std::time::Instant::now(),
             path: path.to_string(),
             kind,
             identity: identity_summary(identity),
-            // System functions' secret arguments (settings passwords, ...) are masked (`settings::redact_args`).
-            args: crate::exec_log::truncate_args(&crate::settings::redact_args(path, args)),
+            args,
         }
+    }
+
+    /// The arguments as logged. System functions' secret arguments (settings passwords, ...) are masked
+    /// (`settings::redact_args`).
+    fn logged_args(path: &str, args: &Value) -> (String, bool) {
+        crate::exec_log::truncate_args(&crate::settings::redact_args(path, args))
     }
 
     fn finish<T>(self, app: &App, result: &crate::Result<T>, log_lines: &[String]) {

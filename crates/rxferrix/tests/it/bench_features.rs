@@ -5,6 +5,7 @@
 //! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_filtered_search -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_filtered_first -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
 //!
@@ -18,6 +19,8 @@
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
 //! `bench_filtered_search`: `BENCH_TENANTS` (100) tenants with 500 posts each, all containing a common word; a search
 //! for it (and for a rarer one) scoped to one tenant, taking 10.
+//! `bench_filtered_first`: `first()`, `take(10)` and a page of 10 of a filtered scan over 1 KiB documents, whose
+//! first match is the 1st (or 8th) document of the range.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
 
 use std::time::{Duration, Instant};
@@ -97,6 +100,21 @@ pub mod fns {
         Ok(())
     }
 
+    #[table(name = "bench_notes")]
+    #[index(by_n = [n])]
+    pub struct Note {
+        pub n: i64,
+        pub body: String,
+    }
+
+    #[internal_mutation]
+    pub async fn insert_notes(ctx: &MutationCtx, from: i64, count: i64) -> Result<()> {
+        for n in from..from + count {
+            ctx.db.insert(Note { n, body: "x".repeat(1024) }).await?;
+        }
+        Ok(())
+    }
+
     #[internal_query]
     pub async fn search_tenant(ctx: &QueryCtx, tenant: String, text: String) -> Result<usize> {
         let hits = ctx
@@ -108,6 +126,21 @@ pub mod fns {
             .take(10)
             .await?;
         Ok(hits.len())
+    }
+
+    /// The first `take` notes from `from` whose `n` is a multiple of `every`.
+    #[internal_query]
+    pub async fn filtered_notes(ctx: &QueryCtx, from: i64, every: i64, take: u32) -> Result<usize> {
+        let q = ctx.db.query::<Note>().with_index(Note::by_n, |r| r.gte(Note::n, from));
+        Ok(q.filter(move |d| d.value.n % every == 0).take(take as usize).await?.len())
+    }
+
+    /// A page of `take` notes from `from` whose `n` is a multiple of `every`.
+    #[internal_query]
+    pub async fn filtered_notes_page(ctx: &QueryCtx, from: i64, every: i64, take: u32) -> Result<usize> {
+        let q = ctx.db.query::<Note>().with_index(Note::by_n, |r| r.gte(Note::n, from));
+        let page = q.filter(move |d| d.value.n % every == 0).paginate(PaginationOpts::first(take as usize)).await?;
+        Ok(page.page.len())
     }
 
     #[internal_mutation]
@@ -336,6 +369,33 @@ async fn bench_filtered_search() {
         }
         println!("{tenants} tenants, search one for {label:<22}: {:>9.1?} per query", started.elapsed() / runs);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_filtered_first() {
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    for from in (0..10_000).step_by(1000) {
+        t.mutation::<fns::insert_notes>((from, 1000)).await.unwrap();
+    }
+    for (label, every, take) in
+        [("first(), 1st matches", 1, 1), ("first(), 8th matches", 8, 1), ("take(10), every 8th", 8, 10)]
+    {
+        let runs = 2000u32;
+        let started = Instant::now();
+        for i in 0..runs {
+            let run = t.query_run::<fns::filtered_notes>((i64::from(i) * 4 % 9000, every, take)).await.unwrap();
+            assert_eq!(run.result.unwrap(), serde_json::json!(take));
+        }
+        println!("filtered scan, {label:<22}: {:>9.1?} per query", started.elapsed() / runs);
+    }
+    let runs = 2000u32;
+    let started = Instant::now();
+    for i in 0..runs {
+        let run = t.query_run::<fns::filtered_notes_page>((i64::from(i) * 4 % 9000, 8, 10)).await.unwrap();
+        assert_eq!(run.result.unwrap(), serde_json::json!(10));
+    }
+    println!("filtered scan, {:<22}: {:>9.1?} per query", "page of 10, every 8th", started.elapsed() / runs);
 }
 
 #[cfg(feature = "olap")]

@@ -36,29 +36,29 @@ enum Signer {
     Ed(Ed25519KeyPair),
 }
 
-struct TestKey {
+pub(crate) struct TestKey {
     kid: String,
     signer: Signer,
 }
 
 impl TestKey {
-    fn rsa(kid: &str) -> TestKey {
+    pub(crate) fn rsa(kid: &str) -> TestKey {
         TestKey {
             kid: kid.into(),
             signer: Signer::Rsa(aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap()),
         }
     }
-    fn ec(kid: &str) -> TestKey {
+    pub(crate) fn ec(kid: &str) -> TestKey {
         TestKey {
             kid: kid.into(),
             signer: Signer::Ec(EcdsaKeyPair::generate(&signature::ECDSA_P256_SHA256_FIXED_SIGNING).unwrap()),
         }
     }
-    fn ed(kid: &str) -> TestKey {
+    pub(crate) fn ed(kid: &str) -> TestKey {
         TestKey { kid: kid.into(), signer: Signer::Ed(Ed25519KeyPair::generate().unwrap()) }
     }
 
-    fn alg(&self) -> &'static str {
+    pub(crate) fn alg(&self) -> &'static str {
         match self.signer {
             Signer::Rsa(_) => "RS256",
             Signer::Ec(_) => "ES256",
@@ -66,7 +66,7 @@ impl TestKey {
         }
     }
 
-    fn jwk(&self) -> Value {
+    pub(crate) fn jwk(&self) -> Value {
         let b = |bytes: &[u8]| BASE64URL_NOPAD.encode(bytes);
         match &self.signer {
             Signer::Rsa(k) => {
@@ -86,7 +86,7 @@ impl TestKey {
     }
 
     /// A compact JWS with this key (header `alg`, `kid` unless `kid` is overridden with `Some(None)`).
-    fn sign(&self, claims: &Value) -> String {
+    pub(crate) fn sign(&self, claims: &Value) -> String {
         self.sign_with(json!({ "alg": self.alg(), "typ": "JWT", "kid": self.kid }), claims)
     }
 
@@ -110,15 +110,15 @@ impl TestKey {
 }
 
 #[derive(Default)]
-struct IdpState {
+pub(crate) struct IdpState {
     issuer: String,
-    jwks: Vec<Value>,
+    pub(crate) jwks: Vec<Value>,
     jwks_fetches: usize,
     discovery_fetches: usize,
 }
 
 /// Serves `/.well-known/openid-configuration` and `/jwks`.
-async fn mock_idp() -> (String, Arc<Mutex<IdpState>>) {
+pub(crate) async fn mock_idp() -> (String, Arc<Mutex<IdpState>>) {
     use axum::routing::get;
     let state = Arc::new(Mutex::new(IdpState::default()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -157,7 +157,7 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-fn claims(issuer: &str, sub: &str) -> Value {
+pub(crate) fn claims(issuer: &str, sub: &str) -> Value {
     json!({ "iss": issuer, "sub": sub, "aud": "my-api", "iat": now(), "exp": now() + 300 })
 }
 
@@ -340,6 +340,40 @@ async fn key_rotation_refetches_at_most_once_per_interval() {
     idp.lock().unwrap().jwks.push(rogue.jwk());
     assert_eq!(whoami(&http, &rogue.sign(&c)).await.0, 200, "refetched after the interval");
     assert_eq!(idp.lock().unwrap().jwks_fetches, 3);
+}
+
+/// Verified tokens are cached (`auth::external_cache`), but never past what a fresh check would accept.
+#[tokio::test]
+async fn cached_tokens_follow_user_deletion_and_key_refreshes() {
+    let (t, http, _addr, issuer, idp) = setup(|iss| {
+        JwtProvider::new(iss)
+            .audience("my-api")
+            .jwks_cache_ttl(Duration::from_millis(300))
+            .jwks_refetch_interval(Duration::from_millis(100))
+    })
+    .await;
+    let key = TestKey::ec("e1");
+    idp.lock().unwrap().jwks = vec![key.jwk()];
+    let token = key.sign(&claims(&issuer, "carol"));
+    let first = whoami(&http, &token).await.1["value"][0].clone();
+    assert_eq!(whoami(&http, &token).await.1["value"][0], first, "the same user, from the cache");
+
+    // Deleting the user: the next call with the same token provisions a new one, as without the cache.
+    let app = t.app().clone();
+    app.auth().create_admin(&app, "admin@example.com", "admin password".into()).await.unwrap();
+    let admin = http.admin_sign_in("admin@example.com", "admin password").await;
+    let admin = admin["accessToken"].as_str().unwrap();
+    http.ok("mutation", "_system/dashboard:delete_user", json!({ "user": first }), admin).await;
+    let second = whoami(&http, &token).await.1["value"][0].clone();
+    assert!(second.is_string() && second != first, "{first} then {second}");
+    // (Provisioning wrote the user, so that call didn't cache it; this one does.)
+    assert_eq!(whoami(&http, &token).await.1["value"][0], second);
+
+    // The provider drops the key: once the JWKS is refreshed, the token is refused, cached or not.
+    idp.lock().unwrap().jwks = vec![TestKey::ec("e2").jwk()];
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let (s, b) = whoami(&http, &token).await;
+    assert_eq!((s, b["errorMessage"].as_str()), (401, Some("unknown token signing key")));
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@
   import { columnsOf, documentMatches, parseFilterValue } from "../lib/format.js";
   import { href, link, router } from "../lib/router.svelte.js";
   import { columnWidths, nearEnd, rowWindow } from "../lib/virtual.js";
+  import { defaultObject, parseTsType } from "../lib/tsType.js";
   import Empty from "../components/Empty.svelte";
   import Icon from "../components/Icon.svelte";
   import JsonValue from "../components/JsonValue.svelte";
@@ -241,7 +242,10 @@
   }
 
   /** A starting point for a new document: the user fields of the first document, or `{}`. */
+  /** A new document: blanks of the table's type, or else a copy of the first document's fields. */
   function template(): JsonObject {
+    const type = parseTsType(table.ts);
+    if (type?.kind === "object") return defaultObject(type.fields);
     const first = docs.results[0];
     if (!first) return {};
     const { _id: _a, _creationTime: _b, ...rest } = first;

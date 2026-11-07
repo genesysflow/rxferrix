@@ -370,7 +370,8 @@ impl Engine {
     /// Apply the next batch of journal rows. Returns whether it applied any.
     async fn apply(&self, app: &App) -> crate::Result<bool> {
         let cursor = self.state().cursor;
-        // Nothing committed past it: no snapshot to open (its ts can't be newer than the log's latest).
+        // Nothing in the write log past it: no snapshot to open. A commit a snapshot could already see but the writer
+        // hasn't appended yet is not missed: its append wakes the follow loop (`run`), which applies it then.
         if app.db().write_log().latest() <= cursor {
             return Ok(false);
         }

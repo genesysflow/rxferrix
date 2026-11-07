@@ -250,6 +250,8 @@ pub struct AuthService {
     revocations: Arc<Revocations>,
     /// Sessions recently found active, so most calls with an access token skip reading theirs.
     sessions: SessionCache,
+    /// External JWTs recently verified, and their users.
+    external: super::external_cache::ExternalCache,
 }
 
 /// The longest an impersonation session may last.
@@ -301,6 +303,7 @@ impl AuthService {
             setup_token_hash: Mutex::new(None),
             revocations: Arc::default(),
             sessions: SessionCache::default(),
+            external: Default::default(),
         })
     }
 
@@ -521,13 +524,34 @@ impl AuthService {
         token: &str,
         watch: bool,
     ) -> Result<(Authenticated, Option<SessionWatch>), TokenError> {
-        let claims = self.jwt.verify(token, now_s()).await?;
-        let user = store::external_user(app, &claims).await.map_err(|e| {
+        use super::external_cache::{Verified, token_key};
+        let failed = |e: crate::Error| {
             tracing::error!("auth: provisioning the user of an external token failed: {e:#}");
             TokenError::SessionEnded
-        })?;
+        };
+        let (now, log) = (now_s(), app.db().write_log());
+        let by_id = |table: &str| app.db().catalog().table(table).map(|t| t.by_id().id);
+        let watched = [by_id(<User as crate::Table>::NAME), by_id(<super::tables::Account as crate::Table>::NAME)];
+        let [Ok(users), Ok(accounts)] = watched else { return Err(failed(anyhow::anyhow!("no _users or _accounts"))) };
+        let watched = [users, accounts];
+        let key = token_key(token);
+        let (user, expires_at) = match self.external.get(log, watched, &key, now) {
+            Some(v) if self.jwt.key_generation(&v.claims.issuer).await == Some(v.generation) => {
+                (v.user, v.claims.expires_at)
+            }
+            _ => {
+                let (claims, generation) = self.jwt.verify_keyed(token, now).await?;
+                // Read before the user: the snapshot has every commit up to it (see `external_cache`).
+                let read_from = log.latest();
+                let (user, account) = store::external_user(app, &claims).await.map_err(failed)?;
+                let expires_at = claims.expires_at;
+                let verified = Verified { claims, generation, user, account: *account.as_bytes() };
+                self.external.insert(log, watched, key, verified, read_from);
+                (user, expires_at)
+            }
+        };
         let identity = Identity::user(user, None);
-        let authenticated = Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(claims.expires_at) };
+        let authenticated = Authenticated { identity, expires_at: UNIX_EPOCH + Duration::from_secs(expires_at) };
         if !watch {
             return Ok((authenticated, None));
         }

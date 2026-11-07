@@ -16,6 +16,9 @@
 //! * `bench_uploads`: `BENCH_UPLOADERS` (16) tasks each get an upload URL (a mutation) and post a 1 KiB file to it, back
 //!   to back for `BENCH_SECS` (10). Reported: uploads per second in each 2 s window, as the table of used upload tokens
 //!   grows.
+//! * `bench_export_files`: an export (`ops::export::export_to_dir`) of `_storage` with one 256 MiB file and 200 of
+//!   1 MiB, then its import into a new app. Reported: time, and how much the process's resident memory grew while
+//!   each ran.
 //! * `bench_ws_fanout`: `BENCH_CONNS` (1000) sockets each subscribe to the same `BENCH_QUERIES` (50) queries, all
 //!   reading one index range, so every commit (`BENCH_RATE` (50) per second for `BENCH_SECS`) invalidates every query
 //!   of every connection. Reported: commit-to-client latency and Transitions per connection.
@@ -335,6 +338,91 @@ async fn bench_http_jwt() {
             latencies.last().copied().unwrap_or_default(),
         );
     }
+}
+
+/// Upload `size` bytes to `url` (an upload URL of the server at `addr`), written in 1 MiB chunks, so the client never
+/// holds the file (reqwest here can't stream a request body).
+async fn upload_streamed(addr: SocketAddr, url: &str, size: usize) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let path = url.strip_prefix(&format!("http://{addr}")).unwrap_or(url);
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/octet-stream\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+    );
+    tcp.write_all(head.as_bytes()).await.unwrap();
+    let chunk = vec![b'x'; 1 << 20];
+    let mut left = size;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        tcp.write_all(&chunk[..n]).await.unwrap();
+        left -= n;
+    }
+    let mut response = Vec::new();
+    tcp.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+/// Run `f`, sampling the process's resident memory: (its result, how long it took, the most it grew).
+async fn with_peak_rss<T>(f: impl std::future::Future<Output = T>) -> (T, Duration, u64) {
+    let before = rss().unwrap_or(0);
+    let peak = Arc::new(AtomicU64::new(before));
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let sampler = {
+        let peak = peak.clone();
+        tokio::spawn(async move {
+            loop {
+                peak.fetch_max(rss().unwrap_or(0), Ordering::Relaxed);
+                tokio::select! {
+                    _ = &mut stop_rx => return,
+                    _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                }
+            }
+        })
+    };
+    let started = Instant::now();
+    let out = f.await;
+    let elapsed = started.elapsed();
+    let _ = stop_tx.send(());
+    sampler.await.unwrap();
+    peak.fetch_max(rss().unwrap_or(0), Ordering::Relaxed);
+    (out, elapsed, peak.load(Ordering::Relaxed).saturating_sub(before))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_export_files() {
+    use rxferrix::ops::export::{self, ExportFormat, ExportOptions, ImportMode, ImportOptions};
+    let storage = rxferrix::storage::StorageConfig::default().upload_rate_limit(None).max_upload_size(512 << 20);
+    let options = rxferrix::AppOptions { dev: false, storage: storage.clone(), ..Default::default() };
+    let t = TestApp::with_options(options.clone()).await.unwrap();
+    let addr = t.serve().await.unwrap();
+    let abs = |url: String| if url.starts_with('/') { format!("http://{addr}{url}") } else { url };
+    upload_streamed(addr, &abs(t.mutation::<fns::net_upload_url>(()).await.unwrap()), 256 << 20).await;
+    let client = reqwest::Client::new();
+    for _ in 0..200 {
+        let url = abs(t.mutation::<fns::net_upload_url>(()).await.unwrap());
+        let res = client.post(&url).header("content-type", "application/octet-stream").body(vec![b'y'; 1 << 20]);
+        let res = res.send().await.unwrap();
+        let status = res.status();
+        assert!(status.is_success(), "{status}: {}", res.text().await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let out = tempfile::tempdir().unwrap();
+    let options_export =
+        ExportOptions { tables: Some(vec!["_storage".into()]), format: ExportFormat::Jsonl, include_files: true };
+    let blobs = export::BlobStore::of_app(t.app());
+    let (manifest, took, grew) =
+        with_peak_rss(export::export_to_dir(t.dir(), Some(blobs), out.path(), &options_export)).await;
+    assert_eq!(manifest.unwrap().files, 201);
+    println!("[export] 201 files (456 MiB): {took:.2?}, resident memory +{:.1} MiB", mib(grew));
+
+    let b = TestApp::with_options(options).await.unwrap();
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 500, allow_system_tables: true, format: None };
+    let (report, took, grew) = with_peak_rss(export::import_path(b.app(), out.path(), None, &import)).await;
+    assert_eq!(report.unwrap().files, 201);
+    println!("[import] 201 files (456 MiB): {took:.2?}, resident memory +{:.1} MiB", mib(grew));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -370,6 +370,11 @@ impl Engine {
     /// Apply the next batch of journal rows. Returns whether it applied any.
     async fn apply(&self, app: &App) -> crate::Result<bool> {
         let cursor = self.state().cursor;
+        // Nothing in the write log past it: no snapshot to open. A commit a snapshot could already see but the writer
+        // hasn't appended yet is not missed: its append wakes the follow loop (`run`), which applies it then.
+        if app.db().write_log().latest() <= cursor {
+            return Ok(false);
+        }
         let snapshot = app.db().snapshot().await?;
         if snapshot.ts <= cursor {
             return Ok(false);
@@ -594,23 +599,34 @@ impl Engine {
     }
 }
 
-/// Follow the database: look for new commits every `apply_every`, rebuild or apply until caught up; back off on
-/// errors. Ends when the app is dropped.
+/// Follow the database: rebuild or apply until caught up, at most every `apply_every` (so commits arriving together
+/// are applied together), and as soon as a commit arrives once that much time has passed since the last work; with
+/// nothing new, still every `apply_every` (rebuild requests, lag checks). Back off on errors. Ends when the app is
+/// dropped.
 pub(super) async fn run(engine: Arc<Engine>, weak: WeakApp) {
+    let Some(mut commits) = weak.upgrade().map(|app| app.db().write_log().subscribe()) else { return };
     let mut failures = 0u32;
+    let mut worked_at: Option<Instant> = None;
     loop {
-        let delay = if failures == 0 {
-            engine.options.apply_every
+        if failures == 0 {
+            if let Some(at) = worked_at {
+                tokio::time::sleep_until((at + engine.options.apply_every).into()).await;
+            }
+            let caught_up = *commits.borrow_and_update() <= engine.state().cursor;
+            if caught_up {
+                // `changed` only errs once the database (with the write log) is gone, as the app is.
+                let _ = tokio::time::timeout(engine.options.apply_every, commits.changed()).await;
+            }
         } else {
-            (Duration::from_secs(1) * 2u32.saturating_pow(failures.min(6))).min(Duration::from_secs(60))
-        };
-        tokio::time::sleep(delay).await;
+            let backoff = (Duration::from_secs(1) * 2u32.saturating_pow(failures.min(6))).min(Duration::from_secs(60));
+            tokio::time::sleep(backoff).await;
+        }
         let Some(app) = weak.upgrade() else { return };
         let _one = engine.running.lock().await;
         let mut result = Ok(());
         for _ in 0..64 {
             match engine.step(&app).await {
-                Ok(true) => continue,
+                Ok(true) => worked_at = Some(Instant::now()),
                 Ok(false) => break,
                 Err(e) => {
                     result = Err(e);

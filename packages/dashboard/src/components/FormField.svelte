@@ -96,13 +96,15 @@
   }
 
   const childFields = $derived(kind.kind === "object" ? kind.fields : []);
+  /** Nested fields are shown for an object value only (not while the field is null or missing). */
+  const isObject = $derived(typeof value === "object" && value !== null && !Array.isArray(value));
   const childExtras = $derived(
-    widget === "object" ? Object.keys(value as JsonObject).filter((k) => !childFields.some((f) => f.name === k)) : [],
+    widget === "object" && isObject ? Object.keys(value as JsonObject).filter((k) => !childFields.some((f) => f.name === k)) : [],
   );
   const rows = $derived(Math.min(8, Math.max(2, draft.split("\n").length)));
 </script>
 
-<div class="field" class:nested={widget === "object" && !isNull && !missing}>
+<div class="field" class:nested={widget === "object" && isObject}>
   <div class="label">
     {#if widget === "boolean" && !isNull && !missing}
       <span class="name mono">{name}</span>
@@ -194,7 +196,7 @@
     {#if mismatch}<div class="faint msg">Stored value doesn't match the type; edit it as JSON.</div>{/if}
     {#if doc}<div class="doc">{doc}</div>{/if}
   </div>
-  {#if widget === "object" && !isNull && !missing}
+  {#if widget === "object" && isObject}
     <div class="children">
       {#each childFields as f (f.name)}
         <FormField

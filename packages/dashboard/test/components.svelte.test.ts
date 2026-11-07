@@ -202,6 +202,18 @@ describe("DocumentForm", () => {
     expect(onsubmit).toHaveBeenCalledOnce();
   });
 
+  it("shows a null or missing nested object without its fields", () => {
+    const { changes } = render({ ...doc, meta: null });
+    expect(target.querySelector(`#field-${CSS.escape("meta.tags")}`)).toBeNull();
+    target.querySelector<HTMLButtonElement>('[aria-label="Give meta a value"]')!.click();
+    expect(changes.at(-1)!.meta).toEqual({ tags: [] });
+    unmount(mounted!);
+    mounted = null;
+    const { meta: _, ...without } = doc;
+    render(without);
+    expect(target.textContent).toContain("missing");
+  });
+
   it("disables locked fields", () => {
     const { field } = render(doc, (f) => f !== "text");
     expect(field("text").disabled).toBe(false);

@@ -71,7 +71,7 @@ pub mod stem;
 pub mod text;
 pub mod vector;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -463,14 +463,7 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
     let desired = desired(def);
     for (name, kind) in &desired {
         let existing = current.iter().find(|c| &c.name == name);
-        if let Some(c) = existing
-            && &c.kind == kind
-        {
-            // Created by an older version, without the filter tokens' column.
-            if c.has_filter_tokens() && !has_column(conn, &c.storage_table(), "g")? {
-                tracing::info!(table = def.name, index = %name, "adding filter tokens to the search index; rebuilding");
-                rebuild(conn, def.name, table_number, c)?;
-            }
+        if existing.is_some_and(|c| &c.kind == kind) {
             continue;
         }
         // Switching a vector index between exact and HNSW, or changing its HNSW parameters, keeps its vec0 table
@@ -514,6 +507,23 @@ pub(crate) fn reconcile_table(conn: &Connection, def: &TableDef, table_number: u
             tracing::info!(table = def.name, index = %old.name, "search index removed; dropping it");
             drop_storage(conn, old)?;
             conn.execute("DELETE FROM _search_indexes WHERE index_id = ?1", [old.id])?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild every stored search index with filter fields whose FTS5 table an older version created without the filter
+/// tokens' column `g`, also those of tables no longer defined in code (their documents are still read, searched from
+/// the dashboard and written by journal replays). `names`: table number → name. Part of the catalog's reconciliation,
+/// before the tables are reconciled with their definitions.
+pub(crate) fn add_filter_tokens(conn: &Connection, names: &HashMap<u32, String>) -> anyhow::Result<()> {
+    for (table_number, infos) in load(conn)? {
+        let table = names.get(&table_number).map(String::as_str).unwrap_or("?");
+        for info in infos {
+            if info.has_filter_tokens() && !has_column(conn, &info.storage_table(), "g")? {
+                tracing::info!(table, index = %info.name, "adding filter tokens to the search index; rebuilding");
+                rebuild(conn, table, table_number, &info)?;
+            }
         }
     }
     Ok(())
@@ -968,6 +978,72 @@ mod tests {
                 Err(e)
             }
         }
+    }
+
+    /// A filtered search index created before the filter tokens' column `g` is rebuilt with it at startup, also when its
+    /// table is no longer defined in code: its documents are still searched (the dashboard) and written (journal
+    /// replays of a takeover or a restore).
+    #[tokio::test]
+    async fn old_search_indexes_of_undefined_tables_get_filter_tokens() {
+        use crate::db::query::{QueryDb, Source};
+        use crate::schema::{SearchIndexDef, Tokenizer};
+        let def = TableDef {
+            name: "st",
+            indexes: vec![],
+            search_indexes: vec![SearchIndexDef {
+                name: "s",
+                search_field: "body",
+                filter_fields: vec!["c"],
+                tokenizer: Tokenizer::default(),
+            }],
+            vector_indexes: vec![],
+            ts: || "{ }".into(),
+            validate: |_| Ok(()),
+            shape: crate::shape::Shape::unknown,
+            aggregates: vec![],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), &[def], 1).unwrap();
+        let txn = db.begin_write().await.unwrap();
+        let id = MutationDb::new(txn.clone()).insert_raw("st", json!({ "body": "hello", "c": "x" })).await.unwrap();
+        txn.commit_with(|_, _| Ok(())).await.unwrap();
+        drop(db);
+
+        // The FTS5 table as older versions created it: the same, without `g`.
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let (name, sql): (String, String) = conn
+            .query_row("SELECT name, sql FROM sqlite_master WHERE sql LIKE '%fts5(t, f0 UNINDEXED, g%'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TEMP TABLE old AS SELECT rowid AS r, t, f0 FROM \"{name}\"; DROP TABLE \"{name}\"; {};
+             INSERT INTO \"{name}\" (rowid, t, f0) SELECT r, t, f0 FROM old;",
+            sql.replace(", g", "")
+        ))
+        .unwrap();
+        drop(conn);
+
+        // Opened by a version that no longer defines the table.
+        let db = Database::open(dir.path(), &[], 1).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let sql: String =
+            conn.query_row("SELECT sql FROM sqlite_master WHERE name = ?1", [&name], |r| r.get(0)).unwrap();
+        assert!(sql.contains(", g"), "{sql}");
+        assert!(db.verify_indexes().await.unwrap().is_empty());
+        let query = QueryDb::new(Source::Snapshot(db.snapshot().await.unwrap()), db.catalog().clone());
+        let hits = query.search_table("st", "s").search("body", "hello").eq("c", json!("x")).take(10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        let mut doc = hits[0].clone();
+        doc["body"] = json!("hello again");
+        // One reader: the snapshot goes before the next one is opened.
+        let ts = db.write_log().latest();
+        drop(query);
+        let changes = serde_json::to_string(&json!([["st", id, doc]])).unwrap();
+        db.replay(&crate::db::journal::JournalEntry { ts: ts + 1, time: 0.0, changes }).await.unwrap();
+        let query = QueryDb::new(Source::Snapshot(db.snapshot().await.unwrap()), db.catalog().clone());
+        let hits = query.search_table("st", "s").search("body", "again").eq("c", json!("x")).take(10).await.unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     /// After the dimensions change, old vectors are skipped by the backfill; their documents stay editable as long

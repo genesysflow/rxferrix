@@ -47,6 +47,7 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
       | "bench_idx_8"
       | "bench_indexed_posts"
       | "bench_keys"
+      | "bench_notes"
       | "bench_plain"
       | "bench_probe"
       | "bench_reads"

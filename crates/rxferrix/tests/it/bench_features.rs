@@ -5,6 +5,7 @@
 //! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_log_stats -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_filtered_first -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
 //!
@@ -18,6 +19,8 @@
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
 //! `bench_log_stats`: the dashboard's per-function stats (`Logs::stats`) over a day of an execution log holding
 //! `BENCH_ROWS` (200k, the default retention) rows of 40 functions.
+//! `bench_filtered_first`: `first()`, `take(10)` and a page of 10 of a filtered scan over 1 KiB documents, whose
+//! first match is the 1st (or 8th) document of the range.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
 
 use std::time::{Duration, Instant};
@@ -78,6 +81,36 @@ pub mod fns {
         pub body: String,
         pub embedding: Vec<f32>,
         pub views: i64,
+    }
+
+    #[table(name = "bench_notes")]
+    #[index(by_n = [n])]
+    pub struct Note {
+        pub n: i64,
+        pub body: String,
+    }
+
+    #[internal_mutation]
+    pub async fn insert_notes(ctx: &MutationCtx, from: i64, count: i64) -> Result<()> {
+        for n in from..from + count {
+            ctx.db.insert(Note { n, body: "x".repeat(1024) }).await?;
+        }
+        Ok(())
+    }
+
+    /// The first `take` notes from `from` whose `n` is a multiple of `every`.
+    #[internal_query]
+    pub async fn filtered_notes(ctx: &QueryCtx, from: i64, every: i64, take: u32) -> Result<usize> {
+        let q = ctx.db.query::<Note>().with_index(Note::by_n, |r| r.gte(Note::n, from));
+        Ok(q.filter(move |d| d.value.n % every == 0).take(take as usize).await?.len())
+    }
+
+    /// A page of `take` notes from `from` whose `n` is a multiple of `every`.
+    #[internal_query]
+    pub async fn filtered_notes_page(ctx: &QueryCtx, from: i64, every: i64, take: u32) -> Result<usize> {
+        let q = ctx.db.query::<Note>().with_index(Note::by_n, |r| r.gte(Note::n, from));
+        let page = q.filter(move |d| d.value.n % every == 0).paginate(PaginationOpts::first(take as usize)).await?;
+        Ok(page.page.len())
     }
 
     #[internal_mutation]
@@ -323,6 +356,33 @@ async fn bench_log_stats() {
         assert_eq!(stats.len(), 40);
     }
     println!("log stats over {rows} rows of 40 functions: {:>9.1?} per call", started.elapsed() / runs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_filtered_first() {
+    let t = TestApp::with_options(AppOptions::default()).await.unwrap();
+    for from in (0..10_000).step_by(1000) {
+        t.mutation::<fns::insert_notes>((from, 1000)).await.unwrap();
+    }
+    for (label, every, take) in
+        [("first(), 1st matches", 1, 1), ("first(), 8th matches", 8, 1), ("take(10), every 8th", 8, 10)]
+    {
+        let runs = 2000u32;
+        let started = Instant::now();
+        for i in 0..runs {
+            let run = t.query_run::<fns::filtered_notes>((i64::from(i) * 4 % 9000, every, take)).await.unwrap();
+            assert_eq!(run.result.unwrap(), serde_json::json!(take));
+        }
+        println!("filtered scan, {label:<22}: {:>9.1?} per query", started.elapsed() / runs);
+    }
+    let runs = 2000u32;
+    let started = Instant::now();
+    for i in 0..runs {
+        let run = t.query_run::<fns::filtered_notes_page>((i64::from(i) * 4 % 9000, 8, 10)).await.unwrap();
+        assert_eq!(run.result.unwrap(), serde_json::json!(10));
+    }
+    println!("filtered scan, {:<22}: {:>9.1?} per query", "page of 10, every 8th", started.elapsed() / runs);
 }
 
 #[cfg(feature = "olap")]

@@ -172,17 +172,32 @@ mod kind_serde {
 }
 
 /// Serialize `args` and cut the result to [`MAX_ARGS_BYTES`] at a char boundary. Returns (json, truncated).
+/// Serialization stops at the limit: large arguments cost no more than [`MAX_ARGS_BYTES`] of JSON.
 pub fn truncate_args(args: &Value) -> (String, bool) {
-    let mut s = serde_json::to_string(args).unwrap_or_default();
-    if s.len() <= MAX_ARGS_BYTES {
-        return (s, false);
+    /// Keeps the first [`MAX_ARGS_BYTES`] bytes written, then fails, which ends the serialization.
+    struct Bounded(Vec<u8>, bool);
+    impl std::io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let room = MAX_ARGS_BYTES - self.0.len();
+            if bytes.len() > room {
+                self.0.extend_from_slice(&bytes[..room]);
+                self.1 = true;
+                return Err(std::io::Error::other("the logged arguments are full"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    let mut cut = MAX_ARGS_BYTES;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    s.truncate(cut);
-    (s, true)
+    let mut out = Bounded(Vec::new(), false);
+    let _ = serde_json::to_writer(&mut out, args);
+    let Bounded(mut bytes, truncated) = out;
+    // At the last char boundary (serde_json writes valid UTF-8 up to where the cut was).
+    let valid = std::str::from_utf8(&bytes).map_or_else(|e| e.valid_up_to(), str::len);
+    bytes.truncate(valid);
+    (String::from_utf8(bytes).expect("valid up to here"), truncated)
 }
 
 /// Filter for [`Logs::query`]. Every field is optional; `Default` returns the newest [`DEFAULT_QUERY_LIMIT`] rows.
@@ -794,6 +809,29 @@ mod tests {
         assert_eq!((s.as_str(), t), (r#"{"a":1}"#, false));
         let (s, t) = truncate_args(&serde_json::json!({ "a": "é".repeat(MAX_ARGS_BYTES) }));
         assert!(t && s.len() <= MAX_ARGS_BYTES && s.starts_with(r#"{"a":"é"#));
+    }
+
+    #[test]
+    fn bounded_args_match_cutting_the_whole_json() {
+        let whole = |args: &Value| {
+            let mut s = serde_json::to_string(args).unwrap();
+            if s.len() <= MAX_ARGS_BYTES {
+                return (s, false);
+            }
+            let mut cut = MAX_ARGS_BYTES;
+            while !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            s.truncate(cut);
+            (s, true)
+        };
+        // Around the limit, with one- to four-byte chars straddling it.
+        for len in MAX_ARGS_BYTES - 12..MAX_ARGS_BYTES + 12 {
+            for c in ["x", "é", "€", "𝄞"] {
+                let args = serde_json::json!({ "s": c.repeat(len / c.len()) + &"y".repeat(len % c.len()) });
+                assert_eq!(truncate_args(&args), whole(&args), "{len} {c}");
+            }
+        }
     }
 
     #[test]

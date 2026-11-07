@@ -570,11 +570,13 @@ impl StorageService {
         let inserted = txn.with_state(|s| {
             if let Some(token) = token {
                 let now = now_s() as i64;
-                s.conn().execute(&format!("DELETE FROM {USED_TOKENS_TABLE} WHERE expires_at < ?1"), [now])?;
-                let fresh = s.conn().execute(
-                    &format!("INSERT OR IGNORE INTO {USED_TOKENS_TABLE} (nonce, expires_at) VALUES (?1, ?2)"),
-                    rusqlite::params![token.n, token.e as i64],
-                )?;
+                // An index seek (`ensure_schema`): nearly always nothing to delete.
+                // `USED_TOKENS_TABLE`, spelled out: no SQL string to build per upload.
+                const PURGE: &str = "DELETE FROM _storage_used_upload_tokens WHERE expires_at < ?1";
+                const MARK: &str =
+                    "INSERT OR IGNORE INTO _storage_used_upload_tokens (nonce, expires_at) VALUES (?1, ?2)";
+                s.conn().prepare_cached(PURGE)?.execute([now])?;
+                let fresh = s.conn().prepare_cached(MARK)?.execute(rusqlite::params![token.n, token.e as i64])?;
                 if fresh == 0 {
                     return Ok(Err(TokenProblem::Used));
                 }
@@ -739,7 +741,8 @@ pub(crate) async fn ensure_schema(app: &App) -> crate::Result<()> {
     txn.with_state(|s| {
         s.conn().execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS {USED_TOKENS_TABLE} (nonce TEXT PRIMARY KEY, expires_at INTEGER NOT NULL) \
-             WITHOUT ROWID"
+             WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS {USED_TOKENS_TABLE}_by_expiry ON {USED_TOKENS_TABLE} (expires_at);"
         ))?;
         Ok(())
     })?;

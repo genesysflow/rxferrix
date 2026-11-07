@@ -55,6 +55,13 @@ pub mod fns {
         ctx.db.insert(Item { group, score: 0, name: String::new() }).await.map(drop)
     }
 
+    /// An insert whose arguments carry a `note` the mutation ignores (a large argument).
+    #[mutation]
+    pub async fn bench_insert_noted(ctx: &MutationCtx, group: i64, note: String) -> Result<()> {
+        let _ = note;
+        ctx.db.insert(Item { group, score: 0, name: String::new() }).await.map(drop)
+    }
+
     /// `n` inserts in one transaction.
     #[mutation]
     pub async fn bench_insert_many(ctx: &MutationCtx, group: i64, n: u32) -> Result<()> {
@@ -411,12 +418,13 @@ async fn subscribers(app: &rxferrix::App, clients: u64, queries: u64) -> Vec<tok
 ///
 /// Mutations are serialized: each holds the writer lock for its whole run, so throughput is about 1 / (time per
 /// mutation) however many writers there are, and latency grows with the queue. Scenarios: a one-insert mutation at
-/// 1 to 64 concurrent writers; with idempotency keys (the WebSocket path); 10 inserts per mutation; read 100 documents
+/// 1 to 64 concurrent writers; with idempotency keys (the WebSocket path); with 64 KiB of arguments (`bigargs`); 10
+/// inserts per mutation; read 100 documents
 /// (an index range) then insert; every writer incrementing one counter (checked: no lost updates); with continuous
 /// replication's journal; with 100 subscribed clients; and fast writers queued behind a mutation that awaits 20 ms. In-process
 /// (`App::execute_mutation`): no JSON over a socket. SQLite runs in WAL mode with `synchronous = NORMAL`, so a commit
 /// doesn't wait for fsync (`BENCH_FSYNC=1`: it does; point `TMPDIR` at a real disk to measure that). Tunable:
-/// `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, many, scan, counter, replication,
+/// `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, bigargs, many, scan, counter, replication,
 /// subscribers, slow), `BENCH_WRITERS` (for insert: 1,4,16,64).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
@@ -442,6 +450,15 @@ async fn bench_writes() {
         let t = write_app(Default::default()).await;
         let run = hammer(t.app(), 16, secs, true, insert.clone()).await;
         println!("[writes] insert with idempotency keys, 16 writers: {}", run.line());
+    }
+    if wanted("bigargs") {
+        let t = write_app(Default::default()).await;
+        let note = "x".repeat(64 << 10);
+        let big: MakeCall = Arc::new(move |w, n| {
+            call(fns::bench_insert_noted::path(), json!({ "group": (w as u64 + n) % 10, "note": note }))
+        });
+        let run = hammer(t.app(), 16, secs, false, big).await;
+        println!("[writes] insert with 64 KiB of arguments, 16 writers: {}", run.line());
     }
     if wanted("many") {
         let t = write_app(Default::default()).await;

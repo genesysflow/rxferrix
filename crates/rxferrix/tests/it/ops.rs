@@ -1491,3 +1491,129 @@ async fn restart_needs_an_exit_code() {
     assert_eq!(r.status(), 400);
     assert_eq!(r.json::<Value>().await.unwrap()["errorData"]["code"], "restart_unavailable");
 }
+
+/// A store whose multipart uploads never get a part through, and whose single puts fail once a multipart upload is
+/// open: an import of a large file and a small one fails with the large one's upload in flight.
+#[derive(Debug, Default)]
+struct StallingStore {
+    inner: object_store::memory::InMemory,
+    opened: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<std::sync::atomic::AtomicUsize>,
+    aborted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl std::fmt::Display for StallingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StallingStore")
+    }
+}
+
+#[derive(Debug)]
+struct StallingUpload {
+    completed: Arc<std::sync::atomic::AtomicUsize>,
+    aborted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl object_store::MultipartUpload for StallingUpload {
+    fn put_part(&mut self, _: object_store::PutPayload) -> object_store::UploadPart {
+        Box::pin(futures::future::pending())
+    }
+    async fn complete(&mut self) -> object_store::Result<object_store::PutResult> {
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(object_store::PutResult { e_tag: None, version: None, extensions: Default::default() })
+    }
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.aborted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for StallingStore {
+    async fn put_opts(
+        &self,
+        _: &object_store::path::Path,
+        _: object_store::PutPayload,
+        _: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        for _ in 0..500 {
+            if self.opened.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(object_store::Error::Generic { store: "stalling", source: Box::new(std::io::Error::other("down")) })
+    }
+    async fn put_multipart_opts(
+        &self,
+        _: &object_store::path::Path,
+        _: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(StallingUpload { completed: self.completed.clone(), aborted: self.aborted.clone() }))
+    }
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// When one file of an import fails, a large file's upload still in flight is aborted, not left behind (an object
+/// store keeps an abandoned multipart upload's parts).
+#[tokio::test]
+async fn a_failed_import_aborts_the_uploads_it_leaves() {
+    let a = TestApp::new().await.unwrap();
+    let large = a.action::<store_text>(("large".to_string(),)).await.unwrap();
+    a.action::<store_text>(("small".to_string(),)).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let options =
+        ExportOptions { tables: Some(vec!["_storage".into()]), format: ExportFormat::Jsonl, include_files: true };
+    export::export_to_dir(a.dir(), Some(export::BlobStore::of_app(a.app())), out.path(), &options).await.unwrap();
+    std::fs::write(out.path().join("files").join(large.to_string()), vec![b'x'; 20 << 20]).unwrap();
+
+    let store = Arc::new(StallingStore::default());
+    let storage = rxferrix::storage::StorageConfig::object_store(store.clone(), "");
+    let b = TestApp::with_options(AppOptions { storage, ..Default::default() }).await.unwrap();
+    let import = ImportOptions { mode: ImportMode::Insert, batch_size: 500, allow_system_tables: true, format: None };
+    let err = export::import_path(b.app(), out.path(), None, &import).await.unwrap_err();
+    assert!(format!("{err:#}").contains("down"), "{err:#}");
+    // The abort runs in a task of its own.
+    for _ in 0..100 {
+        if store.aborted.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let counts = |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(Ordering::SeqCst);
+    assert_eq!((counts(&store.opened), counts(&store.completed), counts(&store.aborted)), (1, 0, 1));
+}

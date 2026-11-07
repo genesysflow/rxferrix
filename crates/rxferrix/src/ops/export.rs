@@ -301,25 +301,35 @@ async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate:
         blobs.store.put_multipart(path).await.context("storing a blob")?,
         BLOB_PART,
     );
-    loop {
-        let mut part = vec![0u8; BLOB_PART];
-        let mut filled = 0;
-        while filled < part.len() {
-            match tokio::io::AsyncReadExt::read(&mut file, &mut part[filled..]).await? {
-                0 => break,
-                n => filled += n,
+    let sent = async {
+        loop {
+            let mut part = vec![0u8; BLOB_PART];
+            let mut filled = 0;
+            while filled < part.len() {
+                match tokio::io::AsyncReadExt::read(&mut file, &mut part[filled..]).await? {
+                    0 => break,
+                    n => filled += n,
+                }
             }
+            if filled == 0 {
+                return Ok::<_, crate::Error>(());
+            }
+            part.truncate(filled);
+            // At most two parts in flight besides the one being read.
+            upload.wait_for_capacity(2).await.context("storing a blob")?;
+            upload.put(part.into());
         }
-        if filled == 0 {
-            break;
-        }
-        part.truncate(filled);
-        // At most two parts in flight besides the one being read.
-        upload.wait_for_capacity(2).await.context("storing a blob")?;
-        upload.put(part.into());
     }
-    upload.finish().await.context("storing a blob")?;
-    Ok(())
+    .await
+    .with_context(|| format!("importing {}", source.display()));
+    match sent {
+        Ok(()) => upload.finish().await.context("storing a blob").map(drop),
+        Err(e) => {
+            // Leave no unfinished upload behind (an object store's parts, a local temporary file).
+            let _ = upload.abort().await;
+            Err(e)
+        }
+    }
 }
 
 /// `manifest.json` of an export.
@@ -428,17 +438,19 @@ pub async fn export_to_dir(
                             tokio::task::spawn_blocking(move || {
                                 std::io::copy(&mut source, &mut std::fs::File::create(&path)?).map(drop)
                             })
-                            .await??;
+                            .await?
+                            .with_context(|| format!("exporting the blob of {id}"))?;
                         }
                         object_store::GetResultPayload::Stream(mut chunks) => {
                             // Buffered: each write of a `tokio::fs::File` is a trip to the blocking pool.
-                            let file = tokio::fs::File::create(&path).await?;
+                            let writing = || format!("exporting the blob of {id} to {}", path.display());
+                            let file = tokio::fs::File::create(&path).await.with_context(writing)?;
                             let mut file = tokio::io::BufWriter::with_capacity(1 << 20, file);
                             while let Some(chunk) = chunks.next().await {
                                 let chunk = chunk.with_context(|| format!("reading the blob of {id}"))?;
-                                tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+                                tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.with_context(writing)?;
                             }
-                            tokio::io::AsyncWriteExt::flush(&mut file).await?;
+                            tokio::io::AsyncWriteExt::flush(&mut file).await.with_context(writing)?;
                         }
                     }
                     Ok::<_, crate::Error>(true)

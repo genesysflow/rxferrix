@@ -273,9 +273,9 @@ async fn indexes_written_with_the_v2_layout_are_rebuilt_on_open() {
 fn posts_search_table(conn: &rusqlite::Connection) -> (String, String) {
     let n: i64 = conn
         .query_row(
-            "SELECT s.index_id - 2147483648 FROM _search_indexes s JOIN _tables t ON t.table_number = s.table_number \
+            "SELECT s.index_id - ?1 FROM _search_indexes s JOIN _tables t ON t.table_number = s.table_number \
              WHERE t.name = 'posts' AND s.name = 'search_body'",
-            [],
+            [rxferrix::db::search::SPECIAL_INDEX_BASE],
             |r| r.get(0),
         )
         .unwrap();

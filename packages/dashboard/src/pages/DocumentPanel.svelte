@@ -174,7 +174,9 @@
           </div>
         </div>
         {#if table.access === "limited"}
-          <p class="faint note">Only <code>name</code>, <code>image</code> and <code>emailVerified</code> can be changed.</p>
+          <p class="faint note">
+            Only {#each USER_FIELDS as f, i (f)}{i > 0 ? (i === USER_FIELDS.length - 1 ? " and " : ", ") : ""}<code>{f}</code>{/each} can be changed.
+          </p>
         {/if}
         {#if changedOnServer && dirty}
           <div class="alert info row">

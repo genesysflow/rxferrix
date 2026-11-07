@@ -241,7 +241,6 @@
     }
   }
 
-  /** A starting point for a new document: the user fields of the first document, or `{}`. */
   /** A new document: blanks of the table's type, or else a copy of the first document's fields. */
   function template(): JsonObject {
     const type = parseTsType(table.ts);

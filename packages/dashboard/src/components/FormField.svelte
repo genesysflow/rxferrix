@@ -53,7 +53,8 @@
   );
   const widget = $derived(mismatch ? "json" : kind.kind);
 
-  // Numbers and JSON keep the text being typed: "-", "1." or half-written JSON aren't values yet.
+  // Numbers and JSON keep the text being typed while the field has focus: "-", "1e" or half-written JSON aren't
+  // values yet, and "1." stays as typed (its value, 1, is already set).
   let draft = $state("");
   let invalid = $state(false);
   let focused = $state(false);

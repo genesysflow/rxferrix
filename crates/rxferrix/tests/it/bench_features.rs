@@ -397,7 +397,7 @@ async fn bench_backup() {
     let olap = rxferrix::olap::OlapOptions { enabled: true, background: false, ..Default::default() };
     let t = TestApp::with_options(AppOptions { olap, ..Default::default() }).await.unwrap();
     for from in (0..docs).step_by(1000) {
-        t.mutation::<fns::insert_plains>((from, 1000)).await.unwrap();
+        t.mutation::<fns::insert_plains>((from, (docs - from).min(1000))).await.unwrap();
     }
     t.olap_sync().await.unwrap();
     for n in 0..10 {

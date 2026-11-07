@@ -315,6 +315,7 @@ async fn bench_log_stats() {
         }
     }
     logs.flush().await.unwrap();
+    assert_eq!(logs.dropped(), 0, "the log dropped entries: the dataset is smaller than BENCH_ROWS");
     let runs = 20u32;
     let started = Instant::now();
     for _ in 0..runs {

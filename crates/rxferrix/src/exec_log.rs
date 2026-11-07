@@ -659,28 +659,33 @@ fn stats(conn: &Connection, since: i64, exclude_background: bool) -> anyhow::Res
         let path = r.get_ref(0)?.as_str()?;
         let outcome = LogOutcome::parse(r.get_ref(2)?.as_str()?);
         let duration = r.get::<_, i64>(3)? as u64;
-        if !by_path.contains_key(path) {
-            let s = FunctionStats {
-                path: path.to_string(),
-                kind: parse_kind(r.get_ref(1)?.as_str()?),
-                calls: 0,
-                errors: 0,
-                user_errors: 0,
-                server_errors: 0,
-                p50_us: 0,
-                p95_us: 0,
-                max_us: 0,
-            };
-            by_path.insert(path.to_string(), (s, Vec::new()));
+        let add = |(s, durations): &mut (FunctionStats, Vec<u64>)| {
+            s.calls += 1;
+            match outcome {
+                LogOutcome::Success => {}
+                LogOutcome::UserError => s.user_errors += 1,
+                LogOutcome::ServerError => s.server_errors += 1,
+            }
+            durations.push(duration);
+        };
+        if let Some(entry) = by_path.get_mut(path) {
+            add(entry);
+            continue;
         }
-        let (s, durations) = by_path.get_mut(path).expect("inserted above");
-        s.calls += 1;
-        match outcome {
-            LogOutcome::Success => {}
-            LogOutcome::UserError => s.user_errors += 1,
-            LogOutcome::ServerError => s.server_errors += 1,
-        }
-        durations.push(duration);
+        let s = FunctionStats {
+            path: path.to_string(),
+            kind: parse_kind(r.get_ref(1)?.as_str()?),
+            calls: 0,
+            errors: 0,
+            user_errors: 0,
+            server_errors: 0,
+            p50_us: 0,
+            p95_us: 0,
+            max_us: 0,
+        };
+        let mut entry = (s, Vec::new());
+        add(&mut entry);
+        by_path.insert(path.to_string(), entry);
     }
     let mut out: Vec<_> = by_path.into_values().collect();
     out.sort_unstable_by(|(a, _), (b, _)| a.path.cmp(&b.path));

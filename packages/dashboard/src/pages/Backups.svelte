@@ -388,21 +388,25 @@
           {/if}
         </dd>
       </dl>
-      <p class="faint small">
-        A backup is a consistent snapshot taken while the server runs (writes are not blocked). It never contains
-        <code>auth_secret.key</code>: settings secrets restore only with the same key file. <strong>Restore</strong>
-        checks a backup completely and stages it; it replaces the database when the server starts next (or use
-        <code>rxferrix restore &lt;archive&gt;</code> while the server is stopped).
-      </p>
+      <details class="help">
+        <summary>How backups and restores work</summary>
+        <p>
+          A backup is a consistent snapshot taken while the server runs (writes are not blocked). It never contains
+          <code>auth_secret.key</code>: settings secrets restore only with the same key file. <strong>Restore</strong>
+          checks a backup completely and stages it; it replaces the database when the server starts next (or use
+          <code>rxferrix restore &lt;archive&gt;</code> while the server is stopped).
+        </p>
+      </details>
       {#if pending}
         <div class="pending" class:failed={pending.error} role="status" data-testid="pending-restore">
-          <div>
+          <div class="pending-text">
             {#if pending.error}
-              <strong>The staged restore of <span class="mono">{pending.source}</span> could not be applied.</strong>
+              <strong>The staged restore of <span class="mono source">{pending.source}</span> could not be applied.</strong>
               <div class="error-text" data-testid="pending-restore-error">{pending.error}</div>
               <div>The server started on its current data. Cancel it, then restore again.</div>
             {:else}
-              <strong>Restore pending:</strong> <span class="mono">{pending.source}</span>
+              <p>
+              <strong>Restore pending:</strong> <span class="mono source">{pending.source}</span>
               {#if pending.pointInTime}
                 {@const p = pending.pointInTime}
                 (committed {formatTime(p.time)}: the snapshot at ts {p.snapshotTs} plus {p.replayed} replayed commit{p.replayed === 1
@@ -417,6 +421,7 @@
               passed every check. It replaces the current data
               <strong>the next time the server starts</strong>; the current files are kept in
               <code>pre-restore-…/</code>.
+              </p>
               {#if pending.secretIgnored}<div class="faint">The archive's <code>auth_secret.key</code> is not restored (only <code>rxferrix restore</code> restores it).</div>{/if}
               {#if restarting === "waiting"}
                 <div data-testid="restarting">Restarting… this page reloads when the server is back.</div>
@@ -453,7 +458,7 @@
       {:else if backups === null}
         <p class="faint">Loading…</p>
       {:else if backups.length === 0}
-        <Empty title="No backups yet" hint="Create one now, or schedule them with Configure… above." />
+        <Empty compact title="No backups yet" hint="Create one now, or schedule them with Configure… above." />
       {:else}
         <table class="grid" data-testid="backups">
           <thead><tr><th>Archive</th><th>Size</th><th>Created</th><th>Kind</th><th>Commit ts</th><th></th></tr></thead>
@@ -598,12 +603,15 @@
             <p class="faint small">Generation <span class="mono">{pitrRange.id}</span> restores ts {pitrRange.fromTs}–{pitrRange.toTs}.</p>
           {/if}
         {/if}
-        <p class="faint small">
-          Every commit is journaled with the data and shipped in segments; a point is rebuilt from the newest snapshot before it
-          and the journal after it, then checked and staged like a backup. Offline:
-          <code>rxferrix restore --from {r.target} --to-time 2026-10-09T12:00:00Z</code>. The blobs of stored files are not
-          journaled.
-        </p>
+        <details class="help">
+          <summary>How point-in-time restores work</summary>
+          <p>
+            Every commit is journaled with the data and shipped in segments; a point is rebuilt from the newest snapshot before
+            it and the journal after it, then checked and staged like a backup. Offline:
+            <code>rxferrix restore --from {r.target} --to-time 2026-10-09T12:00:00Z</code>. The blobs of stored files are not
+            journaled.
+          </p>
+        </details>
       {/if}
     </section>
 
@@ -630,11 +638,14 @@
 
       <section class="card section" aria-labelledby="i-head">
         <h2 id="i-head">Import into a table</h2>
-        <p class="muted small">
-          JSONL (one document per line) or CSV with a header row, as exported; CSV cells are typed with the table's
-          fields. Every document is validated against the table before anything is written; ids and creation times
-          are kept.
-        </p>
+        <p class="muted small">JSONL or CSV, as exported. Every document is checked before anything is written.</p>
+        <details class="help">
+          <summary>File formats</summary>
+          <p>
+            JSONL has one document per line; CSV has a header row, and its cells are typed with the table's fields. Every
+            document is validated against the table before anything is written; ids and creation times are kept.
+          </p>
+        </details>
         <div class="form">
           <label for="import-table">Table</label>
           <select id="import-table" bind:value={importName}>
@@ -771,18 +782,34 @@
   }
   .pending {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 12px 20px;
     align-items: flex-start;
     justify-content: space-between;
-    margin: 10px 0;
-    padding: 10px 12px;
+    margin: 12px 0;
+    padding: 12px 14px;
     border-radius: var(--radius);
     background: var(--warn-soft);
-    border: 1px solid var(--border);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
     font-size: 13px;
+    line-height: 1.55;
   }
   .pending.failed {
     background: var(--err-soft);
+    border-color: color-mix(in srgb, var(--err) 30%, var(--border));
+  }
+  .pending-text {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 420px;
+    min-width: 0;
+  }
+  .pending-text p {
+    margin: 0;
+  }
+  .pending .source {
+    overflow-wrap: anywhere;
   }
   .pending-actions {
     display: flex;

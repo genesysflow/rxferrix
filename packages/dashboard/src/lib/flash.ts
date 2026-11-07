@@ -29,7 +29,7 @@ function tint(node: HTMLElement, name: string, alpha: number): string {
 
 function keyframes(node: HTMLElement, f: Flash, still: boolean): Keyframe[] {
   if (f.kind === "inserted") {
-    const c = tint(node, f.color ?? "--ok", 0.22);
+    const c = tint(node, f.color ?? "--ok", 0.12);
     return still
       ? [{ backgroundColor: c }, { backgroundColor: c, offset: 0.4 }]
       : [
@@ -39,7 +39,7 @@ function keyframes(node: HTMLElement, f: Flash, still: boolean): Keyframe[] {
         ];
   }
   if (f.kind === "changed") {
-    const c = tint(node, f.color ?? "--warn", 0.3);
+    const c = tint(node, f.color ?? "--warn", 0.16);
     return [{ backgroundColor: c }, { backgroundColor: c, offset: 0.35 }];
   }
   const c = tint(node, f.color ?? "--err", 0.16);

@@ -18,7 +18,7 @@ Use `--dir` if the server's data directory is not the default `fx_data`. Dashboa
 
 **Data** lists app and system tables. Select a table to browse its live documents, filter by indexed fields, inspect its schema, or open a document. Tables with text-search indexes also offer search.
 
-The JSON editor can insert, patch, or delete app documents. Writes are validated against the table's Rust type. Change the schema in Rust and deploy it; the dashboard does not define new schema fields or indexes.
+The document panel can insert, edit, or delete app documents, as a form or as JSON. The form has a field per field of the table's Rust type, with its doc comment: text, numbers, checkboxes, a select for string enums, a null toggle for `Option` fields, nested fields for structs, and JSON for lists, maps and anything else. Both views edit the same document, so you can switch while editing. Writes are validated against the table's Rust type. Change the schema in Rust and deploy it; the dashboard does not define new schema fields or indexes.
 
 System tables are generally read-only. Selected user profile fields are editable, while credentials and token hashes are hidden. Treat all administrator edits as privileged operations; they are recorded in the audit log.
 

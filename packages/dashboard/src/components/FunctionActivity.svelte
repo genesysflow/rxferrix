@@ -57,9 +57,9 @@
 <section class="activity" aria-label="Activity">
   <div class="head">
     <h3>Activity</h3>
-    <div class="ranges" role="group" aria-label="Time range">
+    <div class="segmented" role="group" aria-label="Time range">
       {#each RANGES as r (r.id)}
-        <button class="small" class:active={r.id === rangeId} aria-pressed={r.id === rangeId} onclick={() => (rangeId = r.id)}>{r.id}</button>
+        <button class:active={r.id === rangeId} aria-pressed={r.id === rangeId} onclick={() => (rangeId = r.id)}>{r.id}</button>
       {/each}
     </div>
     <BackgroundToggle />
@@ -106,19 +106,10 @@
   .head h3 {
     margin: 0;
   }
-  .ranges {
-    display: inline-flex;
-    gap: 2px;
-  }
-  .ranges button.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: transparent;
-    font-weight: 600;
-  }
   .stats {
     display: inline-flex;
-    gap: 14px;
+    flex-wrap: wrap;
+    gap: 4px 14px;
     font-size: 12.5px;
     color: var(--muted);
     font-variant-numeric: tabular-nums;

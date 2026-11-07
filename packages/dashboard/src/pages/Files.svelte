@@ -6,10 +6,13 @@
   import { formatBytes, formatTime, hasThumbnail, previewKind, sameOriginPath, thumbUrl } from "../lib/format.js";
   import { href, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
+  import Icon from "../components/Icon.svelte";
 
   /** The Files page: stored files (live), previews, download, delete, and upload by picker or drag and drop. */
   let { route }: { route: Route } = $props();
   const ctx = dashboardContext();
+  /** The file whose preview image is tiny (at most 32px square): shown scaled up. */
+  let tinyPreview = $state<string | null>(null);
   const files = usePaginatedQuery(storage.files, () => ({}), { initialNumItems: 50 });
   const deleteFile = useMutation(storage.deleteFile);
   const generateUploadUrl = useMutation(storage.generateUploadUrl);
@@ -182,7 +185,7 @@
                   {:else if previewKind(f.contentType) === "image"}
                     <img src={fileUrl(f)} alt="" loading="lazy" width="36" height="36" />
                   {:else}
-                    <span class="icon" aria-hidden="true">▤</span>
+                    <span class="icon" aria-hidden="true"><Icon name="files" size={18} /></span>
                   {/if}
                 </td>
                 <td class="name" title={f._id}>{label(f)}</td>
@@ -216,7 +219,15 @@
         </header>
         <div class="preview">
           {#if kind === "image"}
-            <img src={fileUrl(f)} alt={label(f)} />
+            <img
+              src={fileUrl(f)}
+              alt={label(f)}
+              class:tiny={tinyPreview === f._id}
+              onload={(e) => {
+                const img = e.currentTarget as HTMLImageElement;
+                tinyPreview = img.naturalWidth <= 32 && img.naturalHeight <= 32 ? f._id : null;
+              }}
+            />
           {:else if kind === "video"}
             <!-- svelte-ignore a11y_media_has_caption -->
             <video src={fileUrl(f)} controls preload="metadata"></video>
@@ -317,7 +328,8 @@
   }
   .actions {
     display: flex;
-    gap: 10px;
+    align-items: center;
+    gap: 12px;
     align-items: center;
   }
   td.by {
@@ -389,6 +401,14 @@
     max-width: 100%;
     max-height: 320px;
     border-radius: 4px;
+  }
+  /* A tiny image (an icon, a pixel) is scaled up crisply instead of disappearing into the frame. */
+  .preview img.tiny {
+    width: 64px;
+    height: 64px;
+    object-fit: contain;
+    image-rendering: pixelated;
+    box-shadow: 0 0 0 1px var(--border);
   }
   .preview audio {
     width: 100%;

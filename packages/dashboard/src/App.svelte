@@ -7,6 +7,7 @@
   import { theme } from "./lib/theme.svelte.js";
   import { type Command } from "./lib/commands.js";
   import CommandPalette from "./components/CommandPalette.svelte";
+  import Icon, { type IconName } from "./components/Icon.svelte";
   import Audit from "./pages/Audit.svelte";
   import Analytics from "./pages/Analytics.svelte";
   import Backups from "./pages/Backups.svelte";
@@ -63,44 +64,44 @@
   interface NavItem {
     page: Page;
     label: string;
-    icon: string;
+    icon: IconName;
     /** Words the command palette also matches. */
     keywords?: string;
   }
   const groups: { label: string | null; items: NavItem[] }[] = [
-    { label: null, items: [{ page: "overview", label: "Overview", icon: "◎", keywords: "stats home" }] },
+    { label: null, items: [{ page: "overview", label: "Overview", icon: "overview", keywords: "stats home" }] },
     {
       label: "Build",
       items: [
-        { page: "data", label: "Data", icon: "▦", keywords: "tables documents" },
-        { page: "functions", label: "Functions", icon: "ƒ", keywords: "runner latency charts" },
-        { page: "logs", label: "Logs", icon: "≡", keywords: "executions tail" },
+        { page: "data", label: "Data", icon: "data", keywords: "tables documents" },
+        { page: "functions", label: "Functions", icon: "functions", keywords: "runner latency charts" },
+        { page: "logs", label: "Logs", icon: "logs", keywords: "executions tail" },
       ],
     },
     {
       label: "Manage",
       items: [
-        { page: "users", label: "Users", icon: "◍", keywords: "sessions auth impersonate" },
-        { page: "files", label: "Files", icon: "▤", keywords: "storage uploads" },
-        { page: "scheduler", label: "Scheduler", icon: "◷", keywords: "crons jobs workpools" },
-        { page: "workflows", label: "Workflows", icon: "⇶", keywords: "steps durable events" },
+        { page: "users", label: "Users", icon: "users", keywords: "sessions auth impersonate" },
+        { page: "files", label: "Files", icon: "files", keywords: "storage uploads" },
+        { page: "scheduler", label: "Scheduler", icon: "scheduler", keywords: "crons jobs workpools" },
+        { page: "workflows", label: "Workflows", icon: "workflows", keywords: "steps durable events" },
       ],
     },
     {
       label: "Operate",
       items: [
-        { page: "migrations", label: "Migrations", icon: "⇄", keywords: "schema" },
-        { page: "backups", label: "Backups", icon: "⧉", keywords: "export import restore" },
-        { page: "analytics", label: "Analytics", icon: "∑", keywords: "olap sql duckdb parquet csv" },
+        { page: "migrations", label: "Migrations", icon: "migrations", keywords: "schema" },
+        { page: "backups", label: "Backups", icon: "backups", keywords: "export import restore" },
+        { page: "analytics", label: "Analytics", icon: "analytics", keywords: "olap sql duckdb parquet csv" },
       ],
     },
     {
       label: "Admin",
       items: [
-        { page: "environment", label: "Environment", icon: "$", keywords: "env variables secrets api keys config" },
-        { page: "settings", label: "Settings", icon: "✱", keywords: "smtp oauth cors redirect signups tokens" },
-        { page: "audit", label: "Audit log", icon: "✎", keywords: "history changes" },
-        { page: "account", label: "Account", icon: "⚿", keywords: "two-factor 2fa mfa authenticator totp recovery codes security" },
+        { page: "environment", label: "Environment", icon: "environment", keywords: "env variables secrets api keys config" },
+        { page: "settings", label: "Settings", icon: "settings", keywords: "smtp oauth cors redirect signups tokens" },
+        { page: "audit", label: "Audit log", icon: "audit", keywords: "history changes" },
+        { page: "account", label: "Account", icon: "account", keywords: "two-factor 2fa mfa authenticator totp recovery codes security" },
       ],
     },
   ];
@@ -179,17 +180,17 @@
 {:else}
   <div class="shell" class:menu-open={menu}>
     <header class="topbar">
-      <button class="ghost menu-button" aria-label="Menu" aria-expanded={menu} onclick={() => (menu = !menu)}>☰</button>
+      <button class="ghost menu-button" aria-label="Menu" aria-expanded={menu} onclick={() => (menu = !menu)}><Icon name="menu" size={20} /></button>
       <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span></a>
       <span class="topbar-title">{current?.label ?? ""}</span>
       <span class="dot" class:on={live} title={live ? "Connected: views update live" : "Reconnecting…"}></span>
-      <button class="ghost menu-button" aria-label="Go to…" onclick={() => (palette = true)}>⌕</button>
+      <button class="ghost menu-button" aria-label="Go to…" onclick={() => (palette = true)}><Icon name="search" size={18} /></button>
     </header>
     <button class="scrim" aria-label="Close menu" tabindex="-1" onclick={() => (menu = false)}></button>
     <nav class="sidebar" aria-label="Dashboard">
       <a class="brand" href={href("overview")} onclick={link}><span class="logo">F</span> rxferrix</a>
       <button class="palette-button" onclick={() => (palette = true)} title="Command palette">
-        <span>Go to…</span><kbd>Ctrl K</kbd>
+        <span class="palette-label"><Icon name="search" size={14} />Go to…</span><kbd>Ctrl K</kbd>
       </button>
       <div class="groups">
         {#each groups as g, gi (gi)}
@@ -205,7 +206,7 @@
                   aria-current={route.page === item.page ? "page" : undefined}
                   title={shortcutOf(i) ? `${item.label} (${shortcutOf(i)})` : item.label}
                 >
-                  <span class="icon" aria-hidden="true">{item.icon}</span>{item.label}
+                  <span class="icon"><Icon name={item.icon} /></span>{item.label}
                 </a>
               </li>
             {/each}
@@ -219,9 +220,9 @@
         <a class="who mono" href={href("account")} onclick={link} title="Signed in administrator: your account">
           {me.data?.email ?? ""}{#if me.data?.mfaEnabled}<span class="mfa" title="Two-factor authentication is on" aria-label="two-factor authentication on"> ⚿</span>{/if}
         </a>
-        <div class="row">
-          <button class="small" onclick={() => theme.cycle()} title="Theme: light, dark or system">
-            {theme.current === "system" ? "◐ system" : theme.current === "dark" ? "☾ dark" : "☀ light"}
+        <div class="foot-actions">
+          <button class="small theme" onclick={() => theme.cycle()} title="Theme: light, dark or system">
+            <Icon name={theme.current === "system" ? "system" : theme.current === "dark" ? "moon" : "sun"} size={14} />{theme.current}
           </button>
           <button class="small" onclick={signOut}>Sign out</button>
         </div>
@@ -269,7 +270,7 @@
 
 <div class="toasts" aria-live="polite">
   {#each toasts as t (t.id)}
-    <div class="toast" class:error={t.kind === "error"} role={t.kind === "error" ? "alert" : "status"}>{t.message}</div>
+    <div class="toast" class:error={t.kind === "error"} role={t.kind === "error" ? "alert" : "status"}><span class="toast-dot" aria-hidden="true"></span>{t.message}</div>
   {/each}
 </div>
 
@@ -298,7 +299,8 @@
     border-right: 1px solid var(--border);
     background: var(--panel);
     padding: 12px 10px;
-    gap: 12px;
+    gap: 10px;
+    min-height: 0;
   }
   .brand {
     display: flex;
@@ -315,8 +317,9 @@
     place-items: center;
     width: 24px;
     height: 24px;
-    border-radius: 6px;
-    background: var(--accent);
+    border-radius: 7px;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 80%, white), var(--accent));
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.08);
     color: white;
     font-size: 13px;
   }
@@ -349,6 +352,13 @@
     background: var(--panel-2);
     border-color: var(--border);
     font-size: 13px;
+    padding-left: 10px;
+    padding-right: 6px;
+  }
+  .palette-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
   }
   ul a {
     display: flex;
@@ -358,9 +368,11 @@
     border-radius: var(--radius);
     color: var(--text);
     text-decoration: none;
+    font-size: 13.5px;
   }
   ul a:hover {
     background: var(--panel-2);
+    text-decoration: none;
   }
   ul a.active {
     background: var(--accent-soft);
@@ -368,8 +380,7 @@
     font-weight: 600;
   }
   .icon {
-    width: 16px;
-    text-align: center;
+    display: inline-flex;
     color: var(--muted);
   }
   a.active .icon {
@@ -380,7 +391,25 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    padding: 10px 4px 0;
+    border-top: 1px solid var(--border);
     font-size: 12.5px;
+  }
+  .foot-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .foot-actions button {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    color: var(--muted);
+  }
+  .foot-actions .theme {
+    text-transform: capitalize;
+  }
+  .foot-actions button:hover:not(:disabled) {
+    color: var(--text);
   }
   .conn {
     display: flex;
@@ -482,11 +511,6 @@
     main {
       min-height: 0;
     }
-    .toasts {
-      left: 12px;
-      right: 12px;
-      bottom: 12px;
-    }
   }
   .toasts {
     position: fixed;
@@ -494,19 +518,65 @@
     right: 16px;
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     gap: 8px;
+    max-width: min(360px, calc(100vw - 32px));
     z-index: 100;
+    pointer-events: none;
   }
   .toast {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
     background: var(--panel);
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
     border-radius: 8px;
-    padding: 8px 14px;
-    max-width: 420px;
+    padding: 9px 14px;
+    max-width: 100%;
+    font-size: 13px;
+    pointer-events: auto;
+    animation: toast-in 0.16s ease-out;
+  }
+  .toast-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    transform: translateY(-1px);
   }
   .toast.error {
-    border-color: var(--err);
+    background: var(--err-soft);
+    border-color: color-mix(in srgb, var(--err) 35%, var(--border));
     color: var(--err);
+  }
+  .toast.error .toast-dot {
+    background: var(--err);
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @media (max-width: 760px) {
+    .toasts {
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      max-width: none;
+      align-items: stretch;
+      gap: 6px;
+    }
+    /* A phone shows the newest two: four would cover most of the screen. */
+    .toast:nth-last-child(n + 3) {
+      display: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .toast {
+      animation: none;
+    }
   }
 </style>

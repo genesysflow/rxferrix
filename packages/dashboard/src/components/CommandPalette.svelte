@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import { rankCommands, type Command } from "../lib/commands.js";
 
   /** Ctrl+K / ⌘K: jump to a page or a table, or run a command, by typing a few letters. */
@@ -46,19 +47,22 @@
 
 <div class="backdrop" role="presentation" onclick={onclose}>
   <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
-    <input
-      bind:this={input}
-      bind:value={query}
-      {onkeydown}
-      placeholder="Go to a page or table, or run a command…"
-      aria-label="Command"
-      role="combobox"
-      aria-expanded="true"
-      aria-controls="palette-list"
-      aria-activedescendant={results[active] ? `cmd-${active}` : undefined}
-      autocomplete="off"
-      spellcheck="false"
-    />
+    <div class="search">
+      <Icon name="search" size={18} />
+      <input
+        bind:this={input}
+        bind:value={query}
+        {onkeydown}
+        placeholder="Go to a page or table, or run a command…"
+        aria-label="Command"
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="palette-list"
+        aria-activedescendant={results[active] ? `cmd-${active}` : undefined}
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
     <ul id="palette-list" role="listbox" bind:this={list}>
       {#each results as c, i (c.id)}
         <li
@@ -79,7 +83,7 @@
         <li class="none">No matches</li>
       {/each}
     </ul>
-    <div class="foot faint"><kbd>↑</kbd> <kbd>↓</kbd> to move · <kbd>↵</kbd> to open · <kbd>Esc</kbd> to close</div>
+    <div class="foot"><span><kbd>↑</kbd> <kbd>↓</kbd> to move</span><span><kbd>↵</kbd> to open</span><span><kbd>Esc</kbd> to close</span></div>
   </div>
 </div>
 
@@ -104,16 +108,26 @@
     display: flex;
     flex-direction: column;
   }
-  input {
-    border: none;
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
     border-bottom: 1px solid var(--border);
+    color: var(--muted);
+  }
+  input {
+    flex: 1;
+    border: none;
     border-radius: 0;
-    padding: 12px 14px;
-    font-size: 15px;
+    padding: 15px 0;
+    font-size: 16px;
     background: transparent;
+    color: var(--text);
   }
   input:focus {
     outline: none;
+    box-shadow: none;
   }
   ul {
     list-style: none;
@@ -134,6 +148,10 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
+  li.active .group {
+    color: inherit;
+    opacity: 0.8;
+  }
   .label {
     flex: 1;
     overflow: hidden;
@@ -149,8 +167,12 @@
     cursor: default;
   }
   .foot {
-    font-size: 11.5px;
-    padding: 6px 12px;
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--muted);
+    padding: 8px 16px;
     border-top: 1px solid var(--border);
+    background: var(--panel-2);
   }
 </style>

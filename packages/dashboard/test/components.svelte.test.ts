@@ -2,7 +2,9 @@ import { createRawSnippet, flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Json, TableSummary } from "../src/lib/api.js";
 import { DASHBOARD_CONTEXT, type DashboardContext } from "../src/lib/context.js";
+import DocumentForm from "../src/components/DocumentForm.svelte";
 import JsonEditor from "../src/components/JsonEditor.svelte";
+import { parseTsType, type TsField } from "../src/lib/tsType.js";
 import JsonValue from "../src/components/JsonValue.svelte";
 import Modal from "../src/components/Modal.svelte";
 
@@ -136,3 +138,86 @@ describe("Modal", () => {
   });
 });
 
+
+describe("DocumentForm", () => {
+  const todo = parseTsType(
+    `{ text: string, done: boolean, image: Id<"_storage"> | null, completedAt: number | null, priority: "low" | "high", meta: { tags: Array<string> }, }`,
+  );
+  const fields = (todo as { fields: TsField[] }).fields;
+  const doc = { _id: "x1", _creationTime: 1, text: "milk", done: false, image: null, completedAt: 5, priority: "low", meta: { tags: ["a"] }, old: 1 };
+
+  function render(value: Record<string, Json> = doc, locked = (_: string) => false) {
+    const changes: Record<string, Json>[] = [];
+    const onsubmit = vi.fn();
+    mounted = mount(DocumentForm, { target, props: { value, fields, locked, onchange: (v: Record<string, Json>) => changes.push(v), onsubmit } });
+    flushSync();
+    const field = (id: string) => target.querySelector<HTMLInputElement>(`#field-${CSS.escape(id)}`)!;
+    return { changes, onsubmit, field };
+  }
+
+  it("edits each field with a widget for its type, keeping _id and _creationTime", () => {
+    const { changes, field } = render();
+    field("text").value = "oat milk";
+    field("text").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(changes.at(-1)).toEqual({ ...doc, text: "oat milk" });
+
+    field("done").click();
+    expect(changes.at(-1)!.done).toBe(true);
+
+    const priority = target.querySelector<HTMLSelectElement>("#field-priority")!;
+    priority.value = "1";
+    priority.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes.at(-1)!.priority).toBe("high");
+
+    // A nested object's fields, the array in it as JSON.
+    type(target.querySelector<HTMLTextAreaElement>(`#field-${CSS.escape("meta.tags")}`)!, '["a", "b"]');
+    expect(changes.at(-1)!.meta).toEqual({ tags: ["a", "b"] });
+    expect(changes.at(-1)!._id).toBe("x1");
+  });
+
+  it("keeps a half-typed number as text, and toggles null", () => {
+    const { changes, field } = render();
+    const n = field("completedAt");
+    n.value = "-";
+    n.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    expect(changes).toHaveLength(0);
+    expect(target.textContent).toContain("Not a number");
+    n.value = "-12.5";
+    n.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(changes.at(-1)!.completedAt).toBe(-12.5);
+
+    target.querySelector<HTMLButtonElement>('[aria-label="Set completedAt to null"]')!.click();
+    expect(changes.at(-1)!.completedAt).toBeNull();
+    target.querySelector<HTMLButtonElement>('[aria-label="Give image a value"]')!.click();
+    expect(changes.at(-1)!.image).toBe("");
+  });
+
+  it("lists fields the type doesn't have, removable, and submits with Ctrl+Enter", () => {
+    const { changes, field, onsubmit } = render();
+    expect(target.textContent).toContain("not in the type");
+    target.querySelector<HTMLButtonElement>('[aria-label="Remove old"]')!.click();
+    expect("old" in changes.at(-1)!).toBe(false);
+    ctrlEnter(field("text"));
+    expect(onsubmit).toHaveBeenCalledOnce();
+  });
+
+  it("shows a null or missing nested object without its fields", () => {
+    const { changes } = render({ ...doc, meta: null });
+    expect(target.querySelector(`#field-${CSS.escape("meta.tags")}`)).toBeNull();
+    target.querySelector<HTMLButtonElement>('[aria-label="Give meta a value"]')!.click();
+    expect(changes.at(-1)!.meta).toEqual({ tags: [] });
+    unmount(mounted!);
+    mounted = null;
+    const { meta: _, ...without } = doc;
+    render(without);
+    expect(target.textContent).toContain("missing");
+  });
+
+  it("disables locked fields", () => {
+    const { field } = render(doc, (f) => f !== "text");
+    expect(field("text").disabled).toBe(false);
+    expect(field("done").disabled).toBe(true);
+    expect(target.querySelector('[aria-label="Give image a value"]')).toBeNull();
+  });
+});

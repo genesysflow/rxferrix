@@ -18,7 +18,9 @@
   import { columnsOf, documentMatches, parseFilterValue } from "../lib/format.js";
   import { href, link, router } from "../lib/router.svelte.js";
   import { columnWidths, nearEnd, rowWindow } from "../lib/virtual.js";
+  import { defaultObject, parseTsType } from "../lib/tsType.js";
   import Empty from "../components/Empty.svelte";
+  import Icon from "../components/Icon.svelte";
   import JsonValue from "../components/JsonValue.svelte";
 
   /**
@@ -94,7 +96,15 @@
   const rows = $derived(needle ? docs.results.filter((d) => documentMatches(d, needle)) : docs.results);
   const columns = $derived(columnsOf(docs.results));
   const writable = $derived(table.access === "readWrite");
-  const widths = $derived(columnWidths(columns, docs.results.slice(0, 300)));
+  /** The grid's width: a narrow grid (the document panel open, a phone) folds its filters behind a button. */
+  let gridWidth = $state(0);
+  const narrow = $derived(gridWidth > 0 && gridWidth <= 640);
+  let filtersOpen = $state(false);
+  const activeFilters = $derived(mode === "search" ? (searching ? 1 : 0) : applied.length);
+  // Narrow, an id shows its first characters (its title and the panel have it whole), leaving room for the data.
+  const widths = $derived(
+    columnWidths(columns, docs.results.slice(0, 300)).map((w, i) => (narrow && columns[i] === "_id" ? Math.min(w, 120) : w)),
+  );
   const totalWidth = $derived(widths.reduce((a, b) => a + b, 0) + (writable ? 32 : 0));
 
   // Live changes, animated: rows that appear slide in, changed cells flash, removed rows fade out (as "ghost" rows
@@ -231,8 +241,10 @@
     }
   }
 
-  /** A starting point for a new document: the user fields of the first document, or `{}`. */
+  /** A new document: blanks of the table's type, or else a copy of the first document's fields. */
   function template(): JsonObject {
+    const type = parseTsType(table.ts);
+    if (type?.kind === "object") return defaultObject(type.fields);
     const first = docs.results[0];
     if (!first) return {};
     const { _id: _a, _creationTime: _b, ...rest } = first;
@@ -254,7 +266,7 @@
   };
 </script>
 
-<div class="page">
+<div class="page" bind:clientWidth={gridWidth}>
   <header class="page-header">
     <h1>{table.name}</h1>
     <span class="muted">{table.documents} document{table.documents === 1 ? "" : "s"}</span>
@@ -267,21 +279,36 @@
       >
     {/if}
     <span class="spacer"></span>
-    <button class="ghost" onclick={() => (showSchema = !showSchema)} aria-expanded={showSchema}>Schema</button>
-    <div class="export" role="group" aria-label="Export">
-      <button class="small" onclick={() => exportAs("jsonl")} disabled={exporting !== null} title="Download every document as JSON lines">
-        {exporting === "jsonl" ? "Exporting…" : "⇩ JSONL"}
-      </button>
-      <button class="small" onclick={() => exportAs("csv")} disabled={exporting !== null} title="Download every document as CSV">
-        {exporting === "csv" ? "Exporting…" : "⇩ CSV"}
-      </button>
+    <div class="header-actions">
+      <input
+        class="quick"
+        type="search"
+        placeholder="Filter loaded rows"
+        aria-label="Filter loaded rows"
+        title="Matches any value of the rows loaded so far (client-side; not an index search)"
+        bind:value={quick}
+      />
+      {#if narrow}
+        <button class="ghost" onclick={() => (filtersOpen = !filtersOpen)} aria-expanded={filtersOpen} aria-controls="grid-filters">
+          Filters{#if activeFilters > 0}<span class="count">{activeFilters}</span>{/if}
+        </button>
+      {/if}
+      <button class="ghost" onclick={() => (showSchema = !showSchema)} aria-expanded={showSchema}>Schema</button>
+      <div class="export" role="group" aria-label="Export">
+        <button onclick={() => exportAs("jsonl")} disabled={exporting !== null} title="Download every document as JSON lines">
+          {#if exporting === "jsonl"}Exporting…{:else}<Icon name="download" size={14} />JSONL{/if}
+        </button>
+        <button onclick={() => exportAs("csv")} disabled={exporting !== null} title="Download every document as CSV">
+          {#if exporting === "csv"}Exporting…{:else}<Icon name="download" size={14} />CSV{/if}
+        </button>
+      </div>
+      {#if visibleSelection.length > 0 && writable}
+        <button class="danger" onclick={deleteSelected}>Delete {visibleSelection.length}</button>
+      {/if}
+      {#if writable}
+        <button class="primary" onclick={() => oninsert(template())}>+ Insert</button>
+      {/if}
     </div>
-    {#if visibleSelection.length > 0 && writable}
-      <button class="danger" onclick={deleteSelected}>Delete {visibleSelection.length}</button>
-    {/if}
-    {#if writable}
-      <button class="primary" onclick={() => oninsert(template())}>+ Insert</button>
-    {/if}
   </header>
 
   {#if showSchema}
@@ -355,11 +382,11 @@
     </div>
   {/if}
 
-  <div class="filters row">
+  <div class="filters row" id="grid-filters" hidden={narrow && !filtersOpen}>
     {#if searchIndexes.length > 0}
-      <div class="modes" role="group" aria-label="Mode">
-        <button class="small" class:active={mode === "browse"} aria-pressed={mode === "browse"} onclick={() => (mode = "browse")}>Browse</button>
-        <button class="small" class:active={mode === "search"} aria-pressed={mode === "search"} onclick={() => (mode = "search")}>Search</button>
+      <div class="segmented" role="group" aria-label="Mode">
+        <button class:active={mode === "browse"} aria-pressed={mode === "browse"} onclick={() => (mode = "browse")}>Browse</button>
+        <button class:active={mode === "search"} aria-pressed={mode === "search"} onclick={() => (mode = "search")}>Search</button>
       </div>
     {/if}
     {#if mode === "browse"}
@@ -391,9 +418,9 @@
           />
         </span>
       {/each}
-      <button class="small" onclick={apply}>Apply</button>
-      {#if applied.length > 0}<button class="small ghost" onclick={clearFilters}>Clear</button>{/if}
-      <button class="small" onclick={() => (order = order === "asc" ? "desc" : "asc")} title="Order along the index">
+      <button onclick={apply}>Apply</button>
+      {#if applied.length > 0}<button class="ghost" onclick={clearFilters}>Clear</button>{/if}
+      <button onclick={() => (order = order === "asc" ? "desc" : "asc")} title="Order along the index">
         {order === "desc" ? "↓ newest first" : "↑ oldest first"}
       </button>
     {:else if searchIndex}
@@ -429,15 +456,6 @@
           : ""} · most relevant first</span
       >
     {/if}
-    <span class="spacer"></span>
-    <input
-      class="quick"
-      type="search"
-      placeholder="Filter loaded rows"
-      aria-label="Filter loaded rows"
-      title="Matches any value of the rows loaded so far (client-side; not an index search)"
-      bind:value={quick}
-    />
   </div>
 
   <div class="body" bind:this={scroller} bind:clientHeight={viewport} onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}>
@@ -546,14 +564,29 @@
     text-decoration: none;
   }
   .filters {
-    padding: 8px 20px;
+    padding: 10px 20px;
+    gap: 10px;
     border-bottom: 1px solid var(--border);
     background: var(--panel);
+  }
+  .filters[hidden] {
+    display: none;
+  }
+  .count {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-size: 11.5px;
+    font-weight: 600;
+    line-height: 18px;
+    text-align: center;
   }
   .field {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
   }
   .fname {
     color: var(--muted);
@@ -561,36 +594,55 @@
   .field input {
     width: 150px;
   }
-  .modes {
-    display: inline-flex;
-  }
-  .modes button {
-    border-radius: 0;
-  }
-  .modes button:first-child {
-    border-radius: var(--radius) 0 0 var(--radius);
-  }
-  .modes button:last-child {
-    border-radius: 0 var(--radius) var(--radius) 0;
-    border-left: none;
-  }
-  .modes button.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    font-weight: 600;
-  }
   .search-box {
     width: 260px;
   }
+  /* One group: on a narrow grid (the document panel open) it wraps as a whole, right-aligned. */
+  .header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
   .quick {
-    width: 200px;
+    flex: 1 1 160px;
+    max-width: 220px;
+  }
+  /* A narrow grid (the document panel open, a phone): the row filter takes a full row, the buttons the next. */
+  .page {
+    container: grid / inline-size;
+  }
+  @container grid (max-width: 640px) {
+    .header-actions {
+      flex: 1 0 100%;
+      min-width: 0;
+    }
+    .quick {
+      flex: 1 0 100%;
+      width: 100%;
+      max-width: none;
+    }
+    .header-actions > button.ghost {
+      padding: 5px 8px;
+    }
+    .export :global(svg) {
+      display: none;
+    }
   }
   .small {
     font-size: 12.5px;
   }
   .export {
     display: inline-flex;
-    gap: 4px;
+  }
+  .export button:first-child {
+    border-radius: var(--radius) 0 0 var(--radius);
+  }
+  .export button:last-child {
+    border-radius: 0 var(--radius) var(--radius) 0;
+    margin-left: -1px;
   }
   .body {
     flex: 1;

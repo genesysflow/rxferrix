@@ -6,10 +6,15 @@
   import { dashboardContext } from "../lib/context.js";
   import { parseJson, pretty } from "../lib/format.js";
   import { href, router } from "../lib/router.svelte.js";
+  import { parseTsType } from "../lib/tsType.js";
+  import DocumentForm from "../components/DocumentForm.svelte";
   import JsonEditor from "../components/JsonEditor.svelte";
   import JsonValue from "../components/JsonValue.svelte";
 
-  /** The side panel: one document (live) with a JSON editor, or a new document when `id` is null. */
+  /**
+   * The side panel: one document (live) with an editor, or a new document when `id` is null. The editor is a form
+   * (fields from the table's type) or the JSON text; both edit the same text, so switching keeps every change.
+   */
   let {
     table,
     id,
@@ -23,6 +28,31 @@
   const deleteDocuments = useMutation(dashboard.deleteDocuments);
 
   const editable = $derived(table.access !== "readOnly");
+  /** The fields of the table's type (`null` when it isn't defined in code, or its type can't be read). */
+  const schemaFields = $derived.by(() => {
+    const t = parseTsType(table.ts);
+    return t?.kind === "object" ? t.fields : null;
+  });
+  // `_users`: the server only takes name, image and emailVerified; masked secrets are never written back.
+  const USER_FIELDS = ["name", "image", "emailVerified"];
+  const locked = (field: string) => (table.access === "limited" && !USER_FIELDS.includes(field)) || table.secretFields.includes(field);
+
+  /** Form or JSON, remembered per browser. */
+  const MODE_KEY = "rxferrix.dashboard.editor";
+  let mode = $state<"form" | "json">(readMode());
+  function readMode(): "form" | "json" {
+    try {
+      return localStorage.getItem(MODE_KEY) === "json" ? "json" : "form";
+    } catch {
+      return "form";
+    }
+  }
+  function setMode(m: "form" | "json") {
+    mode = m;
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {}
+  }
   const current = $derived(doc.data?.document);
   // The panel is keyed by id (see Data.svelte), so the initial props are all it needs.
   let text = $state(untrack(() => (id ? "" : pretty(template ?? {}))));
@@ -31,6 +61,13 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   const dirty = $derived(base !== null && text !== base);
+  /** The text as a document, for the form (`null` while it isn't a JSON object). */
+  const formValue = $derived.by(() => {
+    const parsed = parseJson(text);
+    return parsed.ok && typeof parsed.value === "object" && parsed.value !== null && !Array.isArray(parsed.value)
+      ? (parsed.value as JsonObject)
+      : null;
+  });
   const changedOnServer = $derived(current !== undefined && base !== null && pretty(current) !== base);
 
   $effect(() => {
@@ -87,10 +124,16 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && !(e.target instanceof HTMLTextAreaElement)) onclose();
+    // Escape in a field of the panel stays in the field (a select closes its list, a textarea keeps its text).
+    const inField = e.target instanceof Element && e.target.closest(".panel input, .panel select, .panel textarea");
+    if (e.key === "Escape" && !inField) onclose();
   }
 
-  const fields = $derived(current ? (Object.entries(current) as [string, Json][]) : []);
+  const fields = $derived(
+    current
+      ? (Object.entries(current) as [string, Json][]).filter(([k]) => !(editable && mode === "form") || k === "_id" || k === "_creationTime")
+      : [],
+  );
 </script>
 
 <svelte:window {onkeydown} />
@@ -123,9 +166,17 @@
       {/if}
 
       {#if editable}
-        <h3>{id ? "Edit JSON" : "JSON"}</h3>
+        <div class="edit-head">
+          <h3>{id ? "Edit" : "Fields"}</h3>
+          <div class="segmented" role="group" aria-label="Editor">
+            <button type="button" class:active={mode === "form"} aria-pressed={mode === "form"} onclick={() => setMode("form")}>Form</button>
+            <button type="button" class:active={mode === "json"} aria-pressed={mode === "json"} onclick={() => setMode("json")}>JSON</button>
+          </div>
+        </div>
         {#if table.access === "limited"}
-          <p class="faint note">Only <code>name</code>, <code>image</code> and <code>emailVerified</code> can be changed.</p>
+          <p class="faint note">
+            Only {#each USER_FIELDS as f, i (f)}{i > 0 ? (i === USER_FIELDS.length - 1 ? " and " : ", ") : ""}<code>{f}</code>{/each} can be changed.
+          </p>
         {/if}
         {#if changedOnServer && dirty}
           <div class="alert info row">
@@ -133,7 +184,16 @@
             <button class="small" onclick={reload}>Load latest</button>
           </div>
         {/if}
-        <JsonEditor label="Document JSON" bind:value={text} rows={16} onsubmit={save} />
+        {#if mode === "json"}
+          <JsonEditor label="Document JSON" bind:value={text} rows={16} onsubmit={save} />
+        {:else if formValue}
+          <DocumentForm value={formValue} fields={schemaFields} {locked} onchange={(v) => (text = pretty(v))} onsubmit={save} />
+        {:else}
+          <div class="alert info row" role="status">
+            The JSON isn't a document object yet, so it can't be shown as a form.
+            <button class="small" onclick={() => setMode("json")}>Edit the JSON</button>
+          </div>
+        {/if}
         {#if error}<div class="alert" role="alert">{error}</div>{/if}
         <div class="row actions">
           <button class="primary" onclick={save} disabled={busy || (id !== null && !dirty)}>
@@ -211,6 +271,16 @@
   }
   .actions {
     margin-top: 4px;
+  }
+  .edit-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 12px 0 4px;
+  }
+  .edit-head h3 {
+    margin: 0;
   }
   /* Phones: the panel covers the page. */
   @media (max-width: 760px) {

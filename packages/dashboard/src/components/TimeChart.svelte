@@ -16,7 +16,7 @@
 
   let width = $state(600);
   let hover = $state<number | null>(null);
-  const M = { top: 10, right: 12, bottom: 22, left: 46 };
+  const M = { top: 10, right: 16, bottom: 22, left: 48 };
 
   const t0 = $derived(points[0]?.t ?? 0);
   const t1 = $derived((points.at(-1)?.t ?? 0) + bucket);
@@ -205,8 +205,8 @@
     stroke-width: 1;
   }
   .axis {
-    fill: var(--faint);
-    font-size: 10.5px;
+    fill: var(--muted);
+    font-size: 11px;
     font-family: var(--sans);
     font-variant-numeric: tabular-nums;
   }

@@ -286,16 +286,14 @@ async fn http_calls_are_refused_once_their_session_expires() {
     let auth = AuthConfig::password().rate_limits(None).access_token_ttl(Duration::from_secs(60)).session_ttl(ttl);
     let t = TestApp::with_auth(auth).await.unwrap();
     let http = Http::new(t.serve().await.unwrap());
-    let started = std::time::Instant::now();
     let access = token(&http.sign_up("gil@example.com", "correct horse").await, "accessToken");
+    let signed_up = std::time::Instant::now();
     for _ in 0..3 {
         assert_eq!(http.call("query", &app::my_notes::path(), json!({}), Some(&access)).await.0, 200);
     }
-    // The session began during the sign-up: past its end from the sign-up's start on.
-    tokio::time::sleep(
-        (started + ttl + Duration::from_millis(100)).saturating_duration_since(std::time::Instant::now()),
-    )
-    .await;
+    // The session began during the sign-up, so it has ended by `ttl` after the sign-up returned.
+    let ended = signed_up + ttl + Duration::from_millis(100);
+    tokio::time::sleep(ended.saturating_duration_since(std::time::Instant::now())).await;
     let (s, b) = http.call("query", &app::my_notes::path(), json!({}), Some(&access)).await;
     assert_eq!(s, 401, "{b}");
 }

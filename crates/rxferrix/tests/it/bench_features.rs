@@ -4,6 +4,7 @@
 //! cargo test --release -p rxferrix --test it bench_aggregates -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_aggregate_ranges -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_search_patches -- --ignored --nocapture
+//! cargo test --release -p rxferrix --test it bench_log_stats -- --ignored --nocapture
 //! cargo test --release -p rxferrix --test it bench_filtered_first -- --ignored --nocapture
 //! cargo test --release -p rxferrix --features olap --test it bench_olap_writes -- --ignored --nocapture
 //! ```
@@ -16,6 +17,8 @@
 //! `bench_search_patches`: 16 writers patch a counter of documents (`BENCH_DOCS`, 2000) that also carry a 2 KB text
 //! and a 1536-dimension embedding, in a table without search indexes and in one with a search index on the text and a
 //! vector index on the embedding, for `BENCH_SECS` each. Neither index's fields change.
+//! `bench_log_stats`: the dashboard's per-function stats (`Logs::stats`) over a day of an execution log holding
+//! `BENCH_ROWS` (200k, the default retention) rows of 40 functions.
 //! `bench_filtered_first`: `first()`, `take(10)` and a page of 10 of a filtered scan over 1 KiB documents, whose
 //! first match is the 1st (or 8th) document of the range.
 //! `bench_olap_writes`: inserts with and without `--olap` (the copy following in the background).
@@ -315,6 +318,44 @@ async fn bench_search_patches() {
         let rate = lat.len() as f64 / started.elapsed().as_secs_f64();
         println!("patches, {label:<21}: {rate:>8.0}/s, p50 {:>9.1?}, p99 {:>9.1?}", p(0.5), p(0.99));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark; run with --release --ignored --nocapture"]
+async fn bench_log_stats() {
+    use rxferrix::exec_log::{LogEntry, LogOutcome, LogRetention, Logs};
+    let rows: i64 = std::env::var("BENCH_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(200_000);
+    let dir = tempfile::tempdir().unwrap();
+    let logs = Logs::open(&dir.path().join("aux.db"), LogRetention::default()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    for i in 0..rows {
+        logs.record(LogEntry {
+            id: 0,
+            timestamp: now - 3_600_000 + i,
+            path: format!("app/functions:f{}", i % 40),
+            kind: rxferrix::FunctionKind::Query,
+            identity: None,
+            duration_us: (i % 997) as u64,
+            outcome: LogOutcome::Success,
+            error: None,
+            log_lines: vec!["[INFO] hello".into()],
+            args: format!("{{\"text\":\"{}\"}}", "x".repeat(300)),
+            args_truncated: false,
+        });
+        // The log's queue is bounded (it drops entries when full): let the writer keep up.
+        if i % 1000 == 999 {
+            logs.flush().await.unwrap();
+        }
+    }
+    logs.flush().await.unwrap();
+    assert_eq!(logs.dropped(), 0, "the log dropped entries: the dataset is smaller than BENCH_ROWS");
+    let runs = 20u32;
+    let started = Instant::now();
+    for _ in 0..runs {
+        let stats = logs.stats(now - 24 * 3_600_000, false).await.unwrap();
+        assert_eq!(stats.len(), 40);
+    }
+    println!("log stats over {rows} rows of 40 functions: {:>9.1?} per call", started.elapsed() / runs);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

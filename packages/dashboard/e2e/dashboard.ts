@@ -109,7 +109,8 @@ async function step<T>(label: string, f: () => Promise<T>): Promise<T> {
 async function shot(page: Page, name: string) {
   if (!shots) return;
   const path = join(shots, `${shotPrefix}${name}.png`);
-  await page.screenshot({ path });
+  // Finished animations, not a frame of one (the phone drawer sliding shut, a row flashing in).
+  await page.screenshot({ path, animations: "disabled" });
   console.log(`  screenshot: ${path}`);
 }
 
@@ -209,18 +210,25 @@ try {
   });
   await shot(page, "data-grid");
 
-  // 3. Edit the document in the side panel; the change persists.
+  // 3. Edit the document in the side panel (its form, then its JSON); the change persists.
   const edited = `${first} (edited in the dashboard)`;
   await step("edit a document in the panel", async () => {
     await page.getByTestId("document-grid").getByText(first).click();
-    const editor = page.getByLabel("Document JSON");
-    await editor.waitFor();
-    await page.waitForFunction(() => (document.querySelector("textarea")?.value ?? "").includes("_id"));
-    const doc = JSON.parse(await editor.inputValue());
-    doc.text = edited;
-    doc.done = true;
-    await editor.fill(JSON.stringify(doc, null, 2));
+    const form = page.getByRole("group", { name: "Document fields" });
+    const text = form.getByLabel("text", { exact: true });
+    await text.waitFor();
+    await page.waitForFunction((v) => document.querySelector<HTMLInputElement>("#field-text")?.value === v, first);
+    if (!(await form.getByText(`Id<"_storage"> | null`).count())) throw new Error("the form doesn't show the field types");
+    await text.fill(edited);
+    await form.getByLabel("done", { exact: true }).check();
     await shot(page, "document-panel");
+    // The JSON view has the form's changes, and back.
+    await page.getByRole("button", { name: "JSON", exact: true }).click();
+    const doc = JSON.parse(await page.getByLabel("Document JSON").inputValue());
+    if (doc.text !== edited || doc.done !== true || typeof doc._id !== "string") throw new Error(`form edits not in the JSON: ${JSON.stringify(doc)}`);
+    await shot(page, "document-json");
+    await page.getByRole("button", { name: "Form", exact: true }).click();
+    await text.waitFor();
     await page.getByRole("button", { name: /^Save/ }).click();
     await page.getByText("Saved").waitFor();
     await page.getByTestId("document-grid").getByText(edited).waitFor();
@@ -230,6 +238,7 @@ try {
     await page.reload();
     await page.getByTestId("document-grid").getByText(edited).waitFor();
     // Invalid documents are rejected with the schema error.
+    await page.getByRole("button", { name: "JSON", exact: true }).click();
     await page.getByLabel("Document JSON").fill('{ "text": 42, "done": false }');
     await page.getByRole("button", { name: /^Save/ }).click();
     await page.getByRole("alert").filter({ hasText: "does not match table `todos`" }).waitFor();
@@ -651,7 +660,7 @@ try {
     await status.getByText(/^1 of \d+ loaded rows match/).waitFor();
     await grid.getByText("seed 1234").waitFor();
     await page.getByLabel("Filter loaded rows").fill("");
-    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "⇩ CSV" }).click()]);
+    const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "CSV", exact: true }).click()]);
     const csvLines = readFileSync((await csv.path())!, "utf8").trim().split("\r\n");
     if (csvLines.length !== total + 3) throw new Error(`grid CSV export has ${csvLines.length} lines, want ${total + 3}`); // header, two new todos
   });

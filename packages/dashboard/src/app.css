@@ -6,11 +6,11 @@
   --border-strong: #cfcdc6;
   --text: #1c1b19;
   --muted: #6b6963;
-  --faint: #9a978f;
+  --faint: #7a776f;
   --accent: #c2410c;
   --accent-soft: #fdeee6;
   --accent-text: #9a3412;
-  --link: #1d4ed8;
+  --link: #2357c6;
   --ok: #15803d;
   --ok-soft: #e7f6ec;
   --warn: #a16207;
@@ -38,7 +38,7 @@
     --border-strong: #3d3c38;
     --text: #ecebe7;
     --muted: #a3a099;
-    --faint: #75736d;
+    --faint: #8b8882;
     --accent: #f97316;
     --accent-soft: #3a2113;
     --accent-text: #fdba74;
@@ -66,7 +66,7 @@
   --border-strong: #3d3c38;
   --text: #ecebe7;
   --muted: #a3a099;
-  --faint: #75736d;
+  --faint: #8b8882;
   --accent: #f97316;
   --accent-soft: #3a2113;
   --accent-text: #fdba74;
@@ -155,12 +155,17 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 11px;
+  min-height: 32px;
+  padding: 5px 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel);
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
 }
 button:hover:not(:disabled) {
   background: var(--panel-2);
@@ -189,8 +194,10 @@ button.ghost {
   border-color: transparent;
   background: transparent;
 }
+/* Row actions and compact switches: 28px, against the 32px of toolbar controls. */
 button.small {
-  padding: 2px 8px;
+  min-height: 28px;
+  padding: 3px 10px;
   font-size: 12.5px;
 }
 
@@ -203,14 +210,64 @@ textarea {
   background: var(--panel);
   min-width: 0;
 }
+input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]),
+select {
+  min-height: 32px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--faint);
+}
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+  accent-color: var(--accent);
+}
+input[type="checkbox"],
+input[type="radio"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+input[type="file"] {
+  padding: 3px;
+  color: var(--muted);
+  font-size: 13px;
+  border-style: dashed;
+}
+input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+input[type="file"]:disabled::file-selector-button {
+  cursor: default;
+  opacity: 0.6;
+}
 textarea {
   font-family: var(--mono);
   font-size: 12.5px;
   resize: vertical;
 }
+/* Fields: an accent border and a soft ring; buttons and links (keyboard focus only): an outline. */
 input:focus,
 select:focus,
-textarea:focus,
+textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+input[type="checkbox"]:focus,
+input[type="radio"]:focus {
+  box-shadow: none;
+}
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
@@ -243,7 +300,7 @@ table.grid {
 table.grid th,
 table.grid td {
   text-align: left;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   max-width: 340px;
@@ -256,7 +313,7 @@ table.grid th {
   top: 0;
   background: var(--panel-2);
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--muted);
   z-index: 1;
 }
@@ -368,6 +425,77 @@ table.grid tbody tr.selected {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* Background on how something works: one muted line until opened, so the task stays at the top of its card. */
+details.help {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+details.help > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+details.help > summary::-webkit-details-marker {
+  display: none;
+}
+details.help > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+}
+details.help[open] > summary::before {
+  transform: rotate(45deg);
+}
+details.help > summary:hover {
+  color: var(--text);
+}
+details.help > :not(summary) {
+  margin: 6px 0 0 16px;
+  line-height: 1.55;
+  max-width: 80ch;
+}
+
+/* A compact switch between a few options (data grid modes, time ranges, state filters): one control, the
+   selected option raised. */
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.segmented > button {
+  min-height: 26px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.segmented > button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+.segmented > button.active,
+.segmented > button.active:hover:not(:disabled) {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+}
 button.primary kbd {
   color: rgb(255 255 255 / 0.85);
   border-color: rgb(255 255 255 / 0.45);
@@ -382,12 +510,12 @@ table.diff {
 table.diff th,
 table.diff td {
   text-align: left;
-  padding: 3px 14px 3px 6px;
+  padding: 5px 14px 5px 8px;
   border-bottom: 1px solid var(--border);
   max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre;
 }
 table.diff th {
   color: var(--muted);

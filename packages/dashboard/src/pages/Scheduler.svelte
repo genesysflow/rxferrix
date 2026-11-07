@@ -199,9 +199,9 @@
     <section aria-labelledby="jobs-heading">
       <div class="jobs-head">
         <h2 id="jobs-heading">Jobs</h2>
-        <div class="filters" role="group" aria-label="Filter jobs by state">
+        <div class="filters segmented" role="group" aria-label="Filter jobs by state">
           {#each filters as f (f.label)}
-            <button class="small" class:active={filterState === f.state} aria-pressed={filterState === f.state} onclick={() => setFilter(f.state)}>
+            <button class:active={filterState === f.state} aria-pressed={filterState === f.state} onclick={() => setFilter(f.state)}>
               {f.label}
             </button>
           {/each}
@@ -213,6 +213,7 @@
         <Empty title="Loading…" />
       {:else if jobs.results.length === 0}
         <Empty
+          compact
           title={filterState ? `No ${stateLabels[filterState]} jobs` : "No scheduled jobs"}
           hint="Jobs appear here when a function calls ctx.scheduler.run_after / run_at / pool(..).enqueue, a cron runs, or a workflow runs a step."
         />
@@ -252,34 +253,37 @@
             {/each}
           </tbody>
         </table>
-        <div class="more">
-          {#if jobs.status === "CanLoadMore"}<button onclick={() => jobs.loadMore(50)}>Load more</button>{/if}
-        </div>
+        {#if jobs.status === "CanLoadMore"}
+          <div class="more"><button onclick={() => jobs.loadMore(50)}>Load more</button></div>
+        {/if}
       {/if}
     </section>
 
     <section aria-labelledby="history-heading">
       <div class="jobs-head">
         <h2 id="history-heading">History</h2>
-        <div class="filters" role="group" aria-label="Filter the history by state">
+        <div class="filters segmented" role="group" aria-label="Filter the history by state">
           {#each historyFilters as f (f.label)}
-            <button class="small" class:active={historyState === f.state} aria-pressed={historyState === f.state} onclick={() => (historyState = f.state)}>
+            <button class:active={historyState === f.state} aria-pressed={historyState === f.state} onclick={() => (historyState = f.state)}>
               {f.label}
             </button>
           {/each}
         </div>
         <button class="small refresh" onclick={() => loadHistory(true)} disabled={historyLoading}>Refresh</button>
       </div>
-      <p class="muted pad small-text">
-        Finished jobs move here from the list above once they are an hour old (<code class="mono">SchedulerOptions::history_after</code>), into
-        <code class="mono">aux.db</code>, so <code class="mono">data.db</code> and its backups don't grow with every job run. Kept 7 days by default. Not live: refresh to see newer ones.
-      </p>
+      <details class="help pad history-help">
+        <summary>Finished jobs, kept 7 days. Not live: refresh to see newer ones.</summary>
+        <p>
+          Finished jobs move here from the list above once they are an hour old (<code class="mono">SchedulerOptions::history_after</code>),
+          into <code class="mono">aux.db</code>, so <code class="mono">data.db</code> and its backups don't grow with every job run.
+        </p>
+      </details>
       {#if historyError}
         <div class="alert" role="alert">{historyError}</div>
       {:else if historyLoading && history.length === 0}
         <Empty title="Loading…" />
       {:else if history.length === 0}
-        <Empty title={historyState ? `No ${stateLabels[historyState]} jobs in the history` : "The history is empty"} />
+        <Empty compact title={historyState ? `No ${stateLabels[historyState]} jobs in the history` : "The history is empty"} />
       {:else}
         <table class="grid" data-testid="job-history">
           <thead>
@@ -308,9 +312,9 @@
             {/each}
           </tbody>
         </table>
-        <div class="more">
-          {#if historyMore}<button onclick={() => loadHistory(false)} disabled={historyLoading}>Load more</button>{/if}
-        </div>
+        {#if historyMore}
+          <div class="more"><button onclick={() => loadHistory(false)} disabled={historyLoading}>Load more</button></div>
+        {/if}
       {/if}
     </section>
   </div>
@@ -328,6 +332,9 @@
   h2 {
     margin: 14px 20px 8px;
   }
+  .history-help {
+    margin: 0 0 8px;
+  }
   .pad {
     padding: 0 20px;
   }
@@ -339,17 +346,10 @@
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+    margin: 4px 20px 8px;
   }
-  .filters {
-    display: flex;
-    gap: 4px;
-    margin-top: 6px;
-  }
-  .filters button.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: transparent;
-    font-weight: 600;
+  .jobs-head h2 {
+    margin: 0;
   }
   tr.group td {
     background: var(--panel-2);

@@ -69,9 +69,9 @@
   <header class="page-header">
     <h1>Workflows</h1>
     <span class="spacer"></span>
-    <div class="filters" role="group" aria-label="Filter workflows by state">
+    <div class="segmented" role="group" aria-label="Filter workflows by state">
       {#each filters as f (f.label)}
-        <button class="small" class:active={filterState === f.state} aria-pressed={filterState === f.state} onclick={() => navigate(f.state, open)}>
+        <button class:active={filterState === f.state} aria-pressed={filterState === f.state} onclick={() => navigate(f.state, open)}>
           {f.label}
         </button>
       {/each}
@@ -187,16 +187,6 @@
     flex: 1;
     overflow: auto;
     padding-bottom: 24px;
-  }
-  .filters {
-    display: flex;
-    gap: 4px;
-  }
-  .filters button.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: transparent;
-    font-weight: 600;
   }
   .badge.state.running {
     color: var(--warn);

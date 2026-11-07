@@ -689,6 +689,7 @@ async fn claim_actions(app: &App, ids: Vec<Id<ScheduledJob>>) -> crate::Result<V
         return Ok(Vec::new());
     }
     store::write(app, |db| async move {
+        let now = app.db().clock().now_ms();
         let mut claimed = Vec::with_capacity(ids.len());
         for id in ids {
             let job = db.get(id).await?;
@@ -699,7 +700,7 @@ async fn claim_actions(app: &App, ids: Vec<Id<ScheduledJob>>) -> crate::Result<V
             let mut value = job.value;
             value.state = JobState::InProgress;
             value.attempts += 1;
-            value.started_at = Some(app.db().clock().now_ms());
+            value.started_at = Some(now);
             db.replace(id, value).await?;
             claimed.push(true);
         }

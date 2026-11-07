@@ -379,14 +379,14 @@ async fn bench_filtered_first() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark; run with --release --ignored --nocapture"]
 async fn bench_scheduler() {
-    let jobs: i64 = std::env::var("BENCH_JOBS").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
+    let jobs: u64 = std::env::var("BENCH_JOBS").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
     let t = TestApp::with_options(AppOptions::default()).await.unwrap();
     t.start_scheduler().await.unwrap();
     let mut done = 0;
     for (label, actions) in [("mutations", false), ("actions", true)] {
         let started = Instant::now();
-        t.mutation::<fns::schedule_jobs>((jobs, actions)).await.unwrap();
-        done += jobs as u64;
+        t.mutation::<fns::schedule_jobs>((jobs as i64, actions)).await.unwrap();
+        done += jobs;
         while t.query_run::<fns::count_jobs_done>(()).await.unwrap().result.unwrap() != serde_json::json!(done) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

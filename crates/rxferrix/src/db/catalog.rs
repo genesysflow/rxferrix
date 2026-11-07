@@ -233,6 +233,11 @@ pub fn reconcile(conn: &mut Connection, defs: &[TableDef]) -> anyhow::Result<Cat
     search::ensure_schema(&tx)?;
     super::aggregate::ensure_schema(&tx)?;
     upgrade_key_encoding(&tx)?;
+    let names: HashMap<u32, String> = tx
+        .prepare("SELECT table_number, name FROM _tables")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    search::add_filter_tokens(&tx, &names)?;
     let existing = Catalog::load(&tx, &defs)?;
     let mut next_table: u32 =
         tx.query_row("SELECT COALESCE(MAX(table_number), 0) + 1 FROM _tables", [], |r| r.get(0))?;

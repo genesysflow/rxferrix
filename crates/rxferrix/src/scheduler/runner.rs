@@ -518,10 +518,24 @@ async fn start_due_actions(app: &App, pool: Option<String>, slots: &Slots) -> cr
             .await
     })
     .await?;
+    // The actions are claimed in one write transaction, then spawned. Jobs whose function is no longer an action go
+    // through `run_job` (which runs or fails them).
+    let mut claiming = Vec::new();
     let mut started = 0;
     for job in due {
         let Ok(permit) = slots.semaphore.clone().try_acquire_owned() else { break };
-        if run_job(app, job, Some(permit)).await? {
+        if app.registry().get(&job.path).map(|def| def.handler.kind()) == Some(FunctionKind::Action) {
+            // Registered before the claim commits, so a cancel committed right after it finds the running job.
+            let registration = cancel::register(job.id, app.scheduler_state().options.cancel_grace);
+            claiming.push((job, permit, registration));
+        } else if run_job(app, job, Some(permit)).await? {
+            started += 1;
+        }
+    }
+    let claimed = claim_actions(app, claiming.iter().map(|(job, ..)| job.id).collect()).await?;
+    for ((job, permit, registration), claimed) in claiming.into_iter().zip(claimed) {
+        if claimed {
+            spawn_action(app, job, permit, registration);
             started += 1;
         }
     }
@@ -546,21 +560,10 @@ async fn run_job(app: &App, job: Doc<ScheduledJob>, permit: Option<OwnedSemaphor
             };
             // Registered before the claim commits, so a cancel committed right after it finds the running job.
             let registration = cancel::register(job.id, app.scheduler_state().options.cancel_grace);
-            if !claim_action(app, job.id).await? {
+            if !claim_actions(app, vec![job.id]).await?[0] {
                 return Ok(false);
             }
-            let app = app.clone();
-            let signal = registration.signal.clone();
-            tokio::spawn(IN_JOB.scope(
-                (),
-                cancel::scope(signal, async move {
-                    run_action_job(&app, job, &registration).await;
-                    drop(registration);
-                    drop(permit);
-                    // A slot is free: its pool's next due action can start.
-                    app.scheduler_state().notify();
-                }),
-            ));
+            spawn_action(app, job, permit, registration);
             Ok(true)
         }
         other => {
@@ -681,20 +684,44 @@ async fn fail_pending(app: &App, id: Id<ScheduledJob>, msg: &str) -> crate::Resu
 }
 
 /// Commit `pending` → `inProgress` before an action runs. False if the job is no longer pending.
-async fn claim_action(app: &App, id: Id<ScheduledJob>) -> crate::Result<bool> {
+async fn claim_actions(app: &App, ids: Vec<Id<ScheduledJob>>) -> crate::Result<Vec<bool>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     store::write(app, |db| async move {
-        let Some(job) = db.get(id).await? else { return Ok(false) };
-        if job.state != JobState::Pending {
-            return Ok(false);
+        let mut claimed = Vec::with_capacity(ids.len());
+        for id in ids {
+            let job = db.get(id).await?;
+            let Some(job) = job.filter(|j| j.state == JobState::Pending) else {
+                claimed.push(false);
+                continue;
+            };
+            let mut value = job.value;
+            value.state = JobState::InProgress;
+            value.attempts += 1;
+            value.started_at = Some(app.db().clock().now_ms());
+            db.replace(id, value).await?;
+            claimed.push(true);
         }
-        let mut value = job.value;
-        value.state = JobState::InProgress;
-        value.attempts += 1;
-        value.started_at = Some(app.db().clock().now_ms());
-        db.replace(id, value).await?;
-        Ok(true)
+        Ok(claimed)
     })
     .await
+}
+
+/// Run a claimed action in a task of its own, holding its pool slot (`permit`) and cancel `registration`.
+fn spawn_action(app: &App, job: Doc<ScheduledJob>, permit: OwnedSemaphorePermit, registration: Registration) {
+    let app = app.clone();
+    let signal = registration.signal.clone();
+    tokio::spawn(IN_JOB.scope(
+        (),
+        cancel::scope(signal, async move {
+            run_action_job(&app, job, &registration).await;
+            drop(registration);
+            drop(permit);
+            // A slot is free: its pool's next due action can start.
+            app.scheduler_state().notify();
+        }),
+    ));
 }
 
 /// Run a claimed action and record its outcome (or schedule a retry). A job canceled while it ran keeps its

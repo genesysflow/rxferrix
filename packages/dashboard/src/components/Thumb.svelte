@@ -12,27 +12,24 @@
   let { src }: { src: string } = $props();
 
   const RETRIES = 4;
-  let attempt = $state(0);
-  let failed = $state(false);
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  /** Failed loads so far, and the source they belong to: a new source (e.g. a re-signed URL) starts at 0. */
+  let tries = $state({ src: "", n: 0 });
+  const attempt = $derived(tries.src === src ? tries.n : 0);
+  const failed = $derived(attempt > RETRIES);
   const url = $derived(attempt === 0 ? src : withParams(src, { r: attempt }));
-
-  // A new source (e.g. a re-signed URL) starts over.
-  $effect(() => {
-    void src;
-    clearTimeout(timer);
-    attempt = 0;
-    failed = false;
-  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => () => clearTimeout(timer));
 
   function retry() {
-    if (attempt >= RETRIES) {
-      failed = true;
+    clearTimeout(timer);
+    const failedSrc = src;
+    const n = attempt + 1;
+    if (n > RETRIES) {
+      tries = { src: failedSrc, n };
       return;
     }
     const delay = 2000 * 2 ** attempt * (0.5 + Math.random());
-    timer = setTimeout(() => attempt++, delay);
+    timer = setTimeout(() => (tries = { src: failedSrc, n }), delay);
   }
 </script>
 

@@ -7,6 +7,7 @@ import JsonEditor from "../src/components/JsonEditor.svelte";
 import { parseTsType, type TsField } from "../src/lib/tsType.js";
 import JsonValue from "../src/components/JsonValue.svelte";
 import Modal from "../src/components/Modal.svelte";
+import Thumb from "../src/components/Thumb.svelte";
 
 let target: HTMLElement;
 let mounted: ReturnType<typeof mount> | null = null;
@@ -219,5 +220,51 @@ describe("DocumentForm", () => {
     expect(field("text").disabled).toBe(false);
     expect(field("done").disabled).toBe(true);
     expect(target.querySelector('[aria-label="Give image a value"]')).toBeNull();
+  });
+});
+
+describe("Thumb", () => {
+  const img = () => target.querySelector<HTMLImageElement>("img[data-testid=thumb]");
+  const fail = () => {
+    img()!.dispatchEvent(new Event("error"));
+    flushSync();
+  };
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("retries a failed load with backoff, then shows the file icon", () => {
+    const src = "/api/storage/a?exp=9&sig=s&thumb=96x96&fit=cover";
+    mounted = mount(Thumb, { target, props: { src } });
+    flushSync();
+    expect(img()!.getAttribute("src")).toBe(src);
+    for (let n = 1; n <= 4; n++) {
+      fail();
+      expect(img()!.getAttribute("src"), "no retry before the backoff").not.toContain(`r=${n}`);
+      vi.runAllTimers();
+      flushSync();
+      expect(img()!.getAttribute("src")).toBe(`${src}&r=${n}`);
+    }
+    fail();
+    expect(img()).toBeNull();
+    expect(target.querySelector(".icon")).not.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("starts over for a new source, ignoring a retry still pending for the old one", () => {
+    const props = $state({ src: "/api/storage/a?thumb=96x96" });
+    mounted = mount(Thumb, { target, props });
+    flushSync();
+    fail();
+    vi.runAllTimers();
+    flushSync();
+    expect(img()!.getAttribute("src")).toBe("/api/storage/a?thumb=96x96&r=1");
+    fail();
+    props.src = "/api/storage/a?exp=2&thumb=96x96";
+    flushSync();
+    expect(img()!.getAttribute("src")).toBe("/api/storage/a?exp=2&thumb=96x96");
+    vi.runAllTimers();
+    flushSync();
+    expect(img()!.getAttribute("src"), "the old source's retry doesn't apply").toBe("/api/storage/a?exp=2&thumb=96x96");
   });
 });

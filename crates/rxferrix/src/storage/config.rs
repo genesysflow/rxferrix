@@ -129,7 +129,7 @@ pub struct StorageConfig {
     /// Thumbnails *generated* (cache misses) per client IP: burst and refill per minute; cached variants are not
     /// counted. Each new size decodes the source again and is cached for good, so without a size allowlist this is
     /// what keeps an anonymous client from filling the CPU and the cache with variants. `None` disables the
-    /// limit. Default 30 / 60 per minute.
+    /// limit. Default 100 / 120 per minute: two pages of the dashboard's file list, which shows a thumbnail per image.
     pub thumbnail_rate_limit: Option<(u32, u32)>,
 }
 
@@ -152,7 +152,7 @@ impl Default for StorageConfig {
             thumbnail_sizes: None,
             thumbnail_max_source_pixels: DEFAULT_THUMBNAIL_MAX_SOURCE_PIXELS,
             thumbnail_max_source_bytes: DEFAULT_THUMBNAIL_MAX_SOURCE_BYTES,
-            thumbnail_rate_limit: Some((30, 60)),
+            thumbnail_rate_limit: Some((100, 120)),
         }
     }
 }

@@ -7,6 +7,7 @@
   import { href, router, type Route } from "../lib/router.svelte.js";
   import Empty from "../components/Empty.svelte";
   import Icon from "../components/Icon.svelte";
+  import Thumb from "../components/Thumb.svelte";
 
   /** The Files page: stored files (live), previews, download, delete, and upload by picker or drag and drop. */
   let { route }: { route: Route } = $props();
@@ -181,7 +182,7 @@
               >
                 <td class="thumb">
                   {#if hasThumbnail(f.contentType)}
-                    <img src={thumbUrl(f.url, 96)} alt="" loading="lazy" width="36" height="36" data-testid="thumb" />
+                    <Thumb src={thumbUrl(f.url, 96)} />
                   {:else if previewKind(f.contentType) === "image"}
                     <img src={fileUrl(f)} alt="" loading="lazy" width="36" height="36" />
                   {:else}

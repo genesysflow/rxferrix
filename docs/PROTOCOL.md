@@ -465,7 +465,7 @@ same caching and security headers. Generated once, then cached on the server; de
 - **415** `unsupported_image`: not one of the four types (by content type, then by the bytes).
 - **422** `image_too_large`: more than 40 megapixels (refused from the image header, before decoding: decompression
   bombs cost nothing), or a file over 32 MiB; `invalid_image`: the bytes can't be decoded.
-- **429** `rate_limited` with `Retry-After`: variants not yet cached are limited per client IP (default burst 30, 60
+- **429** `rate_limited` with `Retry-After`: variants not yet cached are limited per client IP (default burst 100, 120
   per minute; `StorageConfig::thumbnail_rate_limit`), so a loop over sizes can't spend the server's CPU and disk.
   Cached variants are served regardless.
 

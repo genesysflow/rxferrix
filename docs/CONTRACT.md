@@ -945,7 +945,7 @@ impl ActionStorage {     // generate_upload_url, get_url, get_signed_url / get_d
       pub thumbnail_sizes: Option<Vec<(u32, u32)>>, // None; Some(allowlist) = only these sizes (bounds the cache)
       pub thumbnail_max_source_pixels: u64,     // 40_000_000
       pub thumbnail_max_source_bytes: u64,      // 32 MiB
-      pub thumbnail_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP, for variants not yet cached; Some((30, 60))
+      pub thumbnail_rate_limit: Option<(u32, u32)>, // (burst, per minute) per client IP, for variants not yet cached; Some((100, 120))
   }
   // StorageConfig::local(dir), ::s3(bucket, prefix), ::object_store(store, prefix), ::parse(location), plus builder
   // setters (`.private(true)`, `.thumbnail_sizes(&[(64, 64), (256, 256)])`, ...).

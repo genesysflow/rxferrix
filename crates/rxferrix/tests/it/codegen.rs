@@ -56,7 +56,7 @@ pub mod tasks {
     #[rxferrix::object]
     #[derive(Clone, Debug, PartialEq)]
     pub struct TaskSummary {
-        /// The task's title.
+        /// The task's title. A `*/` in a doc comment (a glob like `src/**/*.rs`) must not end the generated one.
         pub title: String,
         /// How many labels it has.
         ///
@@ -111,7 +111,8 @@ pub mod tasks {
         Ok(out)
     }
 
-    /// Tasks by priority, one page at a time.
+    /// Tasks by priority, one page at a time. (Not on a cron such as `*/5 * * * *`: a `*/` here must not end the
+    /// generated comment.)
     #[query]
     pub async fn page(
         ctx: &QueryCtx,
@@ -247,7 +248,8 @@ fn generates_from_the_real_registry() {
     assert!(
         dm.contains(
             "/** A task as a list shows it (an `#[rxferrix::object]`, returned in a `Vec`). */\nexport type TaskSummary = {\n  \
-             /** The task's title. */\n  title: string,\n  /**\n   * How many labels it has.\n   *\n   * Zero when unlabeled.\n   \
+             /** The task's title. A `*\\/` in a doc comment (a glob like `src/**\\/*.rs`) must not end the generated one. */\n  \
+             title: string,\n  /**\n   * How many labels it has.\n   *\n   * Zero when unlabeled.\n   \
              */\n  labelCount: number,\n  priority: Priority,\n  /** Left out when there is none. */\n  note?: string | null,\n};\n"
         ),
         "{dm}"

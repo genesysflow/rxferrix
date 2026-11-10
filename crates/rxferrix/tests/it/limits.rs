@@ -52,6 +52,41 @@ async fn a_connection_has_at_most_1024_queries() {
     }
 }
 
+/// While a connection waits for a slow query, the modifications it sends queue up in the manager. The cap on a
+/// connection's live arguments is checked as they arrive, and replacing one large query by the next keeps "live"
+/// small, so the queue needs a cap of its own (`MAX_QUEUED_MODIFY_BYTES`, 16 MiB): otherwise it holds up to a
+/// mailbox of messages of the largest size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_modifications_count_towards_the_argument_cap() {
+    let t = TestApp::new().await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    // Its first query takes a while: everything after it waits.
+    let slow =
+        QuerySetModification::Add { query_id: 0, udf_path: fns::slow_count::path(), args: json!({ "ms": 3000 }) };
+    c.send(ClientMessage::ModifyQuerySet { base_version: 0, new_version: 1, modifications: vec![slow] }).await;
+    // Twenty megabytes of arguments, one megabyte live at a time.
+    let megabyte = "x".repeat(1 << 20);
+    for i in 1..=20u64 {
+        let mut modifications = Vec::new();
+        if i > 1 {
+            modifications.push(QuerySetModification::Remove { query_id: i - 1 });
+        }
+        let args = json!({ "ms": 1, "padding": megabyte });
+        modifications.push(QuerySetModification::Add { query_id: i, udf_path: fns::slow_count::path(), args });
+        c.send(ClientMessage::ModifyQuerySet { base_version: i, new_version: i + 1, modifications }).await;
+    }
+    let dropped = async {
+        loop {
+            if let ServerMessage::FatalError { error } = c.recv().await {
+                return error;
+            }
+        }
+    };
+    let error =
+        tokio::time::timeout(Duration::from_secs(2), dropped).await.expect("dropped before the slow query ends");
+    assert!(error.contains("too many query-set changes"), "{error}");
+}
+
 #[tokio::test]
 async fn queries_time_out() {
     let options = AppOptions { query_timeout: Duration::from_millis(100), ..Default::default() };

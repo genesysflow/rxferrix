@@ -443,6 +443,54 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     );
 }
 
+/// A directory is one import: a bad file fails it before any of its files is written. Checked one file at a time,
+/// the tables before the bad one were already imported (and, with `replace`, emptied first).
+#[tokio::test]
+async fn a_directory_import_checks_every_file_before_writing_any() {
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_pair>((1, "kept".to_string())).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // `ops_docs` sorts first and is fine; `ops_pairs` is not.
+    std::fs::write(
+        dir.path().join("ops_docs.jsonl"),
+        "{\"title\":\"ok\",\"rank\":1,\"file\":null,\"parent\":null,\"tags\":[]}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("ops_pairs.jsonl"), "{\"group\":\"not a number\",\"text\":\"x\"}\n").unwrap();
+    let ts = t.app().db().write_log().latest();
+    for mode in [ImportMode::Insert, ImportMode::Replace] {
+        let options = ImportOptions { mode, ..Default::default() };
+        let err = export::import_path(t.app(), dir.path(), None, &options).await.unwrap_err();
+        assert!(format!("{err:#}").contains("ops_pairs.jsonl:1"), "{err:#}");
+        assert_eq!(t.app().db().write_log().latest(), ts, "{mode:?}: nothing written");
+    }
+    assert_eq!(t.query::<docs>(()).await.unwrap().len(), 0);
+    assert_eq!(t.query::<all_pairs>(()).await.unwrap().len(), 2, "what was there stays");
+}
+
+/// Each file is checked against the database before any is written, which can't see ids two files share: a manifest
+/// (edited by hand) that lists a table twice is refused outright.
+#[tokio::test]
+async fn an_export_that_lists_a_table_twice_is_refused() {
+    let a = TestApp::new().await.unwrap();
+    seed_docs(&a).await;
+    let out = tempfile::tempdir().unwrap();
+    let options =
+        ExportOptions { tables: Some(vec!["ops_docs".into()]), format: ExportFormat::Jsonl, include_files: false };
+    export::export_to_dir(a.dir(), None, out.path(), &options).await.unwrap();
+    let path = out.path().join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let again = manifest["tables"][0].clone();
+    manifest["tables"].as_array_mut().unwrap().push(again);
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let b = TestApp::new().await.unwrap();
+    let ts = b.app().db().write_log().latest();
+    let err = export::import_path(b.app(), out.path(), None, &ImportOptions::default()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("`ops_docs` more than once"), "{err:#}");
+    assert_eq!(b.app().db().write_log().latest(), ts, "nothing written");
+}
+
 #[tokio::test]
 async fn import_validates_every_line_first() {
     let t = TestApp::new().await.unwrap();

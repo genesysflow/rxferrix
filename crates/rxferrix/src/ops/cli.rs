@@ -530,7 +530,12 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
             allow_system_tables: true,
             format: args.format,
         };
-        let report = export::import_path(&app, &args.path, args.table.as_deref(), &import).await?;
+        let imported = export::import_path(&app, &args.path, args.table.as_deref(), &import).await;
+        if imported.is_err() {
+            // The uploads it left unfinished are aborted in tasks of their own, which end with this runtime.
+            export::finish_aborts(std::time::Duration::from_secs(15)).await;
+        }
+        let report = imported?;
         for t in &report.tables {
             println!(
                 "{:<24} {:>8} document(s) written ({} replaced, {} deleted first)",

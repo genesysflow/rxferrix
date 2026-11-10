@@ -8,10 +8,11 @@
 # The data lives in /var/lib/rxferrix (StateDirectory); the service runs as a dynamic, unprivileged user.
 # Run CLI commands on the same data as that user, e.g. a backup while it runs:
 #   sudo systemd-run --pipe --wait -p DynamicUser=yes -p User=rxferrix -p StateDirectory=rxferrix \
-#     /usr/local/bin/todo-server backup --dir /var/lib/rxferrix
-# Keep `-p User=rxferrix`: a dynamic user is named after its unit, so without it the command runs as another user
-# than this service (whose unit is `rxferrix`), and systemd hands the whole state directory to that user while the
-# server is using it.
+#     -p EnvironmentFile=-/etc/rxferrix/env /usr/local/bin/todo-server backup --dir /var/lib/rxferrix
+# Keep `-p User=` and give it this unit's `User=` (below): without it the command runs as a dynamic user named after
+# its own transient unit, and on systems where state directories aren't id-mapped per unit, systemd then changes the
+# owner of the whole state directory to that user while the server is using it. The environment file gives the
+# command the service's settings (storage, AWS credentials).
 # Deploys with no downtime: install the new binary over the old one, then `sudo systemctl reload rxferrix`. The new
 # version starts next to the running one (`serve --takeover`), opens a copy of the data (index builds, schema check),
 # catches up, takes over the listening socket and swaps the copy in; clients keep their connections or reconnect at
@@ -60,6 +61,9 @@ RestartForceExitStatus=75
 LimitNOFILE=65536
 
 DynamicUser=yes
+# Named here rather than after the unit, so that it stays the same if this file is installed under another name
+# (the commands above run as this user).
+User=rxferrix
 StateDirectory=rxferrix
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/rxferrix

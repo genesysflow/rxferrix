@@ -48,8 +48,8 @@ The command validates checksums, SQLite integrity, schema, and indexes before re
 
 | Option | Use it to |
 | --- | --- |
-| `--storage-dir DIR` | Put restored file blobs somewhere other than `<dir>/storage`. |
-| `--skip-verify` | Skip opening the restored database with this binary's tables to check its schema and indexes. Checksums are still verified. |
+| `--storage-dir DIR` | Put restored file blobs somewhere other than the local storage directory. |
+| `--skip-verify` | Skip opening the restored database with this binary's tables to check its schema and indexes. Checksums and SQLite's integrity check still run. |
 | `--cancel` | Cancel a restore staged from the dashboard instead of restoring. |
 
 A restore interrupted during replacement is completed on the next startup or restore attempt. Test a restore to a separate directory periodically so you know the archive, key, and file contents are sufficient.
@@ -90,7 +90,7 @@ List recovery generations and ranges, then restore offline:
   --to-time 2026-10-29T12:00:00Z
 ```
 
-Use `--to-ts N` for a commit timestamp. With no target point, the newest recoverable state is used. A target holds one generation per uninterrupted run of the journal; `--generation ID` picks one from the `--list` output when the default (the newest, or the one live at `--to-time`) is not the one you want. `--storage-dir` and `--skip-verify` work as for archives. The dashboard's point-in-time picker stages the same type of restore for the next startup.
+Use `--to-ts N` for a commit timestamp. With no target point, the newest recoverable state is used. A target holds one generation per uninterrupted run of the journal; `--generation ID` picks one from the `--list` output when the default (the newest, or the one live at `--to-time`) is not the one you want. `--skip-verify` works as for archives. Replication carries documents, not the blobs of stored files: a point-in-time restore brings back the `_storage` documents, and the blobs must still be where they were: keep files in S3, or back them up separately. The dashboard's point-in-time picker stages the same type of restore for the next startup.
 
 The journal is written in the transaction with the document changes. A restore chooses a snapshot and replays changes through the requested point, rebuilding derived indexes as needed.
 

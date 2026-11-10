@@ -95,6 +95,50 @@ async fn a_subscription_that_timed_out_runs_again() {
     assert_eq!(c.value(1), json!(true));
 }
 
+pub mod slow_todos {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use rxferrix::prelude::*;
+
+    use crate::common::todos::Todo;
+
+    pub static RELEASED: AtomicBool = AtomicBool::new(false);
+
+    /// How many todos there are; slower than the test's query timeout until `RELEASED` is set.
+    #[query]
+    pub async fn count_when_released(ctx: &QueryCtx) -> Result<usize> {
+        if !RELEASED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(ctx.db.query::<Todo>().collect().await?.len())
+    }
+}
+
+/// The retry of a timed-out query runs at a later ts when something was committed meanwhile: its result must take the
+/// error's place, not stand next to it (the error would come back at the next commit the query depends on).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_a_commit_replaces_the_timeout() {
+    let options = AppOptions { query_timeout: Duration::from_millis(100), ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    let first = c.subscribe(1, &slow_todos::count_when_released::path(), json!({})).await;
+    assert!(first.is_err(), "it times out");
+    // A commit the query doesn't depend on (it timed out before reading anything): the error stays, the ts moves on.
+    t.mutation::<crate::common::items::insert>((1, 1, "one".to_string())).await.unwrap();
+    slow_todos::RELEASED.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), c.until(|c| c.results[&1].is_ok())).await.expect("retried");
+    assert_eq!(c.value(1), json!(0));
+    // Commits it does depend on: every update is a count, never the old error again.
+    for n in 1..=3 {
+        t.mutation::<crate::common::todos::add>((format!("todo {n}"),)).await.unwrap();
+        while c.value(1) != json!(n) {
+            c.recv().await;
+            assert!(c.results[&1].is_ok(), "the timeout came back: {:?}", c.results[&1]);
+        }
+    }
+}
+
 /// A client that stops reading gets the latest state when it reads again, not a frame per commit it missed: updates
 /// wait in its mailbox, merging, while the socket's queue is full (`worker::OUT_QUEUE`).
 #[tokio::test]

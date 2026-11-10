@@ -187,7 +187,14 @@ async fn start_step(ctx: &MutationCtx, wf: &mut Doc<Workflow>, step: NewStep) ->
                 with = with.with_retries(retries);
             }
             if let Some(b) = call.backoff {
-                with = with.backoff(crate::scheduler::duration_from_ms(b.initial_ms), b.base);
+                // A row edited by hand can hold anything: what isn't a time counts as the longest backoff, as
+                // for a scheduled action's own (`scheduler::runner::backoff`).
+                let initial = if b.initial_ms.is_nan() || b.initial_ms < 0.0 {
+                    Duration::MAX
+                } else {
+                    crate::scheduler::duration_from_ms(b.initial_ms)
+                };
+                with = with.backoff(initial, b.base);
             }
             if let Some(jitter) = call.jitter {
                 with = with.jitter(jitter);

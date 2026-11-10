@@ -412,8 +412,9 @@ async fn a_sleep_survives_a_restart_and_a_canceled_workflow_stops() {
     t.mutation::<cancel>((id,)).await.unwrap(); // already finished: nothing happens
 }
 
-/// A step still `running` can point at a job whose row is gone: the job finished, and the server was down for longer
-/// than `history_after` before the step heard of it, so the cleanup at startup moved the job to the history.
+/// A step still `running` can point at a job whose row is gone. In production that is a job that finished while the
+/// server was down for longer than `history_after` before the step heard of it: the cleanup at startup moves it to
+/// the history. Here the row of the sleep's job is simply deleted; ending the workflow meets the same missing row.
 #[tokio::test]
 async fn a_workflow_ends_even_if_a_running_steps_job_is_gone() {
     let _serial = SERIAL.lock().await;

@@ -25,6 +25,7 @@ pub mod aggregate;
 pub mod catalog;
 pub mod checkpoint;
 pub mod dedup;
+pub mod floats;
 pub mod journal;
 pub mod pagination;
 pub mod query;
@@ -1191,6 +1192,7 @@ impl WriteState {
         let last_creation_time = self.last_creation_time;
         let ct = self.next_creation_time();
         fields.insert(CREATION_TIME_FIELD.into(), serde_json::Number::from_f64(ct).context("bad time")?.into());
+        table.floats_as_floats(&mut fields);
         if let Err(e) = validate(&fields) {
             self.last_creation_time = last_creation_time;
             return Err(e);
@@ -1214,6 +1216,7 @@ impl WriteState {
                 fields.insert(sys.into(), v.clone());
             }
         }
+        table.floats_as_floats(&mut fields);
         self.validate_update(table, &old, &fields, validate)?;
         self.write(table, id, Some(&old), Some(&fields))
     }
@@ -1230,6 +1233,7 @@ impl WriteState {
         let old = self.load(table, id)?;
         let mut new = old.clone();
         new.extend(patch);
+        table.floats_as_floats(&mut new);
         self.validate_update(table, &old, &new, validate)?;
         self.write(table, id, Some(&old), Some(&new))
     }
@@ -1289,6 +1293,7 @@ impl WriteState {
         };
         fields.insert(ID_FIELD.into(), Value::String(id.encode()));
         fields.insert(CREATION_TIME_FIELD.into(), serde_json::Number::from_f64(ct).context("bad time")?.into());
+        table.floats_as_floats(&mut fields);
         validate(&fields)?;
         self.write(table, id, old.as_ref(), Some(&fields))?;
         Ok(old.is_some())

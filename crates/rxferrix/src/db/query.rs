@@ -381,7 +381,7 @@ impl RangeOps {
     }
 
     /// Turn the constraints into a byte range over the index keys.
-    fn to_key_range(&self, table: &str, index: &IndexInfo) -> anyhow::Result<KeyRange> {
+    fn to_key_range(&self, table: &TableInfo, index: &IndexInfo) -> anyhow::Result<KeyRange> {
         self.to_range(table, &index.key_fields, &format!("index `{}`", index.name))
     }
 
@@ -391,8 +391,8 @@ impl RangeOps {
     }
 
     /// Turn the constraints into a byte range over keys made of `fields` (`what`: for errors, e.g. "index `x`").
-    pub(super) fn to_range(&self, table: &str, fields: &[String], what: &str) -> anyhow::Result<KeyRange> {
-        let ctx = || format!("invalid range for {what} of table `{table}` (fields {fields:?})");
+    pub(super) fn to_range(&self, table: &TableInfo, fields: &[String], what: &str) -> anyhow::Result<KeyRange> {
+        let ctx = || format!("invalid range for {what} of table `{}` (fields {fields:?})", table.name);
         let mut prefix = Vec::new();
         let mut pos = 0;
         let mut ops = self.0.iter().peekable();
@@ -405,7 +405,8 @@ impl RangeOps {
                 bail!("{}: expected `{expected}` at position {pos}, got `eq({})`", ctx(), op.field);
             }
             let v = op.value.as_ref().map_err(|e| anyhow::anyhow!("{}: cannot serialize value: {e}", ctx()))?;
-            keys::encode_value(v, &mut prefix);
+            // An untyped bound (the dashboard's filters) may be an integer where the field holds floats.
+            keys::encode_value(&table.bound(&op.field, v), &mut prefix);
             pos += 1;
         }
         // At most one lower and one upper bound, both on the next field.
@@ -428,7 +429,7 @@ impl RangeOps {
             }
             let v = op.value.as_ref().map_err(|e| anyhow::anyhow!("{}: cannot serialize value: {e}", ctx()))?;
             let mut bound = prefix.clone();
-            keys::encode_value(v, &mut bound);
+            keys::encode_value(&table.bound(&op.field, v), &mut bound);
             let slot = if matches!(op.kind, OpKind::Gt | OpKind::Gte) { &mut lower } else { &mut upper };
             if slot.is_some() {
                 bail!(
@@ -545,7 +546,7 @@ impl<'a> ScanPlan<'a> {
         if index.is_by_id() {
             bail!("index `by_id` cannot be scanned; use db.get(id)");
         }
-        let range = ops.to_key_range(&table.name, &index)?;
+        let range = ops.to_key_range(&table, &index)?;
         Ok(ScanPlan { db, table, index, range, order })
     }
 }

@@ -56,6 +56,7 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
       | "blobs"
       | "dash_items"
       | "dx_notes"
+      | "float_readings"
       | "items"
       | "lossy"
       | "mig_counted"

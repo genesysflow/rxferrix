@@ -292,7 +292,7 @@ impl SearchPlan {
                 bail!("{}: `{field}` is not one of its filter fields {filter_fields:?}", ctx());
             };
             let value = value.as_ref().map_err(|e| anyhow::anyhow!("{}: cannot serialize value: {e}", ctx()))?;
-            encoded.push((pos, encode_filter_value(Some(value))));
+            encoded.push((pos, encode_filter_value(Some(&table.bound(field, value)))));
         }
         Ok(SearchPlan { index: info.clone(), expression: match_expression(text, tokenizer.kind), eqs: encoded })
     }

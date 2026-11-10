@@ -180,6 +180,35 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
         (&json!(["gh"]), &json!(true))
     );
 
+    // A stored secret stays with the server it was saved for. Kept for another host, it would be sent there: by a
+    // test email, without anything being saved.
+    let moved = json!({ "url": "smtps://mailer@mail.attacker.example:465", "from": "App <app@example.com>" });
+    for smtp in [moved.clone(), json!({ "url": moved["url"], "from": moved["from"], "password": MASK })] {
+        let (_, b) = http.call("action", "_system/settings:update", json!({ "smtp": smtp }), Some(&admin)).await;
+        assert!(b.to_string().contains("enter it again"), "{b}");
+        let test = json!({ "to": "ops@example.com", "smtp": smtp });
+        let (_, b) = http.call("action", "_system/settings:send_test_email", test, Some(&admin)).await;
+        assert!(b.to_string().contains("enter it again"), "{b}");
+    }
+    // The same host on another port, or a password given again for a new host, is fine.
+    let same_host = json!({ "url": "smtp://mailer@MAIL.example.com:587", "from": "App <app@example.com>" });
+    http.ok("action", "_system/settings:update", json!({ "smtp": same_host }), &admin).await;
+    let again = json!({ "url": "smtps://mailer@mail.example.com:465", "from": "App <app@example.com>" });
+    http.ok("action", "_system/settings:update", json!({ "smtp": again }), &admin).await;
+    // An OAuth client secret stays with its provider's kind and issuer: as an OIDC provider with another issuer, the
+    // secret would be posted to that issuer's token endpoint.
+    let oidc = |secret: Option<&str>| {
+        json!({ "id": "gh", "kind": "oidc", "issuer": "https://issuer.attacker.example", "clientId": "gh-client-id",
+                "clientSecret": secret, "enabled": true })
+    };
+    for secret in [None, Some(MASK)] {
+        let (_, b) =
+            http.call("action", "_system/settings:update", json!({ "oauth": [oidc(secret)] }), Some(&admin)).await;
+        assert!(b.to_string().contains("enter the client secret again"), "{b}");
+    }
+    let view = http.ok("action", "_system/settings:get", json!({}), &admin).await;
+    assert_eq!(view["oauth"][0]["kind"], "github", "nothing changed");
+
     // With another server secret, the stored secrets are unreadable: the provider is off rather than broken.
     let dir = t.dir().to_path_buf();
     drop(http);

@@ -454,6 +454,19 @@ fn smtp_from_input(input: SmtpInput, stored: Option<&StoredSmtp>) -> Result<Stor
         url::form_urlencoded::parse(format!("p={p}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
     });
     let _ = url.set_password(None);
+    // A stored password is only ever sent to the server it was saved for: kept for another host, a test email (or
+    // the next real one) would hand it to whoever runs that host, which is how an administrator's token would read
+    // a secret the dashboard never shows.
+    let keeps_stored = match (&input.password, &inline) {
+        (Some(given), _) => given == MASK,
+        (None, inline) => inline.is_none(),
+    };
+    if keeps_stored
+        && let Some(stored) = stored.filter(|s| s.password.is_some())
+        && !same_host(&stored.url, &url)
+    {
+        return Err(invalid("SMTP password: enter it again, the stored one was saved for another server"));
+    }
     let password = match (input.password, inline) {
         (given @ Some(_), _) => secret_from_input(given, stored.and_then(|s| s.password.as_ref())),
         (None, Some(inline)) => Some(inline),
@@ -465,6 +478,13 @@ fn smtp_from_input(input: SmtpInput, stored: Option<&StoredSmtp>) -> Result<Stor
         return Err(invalid("SMTP password is too long"));
     }
     Ok(StoredSmtp { url: url.to_string(), from, password })
+}
+
+/// Whether the stored SMTP URL names the host of `url`.
+fn same_host(stored: &str, url: &url::Url) -> bool {
+    let stored = url::Url::parse(stored).ok();
+    let host = |u: &url::Url| u.host_str().map(str::to_ascii_lowercase);
+    stored.as_ref().and_then(host).is_some_and(|h| Some(h) == host(url))
 }
 
 /// The trusted proxy headers, trimmed and checked; `None` when no header is left (the peer address is used).
@@ -619,7 +639,20 @@ impl Changes {
                     }
                     (_, _) => None,
                 };
-                let stored_secret = before.oauth.iter().find(|o| o.id == id).and_then(|o| o.client_secret.as_ref());
+                // The stored secret stays only with the provider it was saved for: the same id, kind and issuer.
+                // Otherwise it would be posted to the token endpoint of whatever issuer the provider names now.
+                let stored = before.oauth.iter().find(|o| o.id == id).filter(|o| o.client_secret.is_some());
+                let keeps_stored = p.client_secret.as_deref().is_none_or(|given| given == MASK);
+                if keeps_stored
+                    && let Some(stored) = stored
+                    && (stored.kind != p.kind || stored.issuer != issuer)
+                {
+                    return Err(invalid(format!(
+                        "OAuth provider `{id}`: enter the client secret again, the stored one was saved for another \
+                         kind or issuer"
+                    )));
+                }
+                let stored_secret = stored.and_then(|o| o.client_secret.as_ref());
                 let client_secret = secret_from_input(p.client_secret, stored_secret);
                 let max_secret = if p.kind == OAuthKind::Apple { 4096 } else { 1024 };
                 if client_secret.as_ref().is_some_and(|s| s.len() > max_secret) {

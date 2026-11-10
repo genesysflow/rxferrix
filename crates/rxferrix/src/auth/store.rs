@@ -431,7 +431,13 @@ pub struct ClientInfo {
     pub ip: Option<String>,
 }
 
-/// Create a session; returns its id and the (plaintext) refresh token.
+/// Create a session; returns its id and the (plaintext) refresh token, or `None` if the principal no longer exists,
+/// or no longer has the password hash the sign-in was checked against (`password_hash`).
+///
+/// The caller read the principal, and checked a password, in a snapshot from before this transaction, with a slow
+/// hash in between. Deleting a user or resetting a password ends the sessions that exist at that moment: without
+/// these checks, a sign-in that was in flight then would get a session afterwards, with the old password, or for a
+/// user who is gone (a session nothing lists and nothing ends).
 pub(crate) async fn create_session(
     app: &App,
     keys: &Keys,
@@ -439,7 +445,8 @@ pub(crate) async fn create_session(
     client: ClientInfo,
     now: f64,
     ttl_ms: f64,
-) -> crate::Result<(Id<Session>, String)> {
+    password_hash: Option<String>,
+) -> crate::Result<Option<(Id<Session>, String)>> {
     let refresh = random_token();
     let refresh_token_hash = keys.hash_token(&refresh);
     let (user, admin) = match principal {
@@ -456,8 +463,24 @@ pub(crate) async fn create_session(
         last_used_at: now,
         impersonated_by: None,
     };
-    let id = write(app, |db| async move { db.insert(session).await }).await?;
-    Ok((id, refresh))
+    let id = write(app, |db| async move {
+        let exists = match principal {
+            Principal::User(u) => db.get(u).await?.is_some(),
+            Principal::Admin(a) => db.get(a).await?.is_some(),
+        };
+        if !exists {
+            return Ok(None);
+        }
+        if let (Some(checked), Principal::User(u)) = (&password_hash, principal) {
+            let current = credential_of(&db, u).await?.map(|c| c.value.password_hash);
+            if current.as_ref() != Some(checked) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(db.insert(session).await?))
+    })
+    .await?;
+    Ok(id.map(|id| (id, refresh)))
 }
 
 /// Create a session of `user` on behalf of `admin` (impersonation), with a fixed expiry, and audit it in the same
@@ -833,4 +856,37 @@ pub(crate) async fn set_admin_password(app: &App, email: String, password_hash: 
         Ok(true)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestApp;
+
+    async fn session_for(t: &TestApp, user: Id<User>, password_hash: Option<&str>) -> Option<Id<Session>> {
+        let keys = &t.app().auth().keys;
+        let principal = Principal::User(user);
+        let hash = password_hash.map(String::from);
+        create_session(t.app(), keys, principal, ClientInfo::default(), 0.0, 1000.0, hash).await.unwrap().map(|s| s.0)
+    }
+
+    /// A sign-in checks the password in one snapshot and starts the session in a later transaction, with a slow
+    /// hash in between: a reset or a deletion that lands there must not be followed by a session.
+    #[tokio::test]
+    async fn a_session_starts_only_for_the_user_and_password_that_were_checked() {
+        let t = TestApp::new().await.unwrap();
+        let user = create_password_user(t.app(), "a@b.c".into(), "hash-1".into(), None).await.unwrap().unwrap();
+        assert!(session_for(&t, user, Some("hash-1")).await.is_some());
+        assert!(session_for(&t, user, None).await.is_some(), "a sign-in without a password (a link, OAuth)");
+
+        // The password is reset while a sign-in with the old one is being checked.
+        set_password(t.app(), user, "hash-2".into()).await.unwrap();
+        assert!(session_for(&t, user, Some("hash-1")).await.is_none(), "checked against a hash that is gone");
+        assert!(session_for(&t, user, Some("hash-2")).await.is_some());
+
+        // The user is deleted while a sign-in is being checked.
+        write(t.app(), |db| async move { crate::auth::users::delete_user_in(&db, user).await }).await.unwrap();
+        assert!(session_for(&t, user, Some("hash-2")).await.is_none());
+        assert!(session_for(&t, user, None).await.is_none(), "no session for a user who is gone");
+    }
 }

@@ -117,7 +117,19 @@ impl Inner {
                         && let Some(tokens) = self.by_doc.remove(&doc)
                     {
                         for token in tokens {
-                            self.tokens.remove(&token);
+                            // Its other document still lists it: without this, each write to one and each
+                            // verification that follows would add the token to the other's list once more.
+                            let Some(verified) = self.tokens.remove(&token) else { continue };
+                            for other in [*verified.user.as_bytes(), verified.account] {
+                                if other != doc
+                                    && let Some(listed) = self.by_doc.get_mut(&other)
+                                {
+                                    listed.retain(|t| *t != token);
+                                    if listed.is_empty() {
+                                        self.by_doc.remove(&other);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -179,6 +191,23 @@ mod tests {
         let (log, cache, key) = (WriteLog::new(0), ExternalCache::default(), token_key("t"));
         cache.insert(&log, WATCHED, key, verified(100), 0);
         cache.insert(&log, WATCHED, key, verified(100), 0);
+        let inner = cache.inner.read().unwrap();
+        assert_eq!((inner.by_doc[&USER].len(), inner.by_doc[&ACCOUNT].len()), (1, 1));
+    }
+
+    /// A user document written again and again (a `lastSeen` field, a profile edit), the token verified after each:
+    /// the account's list must not grow by one every time.
+    #[test]
+    fn dropped_tokens_leave_no_mappings_behind() {
+        let (log, cache, key) = (WriteLog::new(0), ExternalCache::default(), token_key("t"));
+        for _ in 0..3 {
+            cache.insert(&log, WATCHED, key, verified(100), log.latest());
+            write(&log, 7, USER);
+            assert!(cache.get(&log, WATCHED, &key, 1).is_none());
+            let inner = cache.inner.read().unwrap();
+            assert!(inner.by_doc.is_empty() && inner.tokens.is_empty(), "{:?}", inner.by_doc);
+        }
+        cache.insert(&log, WATCHED, key, verified(100), log.latest());
         let inner = cache.inner.read().unwrap();
         assert_eq!((inner.by_doc[&USER].len(), inner.by_doc[&ACCOUNT].len()), (1, 1));
     }

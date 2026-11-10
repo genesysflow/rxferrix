@@ -311,6 +311,10 @@ pub(crate) async fn limit_requests(State(app): State<App>, request: Request, nex
     }
     let effective = app.auth().current();
     let rules = &effective.rate_limits;
+    // Rules are prefixes of the path as it is served: the file server decodes and tidies what it is given, so
+    // `//downloads/x` or `/%64ownloads/x` is the file of `/downloads/x` and counts against its rule.
+    let canonical = crate::ops::web::canonical_path(path);
+    let path = canonical.as_ref();
     let Some(first) = rules.paths.iter().find(|r| r.matches_path(path)) else {
         return next.run(request).await;
     };

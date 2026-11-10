@@ -438,13 +438,16 @@ impl Manager {
         }
         // A retry at a later ts (commits the timed-out run didn't depend on came in between): the error held until
         // just before this run. Left open, it would be the version found at every ts after this run's validity ends.
+        // A commit it did depend on (a timed-out run keeps what it read until then) may have closed it meanwhile,
+        // while the retry was in flight, at a ts past this run's: the versions must not overlap either.
         if let Some(prev) = q.versions.back_mut()
-            && prev.through == OPEN
             && prev.ts < run.ts
+            && prev.through >= run.ts
         {
             prev.through = run.ts - 1;
         }
         debug_assert!(q.versions.back().is_none_or(|v| v.ts < run.ts), "versions in ts order");
+        debug_assert!(q.versions.back().is_none_or(|v| v.through < run.ts), "versions don't overlap");
         let changed = q.versions.back().is_none_or(|v| v.result.hash != hash);
         q.versions.push_back(Version { ts: run.ts, through, result });
         q.deps = auth_deps;

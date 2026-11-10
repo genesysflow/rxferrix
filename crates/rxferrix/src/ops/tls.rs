@@ -142,13 +142,16 @@ impl Listen {
 pub enum Listen {
     /// Plain HTTP.
     Http(SocketAddr),
-    /// HTTPS with Let's Encrypt certificates, plus an optional redirect listener.
-    Acme { https: SocketAddr, redirect: Option<SocketAddr>, acme: AcmeSettings },
+    /// HTTPS with Let's Encrypt certificates, plus an optional redirect listener. `public_port`: the port clients
+    /// reach HTTPS on when it isn't the one bound (a container's `-p 443:8443`), for the redirect's target.
+    Acme { https: SocketAddr, redirect: Option<SocketAddr>, public_port: Option<u16>, acme: AcmeSettings },
     /// HTTPS with certificate files, plus an optional redirect listener. With `reload_every`, the files are checked
-    /// that often and a changed, valid pair replaces the certificate without a restart.
+    /// that often and a changed, valid pair replaces the certificate without a restart. `public_port`: as for
+    /// [`Listen::Acme`].
     CertFiles {
         https: SocketAddr,
         redirect: Option<SocketAddr>,
+        public_port: Option<u16>,
         cert: PathBuf,
         key: PathBuf,
         reload_every: Option<Duration>,
@@ -159,6 +162,15 @@ impl Listen {
     /// Whether this serves HTTPS.
     pub fn is_tls(&self) -> bool {
         !matches!(self, Listen::Http(_))
+    }
+
+    /// Redirect plain HTTP to `port` instead of the port HTTPS is bound to: the port of the server's public URL,
+    /// when one was set (`https://example.com` is 443 whatever the container listens on).
+    pub fn with_public_port(mut self, port: Option<u16>) -> Self {
+        if let Listen::Acme { public_port, .. } | Listen::CertFiles { public_port, .. } = &mut self {
+            *public_port = port;
+        }
+        self
     }
 }
 
@@ -300,12 +312,16 @@ type RedirectHosts = Arc<std::sync::RwLock<Vec<String>>>;
 /// The plain-HTTP router that redirects everything to HTTPS (308, same path and query). With `domains` (the
 /// `--https` domains, or the certificate's names; `*.` wildcards match one label), the target host is the requested
 /// one if it is in the list, else the first name that isn't a wildcard; without, the requested host.
+///
+/// `GET /api/health` is answered here, not redirected: a probe on the machine itself (a container's health check)
+/// can't follow the redirect to a certificate that doesn't name `127.0.0.1`.
 pub fn redirect_router(https_port: u16, domains: Vec<String>) -> Router {
     redirect_router_with(https_port, Arc::new(std::sync::RwLock::new(domains)))
 }
 
 fn redirect_router_with(https_port: u16, hosts: RedirectHosts) -> Router {
-    Router::new().fallback(move |headers: HeaderMap, uri: Uri| {
+    let health = || async { axum::Json(serde_json::json!({ "status": "ok" })) };
+    Router::new().route("/api/health", axum::routing::get(health)).fallback(move |headers: HeaderMap, uri: Uri| {
         let domains = hosts.read().unwrap_or_else(|e| e.into_inner()).clone();
         async move {
             let requested = host_of(&headers);
@@ -603,7 +619,7 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
         #[cfg(not(feature = "acme"))]
         Listen::Acme { .. } => bail!(ACME_MISSING),
         #[cfg(feature = "acme")]
-        Listen::Acme { https, redirect, acme } => {
+        Listen::Acme { https, redirect, public_port, acme } => {
             acme.prepare()?;
             let mut state = acme.config().state();
             let acceptor = state.axum_acceptor(state.default_rustls_config());
@@ -630,9 +646,10 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
             let hosts = Arc::new(std::sync::RwLock::new(acme.domains.clone()));
-            start_tls(serve, handle, addr, *redirect, hosts, stop, pause, fd, inherited).await
+            let redirect = redirect.map(|r| (r, public_port.unwrap_or(addr.port())));
+            start_tls(serve, handle, addr, redirect, hosts, stop, pause, fd, inherited).await
         }
-        Listen::CertFiles { https, redirect, cert, key, reload_every } => {
+        Listen::CertFiles { https, redirect, public_port, cert, key, reload_every } => {
             let config = server_config_from_pem(cert, key)?;
             let listener = match take_inherited(&mut inherited, "main", *https) {
                 Some(l) => l,
@@ -653,7 +670,8 @@ pub async fn start_with(router: Router, listen: &Listen, mut inherited: Inherite
                 .acceptor(NoDelay(axum_server::tls_rustls::RustlsAcceptor::new(rustls)))
                 .handle(handle.clone())
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>());
-            start_tls(serve, handle, addr, *redirect, hosts, stop, pause, fd, inherited).await
+            let redirect = redirect.map(|r| (r, public_port.unwrap_or(addr.port())));
+            start_tls(serve, handle, addr, redirect, hosts, stop, pause, fd, inherited).await
         }
     }
 }
@@ -664,7 +682,8 @@ async fn start_tls(
     serve: impl Future<Output = std::io::Result<()>> + Send + 'static,
     handle: axum_server::Handle<SocketAddr>,
     addr: SocketAddr,
-    redirect: Option<SocketAddr>,
+    // The redirect listener's address, and the HTTPS port it sends clients to.
+    redirect: Option<(SocketAddr, u16)>,
     domains: RedirectHosts,
     stop: Stop,
     pause: Arc<watch::Sender<Accepting>>,
@@ -676,12 +695,12 @@ async fn start_tls(
     #[cfg(unix)]
     let mut fds = vec![("main".to_string(), main_fd)];
     let redirect_addr = match redirect {
-        Some(r) => {
+        Some((r, https_port)) => {
             let listener = bind_or_take(&mut inherited, "redirect", r).await?;
             #[cfg(unix)]
             fds.push(("redirect".to_string(), fd_of(&listener)));
             let bound = listener.local_addr()?;
-            let router = redirect_router_with(addr.port(), domains);
+            let router = redirect_router_with(https_port, domains);
             tasks.push(spawn_plain(listener, router, stop.clone(), pause.subscribe()));
             Some(bound)
         }

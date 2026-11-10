@@ -56,5 +56,7 @@ ENTRYPOINT ["/app"]
 HEALTHCHECK --interval=2s --start-interval=1s --start-period=30m --timeout=3s --retries=3 CMD ["/app", "health"]
 # Behind a proxy that terminates TLS. With --https, publish 80 and 443 instead (the user needs no extra rights: the
 # ports inside the container are remapped, e.g. `-p 443:8443 -p 80:8080` with `--https-addr 0.0.0.0:8443
-# --http-redirect 0.0.0.0:8080`).
+# --http-redirect 0.0.0.0:8080 --public-url https://example.com`). The public URL tells the server which port clients
+# reach HTTPS on: without it, the redirect and every link would name 8443. The health check then goes through the
+# redirect listener, which answers it over plain HTTP: `-e RXFERRIX_HEALTH_URL=http://127.0.0.1:8080/api/health`.
 CMD ["serve", "--http", "0.0.0.0:8090", "--dir", "/data"]

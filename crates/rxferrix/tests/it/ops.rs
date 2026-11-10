@@ -857,6 +857,7 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     let listen = Listen::CertFiles {
         https: "127.0.0.1:0".parse().unwrap(),
         redirect: Some("127.0.0.1:0".parse().unwrap()),
+        public_port: None,
         cert: cert_path.clone(),
         key: key_path.clone(),
         reload_every: None,
@@ -886,6 +887,26 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     // To a name of the certificate, not to whatever host the request names.
     let r = plain.get(format!("http://{redirect}/p")).header("host", "evil.test").send().await.unwrap();
     assert_eq!(r.headers()["location"], format!("https://localhost:{}/p", addr.port()).as_str());
+    // The health endpoint is answered in place: a local probe can't follow a redirect to this certificate.
+    let r = plain.get(format!("http://{redirect}/api/health")).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.json::<Value>().await.unwrap()), (200, json!({ "status": "ok" })));
+
+    // Behind a port mapping (a container's `-p 443:8443`), clients reach HTTPS on the public URL's port, not on the
+    // one bound here: that is where the redirect must send them.
+    let mapped = tls::start(
+        rxferrix::ops::web::router(t.app().clone(), &WebOptions::default()),
+        &listen.clone().with_public_port(Some(443)),
+    )
+    .await
+    .unwrap();
+    let r = plain
+        .get(format!("http://{}/some/path?x=1", mapped.redirect_addr.unwrap()))
+        .header("host", "localhost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.headers()["location"], "https://localhost/some/path?x=1");
+    mapped.shutdown();
 
     // A key that doesn't match the certificate is refused at startup.
     let other = rcgen::KeyPair::generate().unwrap();
@@ -893,6 +914,7 @@ async fn tls_with_a_self_signed_certificate_and_the_redirect_listener() {
     let bad = Listen::CertFiles {
         https: "127.0.0.1:0".parse().unwrap(),
         redirect: None,
+        public_port: None,
         cert: cert_path,
         key: key_path,
         reload_every: None,
@@ -921,6 +943,7 @@ async fn tls_certificate_files_are_reloaded_without_dropping_connections() {
     let listen = Listen::CertFiles {
         https: "127.0.0.1:0".parse().unwrap(),
         redirect: Some("127.0.0.1:0".parse().unwrap()),
+        public_port: None,
         cert: cert_path.clone(),
         key: key_path.clone(),
         reload_every: Some(Duration::from_millis(50)),

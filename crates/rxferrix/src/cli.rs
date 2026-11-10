@@ -82,8 +82,9 @@ enum AfterHandover {
 
 #[derive(Args, Debug, Clone)]
 struct HealthArgs {
-    /// The server's health endpoint.
-    #[arg(default_value = "http://127.0.0.1:8090/api/health")]
+    /// The server's health endpoint. With `--https`, the redirect listener answers it over plain HTTP
+    /// (`http://127.0.0.1:<--http-redirect port>/api/health`).
+    #[arg(env = "RXFERRIX_HEALTH_URL", default_value = "http://127.0.0.1:8090/api/health")]
     url: String,
 }
 
@@ -877,6 +878,12 @@ fn auth_config(args: &ServeArgs, mut auth: AuthConfig) -> AuthConfig {
     auth
 }
 
+/// The port of an `https://` URL (443 unless it names one); `None` for anything else.
+fn https_port_of(url: &str) -> Option<u16> {
+    let url = url::Url::parse(url.trim()).ok()?;
+    (url.scheme() == "https").then(|| url.port_or_known_default()).flatten()
+}
+
 /// Whether a public URL was given explicitly (`--public-url` / `RXFERRIX_PUBLIC_URL`, `AuthConfig::public_url`, or a
 /// TLS domain), before [`auth_config`] fills in the default `http://<--http address>`.
 fn explicit_public_url(args: &ServeArgs, auth: &AuthConfig) -> bool {
@@ -954,6 +961,8 @@ fn serve(
                 args.http
             );
         }
+        // Set by hand, not implied by `--https` (that one is built from the port bound: no news for the redirect).
+        let public_https_port = args.public_url.as_deref().or(auth.public_url.as_deref()).and_then(https_port_of);
         let auth = auth_config(&args, auth);
         let storage = storage_config(&args, storage, explicit)?;
         let public_url = auth.public_url.clone().unwrap_or_default();
@@ -977,7 +986,7 @@ fn serve(
             ..Default::default()
         };
         args.ops.apply(&mut options);
-        let listen = args.ops.listen(args.http, &args.dir)?;
+        let listen = args.ops.listen(args.http, &args.dir)?.with_public_port(public_https_port);
         // Held while serving: `restore` refuses to run under a server. A takeover gets it from the old process.
         let takeover = match args.takeover {
             Some(TakeoverMode::Require) => true,
@@ -1180,6 +1189,15 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("app").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_public_urls_https_port() {
+        assert_eq!(https_port_of("https://example.com"), Some(443));
+        assert_eq!(https_port_of("https://example.com/"), Some(443));
+        assert_eq!(https_port_of(" https://example.com:8443/app "), Some(8443));
+        assert_eq!(https_port_of("http://example.com"), None, "not served over TLS from outside");
+        assert_eq!(https_port_of("example.com"), None);
     }
 
     #[test]

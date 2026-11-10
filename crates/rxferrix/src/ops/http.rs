@@ -631,7 +631,8 @@ async fn export_table(
 ) -> Response {
     admin!(app, headers);
     let Ok(Query(q)) = q else {
-        return AuthFailure::new(400, "invalid_request", "format must be jsonl or csv").into_response();
+        let message = "format must be jsonl or csv, and spreadsheet true or false";
+        return AuthFailure::new(400, "invalid_request", message).into_response();
     };
     let format = q.format.unwrap_or_default();
     let spreadsheet = q.spreadsheet;
@@ -667,7 +668,9 @@ async fn export_table(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(format.content_type()));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    let file = format!("{table}.{}", format.extension());
+    // A name of its own for the spreadsheet variant: importing it as the table's CSV would write its `'`s back.
+    let variant = if spreadsheet { ".sheet" } else { "" };
+    let file = format!("{table}{variant}.{}", format.extension());
     let safe: String = file.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{safe}\"")) {
         h.insert(header::CONTENT_DISPOSITION, v);

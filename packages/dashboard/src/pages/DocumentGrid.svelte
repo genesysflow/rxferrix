@@ -208,6 +208,12 @@
     void selectionKey;
     selected = new Set();
   });
+  // A row that left the view is no longer selected, even if a later write brings it back: it would come back ticked,
+  // possibly out of sight, and count in "Delete N".
+  $effect(() => {
+    const visible = new Set(rows.map((d) => d._id));
+    if ([...selected].some((id) => !visible.has(id))) selected = new Set([...selected].filter((id) => visible.has(id)));
+  });
   const visibleSelection = $derived.by(() => {
     const visible = new Set(rows.map((d) => d._id));
     return [...selected].filter((id) => visible.has(id));

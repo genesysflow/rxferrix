@@ -207,6 +207,20 @@ try {
     await call(base, "mutation", "todos:remove", { id: brief.body.value });
     await page.getByTestId("removed-row").filter({ hasText: "short-lived" }).waitFor({ timeout: 3000 });
     await page.getByTestId("removed-row").waitFor({ state: "detached", timeout: 3000 });
+    // A ticked row stays ticked while other documents come and go: the selection is for a bulk delete, and a busy
+    // table would otherwise untick it before the button is reached.
+    const grid = page.getByTestId("document-grid");
+    const ticked = grid.locator("tbody tr", { hasText: first }).getByRole("checkbox");
+    await ticked.check();
+    const other = await call(base, "mutation", "todos:add", { text: "added while one is selected" });
+    await grid.getByText("added while one is selected").waitFor({ timeout: 3000 });
+    await page.waitForTimeout(300);
+    if (!(await ticked.isChecked())) throw new Error("a write to the table unticked the selected row");
+    await page.getByRole("button", { name: "Delete 1", exact: true }).waitFor();
+    await ticked.uncheck();
+    await call(base, "mutation", "todos:remove", { id: other.body.value });
+    await grid.getByText("added while one is selected").waitFor({ state: "detached", timeout: 5000 });
+    await page.getByTestId("removed-row").waitFor({ state: "detached", timeout: 3000 });
   });
   await shot(page, "data-grid");
 

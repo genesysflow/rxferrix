@@ -208,7 +208,9 @@ export function exportTable(
   spreadsheet = false,
 ): Promise<Download> {
   const variant = spreadsheet ? "&spreadsheet=true" : "";
-  return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}${variant}`, `${table}.${format}`);
+  // A name of its own: importing the spreadsheet file as the table's CSV would write its `'`s back.
+  const name = spreadsheet ? `${table}.sheet.${format}` : `${table}.${format}`;
+  return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}${variant}`, name);
 }
 
 /** `POST /api/admin/import/{table}?mode=…&format=…` with a JSONL or CSV body (CSV as exported, with a header). */

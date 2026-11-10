@@ -86,6 +86,8 @@ Alternatively, let the app obtain Let's Encrypt certificates:
   --https app.example.com --acme-email you@example.com
 ```
 
+`--https` and `--acme-email` can also come from `RXFERRIX_HTTPS` (comma-separated domains) and `RXFERRIX_ACME_EMAIL`.
+
 This uses TLS-ALPN-01 on port 443 and redirects port 80 to HTTPS. The domain must resolve to the server and those ports must be reachable. Certificates are cached under the data directory's `acme/`. Use `--acme-staging` when testing issuance.
 
 For your own certificate, use `--tls-cert cert.pem --tls-key key.pem --public-url https://app.example.com`. The pair is reloaded every 30 seconds by default; an invalid replacement leaves the current pair active. `--https-addr` changes the HTTPS listener, and `--http-redirect` configures or disables the redirect listener.

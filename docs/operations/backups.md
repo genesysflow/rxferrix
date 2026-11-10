@@ -46,6 +46,12 @@ Stop the server before using the restore command:
 
 The command validates checksums, SQLite integrity, schema, and indexes before replacing the database. It refuses to restore over an active server. Previous files go to `pre-restore-<time>/`; the two newest such recovery directories are retained.
 
+| Option | Use it to |
+| --- | --- |
+| `--storage-dir DIR` | Put restored file blobs somewhere other than `<dir>/storage`. |
+| `--skip-verify` | Skip opening the restored database with this binary's tables to check its schema and indexes. Checksums are still verified. |
+| `--cancel` | Cancel a restore staged from the dashboard instead of restoring. |
+
 A restore interrupted during replacement is completed on the next startup or restore attempt. Test a restore to a separate directory periodically so you know the archive, key, and file contents are sufficient.
 
 ## Restore from the dashboard
@@ -67,6 +73,15 @@ Continuous replication records committed changes and ships them to a directory o
 
 Defaults are one-second shipping, daily snapshots, and a seven-day recovery window. Shipping is asynchronous: the interval is not a guarantee of maximum data loss when the destination or network is unavailable.
 
+| Option | Default | What it sets |
+| --- | --- | --- |
+| `--replicate-to LOCATION` (`RXFERRIX_REPLICATE_TO`) | off | The target: a directory, `file:///dir`, or `s3://bucket/prefix`. |
+| `--replicate-every DURATION` | `1s` | How often new commits are shipped. |
+| `--replicate-jobs-every DURATION` | `60s` | How often commits that are only the scheduler's own progress are shipped. |
+| `--snapshot-every DURATION` | `24h` | How often a snapshot is taken. A restore replays changes from the newest snapshot before its point. |
+| `--replicate-keep DURATION` | `7d` | How far back restores reach. Older snapshots and segments are deleted from the target. |
+| `--replicate-max-pending SIZE` | `1GB` | How much journal is kept locally while the target is unreachable. Past it the journal is dropped and a new generation starts when the target is back; the commits made in between are in that generation's first snapshot but cannot be restored to one by one. |
+
 List recovery generations and ranges, then restore offline:
 
 ```sh
@@ -75,7 +90,7 @@ List recovery generations and ranges, then restore offline:
   --to-time 2026-10-29T12:00:00Z
 ```
 
-Use `--to-ts N` for a commit timestamp. With no target point, the newest recoverable state is used. The dashboard's point-in-time picker stages the same type of restore for the next startup.
+Use `--to-ts N` for a commit timestamp. With no target point, the newest recoverable state is used. A target holds one generation per uninterrupted run of the journal; `--generation ID` picks one from the `--list` output when the default (the newest, or the one live at `--to-time`) is not the one you want. `--storage-dir` and `--skip-verify` work as for archives. The dashboard's point-in-time picker stages the same type of restore for the next startup.
 
 The journal is written in the transaction with the document changes. A restore chooses a snapshot and replays changes through the requested point, rebuilding derived indexes as needed.
 

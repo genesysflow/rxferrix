@@ -117,8 +117,8 @@ describe("useQuery", () => {
         baseVersion: 1,
         newVersion: 2,
         modifications: [
-          { type: "Add", queryId: 1, udfPath: "todos:list", args: { done: true } },
           { type: "Remove", queryId: 0 },
+          { type: "Add", queryId: 1, udfPath: "todos:list", args: { done: true } },
         ],
       },
     ]);

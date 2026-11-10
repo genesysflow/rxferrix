@@ -154,9 +154,9 @@ describe("usePaginatedQuery", () => {
     expect(items()).toEqual([]);
     await settle();
     expect(sentModifications()).toEqual([
-      { type: "Add", queryId: 3, udfPath: "messages:list", args: { channel: "b", paginationOpts: { numItems: 2, cursor: null } } },
       { type: "Remove", queryId: 1 },
       { type: "Remove", queryId: 2 },
+      { type: "Add", queryId: 3, udfPath: "messages:list", args: { channel: "b", paginationOpts: { numItems: 2, cursor: null } } },
     ]);
     act(() => server.transition({ querySet: 4, ts: 2 }, [update(3, page(["b1"], "e", true))]));
     expect(items()).toEqual(["b1"]);

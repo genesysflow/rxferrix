@@ -434,6 +434,31 @@ async fn export_import_round_trip_keeps_ids_indexes_search_and_files() {
     );
 }
 
+/// A directory is one import: a bad file fails it before any of its files is written. Checked one file at a time,
+/// the tables before the bad one were already imported (and, with `replace`, emptied first).
+#[tokio::test]
+async fn a_directory_import_checks_every_file_before_writing_any() {
+    let t = TestApp::new().await.unwrap();
+    t.mutation::<add_pair>((1, "kept".to_string())).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // `ops_docs` sorts first and is fine; `ops_pairs` is not.
+    std::fs::write(
+        dir.path().join("ops_docs.jsonl"),
+        "{\"title\":\"ok\",\"rank\":1,\"file\":null,\"parent\":null,\"tags\":[]}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("ops_pairs.jsonl"), "{\"group\":\"not a number\",\"text\":\"x\"}\n").unwrap();
+    let ts = t.app().db().write_log().latest();
+    for mode in [ImportMode::Insert, ImportMode::Replace] {
+        let options = ImportOptions { mode, ..Default::default() };
+        let err = export::import_path(t.app(), dir.path(), None, &options).await.unwrap_err();
+        assert!(format!("{err:#}").contains("ops_pairs.jsonl:1"), "{err:#}");
+        assert_eq!(t.app().db().write_log().latest(), ts, "{mode:?}: nothing written");
+    }
+    assert_eq!(t.query::<docs>(()).await.unwrap().len(), 0);
+    assert_eq!(t.query::<all_pairs>(()).await.unwrap().len(), 2, "what was there stays");
+}
+
 #[tokio::test]
 async fn import_validates_every_line_first() {
     let t = TestApp::new().await.unwrap();

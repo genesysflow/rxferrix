@@ -340,16 +340,31 @@ async fn put_blob(blobs: &BlobStore, path: &ObjectPath, source: &Path) -> crate:
 /// A multipart upload that is aborted (in a task of its own) if it is dropped before being taken out.
 struct AbortUnlessFinished(Option<object_store::WriteMultipart>);
 
+/// The abort tasks still running ([`AbortUnlessFinished`]), for a caller that is about to drop the runtime
+/// ([`finish_aborts`]).
+static ABORTS: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
 impl Drop for AbortUnlessFinished {
     fn drop(&mut self) {
         if let Some(upload) = self.0.take()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            runtime.spawn(async move {
+            let abort = runtime.spawn(async move {
                 let _ = upload.abort().await;
             });
+            let mut aborts = ABORTS.lock().unwrap_or_else(|e| e.into_inner());
+            aborts.retain(|task| !task.is_finished());
+            aborts.push(abort);
         }
     }
+}
+
+/// Wait (for at most `limit`) for the aborts of uploads a failed import left unfinished. A server's runtime runs
+/// them to their end by itself; a command that returns the error and exits would cut them off, leaving the parts
+/// already sent in the bucket.
+pub async fn finish_aborts(limit: std::time::Duration) {
+    let aborts = std::mem::take(&mut *ABORTS.lock().unwrap_or_else(|e| e.into_inner()));
+    let _ = tokio::time::timeout(limit, futures::future::join_all(aborts)).await;
 }
 
 /// `manifest.json` of an export.
@@ -815,9 +830,25 @@ pub async fn import_file(
     report: &mut ImportReport,
 ) -> crate::Result<TableImport> {
     let table = import_table(app, table, options)?;
+    let dropped = check_file(app, &table, file, file_format(file, options.format), remap, options.mode).await?;
+    write_checked(app, table, dropped, file, files, remap, options, report).await
+}
+
+/// Write the documents of a file that [`check_file`] passed (`dropped`: the fields it found the table doesn't
+/// define).
+#[allow(clippy::too_many_arguments)]
+async fn write_checked(
+    app: &App,
+    table: Arc<TableInfo>,
+    dropped: BTreeSet<String>,
+    file: &Path,
+    files: Option<&Path>,
+    remap: &IdRemap,
+    options: &ImportOptions,
+    report: &mut ImportReport,
+) -> crate::Result<TableImport> {
     let batch_size = options.batch_size.max(1);
     let format = file_format(file, options.format);
-    let dropped = check_file(app, &table, file, format, remap, options.mode).await?;
     let mut result =
         TableImport { table: table.name.clone(), dropped_fields: dropped.into_iter().collect(), ..Default::default() };
     let shape = (table.def.as_ref().expect("checked by import_table").shape)();
@@ -958,8 +989,21 @@ pub async fn import_path(
     jobs.sort_by_key(|(name, _)| name != crate::storage::StoredFile::NAME);
     report.remapped_ids = !remap.is_empty();
     let options = ImportOptions { format, ..options.clone() };
+    // Every file is checked before the first one is written: a directory is one import, and a bad file must not
+    // leave the tables before it imported (with `replace`: emptied and refilled) and the rest untouched.
+    let mut checked = Vec::with_capacity(jobs.len());
     for (name, file) in jobs {
-        let done = import_file(app, &name, &file, files.as_deref(), &remap, &options, &mut report)
+        let check = async {
+            let table = import_table(app, &name, &options)?;
+            let dropped =
+                check_file(app, &table, &file, file_format(&file, options.format), &remap, options.mode).await?;
+            Ok::<_, anyhow::Error>((table, dropped))
+        };
+        let (table, dropped) = check.await.with_context(|| format!("importing `{name}` from {}", file.display()))?;
+        checked.push((name, file, table, dropped));
+    }
+    for (name, file, table, dropped) in checked {
+        let done = write_checked(app, table, dropped, &file, files.as_deref(), &remap, &options, &mut report)
             .await
             .with_context(|| format!("importing `{name}` from {}", file.display()))?;
         report.tables.push(done);

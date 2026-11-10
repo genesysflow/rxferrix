@@ -96,6 +96,8 @@ struct Conn {
     /// Waiting for its queries before a command can be answered; later commands queue in `deferred`.
     waiting: bool,
     deferred: VecDeque<Command>,
+    /// About what the modifications in `deferred` hold ([`MAX_QUEUED_MODIFY_BYTES`]).
+    deferred_bytes: usize,
     /// How many times every query of the set was valid at one ts (an update was due, whether or not anything changed).
     updates: u64,
     /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
@@ -120,6 +122,7 @@ impl Conn {
             cover: None,
             waiting: false,
             deferred: VecDeque::new(),
+            deferred_bytes: 0,
             updates: 0,
             starving: false,
             blocker: 0,
@@ -383,7 +386,13 @@ impl Manager {
                 // Unknown: dropped for being too slow; its worker is about to stop.
                 let Some(conn) = self.conns.get_mut(&c) else { return };
                 if conn.waiting {
-                    if conn.deferred.len() >= MAILBOX_LIMIT {
+                    if let Command::Modify { bytes, .. } = &cmd {
+                        conn.deferred_bytes += bytes;
+                    }
+                    if conn.deferred_bytes > MAX_QUEUED_MODIFY_BYTES {
+                        conn.mailbox.overflow_because(QUEUED_TOO_MUCH);
+                        self.remove_conn(c);
+                    } else if conn.deferred.len() >= MAILBOX_LIMIT {
                         self.kill(c);
                     } else {
                         conn.deferred.push_back(cmd);
@@ -398,7 +407,7 @@ impl Manager {
     /// Apply a command of a connection that is not waiting.
     fn apply(&mut self, cmd: Command) {
         match cmd {
-            Command::Modify { conn: c, query_set, modifications } => {
+            Command::Modify { conn: c, query_set, modifications, bytes: _ } => {
                 let Some(conn) = self.conns.get_mut(&c) else { return };
                 conn.query_set = query_set;
                 for m in modifications {

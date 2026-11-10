@@ -132,6 +132,34 @@ fn percent_decode(path: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// A request path as the file server reads it ([`relative_path`]): percent-decoded, without empty and `.` segments.
+/// `//downloads/x`, `/./downloads/x` and `/%64ownloads/x` all serve the file of `/downloads/x`, so whatever decides
+/// by path prefix (the path rate limits) must look at this form, or each spelling gets past it. A path that is
+/// already in this form is returned as is; one that can't be decoded or leaves the root (never served) too.
+pub(crate) fn canonical_path(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let plain = !path.contains('%') && !path.contains("//") && !path.contains("/./") && !path.ends_with("/.");
+    if plain && path.starts_with('/') {
+        return Cow::Borrowed(path);
+    }
+    let Some(decoded) = percent_decode(path) else { return Cow::Borrowed(path) };
+    let mut out = String::with_capacity(decoded.len() + 1);
+    for segment in decoded.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => return Cow::Borrowed(path),
+            segment => {
+                out.push('/');
+                out.push_str(segment);
+            }
+        }
+    }
+    if out.is_empty() || decoded.ends_with('/') {
+        out.push('/');
+    }
+    Cow::Owned(out)
+}
+
 /// The relative file path for a request path, or `None` if it tries to leave the root.
 fn relative_path(path: &str) -> Option<String> {
     let decoded = percent_decode(path)?;
@@ -307,6 +335,28 @@ mod tests {
 
     #[test]
     fn paths() {
+        for (spelling, canonical) in [
+            ("/downloads/x.zip", "/downloads/x.zip"),
+            ("//downloads/x.zip", "/downloads/x.zip"),
+            ("/./downloads//x.zip", "/downloads/x.zip"),
+            ("/%64ownloads/x.zip", "/downloads/x.zip"),
+            ("/downloads/%2e/x.zip", "/downloads/x.zip"),
+            ("/downloads/", "/downloads/"),
+            ("//downloads//", "/downloads/"),
+            ("/", "/"),
+            ("//", "/"),
+            ("/a%20b", "/a b"),
+            // Never served: left as they are.
+            ("/../etc/passwd", "/../etc/passwd"),
+            ("/a/%2e%2e/x", "/a/%2e%2e/x"),
+            ("/%ff", "/%ff"),
+        ] {
+            assert_eq!(canonical_path(spelling), canonical, "{spelling}");
+            // The file served is the same one.
+            if let Some(file) = relative_path(spelling) {
+                assert_eq!(relative_path(canonical).as_deref(), Some(file.as_str()), "{spelling}");
+            }
+        }
         assert_eq!(relative_path("/").as_deref(), Some("index.html"));
         assert_eq!(relative_path("/a/b.js").as_deref(), Some("a/b.js"));
         assert_eq!(relative_path("/docs/").as_deref(), Some("docs/index.html"));

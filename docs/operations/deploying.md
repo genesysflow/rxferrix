@@ -86,9 +86,15 @@ Alternatively, let the app obtain Let's Encrypt certificates:
   --https app.example.com --acme-email you@example.com
 ```
 
+`--https` and `--acme-email` can also come from `RXFERRIX_HTTPS` (comma-separated domains) and `RXFERRIX_ACME_EMAIL`.
+
 This uses TLS-ALPN-01 on port 443 and redirects port 80 to HTTPS. The domain must resolve to the server and those ports must be reachable. Certificates are cached under the data directory's `acme/`. Use `--acme-staging` when testing issuance.
 
 For your own certificate, use `--tls-cert cert.pem --tls-key key.pem --public-url https://app.example.com`. The pair is reloaded every 30 seconds by default; an invalid replacement leaves the current pair active. `--https-addr` changes the HTTPS listener, and `--http-redirect` configures or disables the redirect listener.
+
+When HTTPS is reached on another port than the one bound, as with a container's `-p 443:8443 -p 80:8080`, pass `--public-url https://app.example.com` as well: the redirect sends clients to the public URL's port, and links use it. Without it, the redirect names the bound port, and so do links with `--https` (with certificate files, links default to the `--http` address and the server warns). Clients that reach the HTTPS port directly, past the mapping, are redirected to the public URL's port too.
+
+The redirect listener answers `GET /api/health` over plain HTTP, so a local health check works without a certificate for `127.0.0.1`: set `RXFERRIX_HEALTH_URL=http://127.0.0.1:8080/api/health` for the image's built-in check. That check says the process is serving, not that a certificate is in place: with `--https`, it passes while Let's Encrypt has not issued one yet.
 
 HTTPS enables one-year HSTS by default. `--no-hsts` disables it for setups such as untrusted test certificates. See `serve --help` for TLS options.
 

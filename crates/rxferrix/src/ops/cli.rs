@@ -182,6 +182,7 @@ impl OpsServeArgs {
             return Ok(Listen::Acme {
                 https: self.https_addr,
                 redirect: self.redirect(true)?,
+                public_port: None,
                 acme: AcmeSettings {
                     domains,
                     emails: self.acme_email.clone(),
@@ -194,6 +195,7 @@ impl OpsServeArgs {
             return Ok(Listen::CertFiles {
                 https: self.https_addr,
                 redirect: self.redirect(false)?,
+                public_port: None,
                 cert: cert.clone(),
                 key: key.clone(),
                 reload_every: (!self.tls_reload_every.is_zero()).then_some(self.tls_reload_every),
@@ -528,7 +530,12 @@ pub fn run_import(args: ImportArgs, mut options: AppOptions) -> crate::Result<()
             allow_system_tables: true,
             format: args.format,
         };
-        let report = export::import_path(&app, &args.path, args.table.as_deref(), &import).await?;
+        let imported = export::import_path(&app, &args.path, args.table.as_deref(), &import).await;
+        if imported.is_err() {
+            // The uploads it left unfinished are aborted in tasks of their own, which end with this runtime.
+            export::finish_aborts(std::time::Duration::from_secs(15)).await;
+        }
+        let report = imported?;
         for t in &report.tables {
             println!(
                 "{:<24} {:>8} document(s) written ({} replaced, {} deleted first)",
@@ -597,7 +604,7 @@ mod tests {
         // --https: ACME on :443, redirect from :80, cache in <dir>/acme, public URL.
         let ops =
             parse(&["--https", "Example.com,www.example.com", "--acme-email", "a@b.c", "--acme-staging"]).unwrap();
-        let Listen::Acme { https, redirect, acme } = ops.listen(http, dir).unwrap() else { panic!("acme") };
+        let Listen::Acme { https, redirect, acme, .. } = ops.listen(http, dir).unwrap() else { panic!("acme") };
         assert_eq!(https, "0.0.0.0:443".parse().unwrap());
         assert_eq!(redirect, Some("0.0.0.0:80".parse().unwrap()));
         assert_eq!(acme.domains, ["example.com", "www.example.com"]);

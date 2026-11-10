@@ -2833,7 +2833,10 @@ a changed pair that loads replaces the certificate for new handshakes (the rustl
 connections keep theirs), a pair that doesn't (a half-written renewal, a mismatched key) is ignored with one error in
 the log per change. The HTTP→HTTPS redirect (`--http-redirect`) keeps the requested host when it is one of the
 `--https` domains or of the certificate's DNS names (a `*.` name matches one label), else uses the first of them that
-isn't a wildcard (400 if none); with no names at all, the requested host. Every HTTPS response gets
+isn't a wildcard (400 if none); with no names at all, the requested host. Its port is the one of the public URL when
+one was set (`--public-url https://…`, `AuthConfig::public_url`), else the port HTTPS is bound to; `GET /api/health`
+is answered by the redirect listener itself (200, not redirected), for health checks on the machine
+(`health`, whose URL defaults to `RXFERRIX_HEALTH_URL`). Every HTTPS response gets
 `Strict-Transport-Security: max-age=31536000` unless it sets its own (`--no-hsts` turns it off). Let's Encrypt
 certificates (`--https`) need the crate's `acme` feature (default); without it, `--https` fails at startup and
 certificate files still work.

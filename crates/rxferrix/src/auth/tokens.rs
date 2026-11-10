@@ -94,6 +94,17 @@ impl Keys {
         blake3::keyed_hash(&self.hash, token.as_bytes()).to_hex().to_string()
     }
 
+    /// The refresh token that follows `current` when it is rotated: a keyed hash of it, not a new random one.
+    /// Rotating the same token again therefore gives the same successor, so a refresh whose answer was lost, or one
+    /// that raced another tab's, can be answered again with what the first one got (`store::rotate_refresh_token`).
+    /// Without the server's key nobody can tell a token's successor; 256 bits, like a random one.
+    pub fn next_refresh_token(&self, current: &str) -> String {
+        // A key of its own, derived from the hashing key: what [`Keys::hash_token`] computes for some input (it
+        // hashes whatever a client presents) is never a successor.
+        let key = blake3::derive_key("rxferrix auth v1 refresh token successor", &self.hash);
+        BASE64URL_NOPAD.encode(blake3::keyed_hash(&key, current.as_bytes()).as_bytes())
+    }
+
     /// Sign access token claims.
     pub fn sign(&self, claims: &AccessClaims) -> String {
         self.sign_claims(claims)

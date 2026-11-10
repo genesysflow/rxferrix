@@ -275,6 +275,81 @@ describe("RxFerrixAuth", () => {
     expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: JSON.parse(other).accessToken });
   });
 
+  it("refreshes with the newer tokens of another tab when theirs are used up too, instead of wiping them", async () => {
+    storage.setItem(KEY, stored("a", Date.now() - 1000));
+    const other = stored("other-tab", Date.now() - 500); // rotated by another tab; its access token is spent as well
+    const fresh = tokens("fresh");
+    const { fetch, calls } = mockFetch({
+      "/api/auth/refresh": (body) => {
+        if (body.refreshToken === "refresh-a") {
+          storage.setItem(KEY, other);
+          return authError(401, "stale_refresh_token");
+        }
+        return { status: 200, body: fresh };
+      },
+    });
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    const sent = await openAndDrain();
+    expect(calls.map((c) => c.body?.refreshToken)).toEqual(["refresh-a", "refresh-other-tab"]);
+    expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: fresh.accessToken });
+    expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-fresh");
+  });
+
+  it("asks again next to a refresh that is slow, and uses the answer that comes first", async () => {
+    storage.setItem(KEY, stored("a", Date.now() - 1000));
+    const fresh = tokens("fresh");
+    const answers: ((r: Response) => void)[] = [];
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => answers.push(resolve))) as unknown as typeof globalThis.fetch;
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await settle();
+    expect(answers.length).toBe(1);
+    // Unanswered after 3 seconds: asked again, the first request still out (it is slow, not lost).
+    vi.advanceTimersByTime(3_000);
+    await settle();
+    expect(answers.length).toBe(2);
+    // The slow first one answers after all: used, nothing was given up.
+    answers[0]!(new Response(JSON.stringify(fresh), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const sent = await openAndDrain();
+    expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: fresh.accessToken });
+    vi.advanceTimersByTime(20_000);
+    await settle();
+    expect(answers.length).toBe(2);
+    expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-fresh");
+  });
+
+  it("does not refresh with an older pair left in storage", async () => {
+    const now = Date.now();
+    storage.setItem(KEY, stored("a", now - 1000));
+    const { fetch, calls } = mockFetch({
+      "/api/auth/refresh": () => {
+        storage.setItem(KEY, stored("older", now - 60_000)); // not newer than ours: a rotated token
+        return authError(401, "stale_refresh_token");
+      },
+    });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+    expect(calls.map((c) => c.body?.refreshToken)).toEqual(["refresh-a"]);
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(auth.state().isAuthenticated).toBe(false);
+  });
+
+  it("asks for the refresh once more when no answer comes, with the same token", async () => {
+    storage.setItem(KEY, stored("a", Date.now() - 1000));
+    const fresh = tokens("fresh");
+    const asked: unknown[] = [];
+    // The first answer is lost on the way (the server did rotate); the server answers the same request the same way.
+    const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      asked.push(JSON.parse(String(init?.body)).refreshToken);
+      if (asked.length === 1) throw new TypeError("network changed");
+      return new Response(JSON.stringify(fresh), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof globalThis.fetch;
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    const sent = await openAndDrain();
+    expect(asked).toEqual(["refresh-a", "refresh-a"]);
+    expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: fresh.accessToken });
+    expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-fresh");
+  });
+
   it("signs out: forgets the tokens, clears the socket identity and ends the session", async () => {
     storage.setItem(KEY, stored("a", Date.now() + 600_000));
     const { fetch, calls } = mockFetch({ "/api/auth/signout": () => ({ status: 200, body: {} }) });

@@ -171,8 +171,23 @@ interface StoredTokens {
 
 /** Refresh access tokens that expire within this window instead of using them. */
 const EXPIRY_LEEWAY_MS = 10_000;
-/** A refresh request that hasn't answered by then is given up (a black-holed connection after a network switch). */
+/** A refresh that hasn't been answered by then is given up (a black-holed connection after a network switch). */
 const REFRESH_TIMEOUT_MS = 10_000;
+/**
+ * While a refresh request is unanswered, the same request is sent again at these times after the first, next to the
+ * ones already out: the first answer to arrive is used. The server may have rotated the token for a request whose
+ * answer never arrives; it answers the same request the same way for 10 seconds after that (its default
+ * `refresh_reuse_grace`) and revokes the session for a rotated token presented later. Asking again early is the only
+ * way to still get that answer, and it costs a request that is merely slow nothing: it is not given up for it.
+ */
+const REFRESH_ASK_AGAIN_MS = [3_000, 6_000];
+
+/** What `POST /api/auth/refresh` answered. */
+interface RefreshAnswer {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
 
 function defaultStorage(): AuthStorage {
   try {
@@ -409,37 +424,99 @@ export class RxFerrixAuth {
     if (!before) return null;
     const adopted = await this.adoptNewerStoredTokens(before);
     if (adopted) return adopted;
-    const t = this.tokens;
-    if (!t) return null;
-    let res: Response;
-    try {
-      const timeout = (AbortSignal as { timeout?: (ms: number) => AbortSignal }).timeout?.(REFRESH_TIMEOUT_MS);
-      res = await this.fetchImpl(`${this.baseUrl}/api/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken: t.refreshToken }),
-        ...(timeout ? { signal: timeout } : {}),
-      });
-    } catch (e) {
-      // Offline: keep the session; the next reconnect or AuthError tries again.
-      throw new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: e });
-    }
-    const body = (await res.json().catch(() => null)) as unknown;
-    if (epoch !== this.epoch || this.tokens !== t) return this.tokens?.accessToken ?? null;
-    if (res.ok) {
-      const next = toStored(body as AuthTokens);
-      await this.saveTokens(next);
-      return next.accessToken;
-    }
-    if (res.status === 401) {
+    // With our own tokens, then with each newer pair another tab turns out to have stored (a couple at most).
+    for (let round = 0; round < 3; round++) {
+      const t = this.tokens;
+      if (!t) return null;
+      const answer = await this.postRefresh(t.refreshToken, () => epoch === this.epoch && this.tokens === t);
+      if (epoch !== this.epoch || this.tokens !== t) return this.tokens?.accessToken ?? null;
+      if (answer.ok) {
+        const next = toStored(answer.body as AuthTokens);
+        await this.saveTokens(next);
+        return next.accessToken;
+      }
+      if (answer.status !== 401) throw errorFrom(answer.status, answer.body);
       // Lost a race with another tab that rotated the token a moment ago: use its tokens.
       const raced = await this.adoptNewerStoredTokens(t);
       if (raced) return raced;
+      // Its tokens are newer than ours but their access token is used up as well: refresh with them. Signing out
+      // here would wipe them for every tab. Only if they are newer: an older pair left in storage (a write that
+      // failed) is a rotated token, and presenting it would revoke the session.
+      const stored = this.tokens;
+      if (stored !== t && stored !== null && stored.expiresAt > t.expiresAt) continue;
       await this.saveTokens(null);
       this.setState(SIGNED_OUT_STATE);
       return null;
     }
-    throw errorFrom(res.status, body);
+    // Tabs kept handing each other tokens that were refused: not an answer. The caller tries again later.
+    throw new RxFerrixError("Could not refresh the session", { code: "network_error" });
+  }
+
+  /**
+   * `POST /api/auth/refresh`, sent again while it is unanswered (see {@link REFRESH_ASK_AGAIN_MS}) and once more
+   * right away when a request fails outright; the first complete answer wins. An answer whose body can't be read
+   * counts as none: the server may have rotated the token, and only asking again gets the new one.
+   */
+  private postRefresh(refreshToken: string, stillWanted: () => boolean): Promise<RefreshAnswer> {
+    return new Promise<RefreshAnswer>((resolve, reject) => {
+      const abort = typeof AbortController === "function" ? new AbortController() : null;
+      const timers: ReturnType<typeof setTimeout>[] = [];
+      let asksLeft = REFRESH_ASK_AGAIN_MS.length;
+      let pending = 0;
+      let done = false;
+      const finish = (settle: () => void): void => {
+        if (done) return;
+        done = true;
+        for (const timer of timers) clearTimeout(timer);
+        settle();
+        // The requests still out: their answers are no longer needed (the server gives each the same one).
+        abort?.abort();
+      };
+      const fail = (cause: unknown): void =>
+        finish(() =>
+          // Offline: keep the session; the next reconnect or AuthError tries again.
+          reject(new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause })),
+        );
+      const ask = (): void => {
+        pending++;
+        const request = this.fetchImpl(`${this.baseUrl}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken }),
+          ...(abort ? { signal: abort.signal } : {}),
+        }).then(async (res): Promise<RefreshAnswer> => {
+          const body = (await res.json().catch(() => null)) as unknown;
+          if (res.ok && body === null) throw new Error("the refresh answer could not be read");
+          return { ok: res.ok, status: res.status, body };
+        });
+        request.then(
+          (answer) => finish(() => resolve(answer)),
+          (cause: unknown) => {
+            pending--;
+            if (done) return;
+            // Failed outright (a network that just changed): the request may have arrived all the same.
+            if (asksLeft > 0 && stillWanted()) {
+              asksLeft--;
+              ask();
+            } else if (pending === 0) {
+              fail(cause);
+            }
+          },
+        );
+      };
+      for (const ms of REFRESH_ASK_AGAIN_MS) {
+        timers.push(
+          setTimeout(() => {
+            if (!done && asksLeft > 0 && stillWanted()) {
+              asksLeft--;
+              ask();
+            }
+          }, ms),
+        );
+      }
+      timers.push(setTimeout(() => fail(new Error(`no answer within ${REFRESH_TIMEOUT_MS} ms`)), REFRESH_TIMEOUT_MS));
+      ask();
+    });
   }
 
   private listenToOtherTabs(): void {

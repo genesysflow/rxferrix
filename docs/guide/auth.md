@@ -188,7 +188,7 @@ In **Settings → Email templates**, customize the subject and HTML for verifica
 
 ## Sessions, settings, and user removal
 
-Built-in access tokens last 15 minutes by default; refresh tokens rotate. Sign-out, session revocation, user deletion, or detected refresh-token reuse revokes affected sockets promptly. The refresh reuse grace period is 10 seconds by default. External tokens have no local session row; deleting their provisioned user also revokes their sockets.
+Built-in access tokens last 15 minutes by default; refresh tokens rotate. Sign-out, session revocation, user deletion, or detected refresh-token reuse revokes affected sockets promptly. A rotated refresh token presented again revokes its session, except for 10 seconds after the rotation (`refresh_reuse_grace`): within that window the same refresh gets the same new refresh token again (with a new access token), so an answer lost on the network or two tabs refreshing at once do not end the session. The client asks again while a refresh is unanswered; an answer that stays lost for longer than the window still ends the session, and the user signs in again. External tokens have no local session row; deleting their provisioned user also revokes their sockets.
 
 The data directory's `auth_secret.key` signs built-in sessions and encrypts secrets. Preserve it when moving or restoring the app.
 

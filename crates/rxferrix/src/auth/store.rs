@@ -590,7 +590,7 @@ pub(crate) enum RefreshOutcome {
     Invalid,
     /// The session expired (and was deleted).
     Expired,
-    /// Rotated moments ago (within the grace window): probably a concurrent refresh from another tab.
+    /// Rotated moments ago (within the grace window), and its successor was rotated since: two refreshes behind.
     Stale,
     /// An already-rotated token was presented again: the session has been revoked.
     Reused,
@@ -606,7 +606,9 @@ pub(crate) async fn rotate_refresh_token(
     grace_ms: f64,
 ) -> crate::Result<RefreshOutcome> {
     let hash = keys.hash_token(refresh);
-    let new_refresh = random_token();
+    // Derived from the token it replaces (`Keys::next_refresh_token`), so that the same refresh asked again within
+    // the grace window can be given the same answer.
+    let new_refresh = keys.next_refresh_token(refresh);
     let new_hash = keys.hash_token(&new_refresh);
     write(app, |db| async move {
         let current = db
@@ -649,7 +651,22 @@ pub(crate) async fn rotate_refresh_token(
             .first()
             .await?;
         match used {
-            Some(u) if now - u.rotated_at < grace_ms => Ok(RefreshOutcome::Stale),
+            // Rotated a moment ago. If its successor is still the session's token, this is the same refresh asked
+            // again (the answer was lost on the way, or two tabs refreshed at once): the same answer, and nothing
+            // changes. Rotating once more instead would leave whoever did get the first answer holding a token
+            // that, past the grace window, revokes the session.
+            Some(u) if now - u.rotated_at < grace_ms => {
+                let Some(s) = db.get(u.session).await? else { return Ok(RefreshOutcome::Invalid) };
+                if !ct_eq(&s.refresh_token_hash, &new_hash) || s.expires_at <= now {
+                    return Ok(RefreshOutcome::Stale);
+                }
+                let principal = match (s.user, s.admin) {
+                    (Some(u), _) => Principal::User(u),
+                    (None, Some(a)) => Principal::Admin(a),
+                    (None, None) => anyhow::bail!("session {} has no owner", s.id),
+                };
+                Ok(RefreshOutcome::Rotated { session: s.id, principal, refresh: new_refresh, expires_at: s.expires_at })
+            }
             Some(u) => {
                 delete_session_in(&db, u.session).await?;
                 Ok(RefreshOutcome::Reused)

@@ -271,10 +271,13 @@ endpoints' error shape, without `logLines`).
   the session still exists and is unexpired (so sign-out and revocation apply immediately to new sockets and HTTP
   calls; sockets already authenticated with it get `AuthError` right away, guarantee 10). The access token never
   outlives its session (its `exp` is capped at the session's expiry).
-- **Refresh token**: 43 random URL-safe characters (256 bits), stored only as a keyed BLAKE3 hash. Every refresh
-  rotates it. Presenting an already-rotated refresh token revokes the whole session (reuse detection), except within
-  10 seconds of its rotation, when it is answered with `stale_refresh_token` and the session survives (two tabs
-  refreshing at once). Sessions expire after 30 days without a refresh (sliding). Impersonation sessions (minted by an
+- **Refresh token**: 43 URL-safe characters (256 bits), stored only as a keyed BLAKE3 hash. A session's first one is
+  random; every refresh rotates it to a successor derived from it with the server's key. Presenting an
+  already-rotated refresh token revokes the whole session (reuse detection), except within 10 seconds of its rotation
+  (`refresh_reuse_grace`): then the same refresh is answered again with the same new refresh token (the first answer
+  was lost on the way, or two tabs refreshed at once), or, if that successor was rotated too, with
+  `stale_refresh_token`; either way the session survives. The client gives a refresh request 4 seconds and asks once
+  more, so its second attempt falls inside that window. Sessions expire after 30 days without a refresh (sliding). Impersonation sessions (minted by an
   admin, `impersonatedBy` set) have a fixed expiry that refreshing never extends.
 - **External tokens** (`AuthConfig::jwt`, docs/CONTRACT.md §1.5): a JWT from a configured issuer (Clerk, Auth0,
   Supabase, any OIDC provider) is accepted wherever an access token is, on `Authenticate` and as an HTTP Bearer token.
@@ -298,7 +301,7 @@ spread over many addresses still meets the same budget. Sign-out shares the refr
 | `GET /api/auth/providers` | | `{ password, magicLink, signups, oauth: ["github", …] }` |
 | `POST /api/auth/signup` | `{ email, password, name? }` | `Tokens`, or `{ verificationRequired: true }`. 400 `email_in_use`, `weak_password` (< 8 chars), `invalid_password` (> 256 chars), `invalid_email`; 403 `signups_disabled`. Sends a verification email when email is configured. |
 | `POST /api/auth/signin` | `{ email, password }` | `Tokens`, or `MfaRequired` (below) when the user has two-factor authentication. 401 `invalid_credentials` for both unknown emails and wrong passwords (same timing); 403 `email_not_verified` when verification is required. |
-| `POST /api/auth/refresh` | `{ refreshToken }` | `Tokens` (new refresh token). 401 `invalid_refresh_token`, `stale_refresh_token`, `refresh_token_reused` (session revoked), `session_expired`. |
+| `POST /api/auth/refresh` | `{ refreshToken }` | `Tokens` (new refresh token; the same one again for a token rotated within the grace window). 401 `invalid_refresh_token`, `stale_refresh_token`, `refresh_token_reused` (session revoked), `session_expired`. |
 | `POST /api/auth/signout` | `{ refreshToken? }` and/or `Authorization: Bearer` | `{}` always. Deletes the session (an unknown token is looked up without a write). Rate limited with refreshes. |
 | `POST /api/auth/verify-email/request` | `{ email, redirectTo? }` | `{}` always (no enumeration). Emails unverified users. |
 | `POST /api/auth/verify-email/confirm` | `{ token }` or `{ email, code }` | `{}`. 400 `invalid_code`. |

@@ -381,15 +381,31 @@ async fn refresh_rotation_reuse_detection_and_sign_out() {
     assert_eq!(http.post_with("/api/auth/signout", Some(&access), json!({})).await.0, 200);
     assert_eq!(http.call("query", &whoami, json!({}), Some(&access)).await.0, 401);
 
-    // Within the grace window a just-rotated token is "stale" and does NOT revoke the session (two tabs racing).
+    // Within the grace window, refreshing a just-rotated token again gives the same new refresh token and does NOT
+    // revoke the session: the answer was lost on the way, or two tabs refreshed at once.
     let t2 = TestApp::with_auth(config(&mailer)).await.unwrap();
     let http2 = Http::new(t2.serve().await.unwrap());
     let a = http2.sign_up("dave@example.com", "correct horse").await;
     let (_, b) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&a, "refreshToken") })).await;
+    assert_ne!(token(&b, "refreshToken"), token(&a, "refreshToken"), "rotated");
+    for _ in 0..2 {
+        let (s, again) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&a, "refreshToken") })).await;
+        assert_eq!(s, 200, "{again}");
+        assert_eq!(token(&again, "refreshToken"), token(&b, "refreshToken"), "the same successor");
+        assert_eq!(http2.call("query", &whoami, json!({}), Some(&token(&again, "accessToken"))).await.0, 200);
+    }
+    // Once its successor was rotated too, it is two steps behind: stale, and the session still survives.
+    let (s, c) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&b, "refreshToken") })).await;
+    assert_eq!(s, 200);
     let (s, stale) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&a, "refreshToken") })).await;
     assert_eq!((s, code_of(&stale)), (401, "stale_refresh_token"));
-    let (s, _) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&b, "refreshToken") })).await;
+    let (s, _) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&c, "refreshToken") })).await;
     assert_eq!(s, 200, "the session survives");
+    // Sessions don't share successors: another session's tokens are its own.
+    let other = http2.sign_in("dave@example.com", "correct horse").await.1;
+    let (_, other_next) =
+        http2.post("/api/auth/refresh", json!({ "refreshToken": token(&other, "refreshToken") })).await;
+    assert_ne!(token(&other_next, "refreshToken"), token(&b, "refreshToken"));
 }
 
 #[tokio::test]

@@ -171,8 +171,14 @@ interface StoredTokens {
 
 /** Refresh access tokens that expire within this window instead of using them. */
 const EXPIRY_LEEWAY_MS = 10_000;
-/** A refresh request that hasn't answered by then is given up (a black-holed connection after a network switch). */
-const REFRESH_TIMEOUT_MS = 10_000;
+/**
+ * A refresh request that hasn't answered by then is given up (a black-holed connection after a network switch) and
+ * asked once more. The server may have rotated the token for a request whose answer never arrived; it gives the same
+ * answer to the same request for 10 seconds (its default `refresh_reuse_grace`), and revokes the session for a
+ * rotated token presented later than that. Two attempts of 4 seconds end inside that window.
+ */
+const REFRESH_TIMEOUT_MS = 4_000;
+const REFRESH_ATTEMPTS = 2;
 
 function defaultStorage(): AuthStorage {
   try {
@@ -409,37 +415,50 @@ export class RxFerrixAuth {
     if (!before) return null;
     const adopted = await this.adoptNewerStoredTokens(before);
     if (adopted) return adopted;
-    const t = this.tokens;
-    if (!t) return null;
-    let res: Response;
-    try {
-      const timeout = (AbortSignal as { timeout?: (ms: number) => AbortSignal }).timeout?.(REFRESH_TIMEOUT_MS);
-      res = await this.fetchImpl(`${this.baseUrl}/api/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refreshToken: t.refreshToken }),
-        ...(timeout ? { signal: timeout } : {}),
-      });
-    } catch (e) {
-      // Offline: keep the session; the next reconnect or AuthError tries again.
-      throw new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: e });
-    }
-    const body = (await res.json().catch(() => null)) as unknown;
-    if (epoch !== this.epoch || this.tokens !== t) return this.tokens?.accessToken ?? null;
-    if (res.ok) {
-      const next = toStored(body as AuthTokens);
-      await this.saveTokens(next);
-      return next.accessToken;
-    }
-    if (res.status === 401) {
+    // With our own tokens, then with each newer pair another tab turns out to have stored (a couple at most).
+    for (let round = 0; round < 3; round++) {
+      const t = this.tokens;
+      if (!t) return null;
+      const res = await this.postRefresh(t.refreshToken, () => epoch === this.epoch && this.tokens === t);
+      const body = (await res.json().catch(() => null)) as unknown;
+      if (epoch !== this.epoch || this.tokens !== t) return this.tokens?.accessToken ?? null;
+      if (res.ok) {
+        const next = toStored(body as AuthTokens);
+        await this.saveTokens(next);
+        return next.accessToken;
+      }
+      if (res.status !== 401) throw errorFrom(res.status, body);
       // Lost a race with another tab that rotated the token a moment ago: use its tokens.
       const raced = await this.adoptNewerStoredTokens(t);
       if (raced) return raced;
+      // Its tokens are newer than ours but their access token is used up as well: refresh with them. Signing out
+      // here would wipe them for every tab.
+      if (this.tokens !== t) continue;
       await this.saveTokens(null);
       this.setState(SIGNED_OUT_STATE);
       return null;
     }
-    throw errorFrom(res.status, body);
+    return this.tokens?.accessToken ?? null;
+  }
+
+  /** `POST /api/auth/refresh`, asked again when no answer comes (see {@link REFRESH_TIMEOUT_MS}). */
+  private async postRefresh(refreshToken: string, stillWanted: () => boolean): Promise<Response> {
+    let failure: unknown;
+    for (let attempt = 0; attempt < REFRESH_ATTEMPTS && (attempt === 0 || stillWanted()); attempt++) {
+      try {
+        const timeout = (AbortSignal as { timeout?: (ms: number) => AbortSignal }).timeout?.(REFRESH_TIMEOUT_MS);
+        return await this.fetchImpl(`${this.baseUrl}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken }),
+          ...(timeout ? { signal: timeout } : {}),
+        });
+      } catch (e) {
+        failure = e;
+      }
+    }
+    // Offline: keep the session; the next reconnect or AuthError tries again.
+    throw new RxFerrixError("Could not reach the server to refresh the session", { code: "network_error", cause: failure });
   }
 
   private listenToOtherTabs(): void {

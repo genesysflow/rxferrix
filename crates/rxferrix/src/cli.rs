@@ -84,7 +84,7 @@ enum AfterHandover {
 struct HealthArgs {
     /// The server's health endpoint. With `--https`, the redirect listener answers it over plain HTTP
     /// (`http://127.0.0.1:<--http-redirect port>/api/health`).
-    #[arg(env = "RXFERRIX_HEALTH_URL", default_value = "http://127.0.0.1:8090/api/health")]
+    #[arg(env = "RXFERRIX_HEALTH_URL", default_value = DEFAULT_HEALTH_URL)]
     url: String,
 }
 
@@ -575,14 +575,24 @@ fn codegen(out: &Path) -> crate::Result<()> {
     Ok(())
 }
 
+/// Where `health` asks when it isn't told: the default `--http` address.
+const DEFAULT_HEALTH_URL: &str = "http://127.0.0.1:8090/api/health";
+
+/// The URL `health` asks: the one given, or the default for a blank one (`RXFERRIX_HEALTH_URL=` in a compose file
+/// whose variable is unset means "not set", not "ask nothing").
+fn health_url(given: &str) -> &str {
+    if given.trim().is_empty() { DEFAULT_HEALTH_URL } else { given.trim() }
+}
+
 fn health(args: HealthArgs) -> crate::Result<()> {
+    let url = health_url(&args.url);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let ok = rt.block_on(async {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build()?;
-        anyhow::Ok(client.get(&args.url).send().await.map(|r| r.status().is_success()).unwrap_or(false))
+        anyhow::Ok(client.get(url).send().await.map(|r| r.status().is_success()).unwrap_or(false))
     })?;
     if !ok {
-        eprintln!("unhealthy: {}", args.url);
+        eprintln!("unhealthy: {url}");
         std::process::exit(1);
     }
     Ok(())
@@ -1189,6 +1199,15 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("app").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_blank_health_url_is_the_default() {
+        assert_eq!(health_url(""), DEFAULT_HEALTH_URL);
+        assert_eq!(health_url("  "), DEFAULT_HEALTH_URL);
+        assert_eq!(health_url(" http://127.0.0.1:8080/api/health "), "http://127.0.0.1:8080/api/health");
+        let cli = parse(&["health"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Health(ref a)) if health_url(&a.url) == DEFAULT_HEALTH_URL));
     }
 
     #[test]

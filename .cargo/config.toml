@@ -1,8 +1,10 @@
 # Build flags for the bundled SQLite (libsqlite3-sys reads LIBSQLITE3_FLAGS).
 #
-# rusqlite's bundled build defines SQLITE_ENABLE_MEMORY_MANAGEMENT, which makes every connection share ONE page cache
-# guarded by one global mutex, and leaves SQLITE_DEFAULT_MEMSTATUS on, which takes another global mutex on every
-# allocation. Together they serialize all reader connections: measured, N parallel readers ran no faster than one.
+# rusqlite's bundled build used to define SQLITE_ENABLE_MEMORY_MANAGEMENT (up to libsqlite3-sys 0.38), which makes
+# every connection share ONE page cache guarded by one global mutex, and it leaves SQLITE_DEFAULT_MEMSTATUS on, which
+# takes another global mutex on every allocation. Together they serialize all reader connections: measured, N parallel
+# readers ran no faster than one. libsqlite3-sys 0.39 (rusqlite 0.41) no longer defines the first, so its `-U` below
+# changes nothing with the version locked here; it stays in case a build flag brings the option back.
 # Without them reads scale with threads (see docs/DESIGN.md, "Measurements"). RxFerrix never uses sqlite3_release_memory or
 # sqlite3_soft_heap_limit, which is all ENABLE_MEMORY_MANAGEMENT is for. Apps built outside this workspace should set
 # the same variable (rxferrix logs a warning at startup when it is missing).

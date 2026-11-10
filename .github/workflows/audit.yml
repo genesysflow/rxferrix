@@ -11,7 +11,7 @@ name: audit
 on:
   push:
     branches: [master]
-    paths: ["Cargo.lock", ".github/workflows/audit.yml"]
+    paths: ["Cargo.lock", "**/Cargo.toml", ".github/workflows/audit.yml"]
   pull_request:
     paths: ["Cargo.lock", "**/Cargo.toml", ".github/workflows/audit.yml"]
   schedule:

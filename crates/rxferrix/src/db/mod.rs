@@ -834,7 +834,7 @@ impl Drop for WriterGuard {
 ///
 /// Two global mutexes in SQLite serialize reader connections that run on different threads: the memory statistics
 /// (`SQLITE_CONFIG_MEMSTATUS`, taken on every allocation) and, when SQLite is built with
-/// `SQLITE_ENABLE_MEMORY_MANAGEMENT` (rusqlite's bundled build defines it), the page cache that all connections then
+/// `SQLITE_ENABLE_MEMORY_MANAGEMENT` (rusqlite's bundled build defined it up to libsqlite3-sys 0.38), the page cache that all connections then
 /// share. With both, N readers ran no faster than one. Memory statistics are turned off here (if SQLite is not
 /// initialized yet; the workspace also builds it with `SQLITE_DEFAULT_MEMSTATUS=0`); the shared page cache can only
 /// be avoided at build time, so its presence is logged (see `.cargo/config.toml`, which `rxferrix new` gives every app).

@@ -13,3 +13,6 @@ fx_data/
 .github/
 Dockerfile
 .dockerignore
+# Secrets for `docker compose` (deploy/docker/compose.yaml reads app.env): never part of an image layer.
+*.env
+**/*.env

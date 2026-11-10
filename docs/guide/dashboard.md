@@ -6,7 +6,7 @@ Every default-feature server embeds a dashboard at `/_/`, such as http://127.0.0
 
 On first startup, open the setup link printed in the backend terminal. It contains a one-time token for creating the first administrator.
 
-For offline setup, use the app's command:
+To create one while the server is stopped (the `admin` commands refuse a data directory a server is using), use the app's command:
 
 ```sh
 cargo run -- admin create you@example.com

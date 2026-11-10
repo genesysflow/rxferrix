@@ -609,6 +609,29 @@ fn check(args: CheckArgs) -> crate::Result<()> {
 }
 
 fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
+    let dir = match &cmd {
+        AdminCommand::Create(a) | AdminCommand::ResetPassword(a) => a.dir.clone(),
+        AdminCommand::Disable2fa(a) => a.dir.clone(),
+    };
+    // Offline (`crate::ops::lock`): a second process writing to the database of a running server commits behind its
+    // back. The server wouldn't end the sessions a reset ends, and its next commit would take the same number, so
+    // replication and a takeover's catch-up would miss this one.
+    const OFFLINE: &str = "`admin` works on a data directory no server is using (a running server creates its \
+                           first administrator with the setup link it prints)";
+    // Said before asking for a password; the lock itself is taken after the prompt, which can stay open for as
+    // long as someone leaves it: a server starting meanwhile (a takeover waits a minute for it) must not find the
+    // directory in use.
+    if crate::ops::DirLock::is_locked(&dir) {
+        crate::ops::DirLock::acquire(&dir).context(OFFLINE)?;
+    }
+    let password = match &cmd {
+        AdminCommand::Create(a) | AdminCommand::ResetPassword(a) => Some(match &a.password {
+            Some(p) => p.clone(),
+            None => read_password()?,
+        }),
+        AdminCommand::Disable2fa(_) => None,
+    };
+    let _lock = crate::ops::DirLock::acquire(&dir).context(OFFLINE)?;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     if let AdminCommand::Disable2fa(args) = cmd {
         return rt.block_on(async move {
@@ -626,10 +649,7 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
         AdminCommand::ResetPassword(a) => (a, false),
         AdminCommand::Disable2fa(_) => unreachable!("handled above"),
     };
-    let password = match args.password {
-        Some(p) => p,
-        None => read_password()?,
-    };
+    let password = password.expect("read above for create and reset-password");
     rt.block_on(async move {
         let app = App::open(&args.dir, AppOptions { auth, ..Default::default() }).await?;
         let email = crate::auth::normalize_email(&args.email)?;
@@ -1090,7 +1110,8 @@ fn serve(
             // Printed to the console rather than logged: a one-time secret, valid until used or until restart.
             println!(
                 "\nNo administrator exists yet. Create one at:\n\n    {}/_/setup#token={token}\n\n\
-                 (or run `admin create <email>`). The link works once and only until the server restarts.\n",
+                 The link works once and only until the server restarts (`admin create <email>` does the same \
+                 while the server is stopped).\n",
                 public_url.trim_end_matches('/')
             );
         }
@@ -1188,6 +1209,31 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Codegen(ref a)) if a.out == Path::new("rxferrix-generated")));
         let cli = parse(&["codegen", "--out", "../web/src/rxferrix"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Codegen(ref a)) if a.out == Path::new("../web/src/rxferrix")));
+    }
+
+    /// `admin` writes to the database: never next to a server that has it open.
+    #[test]
+    fn admin_refuses_a_data_directory_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |password: &str| AdminArgs {
+            email: "a@b.c".into(),
+            password: Some(password.into()),
+            dir: dir.path().to_path_buf(),
+        };
+        let lock = crate::ops::DirLock::acquire(dir.path()).unwrap();
+        let email = AdminEmailArgs { email: "a@b.c".into(), dir: dir.path().to_path_buf() };
+        for cmd in [
+            AdminCommand::Create(args("a long enough password")),
+            AdminCommand::ResetPassword(args("another long password")),
+            AdminCommand::Disable2fa(email),
+        ] {
+            let err = format!("{:#}", admin(cmd, AuthConfig::default()).unwrap_err());
+            assert!(err.contains("is in use"), "{err}");
+        }
+        assert!(!dir.path().join("data.db").exists(), "nothing was opened");
+        drop(lock);
+        admin(AdminCommand::Create(args("a long enough password")), AuthConfig::default()).unwrap();
+        admin(AdminCommand::ResetPassword(args("another long password")), AuthConfig::default()).unwrap();
     }
 
     #[test]

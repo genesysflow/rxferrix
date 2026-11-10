@@ -581,16 +581,22 @@ impl AuthService {
         AuthTokens { access_token, refresh_token: refresh, expires_in: ttl, user_id, admin_id }
     }
 
-    /// Start a session. A user sign-in (`method`) then runs the `on_sign_in` hook.
+    /// Start a session. A user sign-in (`method`) then runs the `on_sign_in` hook. `password_hash`: the hash a
+    /// password sign-in was just checked against; the session is refused if it changed meanwhile, or if the principal
+    /// is gone (`store::create_session`).
     async fn start_session(
         &self,
         app: &App,
         principal: Principal,
         client: ClientInfo,
         method: Option<SignInMethod>,
+        password_hash: Option<String>,
     ) -> AuthResult<AuthTokens> {
         let (now, ttl) = (now_ms(), self.session_ttl_ms());
-        let (session, refresh) = store::create_session(app, &self.keys, principal, client.clone(), now, ttl).await?;
+        let created =
+            store::create_session(app, &self.keys, principal, client.clone(), now, ttl, password_hash).await?;
+        // Deleted, or the password was reset, while this sign-in was being checked: as if the check had failed.
+        let Some((session, refresh)) = created else { return Err(AuthFailure::invalid_credentials()) };
         let tokens = self.issue(session, principal, refresh, now + ttl);
         if let (Some(method), Principal::User(user), Some(hook)) = (method, principal, &self.config.on_sign_in) {
             hook(app.clone(), SignIn { user, session, method, client }).await;
@@ -607,10 +613,23 @@ impl AuthService {
         client: ClientInfo,
         method: Option<SignInMethod>,
     ) -> AuthResult<SignInOutcome> {
+        self.finish_password_sign_in(app, principal, client, method, None).await
+    }
+
+    /// [`Self::finish_sign_in`] after checking a password against `password_hash` (see [`Self::start_session`]). With
+    /// a second factor, the session starts later, from the second-factor token, without this check.
+    async fn finish_password_sign_in(
+        &self,
+        app: &App,
+        principal: Principal,
+        client: ClientInfo,
+        method: Option<SignInMethod>,
+        password_hash: Option<String>,
+    ) -> AuthResult<SignInOutcome> {
         if super::mfa::has_confirmed_factor(app, principal).await? {
             return Ok(self.mfa_challenge(principal, method, None));
         }
-        Ok(SignInOutcome::Tokens(self.start_session(app, principal, client, method).await?))
+        Ok(SignInOutcome::Tokens(self.start_session(app, principal, client, method, password_hash).await?))
     }
 
     /// The second-factor step of a sign-in, carrying a reset's sealed new password hash (`pending_password`).
@@ -643,12 +662,12 @@ impl AuthService {
         client: ClientInfo,
         method: Option<SignInMethod>,
     ) -> AuthResult<AuthTokens> {
-        self.start_session(app, principal, client, method).await
+        self.start_session(app, principal, client, method, None).await
     }
 
     /// Mint tokens for `user` without credentials, e.g. from a test or an admin tool.
     pub async fn sign_in_as(&self, app: &App, user: Id<User>) -> crate::Result<AuthTokens> {
-        self.start_session(app, Principal::User(user), ClientInfo::default(), None)
+        self.start_session(app, Principal::User(user), ClientInfo::default(), None, None)
             .await
             .map_err(|f| anyhow::anyhow!(f.error))
     }
@@ -735,7 +754,7 @@ impl AuthService {
             return Ok(SignUpResult::VerificationRequired);
         }
         Ok(SignUpResult::SignedIn(
-            self.start_session(app, Principal::User(user), client, Some(SignInMethod::SignUp)).await?,
+            self.start_session(app, Principal::User(user), client, Some(SignInMethod::SignUp), None).await?,
         ))
     }
 
@@ -759,22 +778,38 @@ impl AuthService {
         };
         // An imported (bcrypt) hash becomes argon2id once the password is known to be right.
         let rehash = stored.clone().filter(|h| password::needs_rehash(h)).map(|h| (h, password.clone()));
+        // The hash the password is checked against: the session only starts if it is still the user's by then.
+        let mut checked = stored.clone();
         // Always runs argon2 (against a dummy hash for unknown accounts), so timing reveals nothing.
         if !password::verify(password, stored).await {
             return Err(AuthFailure::invalid_credentials());
         }
         let user = user.expect("verified against a real hash");
         if let Some((old_hash, password)) = rehash {
-            let upgraded =
-                async { store::upgrade_password_hash(app, user.id, old_hash, password::hash(password).await?).await };
-            if let Err(e) = upgraded.await {
-                tracing::warn!(user = %user.id, "could not upgrade an imported password hash: {e:#}");
+            let upgraded = async {
+                let new_hash = password::hash(password.clone()).await?;
+                let replaced = store::upgrade_password_hash(app, user.id, old_hash, new_hash.clone()).await?;
+                Ok::<_, anyhow::Error>(replaced.then_some(new_hash))
+            };
+            match upgraded.await {
+                Ok(Some(new_hash)) => checked = Some(new_hash),
+                // The hash changed meanwhile. Usually another sign-in of this user upgraded it first (two tabs, a
+                // retry): the password is as right against that hash, and the session must not be refused for it.
+                // After a reset it isn't, and the check at the session's start refuses.
+                Ok(None) => {
+                    let current = store::password_hash_of(app, user.id).await?;
+                    if current.is_some() && password::verify(password, current.clone()).await {
+                        checked = current;
+                    }
+                }
+                Err(e) => tracing::warn!(user = %user.id, "could not upgrade an imported password hash: {e:#}"),
             }
         }
         if self.config.verification_required() && !user.email_verified {
             return Err(AuthFailure::new(403, "email_not_verified", "Verify your email address before signing in"));
         }
-        self.finish_sign_in(app, Principal::User(user.id), client, Some(SignInMethod::Password)).await
+        let method = Some(SignInMethod::Password);
+        self.finish_password_sign_in(app, Principal::User(user.id), client, method, checked).await
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1205,7 +1240,7 @@ impl AuthService {
         let hash = password::hash(password).await?;
         let admin = store::create_admin(app, email, hash, true).await??;
         *self.setup_token_hash.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.start_session(app, Principal::Admin(admin), client, None).await
+        self.start_session(app, Principal::Admin(admin), client, None, None).await
     }
 }
 

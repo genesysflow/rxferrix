@@ -4,7 +4,9 @@
 //! A rule's label says what it limits:
 //! - `/…`: HTTP requests whose path starts with it (`/api/`, `/api/storage/upload`, an app route, static files),
 //!   checked by a middleware before the handler runs ([`limit_requests`]). The longest matching prefix decides, and
-//!   the requests it counts don't also count against shorter ones.
+//!   the requests it counts don't also count against shorter ones. Paths compare as the file server reads them
+//!   (percent-decoded, without empty and `.` segments: `//files/x` and `/%66iles/x` are `/files/x`), a label
+//!   included, and by exact case: on a file system that ignores case, `/FILES/x` is the same file and no match.
 //! - `module:function`, either side `*`, or a lone `*`: app functions called by clients, over HTTP (`/api/query`,
 //!   `/api/mutation`, `/api/action`) and over the WebSocket (mutations and actions; query subscriptions are not
 //!   counted). The most specific match decides: `messages:send`, then `messages:*`, then `*:send`, then `*`.
@@ -89,7 +91,8 @@ fn parse_label(label: &str) -> std::result::Result<Target, String> {
         if !label.bytes().all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#') {
             return Err(format!("rate limit `{label}`: a path has no spaces, query or fragment"));
         }
-        return Ok(Target::Path(label.to_string()));
+        // Compared with the path as the file server reads it (`limit_requests`): written the same way.
+        return Ok(Target::Path(crate::ops::web::canonical_path(label).into_owned()));
     }
     if label == "*" {
         return Ok(Target::Function { module: None, name: None });
@@ -311,6 +314,10 @@ pub(crate) async fn limit_requests(State(app): State<App>, request: Request, nex
     }
     let effective = app.auth().current();
     let rules = &effective.rate_limits;
+    // Rules are prefixes of the path as it is served: the file server decodes and tidies what it is given, so
+    // `//downloads/x` or `/%64ownloads/x` is the file of `/downloads/x` and counts against its rule.
+    let canonical = crate::ops::web::canonical_path(path);
+    let path = canonical.as_ref();
     let Some(first) = rules.paths.iter().find(|r| r.matches_path(path)) else {
         return next.run(request).await;
     };
@@ -381,6 +388,9 @@ mod tests {
     #[test]
     fn labels_are_paths_or_function_patterns() {
         assert_eq!(parse_label("/api/"), Ok(Target::Path("/api/".into())));
+        // A label is read like a request path: the decoded form is what requests are compared with.
+        assert_eq!(parse_label("/files/r%C3%A9sum%C3%A9/"), Ok(Target::Path("/files/résumé/".into())));
+        assert_eq!(parse_label("//files/./x"), Ok(Target::Path("/files/x".into())));
         assert_eq!(parse_label("*"), Ok(Target::Function { module: None, name: None }));
         assert_eq!(parse_label("*:create"), Ok(Target::Function { module: None, name: Some("create".into()) }));
         assert_eq!(

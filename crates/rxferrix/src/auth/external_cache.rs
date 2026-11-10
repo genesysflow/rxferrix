@@ -10,7 +10,7 @@
 //!   `by_id` key); a log that no longer has the commits since the cursor drops everything. So a deleted user or an
 //!   account moved to another user is seen by the next call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use super::jwt::ExternalClaims;
@@ -111,13 +111,31 @@ impl Inner {
         }
         match log.entries_between(self.cursor, latest) {
             Some(entries) if !self.tokens.is_empty() => {
+                // The other document of each dropped token still lists it: without taking it out there too, each
+                // write to one and each verification that follows would add the token to the other's list once
+                // more. Collected first, so that a user with many tokens costs one pass over a list, not one per
+                // token.
+                let mut dropped: HashMap<[u8; 16], HashSet<[u8; 32]>> = HashMap::new();
                 for (index, key) in entries.iter().flat_map(|e| &e.writes) {
                     if watched.contains(index)
                         && let Ok(doc) = <[u8; 16]>::try_from(&key[..])
                         && let Some(tokens) = self.by_doc.remove(&doc)
                     {
                         for token in tokens {
-                            self.tokens.remove(&token);
+                            let Some(verified) = self.tokens.remove(&token) else { continue };
+                            for other in [*verified.user.as_bytes(), verified.account] {
+                                if other != doc {
+                                    dropped.entry(other).or_default().insert(token);
+                                }
+                            }
+                        }
+                    }
+                }
+                for (doc, tokens) in dropped {
+                    if let Some(listed) = self.by_doc.get_mut(&doc) {
+                        listed.retain(|token| !tokens.contains(token));
+                        if listed.is_empty() {
+                            self.by_doc.remove(&doc);
                         }
                     }
                 }
@@ -179,6 +197,23 @@ mod tests {
         let (log, cache, key) = (WriteLog::new(0), ExternalCache::default(), token_key("t"));
         cache.insert(&log, WATCHED, key, verified(100), 0);
         cache.insert(&log, WATCHED, key, verified(100), 0);
+        let inner = cache.inner.read().unwrap();
+        assert_eq!((inner.by_doc[&USER].len(), inner.by_doc[&ACCOUNT].len()), (1, 1));
+    }
+
+    /// A user document written again and again (a `lastSeen` field, a profile edit), the token verified after each:
+    /// the account's list must not grow by one every time.
+    #[test]
+    fn dropped_tokens_leave_no_mappings_behind() {
+        let (log, cache, key) = (WriteLog::new(0), ExternalCache::default(), token_key("t"));
+        for _ in 0..3 {
+            cache.insert(&log, WATCHED, key, verified(100), log.latest());
+            write(&log, 7, USER);
+            assert!(cache.get(&log, WATCHED, &key, 1).is_none());
+            let inner = cache.inner.read().unwrap();
+            assert!(inner.by_doc.is_empty() && inner.tokens.is_empty(), "{:?}", inner.by_doc);
+        }
+        cache.insert(&log, WATCHED, key, verified(100), log.latest());
         let inner = cache.inner.read().unwrap();
         assert_eq!((inner.by_doc[&USER].len(), inner.by_doc[&ACCOUNT].len()), (1, 1));
     }

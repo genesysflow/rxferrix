@@ -122,6 +122,16 @@ impl Workpool {
 
 /// Default [`SchedulerOptions::concurrency`].
 pub const DEFAULT_CONCURRENCY: usize = 10;
+/// `ms` milliseconds as a `Duration`, for values computed in floating point or read from stored rows: what isn't a
+/// number or is negative counts as none, and what a `Duration` can't hold as the longest one
+/// (`Duration::from_secs_f64` panics on all three).
+pub(crate) fn duration_from_ms(ms: f64) -> Duration {
+    if ms.is_nan() || ms <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
+}
+
 /// Default [`SchedulerOptions::history_after`].
 pub const DEFAULT_HISTORY_AFTER: Duration = Duration::from_secs(3600);
 /// Default [`SchedulerOptions::retention`].
@@ -390,5 +400,27 @@ pub async fn run_cron_now(ctx: &MutationCtx, name: String, force: Option<bool>) 
             "running",
             format!("The previous run of `{name}` hasn't finished; pass force to run it anyway"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn milliseconds_convert_without_panicking() {
+        assert_eq!(duration_from_ms(1500.0), Duration::from_millis(1500));
+        assert_eq!(duration_from_ms(0.25), Duration::from_micros(250));
+        for none in [0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(duration_from_ms(none), Duration::ZERO, "{none}");
+        }
+        // 2^64 seconds is the first value `Duration::from_secs_f64` panics on.
+        let limit_ms = 2f64.powi(64) * 1000.0;
+        for too_long in [limit_ms, limit_ms * 2.0, f64::MAX, f64::INFINITY] {
+            assert_eq!(duration_from_ms(too_long), Duration::MAX, "{too_long}");
+        }
+        assert!(duration_from_ms(limit_ms / 2.0) < Duration::MAX);
+        // What `sleep(Duration::MAX)` in a workflow stores.
+        assert_eq!(duration_from_ms(Duration::MAX.as_secs_f64() * 1000.0), Duration::MAX);
     }
 }

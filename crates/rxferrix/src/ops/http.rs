@@ -7,7 +7,8 @@
 //! - `GET /api/admin/backups/{name}` → the archive (`application/zstd`, attachment).
 //! - `DELETE /api/admin/backups/{name}` → `{ deleted: true }`, or 404 `not_found`.
 //! - `GET /api/admin/export/{table}?format=jsonl|csv` → the table, streamed from one consistent snapshot (secrets of
-//!   system tables masked as in the dashboard).
+//!   system tables masked as in the dashboard). With `format=csv&spreadsheet=true`, text a spreadsheet would run as
+//!   a formula gets a leading `'`.
 //! - `POST /api/admin/import/{table}?mode=insert|upsert|replace&format=jsonl|csv` with a JSONL or CSV body (at most
 //!   256 MiB) → `ImportReport`. App tables only.
 //! - `GET /api/admin/olap` → `{ enabled: false }` or `{ enabled: true, ...OlapStatus }` (`crate::olap`);
@@ -594,6 +595,8 @@ async fn restart(State(app): State<App>, headers: HeaderMap) -> Response {
 #[serde(default)]
 struct ExportQuery {
     format: Option<ExportFormat>,
+    /// CSV only: for opening in a spreadsheet (`export::defuse_formulas`).
+    spreadsheet: bool,
 }
 
 /// A `Write` that sends 64 KiB chunks into a channel (from a blocking task to a streamed response body).
@@ -631,6 +634,10 @@ async fn export_table(
         return AuthFailure::new(400, "invalid_request", "format must be jsonl or csv").into_response();
     };
     let format = q.format.unwrap_or_default();
+    let spreadsheet = q.spreadsheet;
+    if spreadsheet && format != ExportFormat::Csv {
+        return AuthFailure::new(400, "invalid_request", "spreadsheet applies to format=csv").into_response();
+    }
     let Ok(info) = app.db().catalog().table(&table).cloned() else {
         return not_found(format!("Table `{table}` does not exist"));
     };
@@ -639,9 +646,13 @@ async fn export_table(
     tokio::task::spawn_blocking(move || {
         let mut out = ChannelWriter { tx: tx.clone(), buf: Vec::new() };
         let name = info.name.clone();
-        let mask = move |doc: serde_json::Value| crate::dashboard::secrets::mask(&name, doc);
+        let system = crate::dashboard::secrets::is_system_table(&info.name);
+        let rewrite = move |doc: serde_json::Value| {
+            let doc = if system { crate::dashboard::secrets::mask(&name, doc) } else { doc };
+            if spreadsheet { export::defuse_formulas(doc) } else { doc }
+        };
         let transform: Option<&dyn Fn(serde_json::Value) -> serde_json::Value> =
-            if crate::dashboard::secrets::is_system_table(&info.name) { Some(&mask) } else { None };
+            if system || spreadsheet { Some(&rewrite) } else { None };
         let result = export::ReadTxn::open(&dir)
             .and_then(|txn| export::write_table(txn.conn(), info.number, format, transform, &mut out))
             .and_then(|_| Ok(out.flush()?));

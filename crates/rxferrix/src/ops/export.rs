@@ -186,6 +186,23 @@ pub fn csv_value(value: Option<&Value>) -> String {
     }
 }
 
+/// For a CSV that will be opened in a spreadsheet: a `'` in front of every top-level string that a spreadsheet would
+/// take for a formula (it starts with `=`, `+`, `-`, `@`, a tab or a carriage return), so that text a user typed
+/// into the app isn't run when an administrator opens the export. Numbers are left alone (`-5` stays a number), and
+/// so is everything nested, which is written as JSON. The result doesn't import back as it was: it is for reading.
+pub fn defuse_formulas(mut doc: Value) -> Value {
+    if let Value::Object(fields) = &mut doc {
+        for value in fields.values_mut() {
+            if let Value::String(text) = value
+                && text.starts_with(['=', '+', '-', '@', '\t', '\r'])
+            {
+                text.insert(0, '\'');
+            }
+        }
+    }
+    doc
+}
+
 /// Write one CSV record (fields joined by commas, terminated by CRLF).
 pub fn write_csv_record<W: Write>(out: &mut W, fields: impl IntoIterator<Item = String>) -> std::io::Result<()> {
     let mut first = true;
@@ -1021,6 +1038,30 @@ pub async fn import_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_a_spreadsheet_would_run_gets_a_quote() {
+        let doc = serde_json::json!({
+            "_id": "abc", "formula": "=HYPERLINK(\"http://x\")", "plus": "+1", "minus": "-1", "at": "@SUM(A1)",
+            "tab": "\tx", "plain": "a = b", "number": -5, "list": ["=1"], "nested": { "f": "=1" }, "none": null,
+        });
+        let safe = defuse_formulas(doc);
+        for (field, expected) in [
+            ("formula", "'=HYPERLINK(\"http://x\")"),
+            ("plus", "'+1"),
+            ("minus", "'-1"),
+            ("at", "'@SUM(A1)"),
+            ("tab", "'\tx"),
+            ("plain", "a = b"),
+            ("_id", "abc"),
+        ] {
+            assert_eq!(safe[field], expected, "{field}");
+        }
+        // Numbers stay numbers; what is nested is written as JSON, which starts with a bracket.
+        assert_eq!(safe["number"], -5);
+        assert_eq!(csv_value(safe.get("list")), "[\"=1\"]");
+        assert_eq!(csv_value(safe.get("nested")), "{\"f\":\"=1\"}");
+    }
 
     #[test]
     fn csv_escaping() {

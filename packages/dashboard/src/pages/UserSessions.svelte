@@ -14,6 +14,7 @@
   let revoking = $state<Set<string>>(new Set());
 
   async function revoke(id: string) {
+    if (!confirm("Revoke this session? Whoever uses it is signed out at once, on every connection it has open.")) return;
     revoking = new Set([...revoking, id]);
     try {
       await revokeSession({ session: id });

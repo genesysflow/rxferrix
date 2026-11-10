@@ -69,7 +69,7 @@
   let quick = $state("");
   let showSchema = $state(false);
   let selected = $state<Set<string>>(new Set());
-  let exporting = $state<ExportFormat | null>(null);
+  let exporting = $state<ExportFormat | "sheet" | null>(null);
 
   const browse = usePaginatedQuery(
     dashboard.documents,
@@ -200,9 +200,12 @@
   }
 
   // Only rows in view can be selected: a selection doesn't carry over to another table, index, filter, order or
-  // search, and rows that left the view (deleted elsewhere, or no longer matching) drop out of it.
+  // search, and rows that left the view (deleted elsewhere, or no longer matching) drop out of it. Keyed by a
+  // string, like the scroll position above: the table summary is a new object on every write to the table, and an
+  // effect that read `table.name` ran (and unticked every row) each time someone inserted a document.
+  const selectionKey = $derived(JSON.stringify([table.name, queryKey]));
   $effect(() => {
-    void [table.name, index?.name, JSON.stringify(applied), order, mode, searchText, searchIndex?.name];
+    void selectionKey;
     selected = new Set();
   });
   const visibleSelection = $derived.by(() => {
@@ -229,11 +232,13 @@
     }
   }
 
-  async function exportAs(format: ExportFormat) {
+  /** `sheet`: CSV for opening in a spreadsheet (formulas in the data are defused; not for importing again). */
+  async function exportAs(format: ExportFormat | "sheet") {
     exporting = format;
     try {
-      saveBlob(await exportTable(ctx.auth, table.name, format));
-      ctx.toast(`Exported ${table.name} as ${format.toUpperCase()}`);
+      const file = format === "sheet" ? "csv" : format;
+      saveBlob(await exportTable(ctx.auth, table.name, file, format === "sheet"));
+      ctx.toast(`Exported ${table.name} as ${file.toUpperCase()}`);
     } catch (e) {
       ctx.toast(`Export failed: ${e instanceof Error ? e.message : String(e)}`, "error");
     } finally {
@@ -300,6 +305,13 @@
         </button>
         <button onclick={() => exportAs("csv")} disabled={exporting !== null} title="Download every document as CSV">
           {#if exporting === "csv"}Exporting…{:else}<Icon name="download" size={14} />CSV{/if}
+        </button>
+        <button
+          onclick={() => exportAs("sheet")}
+          disabled={exporting !== null}
+          title="Download every document as CSV for opening in a spreadsheet: text that starts with =, +, - or @ gets a leading ' so it isn't run as a formula. To import the file again, use CSV."
+        >
+          {#if exporting === "sheet"}Exporting…{:else}<Icon name="download" size={14} />Sheet{/if}
         </button>
       </div>
       {#if visibleSelection.length > 0 && writable}

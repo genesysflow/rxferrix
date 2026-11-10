@@ -1266,6 +1266,15 @@ async fn ops_admin_backup_export_and_import_flows() {
             && csv.contains(",\"exported, \"\"quoted\"\"\"\r\n"),
         "{csv}"
     );
+    // For a spreadsheet: the same CSV (nothing here looks like a formula); only CSV has that variant.
+    let r = a
+        .req(Method::GET, "/api/admin/export/ops_docs?format=csv&spreadsheet=true", Some(&a.admin))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, csv.clone()));
+    let r = a.req(Method::GET, "/api/admin/export/ops_docs?spreadsheet=true", Some(&a.admin)).send().await.unwrap();
+    assert_eq!(r.status(), 400);
     let users = a
         .req(Method::GET, "/api/admin/export/_credentials", Some(&a.admin))
         .send()

@@ -55,7 +55,11 @@
   }
 
   async function cancel(job: ScheduledJob) {
-    if (job.state === "inProgress" && !confirm(`Stop the running action ${job.path}? It is signaled now and aborted at its next await after a grace period; mutations it already committed stay.`)) return;
+    const question =
+      job.state === "inProgress"
+        ? `Stop the running action ${job.path}? It is signaled now and aborted at its next await after a grace period; mutations it already committed stay.`
+        : `Cancel the scheduled ${job.path}? It will not run.`;
+    if (!confirm(question)) return;
     try {
       const outcome = await cancelJob({ id: job._id });
       if (outcome === "canceled") ctx.toast(job.state === "inProgress" ? "Canceling the running action" : "Job canceled");

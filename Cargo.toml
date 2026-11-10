@@ -13,7 +13,7 @@ readme = "README.md"
 [workspace.dependencies]
 # Versions checked on crates.io 2026-10-09
 axum = { version = "0.8.9", features = ["ws"] }
-tokio = { version = "1.53.2", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tokio-tungstenite = "0.30.0"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 linkme = "0.3.37"

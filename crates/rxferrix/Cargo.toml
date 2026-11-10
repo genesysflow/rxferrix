@@ -47,7 +47,7 @@ sha2 = "0.11.0"
 # TOTP second factors (RFC 6238, HMAC-SHA1).
 sha1 = "0.11.0"
 subtle = "2.6.1"
-tokio = { version = "1.53.2", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tower-http = { version = "0.7.1", features = ["cors"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -67,7 +67,7 @@ chrono-tz = "0.10.4"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 # Operations (`ops`): backup archives (.tar.zst), static frontend serving, TLS (certificate files and Let's Encrypt).
 tar = "0.4.46"
-zstd = { version = "0.14.1", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 mime_guess = "2.0.5"
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
@@ -119,7 +119,7 @@ nix = { version = "0.31.3", default-features = false, features = ["socket", "uio
 
 [dev-dependencies]
 # Paused time in tests (`#[tokio::test(start_paused = true)]`).
-tokio = { version = "1.53.2", features = ["full", "test-util"] }
+tokio = { version = "1.54.1", features = ["full", "test-util"] }
 # A failing `ObjectStore` wrapper in the replication tests (the trait is an `async_trait`).
 async-trait = "0.1.92"
 proptest = "1.11.0"

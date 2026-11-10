@@ -54,11 +54,25 @@ pub struct TableInfo {
     pub search_indexes: Vec<SearchIndexInfo>,
     /// Live aggregates (`db::aggregate`).
     pub aggregates: Vec<super::aggregate::AggregateInfo>,
+    /// Where the table's documents hold floats ([`super::floats`]); `None` if nowhere, or without a definition.
+    pub floats: Option<Arc<super::floats::Floats>>,
 }
 
 impl TableInfo {
     pub fn index(&self, name: &str) -> Option<&IndexInfo> {
         self.indexes.iter().find(|i| i.name == name)
+    }
+
+    /// Store the whole numbers of `doc`'s float fields as floats (see [`super::floats`]).
+    pub(crate) fn floats_as_floats(&self, doc: &mut serde_json::Map<String, Value>) {
+        if let Some(floats) = &self.floats {
+            floats.apply_to_doc(doc);
+        }
+    }
+
+    /// `bound` as a value to compare the field `field` with: an integer bound on a float field is that float.
+    pub(crate) fn bound<'a>(&self, field: &str, bound: &'a Value) -> std::borrow::Cow<'a, Value> {
+        super::floats::Floats::bound(self.floats.as_deref(), field, bound)
     }
 
     pub fn by_id(&self) -> &IndexInfo {
@@ -155,6 +169,7 @@ impl Catalog {
                         def: None,
                         search_indexes: Vec::new(),
                         aggregates: Vec::new(),
+                        floats: None,
                     },
                 );
             }
@@ -178,6 +193,7 @@ impl Catalog {
             t.search_indexes = search_indexes.remove(&number).unwrap_or_default();
             t.aggregates = aggregates.remove(&number).unwrap_or_default();
             t.def = defs.iter().find(|d| d.name == t.name).cloned();
+            t.floats = t.def.as_ref().and_then(|d| super::floats::Floats::of(&(d.shape)())).map(Arc::new);
             let t = Arc::new(t);
             catalog.by_name.insert(t.name.clone(), t.clone());
             catalog.by_number.insert(number, t);

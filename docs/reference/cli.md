@@ -67,9 +67,9 @@ For a compiled app, replace `cargo run --` with its path, such as `./target/rele
 | `migrate --dir DIR` | Run pending migrations. | No; use the dashboard or `serve --migrate` while serving. |
 | `migrate status --dir DIR` | Show migration progress offline. | No; use the dashboard while serving. |
 | `env list`, `env set NAME [VALUE]`, `env unset NAME` | Manage app variables offline. | No; use the dashboard while serving. |
-| `admin create EMAIL` | Create a dashboard administrator. | Use offline for initial setup. |
-| `admin reset-password EMAIL` | Reset an administrator's password. | Use offline for recovery. |
-| `admin disable-2fa EMAIL` | Remove a lost administrator second factor. | Use offline for recovery. |
+| `admin create EMAIL` | Create a dashboard administrator. | No; a running server prints a setup link for the first one. |
+| `admin reset-password EMAIL` | Reset an administrator's password. | No; stop the server first. |
+| `admin disable-2fa EMAIL` | Remove a lost administrator second factor. | No; stop the server first. |
 | `health [URL]` | Exit successfully when the health endpoint responds. The URL defaults to `RXFERRIX_HEALTH_URL`, then `http://127.0.0.1:8090/api/health`. | Yes. |
 
 Run a command's `--help` for its full options. Always pass the same `--dir` used by `serve`; otherwise commands use `fx_data` relative to their working directory.

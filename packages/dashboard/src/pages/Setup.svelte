@@ -51,8 +51,8 @@
 {:else if !token}
   <AuthCard title="Setup link incomplete" subtitle="This page needs the one-time link that `serve` prints.">
     <p class="muted">
-      Look for <code>/_/setup#token=…</code> in the server's output (it is valid until used or until restart), or run
-      <code>admin create &lt;email&gt;</code>.
+      Look for <code>/_/setup#token=…</code> in the server's output (it is valid until used or until restart), or
+      stop the server and run <code>admin create &lt;email&gt;</code>.
     </p>
   </AuthCard>
 {:else}

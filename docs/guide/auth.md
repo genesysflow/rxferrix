@@ -158,7 +158,7 @@ const { recoveryCodes } = await auth.confirmTotp(firstCode);
 
 Every enabled sign-in method then returns an MFA challenge until a TOTP code or recovery code is verified. `getMfaStatus()`, `disableMfa(code)`, and `regenerateRecoveryCodes(code)` manage enrollment. Five wrong codes lock the factor for five minutes; a code cannot be reused.
 
-Administrators can reset a user's lost factor on **Users**. For an administrator who lost both the authenticator and recovery codes, use the app's `admin disable-2fa EMAIL` command. Administrators manage their own enrollment on **Account**.
+Administrators can reset a user's lost factor on **Users**. For an administrator who lost both the authenticator and recovery codes, stop the server and use the app's `admin disable-2fa EMAIL` command. Administrators manage their own enrollment on **Account**.
 
 ## Control account creation and sign-in hooks
 

@@ -794,15 +794,23 @@ fn retry_delay(job: &ScheduledJob, options: &SchedulerOptions) -> Duration {
         Some(b) => (b.initial_ms, b.base),
         None => (options.retry_backoff.as_secs_f64() * 1000.0, 2.0),
     };
-    let ms = initial_ms * base.powi(retry);
-    let delay =
-        if ms.is_finite() && ms >= 0.0 { Duration::from_secs_f64(ms / 1000.0).min(MAX_BACKOFF) } else { MAX_BACKOFF };
+    let delay = backoff(initial_ms, base, retry);
     let jitter = job.jitter.unwrap_or(options.retry_jitter);
     // A row edited by hand (the dashboard) can hold anything: what isn't a valid jitter counts as none.
     if !valid_jitter(jitter) {
         return delay;
     }
     delay.mul_f64(1.0 - jitter * rand::random::<f64>())
+}
+
+/// `initial_ms * base^retry`, at most `MAX_BACKOFF`. A row edited by hand (the dashboard) can hold anything, and a
+/// steep backoff outgrows what a `Duration` holds after a few dozen attempts: what isn't a time counts as the longest.
+fn backoff(initial_ms: f64, base: f64, retry: i32) -> Duration {
+    let ms = initial_ms * base.powi(retry);
+    if ms.is_nan() || ms < 0.0 {
+        return MAX_BACKOFF;
+    }
+    super::duration_from_ms(ms).min(MAX_BACKOFF)
 }
 
 /// A jitter is a share of the delay: 0 to 1.
@@ -876,8 +884,10 @@ async fn run_loop(app: App) {
         let wait = match dispatch(&app).await {
             Ok(_) => match next_wake(&app).await {
                 Ok(Some(at)) => {
+                    // A job can be due as far ahead as its caller said (`run_at`): further than a `Duration` holds.
+                    // At least a millisecond, also for one that is overdue.
                     let ms = (at - app.db().clock().now_ms()).max(0.0) + 1.0;
-                    Duration::from_secs_f64(ms / 1000.0).min(MAX_SLEEP)
+                    super::duration_from_ms(ms).min(MAX_SLEEP)
                 }
                 Ok(None) => MAX_SLEEP,
                 Err(e) => {
@@ -909,5 +919,23 @@ async fn run_loop(app: App) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_backoff_past_what_a_duration_holds_is_the_longest_one() {
+        assert_eq!(backoff(1000.0, 2.0, 0), Duration::from_secs(1));
+        assert_eq!(backoff(1000.0, 2.0, 3), Duration::from_secs(8));
+        // 2^64 seconds and beyond: `Duration::from_secs_f64` panics there.
+        assert_eq!(backoff(1000.0, 2.0, 64), MAX_BACKOFF);
+        assert_eq!(backoff(1000.0, 10.0, 20), MAX_BACKOFF);
+        assert_eq!(backoff(60_000.0, 60.0, 64), MAX_BACKOFF);
+        assert_eq!(backoff(f64::MAX, 2.0, 64), MAX_BACKOFF, "infinite");
+        assert_eq!(backoff(f64::NAN, 2.0, 1), MAX_BACKOFF);
+        assert_eq!(backoff(-1.0, 2.0, 1), MAX_BACKOFF);
     }
 }

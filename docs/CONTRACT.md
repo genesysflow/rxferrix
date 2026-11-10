@@ -659,6 +659,7 @@ CLI flags / env vars add to it: `--public-url` (`RXFERRIX_PUBLIC_URL`), `--auth-
 `RXFERRIX_AUTH_REDIRECT_URLS`, comma-separated), `--smtp-url` / `--smtp-from` (`RXFERRIX_SMTP_URL`, `RXFERRIX_SMTP_FROM`),
 `--trust-proxy`, `--trust-proxy-from` (repeatable; `RXFERRIX_TRUST_PROXY_FROM`, comma-separated). Commands: `admin create <email> [--password …]`, `admin reset-password <email> [--password …]`
 (the password is read from stdin when omitted), `admin disable-2fa <email>` (removes an administrator's second factor).
+All three are offline: they take `rxferrix.lock` and refuse while a server holds the data directory.
 
 **Sign-up check.** Before a sign-up creates an account (password sign-up; the first sign-in by magic link or code, or
 by OAuth) and only when `signups` allows sign-ups: first the allowlists, then `before_sign_up`. The allowlists

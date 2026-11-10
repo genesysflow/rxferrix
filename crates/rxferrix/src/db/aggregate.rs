@@ -444,7 +444,7 @@ impl QueryDb {
             .find(|a| a.name == name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("table `{table}` has no aggregate `{name}`"))?;
-        let range = ops.to_range(&t.name, &info.spec.group_fields, &format!("aggregate `{name}`"))?;
+        let range = ops.to_range(t, &info.spec.group_fields, &format!("aggregate `{name}`"))?;
         Ok((info, range))
     }
 
@@ -620,6 +620,7 @@ mod tests {
             def: None,
             search_indexes: vec![],
             aggregates: vec![AggregateInfo { id: AGGREGATE_ID_BASE + 1, name: "a".into(), spec }],
+            floats: None,
         };
         let doc = |g: &str, n: i64, other: &str| json!({ "g": g, "n": n, "other": other }).as_object().unwrap().clone();
         assert!(Writes::prepare(&table, Some(&doc("x", 1, "a")), Some(&doc("x", 1, "b"))).deltas.is_empty());

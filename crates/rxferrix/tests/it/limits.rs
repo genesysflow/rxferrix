@@ -95,6 +95,93 @@ async fn a_subscription_that_timed_out_runs_again() {
     assert_eq!(c.value(1), json!(true));
 }
 
+pub mod slow_todos {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use rxferrix::prelude::*;
+
+    use crate::common::todos::Todo;
+
+    pub static RELEASED: AtomicBool = AtomicBool::new(false);
+
+    /// How many todos there are; slower than the test's query timeout until `RELEASED` is set.
+    #[query]
+    pub async fn count_when_released(ctx: &QueryCtx) -> Result<usize> {
+        if !RELEASED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(ctx.db.query::<Todo>().collect().await?.len())
+    }
+}
+
+/// The retry of a timed-out query runs at a later ts when something was committed meanwhile: its result must take the
+/// error's place, not stand next to it (the error would come back at the next commit the query depends on).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_a_commit_replaces_the_timeout() {
+    let options = AppOptions { query_timeout: Duration::from_millis(100), ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    let first = c.subscribe(1, &slow_todos::count_when_released::path(), json!({})).await;
+    assert!(first.is_err(), "it times out");
+    // A commit the query doesn't depend on (it timed out before reading anything): the error stays, the ts moves on.
+    t.mutation::<crate::common::items::insert>((1, 1, "one".to_string())).await.unwrap();
+    slow_todos::RELEASED.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), c.until(|c| c.results[&1].is_ok())).await.expect("retried");
+    assert_eq!(c.value(1), json!(0));
+    // Commits it does depend on: every update is a count, never the old error again.
+    for n in 1..=3 {
+        t.mutation::<crate::common::todos::add>((format!("todo {n}"),)).await.unwrap();
+        while c.value(1) != json!(n) {
+            c.recv().await;
+            assert!(c.results[&1].is_ok(), "the timeout came back: {:?}", c.results[&1]);
+        }
+    }
+}
+
+pub mod stalling_todos {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use rxferrix::prelude::*;
+
+    use crate::common::todos::Todo;
+
+    pub static STALL_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many todos there are, read at once; then it takes `STALL_MS` to answer.
+    #[query]
+    pub async fn count_then_stall(ctx: &QueryCtx) -> Result<usize> {
+        let n = ctx.db.query::<Todo>().collect().await?.len();
+        tokio::time::sleep(Duration::from_millis(STALL_MS.load(Ordering::SeqCst))).await;
+        Ok(n)
+    }
+}
+
+/// A run that timed out keeps what it read until then, so a commit to that can end the error's validity while the
+/// retry is in flight, at a ts past the retry's own: the two versions must not overlap (`apply_run` asserts it in
+/// debug builds; the manager's own invariant check only sees it while a connection that is behind keeps the older
+/// version from being trimmed). If the commit misses the retry's flight on a slow machine, this passes without
+/// having shown anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_overtaken_by_a_commit_it_depends_on_still_fits() {
+    use std::sync::atomic::Ordering;
+    let options = AppOptions { query_timeout: Duration::from_millis(500), ..Default::default() };
+    let t = TestApp::with_options(options).await.unwrap();
+    let mut c = Client::new(t.app()).await;
+    stalling_todos::STALL_MS.store(3000, Ordering::SeqCst);
+    let first = c.subscribe(1, &stalling_todos::count_then_stall::path(), json!({})).await;
+    assert!(first.is_err(), "it times out, having read the todos");
+    // A commit it doesn't depend on: the error stays, and the retry (a second after the timeout) runs at this ts.
+    t.mutation::<crate::common::items::insert>((1, 1, "one".to_string())).await.unwrap();
+    // The retry answers in time, after 400 ms in flight; a todo is added in the middle of those.
+    stalling_todos::STALL_MS.store(400, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    t.mutation::<crate::common::todos::add>(("during the retry".to_string(),)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), c.until(|c| c.results[&1] == Ok(json!(1)))).await.expect("retried");
+    stalling_todos::STALL_MS.store(0, Ordering::SeqCst);
+}
+
 /// A client that stops reading gets the latest state when it reads again, not a frame per commit it missed: updates
 /// wait in its mailbox, merging, while the socket's queue is full (`worker::OUT_QUEUE`).
 #[tokio::test]

@@ -616,10 +616,22 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
     // Offline (`crate::ops::lock`): a second process writing to the database of a running server commits behind its
     // back. The server wouldn't end the sessions a reset ends, and its next commit would take the same number, so
     // replication and a takeover's catch-up would miss this one.
-    let _lock = crate::ops::DirLock::acquire(&dir).context(
-        "`admin` works on a data directory no server is using (a running server creates its first administrator \
-         with the setup link it prints)",
-    )?;
+    const OFFLINE: &str = "`admin` works on a data directory no server is using (a running server creates its \
+                           first administrator with the setup link it prints)";
+    // Said before asking for a password; the lock itself is taken after the prompt, which can stay open for as
+    // long as someone leaves it: a server starting meanwhile (a takeover waits a minute for it) must not find the
+    // directory in use.
+    if crate::ops::DirLock::is_locked(&dir) {
+        crate::ops::DirLock::acquire(&dir).context(OFFLINE)?;
+    }
+    let password = match &cmd {
+        AdminCommand::Create(a) | AdminCommand::ResetPassword(a) => Some(match &a.password {
+            Some(p) => p.clone(),
+            None => read_password()?,
+        }),
+        AdminCommand::Disable2fa(_) => None,
+    };
+    let _lock = crate::ops::DirLock::acquire(&dir).context(OFFLINE)?;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     if let AdminCommand::Disable2fa(args) = cmd {
         return rt.block_on(async move {
@@ -637,10 +649,7 @@ fn admin(cmd: AdminCommand, auth: AuthConfig) -> crate::Result<()> {
         AdminCommand::ResetPassword(a) => (a, false),
         AdminCommand::Disable2fa(_) => unreachable!("handled above"),
     };
-    let password = match args.password {
-        Some(p) => p,
-        None => read_password()?,
-    };
+    let password = password.expect("read above for create and reset-password");
     rt.block_on(async move {
         let app = App::open(&args.dir, AppOptions { auth, ..Default::default() }).await?;
         let email = crate::auth::normalize_email(&args.email)?;

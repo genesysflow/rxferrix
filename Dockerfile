@@ -5,7 +5,7 @@
 #
 #   docker build -t todo-server .
 #   docker run -p 8090:8090 -v todo-data:/data todo-server
-#   docker run --rm -v todo-data:/data todo-server admin reset-password you@example.com --dir /data   # any CLI command
+#   docker run --rm -it -v todo-data:/data todo-server admin reset-password you@example.com --dir /data   # any CLI command
 #
 # Commands that write (`admin`, `env`, `restore`, `import`) need the data directory to themselves: stop the server's
 # container first. The first administrator needs no command: the server prints a setup link while there is none.

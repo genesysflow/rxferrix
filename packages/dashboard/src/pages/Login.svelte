@@ -84,8 +84,8 @@
       <button class="primary" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
     </form>
     <p class="faint hint">
-      No administrator yet? Open the one-time <code>/_/setup#token=…</code> link that <code>serve</code> prints, or run
-      <code>admin create &lt;email&gt;</code>.
+      No administrator yet? Open the one-time <code>/_/setup#token=…</code> link that <code>serve</code> prints, or
+      stop the server and run <code>admin create &lt;email&gt;</code>.
     </p>
   </AuthCard>
 {/if}

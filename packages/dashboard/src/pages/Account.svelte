@@ -163,8 +163,8 @@
       <h2>Signed in as</h2>
       <p class="mono">{me.data?.email ?? "…"}</p>
       <p class="muted small">
-        To change the password, run <code>admin reset-password &lt;email&gt;</code> on the server (it ends every session
-        of that administrator).
+        To change the password, stop the server and run <code>admin reset-password &lt;email&gt;</code> on its data
+        directory (it ends every session of that administrator).
       </p>
     </section>
 
@@ -196,8 +196,9 @@
         <div class="row"><button class="primary" onclick={startEnable}>Turn on…</button></div>
       {/if}
       <p class="muted small note">
-        Lost the authenticator and the recovery codes? Another administrator can't reset yours from here: run
-        <code>admin disable-2fa &lt;email&gt;</code> on the server. Users' factors are reset from the Users page.
+        Lost the authenticator and the recovery codes? Another administrator can't reset yours from here: stop the
+        server and run <code>admin disable-2fa &lt;email&gt;</code> on its data directory. Users' factors are reset
+        from the Users page.
       </p>
     </section>
   </div>

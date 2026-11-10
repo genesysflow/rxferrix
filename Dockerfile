@@ -5,7 +5,10 @@
 #
 #   docker build -t todo-server .
 #   docker run -p 8090:8090 -v todo-data:/data todo-server
-#   docker run todo-server admin create you@example.com --password '…' --dir /data   # any CLI command
+#   docker run --rm -v todo-data:/data todo-server admin reset-password you@example.com --dir /data   # any CLI command
+#
+# Commands that write (`admin`, `env`, `restore`, `import`) need the data directory to themselves: stop the server's
+# container first. The first administrator needs no command: the server prints a setup link while there is none.
 #
 # For your own app: `docker build --build-arg PACKAGE=my-server --build-arg WEB=web -t my-server .` (WEB is the web
 # app directory to build and embed, or "" for none).

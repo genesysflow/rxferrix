@@ -24,6 +24,7 @@ mod determinism;
 mod diff_fixtures;
 mod dx;
 mod env;
+mod float_fields;
 mod fuzz;
 mod group_commit;
 mod hardening;

@@ -65,6 +65,8 @@ pub struct TaskSummary {
 
 The client gets a named `TaskSummary` type with `openCount` and `latestText`. The macro provides serde and TypeScript derives through framework re-exports. Field doc comments become generated JSDoc.
 
+A field declared `f32` or `f64` always stores a float. A whole number written into it as a JSON integer, such as `ctx.db.patch(id, json!({ "score": 5 }))` or a document saved in the dashboard, is stored as `5.0`, so indexes, aggregates, and search filters on the field see one kind of number. Documents written by 0.12.0 or earlier may still hold an integer in such a field and are not found by `eq` or range queries on it until they are written again.
+
 For dates and UUIDs, enable the `chrono` or `uuid` feature on `rxferrix` and add the corresponding crate to your app to name its types. Use serde support as needed. Dates serialize as strings according to the type's serde format; `DateTime<Utc>` uses RFC 3339. `ctx.now()` remains `f64` epoch milliseconds.
 
 When hand-writing patches, use serialized field names. When calling functions, keep their Rust names: `set_done` is `api.tasks.set_done`, while a `completed_at` argument becomes `completedAt`.

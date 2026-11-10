@@ -267,7 +267,7 @@ impl VectorPlan {
                         let value = value
                             .as_ref()
                             .map_err(|e| anyhow::anyhow!("vector_search: cannot serialize filter value: {e}"))?;
-                        let encoded = encode_filter_value(Some(value));
+                        let encoded = encode_filter_value(Some(&table.bound(field, value)));
                         match conds.iter().find(|(c, _)| *c == col) {
                             Some((_, v)) if *v != encoded => continue 'branch, // field == a AND field == b: no match
                             Some(_) => {}

@@ -10,7 +10,7 @@
 //!   `by_id` key); a log that no longer has the commits since the cursor drops everything. So a deleted user or an
 //!   account moved to another user is seen by the next call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use super::jwt::ExternalClaims;
@@ -111,25 +111,31 @@ impl Inner {
         }
         match log.entries_between(self.cursor, latest) {
             Some(entries) if !self.tokens.is_empty() => {
+                // The other document of each dropped token still lists it: without taking it out there too, each
+                // write to one and each verification that follows would add the token to the other's list once
+                // more. Collected first, so that a user with many tokens costs one pass over a list, not one per
+                // token.
+                let mut dropped: HashMap<[u8; 16], HashSet<[u8; 32]>> = HashMap::new();
                 for (index, key) in entries.iter().flat_map(|e| &e.writes) {
                     if watched.contains(index)
                         && let Ok(doc) = <[u8; 16]>::try_from(&key[..])
                         && let Some(tokens) = self.by_doc.remove(&doc)
                     {
                         for token in tokens {
-                            // Its other document still lists it: without this, each write to one and each
-                            // verification that follows would add the token to the other's list once more.
                             let Some(verified) = self.tokens.remove(&token) else { continue };
                             for other in [*verified.user.as_bytes(), verified.account] {
-                                if other != doc
-                                    && let Some(listed) = self.by_doc.get_mut(&other)
-                                {
-                                    listed.retain(|t| *t != token);
-                                    if listed.is_empty() {
-                                        self.by_doc.remove(&other);
-                                    }
+                                if other != doc {
+                                    dropped.entry(other).or_default().insert(token);
                                 }
                             }
+                        }
+                    }
+                }
+                for (doc, tokens) in dropped {
+                    if let Some(listed) = self.by_doc.get_mut(&doc) {
+                        listed.retain(|token| !tokens.contains(token));
+                        if listed.is_empty() {
+                            self.by_doc.remove(&doc);
                         }
                     }
                 }

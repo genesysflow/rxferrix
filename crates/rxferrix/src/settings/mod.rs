@@ -454,18 +454,21 @@ fn smtp_from_input(input: SmtpInput, stored: Option<&StoredSmtp>) -> Result<Stor
         url::form_urlencoded::parse(format!("p={p}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
     });
     let _ = url.set_password(None);
-    // A stored password is only ever sent to the server it was saved for: kept for another host, a test email (or
-    // the next real one) would hand it to whoever runs that host, which is how an administrator's token would read
-    // a secret the dashboard never shows.
+    // A stored password is only ever sent to the server it was saved for, the way it was sent then: kept for
+    // another host, a test email (or the next real one) would hand it to whoever runs that host, and kept for
+    // `smtp://` after `smtps://` it would cross the network in clear. Either is how an administrator's token would
+    // read a secret the dashboard never shows.
     let keeps_stored = match (&input.password, &inline) {
         (Some(given), _) => given == MASK,
         (None, inline) => inline.is_none(),
     };
     if keeps_stored
         && let Some(stored) = stored.filter(|s| s.password.is_some())
-        && !same_host(&stored.url, &url)
+        && !same_server(&stored.url, &url)
     {
-        return Err(invalid("SMTP password: enter it again, the stored one was saved for another server"));
+        return Err(invalid(
+            "SMTP password: enter it again, the stored one was saved for another server or another kind of connection",
+        ));
     }
     let password = match (input.password, inline) {
         (given @ Some(_), _) => secret_from_input(given, stored.and_then(|s| s.password.as_ref())),
@@ -480,11 +483,14 @@ fn smtp_from_input(input: SmtpInput, stored: Option<&StoredSmtp>) -> Result<Stor
     Ok(StoredSmtp { url: url.to_string(), from, password })
 }
 
-/// Whether the stored SMTP URL names the host of `url`.
-fn same_host(stored: &str, url: &url::Url) -> bool {
-    let stored = url::Url::parse(stored).ok();
+/// Whether the stored SMTP URL names the host of `url` and connects the same way (the scheme and the query, which
+/// carries lettre's `tls` setting). The port and the user may differ.
+fn same_server(stored: &str, url: &url::Url) -> bool {
+    let Ok(stored) = url::Url::parse(stored) else { return false };
     let host = |u: &url::Url| u.host_str().map(str::to_ascii_lowercase);
-    stored.as_ref().and_then(host).is_some_and(|h| Some(h) == host(url))
+    host(&stored).is_some_and(|h| Some(h) == host(url))
+        && stored.scheme() == url.scheme()
+        && stored.query() == url.query()
 }
 
 /// The trusted proxy headers, trimmed and checked; `None` when no header is left (the peer address is used).

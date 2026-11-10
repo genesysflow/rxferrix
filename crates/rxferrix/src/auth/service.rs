@@ -787,14 +787,21 @@ impl AuthService {
         let user = user.expect("verified against a real hash");
         if let Some((old_hash, password)) = rehash {
             let upgraded = async {
-                let new_hash = password::hash(password).await?;
+                let new_hash = password::hash(password.clone()).await?;
                 let replaced = store::upgrade_password_hash(app, user.id, old_hash, new_hash.clone()).await?;
                 Ok::<_, anyhow::Error>(replaced.then_some(new_hash))
             };
             match upgraded.await {
                 Ok(Some(new_hash)) => checked = Some(new_hash),
-                // Changed meanwhile: the check at the session's start decides.
-                Ok(None) => {}
+                // The hash changed meanwhile. Usually another sign-in of this user upgraded it first (two tabs, a
+                // retry): the password is as right against that hash, and the session must not be refused for it.
+                // After a reset it isn't, and the check at the session's start refuses.
+                Ok(None) => {
+                    let current = store::password_hash_of(app, user.id).await?;
+                    if current.is_some() && password::verify(password, current.clone()).await {
+                        checked = current;
+                    }
+                }
                 Err(e) => tracing::warn!(user = %user.id, "could not upgrade an imported password hash: {e:#}"),
             }
         }

@@ -190,8 +190,14 @@ async fn secrets_are_encrypted_at_rest_masked_everywhere_and_survive_a_restart()
         let (_, b) = http.call("action", "_system/settings:send_test_email", test, Some(&admin)).await;
         assert!(b.to_string().contains("enter it again"), "{b}");
     }
+    // Nor is it kept for a connection that isn't encrypted the same way.
+    for url in ["smtp://mailer@mail.example.com:25", "smtps://mailer@mail.example.com:465?tls=opportunistic"] {
+        let smtp = json!({ "url": url, "from": "App <app@example.com>" });
+        let (_, b) = http.call("action", "_system/settings:update", json!({ "smtp": smtp }), Some(&admin)).await;
+        assert!(b.to_string().contains("enter it again"), "{url}: {b}");
+    }
     // The same host on another port, or a password given again for a new host, is fine.
-    let same_host = json!({ "url": "smtp://mailer@MAIL.example.com:587", "from": "App <app@example.com>" });
+    let same_host = json!({ "url": "smtps://mailer@MAIL.example.com:466", "from": "App <app@example.com>" });
     http.ok("action", "_system/settings:update", json!({ "smtp": same_host }), &admin).await;
     let again = json!({ "url": "smtps://mailer@mail.example.com:465", "from": "App <app@example.com>" });
     http.ok("action", "_system/settings:update", json!({ "smtp": again }), &admin).await;
@@ -494,6 +500,11 @@ async fn path_rate_limits_tell_guests_from_users_and_spare_the_dashboard() {
     assert_eq!(http.call("query", &list, json!({}), Some(&user)).await.0, 429);
     // A forged token is a guest's.
     assert_eq!(http.call("query", &list, json!({}), Some("not.a.token")).await.0, 429);
+
+    // Another spelling of a path is the same path: it counts against the same rule.
+    for path in ["//api/query", "/api/./query", "/%61pi/query"] {
+        assert_eq!(http.get(path, Some("not.a.token")).await.0, 429, "{path}");
+    }
 
     // Health checks and the dashboard's API are never limited, nor are administrators over the limit.
     for _ in 0..5 {

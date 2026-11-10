@@ -673,6 +673,34 @@ describe("reconnect", () => {
     await expect(a2).resolves.toBe("ok");
   });
 
+  it("does not complete a mutation on an identity-only transition when the socket opened with an expired token", async () => {
+    const jwt = (exp: number) => `h.${btoa(JSON.stringify({ exp })).replace(/=+$/, "")}.s`;
+    let token = jwt(Math.floor(Date.now() / 1000) + 30);
+    client.setAuth(async () => token);
+    client.watchQuery(api.todos.count).onUpdate(() => {});
+    await openAndDrain();
+    server.transition({ querySet: 1, identity: 1, ts: 1 }, [{ type: "QueryUpdated", queryId: 0, value: 0 }]);
+    const done = vi.fn();
+    void client.mutation(api.todos.add, { text: "x" }).then(done);
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "r", ts: 2 });
+    server.close();
+    // The token expires while the socket is down and no timer runs (a laptop asleep: the clock jumps, the refresh
+    // timer hasn't fired): the new socket's sends wait for a fresh token, so nothing is re-added when it opens.
+    vi.setSystemTime(Date.now() + 120_000);
+    token = jwt(Math.floor(Date.now() / 1000) + 600);
+    vi.advanceTimersByTime(1_000);
+    const sent = await openAndDrain();
+    expect(sent.filter((m) => m.type === "ModifyQuerySet").length).toBe(1);
+    const identity = sent.filter((m) => m.type === "Authenticate").length;
+    expect(identity).toBeGreaterThan(0);
+    server.transition({ identity, ts: 2 }); // Authenticate processed; the query set is not re-added yet
+    await flushMicrotasks();
+    expect(done).not.toHaveBeenCalled();
+    server.transition({ querySet: 1 }, [{ type: "QueryUpdated", queryId: 0, value: 1 }]);
+    await flushMicrotasks();
+    expect(done).toHaveBeenCalledWith("r");
+  });
+
   it("does not complete a mutation on an identity-only transition while resyncing", async () => {
     client.setAuth(async () => "tok");
     client.watchQuery(api.todos.count).onUpdate(() => {});
@@ -740,6 +768,103 @@ describe("errors", () => {
     vi.advanceTimersByTime(20_000);
     const sent = await openAndDrain();
     expect(sent[0]).toMatchObject({ type: "Connect", lastCloseReason: "FatalError: boom" });
+  });
+
+  it("waits longer after each FatalError in a row, whatever the server says in between", async () => {
+    client.watchQuery(api.todos.count).onUpdate(() => {});
+    await openAndDrain();
+    // What the server refuses is sent again on every socket: each socket looks healthy (a Transition) and then
+    // ends the same way. Without a growing delay that is several reconnects a second, for as long as it lasts.
+    const delays: number[] = [];
+    for (let round = 0; round < 6; round++) {
+      server.transition({ querySet: 1, ts: round + 1 }, [{ type: "QueryUpdated", queryId: 0, value: round }]);
+      const sockets = server.sockets.length;
+      server.push({ type: "FatalError", error: "messages may be at most 2 MiB" });
+      let waited = 0;
+      while (server.sockets.length === sockets && waited < 60_000) {
+        vi.advanceTimersByTime(50);
+        waited += 50;
+      }
+      delays.push(waited);
+      await openAndDrain();
+    }
+    expect(delays[5]!).toBeGreaterThanOrEqual(2_000);
+    expect(delays[5]!).toBeGreaterThan(delays[0]! * 4);
+    // A minute without one (the server pings meanwhile): the streak is over.
+    server.transition({ querySet: 1, ts: 10 }, [{ type: "QueryUpdated", queryId: 0, value: 9 }]);
+    for (let waited = 0; waited < 61_000; waited += 10_000) {
+      vi.advanceTimersByTime(10_000);
+      server.push({ type: "Ping" });
+    }
+    const sockets = server.sockets.length;
+    server.push({ type: "FatalError", error: "once" });
+    vi.advanceTimersByTime(300);
+    expect(server.sockets.length).toBe(sockets + 1);
+  });
+
+  it("refuses arguments no message can carry, before anything is queued", async () => {
+    await openAndDrain();
+    const huge = "x".repeat(2 * 1024 * 1024);
+    await expect(client.mutation(api.todos.add, { text: huge })).rejects.toMatchObject({ code: "args_too_large" });
+    await expect(client.action(api.ai.summarize, { text: huge })).rejects.toMatchObject({ code: "args_too_large" });
+    expect(() => client.watchQuery(api.todos.get, { id: huge }).onUpdate(() => {})).toThrow(/too large/);
+    // Three bytes a character: over the limit at a third of its length.
+    const wide = "\u20ac".repeat(800_000);
+    await expect(client.mutation(api.todos.add, { text: wide })).rejects.toMatchObject({ code: "args_too_large" });
+    await flushMicrotasks();
+    expect(server.drain()).toEqual([]);
+    // Just under it goes out.
+    void client.mutation(api.todos.add, { text: "x".repeat(2 * 1024 * 1024 - 4096) }).catch(() => {});
+    expect(server.drain().map((m) => m.type)).toEqual(["Mutation"]);
+  });
+
+  it("re-adds a large query set in several messages, each under the limit", async () => {
+    // 2.5 MiB of arguments in all: fine for the server one query at a time, too much for one message.
+    const padding = "p".repeat(100_000);
+    for (let i = 0; i < 25; i++) client.watchQuery(api.todos.get, { id: `${i}-${padding}` }).onUpdate(() => {});
+    const sent = (await openAndDrain()).filter((m) => m.type === "ModifyQuerySet");
+    expect(sent.length).toBeGreaterThan(1);
+    let version = 0;
+    let adds = 0;
+    for (const message of sent) {
+      if (message.type !== "ModifyQuerySet") continue;
+      expect(message.baseVersion).toBe(version);
+      expect(message.newVersion).toBe(version + 1);
+      version = message.newVersion;
+      adds += message.modifications.length;
+      expect(JSON.stringify(message).length).toBeLessThan(1024 * 1024);
+    }
+    expect(adds).toBe(25);
+    // A mutation completed meanwhile waits for the last of them, not the first.
+    const done = vi.fn();
+    void client.mutation(api.todos.add, { text: "x" }).then(done);
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "r", ts: 2 });
+    server.close();
+    vi.advanceTimersByTime(20_000);
+    const again = (await openAndDrain()).filter((m) => m.type === "ModifyQuerySet");
+    expect(again.length).toBe(sent.length);
+    server.transition({ querySet: 1, ts: 2 });
+    await flushMicrotasks();
+    expect(done).not.toHaveBeenCalled();
+    server.transition({ querySet: again.length, ts: 2 });
+    await flushMicrotasks();
+    expect(done).toHaveBeenCalledWith("r");
+  });
+
+  it("settles a mutation that completed on the last socket when nothing is watched", async () => {
+    await openAndDrain();
+    const done = vi.fn();
+    void client.mutation(api.todos.add, { text: "x" }).then(done);
+    // The answer arrived, the Transition that covers it did not.
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "r", ts: 2 });
+    await flushMicrotasks();
+    expect(done).not.toHaveBeenCalled();
+    server.close();
+    vi.advanceTimersByTime(20_000);
+    // The new socket has nothing to say (no queries, no identity): the mutation would wait for ever.
+    expect((await openAndDrain()).map((m) => m.type)).toEqual(["Connect"]);
+    await flushMicrotasks();
+    expect(done).toHaveBeenCalledWith("r");
   });
 });
 

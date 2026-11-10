@@ -1,4 +1,5 @@
 import { queryToken, type QueryToken } from "./canonical.js";
+import { MODIFY_QUERY_SET_CHARS } from "./limits.js";
 import type { ModifyQuerySetMessage, QueryId, QuerySetModification } from "./protocol.js";
 
 export interface LocalQuery {
@@ -12,8 +13,12 @@ export interface LocalQuery {
 }
 
 export interface FlushResult {
-  /** The message to send, or null when nothing changed (or nothing can be sent right now). */
-  message: ModifyQuerySetMessage | null;
+  /**
+   * The messages to send, in order; none when nothing changed (or nothing can be sent right now). Usually one. A
+   * query set too large for one message (it is sent whole on every new socket) is split into several, each one
+   * version after the last.
+   */
+  messages: ModifyQuerySetMessage[];
   /** Queries dropped locally by this flush (their last watcher left). Their results should be discarded. */
   removed: QueryId[];
 }
@@ -83,8 +88,8 @@ export class LocalQuerySet {
   }
 
   /**
-   * Drops queries without watchers and, if `canSend`, builds the ModifyQuerySet that brings the server's query set
-   * in line with the local one (bumping the query set version).
+   * Drops queries without watchers and, if `canSend`, builds the ModifyQuerySets that bring the server's query set
+   * in line with the local one (bumping the query set version once per message).
    */
   flush(canSend: boolean): FlushResult {
     const removed: QueryId[] = [];
@@ -95,25 +100,36 @@ export class LocalQuerySet {
       removed.push(query.queryId);
       if (query.onServer) this.pendingRemoves.add(query.queryId);
     }
-    if (!canSend) return { message: null, removed };
+    if (!canSend) return { messages: [], removed };
 
-    const modifications: QuerySetModification[] = [];
+    // The adds, split so that no message outgrows the server's limit; the removes go with the first.
+    const batches: QuerySetModification[][] = [[]];
+    let chars = 0;
     for (const query of this.byToken.values()) {
-      if (!query.onServer) {
-        modifications.push({ type: "Add", queryId: query.queryId, udfPath: query.udfPath, args: query.args });
-        query.onServer = true;
+      if (query.onServer) continue;
+      // The token is the path and the canonical JSON of the arguments: about what the Add takes on the wire.
+      const size = query.token.length;
+      let batch = batches[batches.length - 1]!;
+      if (batch.length > 0 && chars + size > MODIFY_QUERY_SET_CHARS) {
+        batch = [];
+        batches.push(batch);
+        chars = 0;
       }
+      batch.push({ type: "Add", queryId: query.queryId, udfPath: query.udfPath, args: query.args });
+      chars += size;
+      query.onServer = true;
     }
-    for (const queryId of this.pendingRemoves) modifications.push({ type: "Remove", queryId });
+    for (const queryId of this.pendingRemoves) batches[0]!.push({ type: "Remove", queryId });
     this.pendingRemoves.clear();
-    if (modifications.length === 0) return { message: null, removed };
 
-    const baseVersion = this.querySetVersion;
-    this.querySetVersion += 1;
-    return {
-      message: { type: "ModifyQuerySet", baseVersion, newVersion: this.querySetVersion, modifications },
-      removed,
-    };
+    const messages: ModifyQuerySetMessage[] = [];
+    for (const modifications of batches) {
+      if (modifications.length === 0) continue;
+      const baseVersion = this.querySetVersion;
+      this.querySetVersion += 1;
+      messages.push({ type: "ModifyQuerySet", baseVersion, newVersion: this.querySetVersion, modifications });
+    }
+    return { messages, removed };
   }
 
   /** The server state is fresh on a new socket: nothing is subscribed and the query set version is 0. */

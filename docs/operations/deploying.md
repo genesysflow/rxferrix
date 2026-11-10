@@ -33,7 +33,7 @@ Generated projects include this `.cargo/config.toml` setting:
 LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0"
 ```
 
-Keep it in your app. It removes SQLite build-time bottlenecks that otherwise serialize concurrent reads. A dependency cannot set this Cargo environment option on behalf of the consuming app. The server warns when the relevant flag is missing.
+Keep it in your app. It removes SQLite build-time bottlenecks that can serialize concurrent reads. A dependency cannot set this Cargo environment option on behalf of the consuming app. The server warns at startup if SQLite was built with the shared page cache; the SQLite bundled since rxferrix moved to rusqlite 0.41 no longer enables it by default.
 
 ## Start with a persistent data directory
 

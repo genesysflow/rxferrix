@@ -1,0 +1,41 @@
+# Known vulnerabilities in the Rust dependencies (`cargo audit`, the RustSec advisory database against Cargo.lock).
+#
+# Runs when the dependencies change, and once a week: an advisory is published long after the version it concerns was
+# locked, so a lockfile nobody touched goes from clean to vulnerable on its own. A job of its own workflow rather than
+# a step of the release gates: a new advisory must be seen, but it must not block an unrelated pull request or a
+# release (the fix is usually a `cargo update -p <crate>` in a pull request of its own, which this checks).
+#
+# Vulnerabilities fail the job. Unsound-code and unmaintained-crate notices are printed as warnings.
+name: audit
+
+on:
+  push:
+    branches: [master]
+    paths: ["Cargo.lock", "**/Cargo.toml", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["Cargo.lock", "**/Cargo.toml", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo-audit (a prebuilt binary)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit

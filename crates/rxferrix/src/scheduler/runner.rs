@@ -885,7 +885,9 @@ async fn run_loop(app: App) {
             Ok(_) => match next_wake(&app).await {
                 Ok(Some(at)) => {
                     // A job can be due as far ahead as its caller said (`run_at`): further than a `Duration` holds.
-                    super::duration_from_ms(at - app.db().clock().now_ms() + 1.0).min(MAX_SLEEP)
+                    // At least a millisecond, also for one that is overdue.
+                    let ms = (at - app.db().clock().now_ms()).max(0.0) + 1.0;
+                    super::duration_from_ms(ms).min(MAX_SLEEP)
                 }
                 Ok(None) => MAX_SLEEP,
                 Err(e) => {

@@ -122,6 +122,16 @@ impl Workpool {
 
 /// Default [`SchedulerOptions::concurrency`].
 pub const DEFAULT_CONCURRENCY: usize = 10;
+/// `ms` milliseconds as a `Duration`, for values computed in floating point or read from stored rows: what isn't a
+/// number or is negative counts as none, and what a `Duration` can't hold as the longest one
+/// (`Duration::from_secs_f64` panics on all three).
+pub(crate) fn duration_from_ms(ms: f64) -> Duration {
+    if ms.is_nan() || ms <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
+}
+
 /// Default [`SchedulerOptions::history_after`].
 pub const DEFAULT_HISTORY_AFTER: Duration = Duration::from_secs(3600);
 /// Default [`SchedulerOptions::retention`].

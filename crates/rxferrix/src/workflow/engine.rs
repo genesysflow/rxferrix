@@ -187,7 +187,7 @@ async fn start_step(ctx: &MutationCtx, wf: &mut Doc<Workflow>, step: NewStep) ->
                 with = with.with_retries(retries);
             }
             if let Some(b) = call.backoff {
-                with = with.backoff(Duration::from_secs_f64(b.initial_ms / 1000.0), b.base);
+                with = with.backoff(crate::scheduler::duration_from_ms(b.initial_ms), b.base);
             }
             if let Some(jitter) = call.jitter {
                 with = with.jitter(jitter);
@@ -196,9 +196,10 @@ async fn start_step(ctx: &MutationCtx, wf: &mut Doc<Workflow>, step: NewStep) ->
         }
         StepKind::Sleep => {
             let step_id = ctx.db.insert(doc.clone()).await?;
-            let ms = call.args["ms"].as_f64().unwrap_or(0.0).max(0.0);
+            // `sleep(Duration::MAX)` is more milliseconds than a `Duration` built from them holds.
+            let delay = crate::scheduler::duration_from_ms(call.args["ms"].as_f64().unwrap_or(0.0));
             let scheduler = ctx.scheduler.with_origin(format!("workflow:{}", wf.id));
-            (step_id, scheduler.run_after::<super::wake>(Duration::from_secs_f64(ms / 1000.0), (step_id,)).await)
+            (step_id, scheduler.run_after::<super::wake>(delay, (step_id,)).await)
         }
     };
     let (step_id, job) = scheduled;
@@ -285,7 +286,11 @@ pub(crate) async fn finish(db: &MutationDb, now: f64, wf: Doc<Workflow>, ending:
             continue;
         }
         let mut s = step.value;
-        if let Some(job) = s.job {
+        // A job that finished long ago has no row any more (the cleanup moved it to the job history after
+        // `history_after`): there is nothing to cancel, and the workflow must still end.
+        if let Some(job) = s.job
+            && db.get(job).await?.is_some()
+        {
             store::cancel(db, job, now, &format!("Canceled because {why}")).await?;
         }
         s.state = StepState::Canceled;

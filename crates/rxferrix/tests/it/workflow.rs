@@ -267,6 +267,12 @@ mod app {
         ctx.workflows.cancel(id).await
     }
 
+    /// What the scheduler's cleanup does to a finished job after `history_after`: its row goes.
+    #[mutation]
+    pub async fn forget_job(ctx: &MutationCtx, id: Id<ScheduledJob>) -> Result<()> {
+        ctx.db.delete(id).await
+    }
+
     /// Starts `approval` and sends both events, from an action.
     #[internal_action]
     pub async fn from_action(ctx: &ActionCtx) -> Result<Id<Workflow>> {
@@ -404,6 +410,22 @@ async fn a_sleep_survives_a_restart_and_a_canceled_workflow_stops() {
     assert_eq!(lines.iter().filter(|l| *l == "after nap").count(), 1, "{lines:?}");
     assert!(lines.contains(&"done napper: canceled".to_string()), "{lines:?}");
     t.mutation::<cancel>((id,)).await.unwrap(); // already finished: nothing happens
+}
+
+/// A step still `running` can point at a job whose row is gone: the job finished, and the server was down for longer
+/// than `history_after` before the step heard of it, so the cleanup at startup moved the job to the history.
+#[tokio::test]
+async fn a_workflow_ends_even_if_a_running_steps_job_is_gone() {
+    let _serial = SERIAL.lock().await;
+    let t = TestApp::with_options(options()).await.unwrap();
+    let id = t.mutation::<start_napper>(()).await.unwrap();
+    t.run_due_jobs().await.unwrap();
+    let step_docs = t.query::<app::steps>((id,)).await.unwrap();
+    assert_eq!(step_docs[1].state, StepState::Running);
+    t.mutation::<forget_job>((step_docs[1].job.unwrap(),)).await.unwrap();
+    t.mutation::<cancel>((id,)).await.unwrap();
+    assert_eq!(workflow(&t, id).await.state, WorkflowState::Canceled);
+    assert_eq!(t.query::<app::steps>((id,)).await.unwrap()[1].state, StepState::Canceled);
 }
 
 #[tokio::test]

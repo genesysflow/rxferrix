@@ -7,7 +7,7 @@ import type {
 } from "./api.js";
 import { normalizeArgs, queryToken, type QueryToken } from "./canonical.js";
 import { CLIENT_CLOSED, RxFerrixError } from "./errors.js";
-import { tooLarge } from "./limits.js";
+import { MAX_QUERY_ARGS_BYTES, tooLarge, tooMuchWatched } from "./limits.js";
 import { LocalQuerySet } from "./local_query_set.js";
 import { createLogger, type Logger } from "./logging.js";
 import {
@@ -367,10 +367,13 @@ export class RxFerrixClient {
         { code: "too_many_queries" },
       );
     }
-    if (!this.localQueries.get(token)) {
-      // The same goes for a query whose arguments no message can carry (the token holds their canonical JSON).
+    const cost = this.localQueries.costOf(token);
+    if (cost > 0) {
+      // The same goes for a query whose arguments no message can carry (the token holds their canonical JSON), and
+      // for the one that takes the set past what the server lets a socket watch.
       const large = tooLarge(udfPath, token);
       if (large) throw large;
+      if (this.localQueries.argsBytes + cost > MAX_QUERY_ARGS_BYTES) throw tooMuchWatched(udfPath);
     }
     let set = this.listeners.get(token);
     if (!set) {

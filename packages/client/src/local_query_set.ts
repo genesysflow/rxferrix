@@ -1,5 +1,5 @@
 import { queryToken, type QueryToken } from "./canonical.js";
-import { MODIFY_QUERY_SET_CHARS } from "./limits.js";
+import { MODIFY_QUERY_SET_CHARS, REMOVE_CHARS, utf8Length } from "./limits.js";
 import type { ModifyQuerySetMessage, QueryId, QuerySetModification } from "./protocol.js";
 
 export interface LocalQuery {
@@ -10,6 +10,8 @@ export interface LocalQuery {
   refCount: number;
   /** Whether an `Add` for this query is part of the server's query set on the current socket. */
   onServer: boolean;
+  /** About what its arguments count for on the server ({@link LocalQuerySet.argsBytes}). */
+  readonly bytes: number;
 }
 
 export interface FlushResult {
@@ -39,12 +41,31 @@ export class LocalQuerySet {
   private readonly pendingRemoves = new Set<QueryId>();
   /** The `newVersion` of the last ModifyQuerySet sent on this socket. */
   private querySetVersion = 0;
+  /** The sum of {@link LocalQuery.bytes} over the queries that have watchers. */
+  private bytes = 0;
+
+  /**
+   * About what the server counts for the arguments of the watched queries (it caps their JSON at 8 MiB a socket).
+   * An upper bound: each query counts with its token, which holds its path as well. A query whose last watcher
+   * left no longer counts, though it is tracked until the next flush: that flush removes it before it adds anything.
+   */
+  get argsBytes(): number {
+    return this.bytes;
+  }
+
+  /** What watching the query `token` would add to {@link argsBytes}; nothing if it has watchers already. */
+  costOf(token: QueryToken): number {
+    const tracked = this.byToken.get(token);
+    if (!tracked) return utf8Length(token);
+    return tracked.refCount > 0 ? 0 : tracked.bytes;
+  }
 
   /** Adds a watcher; returns the query (created if needed) and whether a flush is needed. */
   addRef(udfPath: string, args: Record<string, unknown>): { query: LocalQuery; needsFlush: boolean } {
     const token = queryToken(udfPath, args);
     const existing = this.byToken.get(token);
     if (existing) {
+      if (existing.refCount === 0) this.bytes += existing.bytes;
       existing.refCount += 1;
       // refCount went 0 -> 1 before the flush: the query is revived without any server traffic.
       return { query: existing, needsFlush: false };
@@ -56,7 +77,9 @@ export class LocalQuerySet {
       args,
       refCount: 1,
       onServer: false,
+      bytes: utf8Length(token),
     };
+    this.bytes += query.bytes;
     this.byToken.set(token, query);
     this.byId.set(query.queryId, query);
     return { query, needsFlush: true };
@@ -66,6 +89,7 @@ export class LocalQuerySet {
   removeRef(token: QueryToken): boolean {
     const query = this.byToken.get(token);
     if (!query) return false;
+    if (query.refCount === 1) this.bytes -= query.bytes;
     query.refCount = Math.max(0, query.refCount - 1);
     return query.refCount === 0;
   }
@@ -102,9 +126,21 @@ export class LocalQuerySet {
     }
     if (!canSend) return { messages: [], removed };
 
-    // The adds, split so that no message outgrows the server's limit; the removes go with the first.
+    // Split so that no message outgrows the server's limit. The removes go first: the server applies a message in
+    // order and caps what is live after each step, so a set near the cap is swapped by making room before using it.
     const batches: QuerySetModification[][] = [[]];
     let chars = 0;
+    for (const queryId of this.pendingRemoves) {
+      let batch = batches[batches.length - 1]!;
+      if (chars + REMOVE_CHARS > MODIFY_QUERY_SET_CHARS) {
+        batch = [];
+        batches.push(batch);
+        chars = 0;
+      }
+      batch.push({ type: "Remove", queryId });
+      chars += REMOVE_CHARS;
+    }
+    this.pendingRemoves.clear();
     for (const query of this.byToken.values()) {
       if (query.onServer) continue;
       // The token is the path and the canonical JSON of the arguments: about what the Add takes on the wire.
@@ -119,8 +155,6 @@ export class LocalQuerySet {
       chars += size;
       query.onServer = true;
     }
-    for (const queryId of this.pendingRemoves) batches[0]!.push({ type: "Remove", queryId });
-    this.pendingRemoves.clear();
 
     const messages: ModifyQuerySetMessage[] = [];
     for (const modifications of batches) {

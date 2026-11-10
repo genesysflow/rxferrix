@@ -224,9 +224,10 @@ describe("query set", () => {
         type: "ModifyQuerySet",
         baseVersion: 2,
         newVersion: 3,
+        // Removes first: the server caps what is live after each step.
         modifications: [
-          { type: "Add", queryId: 2, udfPath: "todos:get", args: { id: "1" } },
           { type: "Remove", queryId: 1 },
+          { type: "Add", queryId: 2, udfPath: "todos:get", args: { id: "1" } },
         ],
       },
     ]);
@@ -701,6 +702,28 @@ describe("reconnect", () => {
     expect(done).toHaveBeenCalledWith("r");
   });
 
+  it("settles a mutation completed on the last socket when the new one opens with an expired token and nothing is watched", async () => {
+    const jwt = (exp: number) => `h.${btoa(JSON.stringify({ exp })).replace(/=+$/, "")}.s`;
+    let token = jwt(Math.floor(Date.now() / 1000) + 30);
+    client.setAuth(async () => token);
+    await openAndDrain();
+    server.transition({ identity: 1, ts: 1 });
+    const done = vi.fn();
+    void client.mutation(api.todos.add, { text: "x" }).then(done);
+    server.push({ type: "MutationResponse", requestId: 0, success: true, result: "r", ts: 2 });
+    server.close();
+    vi.setSystemTime(Date.now() + 120_000);
+    token = jwt(Math.floor(Date.now() / 1000) + 600);
+    vi.advanceTimersByTime(1_000);
+    // Held back for the fresh token, then: Authenticate and nothing else. Nothing is watched, so nothing shown can be
+    // behind the mutation: it is done once the socket's sends go out.
+    const sent = await openAndDrain();
+    expect(sent.some((m) => m.type === "ModifyQuerySet")).toBe(false);
+    expect(sent.some((m) => m.type === "Authenticate")).toBe(true);
+    await flushMicrotasks();
+    expect(done).toHaveBeenCalledWith("r");
+  });
+
   it("does not complete a mutation on an identity-only transition while resyncing", async () => {
     client.setAuth(async () => "tok");
     client.watchQuery(api.todos.count).onUpdate(() => {});
@@ -816,6 +839,40 @@ describe("errors", () => {
     // Just under it goes out.
     void client.mutation(api.todos.add, { text: "x".repeat(2 * 1024 * 1024 - 4096) }).catch(() => {});
     expect(server.drain().map((m) => m.type)).toEqual(["Mutation"]);
+  });
+
+  it("accepts arguments right up to what a message carries", async () => {
+    await openAndDrain();
+    // {"text":"xxx…"} is 11 characters around the text; a kibibyte and the path's length are kept for the envelope.
+    const room = 2 * 1024 * 1024 - 1024 - "todos:add".length;
+    void client.mutation(api.todos.add, { text: "x".repeat(room - 11) }).catch(() => {});
+    const sent = server.drain();
+    expect(sent.map((m) => m.type)).toEqual(["Mutation"]);
+    expect(JSON.stringify(sent[0]).length).toBeLessThanOrEqual(2 * 1024 * 1024);
+    await expect(client.mutation(api.todos.add, { text: "x".repeat(room - 10) })).rejects.toMatchObject({
+      code: "args_too_large",
+    });
+  });
+
+  it("refuses the query that takes the watched arguments past the server's cap", async () => {
+    await openAndDrain();
+    const megabyte = "m".repeat(1024 * 1024);
+    const unwatch: (() => void)[] = [];
+    // Seven megabytes and a bit are fine; the eighth would be the server's FatalError on this and every later socket.
+    for (let i = 0; i < 7; i++) unwatch.push(client.watchQuery(api.todos.get, { id: `${i}${megabyte}` }).onUpdate(() => {}));
+    await flushMicrotasks();
+    expect(() => client.watchQuery(api.todos.get, { id: `7${megabyte}` }).onUpdate(() => {})).toThrow(/at most 8 MiB/);
+    server.drain();
+    // A watcher more on one of them costs nothing, and room made is room.
+    client.watchQuery(api.todos.get, { id: `0${megabyte}` }).onUpdate(() => {});
+    unwatch[1]!();
+    client.watchQuery(api.todos.get, { id: `7${megabyte}` }).onUpdate(() => {});
+    await flushMicrotasks();
+    // And what replaces a query goes out after what it replaces.
+    const modifications = server.drain().flatMap((m) => (m.type === "ModifyQuerySet" ? m.modifications : []));
+    const kinds = modifications.map((m) => m.type);
+    expect(kinds.lastIndexOf("Remove")).toBeGreaterThan(-1);
+    expect(kinds.indexOf("Remove")).toBeLessThan(kinds.lastIndexOf("Add"));
   });
 
   it("re-adds a large query set in several messages, each under the limit", async () => {

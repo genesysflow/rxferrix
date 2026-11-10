@@ -210,7 +210,8 @@ The server bounds per-socket resource use with these limits:
 - At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`. The client
   refuses the 1025th distinct query up front (`too_many_queries`) rather than having every reconnect repeat the error.
 - At most 8 MiB of arguments (as JSON) over all live queries of a socket (`MAX_QUERY_ARGS_BYTES`): an `Add` past it
-  is a `FatalError`.
+  is a `FatalError`. The client refuses the query that would cross it up front (`args_too_large`), and puts the
+  removes of a `ModifyQuerySet` before its adds, so a set near the cap can be swapped in one message.
 - Messages of at most 2 MiB (`MAX_MESSAGE_BYTES`, like the HTTP API's request bodies): a larger one is a
   `FatalError`; past 4 MiB the socket closes without reading the rest. The client refuses arguments that don't fit
   in one message up front (`args_too_large`), and sends a query set that doesn't (it is re-added whole on every new

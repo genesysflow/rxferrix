@@ -985,6 +985,13 @@ pub async fn import_path(
         };
         jobs.push((name, path.to_path_buf()));
     }
+    // One file per table (a manifest edited by hand could list one twice): the files are checked against the
+    // database as it is before any is written, which says nothing about ids two files of one table share.
+    let mut names: Vec<&str> = jobs.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    if let Some(twice) = names.windows(2).find(|pair| pair[0] == pair[1]) {
+        bail!("{} lists the table `{}` more than once", path.display(), twice[0]);
+    }
     // Stored files first, so documents referencing them never point at a file that doesn't exist yet.
     jobs.sort_by_key(|(name, _)| name != crate::storage::StoredFile::NAME);
     report.remapped_ids = !remap.is_empty();

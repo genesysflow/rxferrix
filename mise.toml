@@ -1,2 +1,4 @@
 [tools]
-rust = "stable"
+# The Rust that CI tests with and the Dockerfile builds with (its RUST_VERSION; CI checks that they agree). The
+# crates' minimum is `rust-version` in Cargo.toml.
+rust = "1.99"

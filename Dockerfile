@@ -13,8 +13,9 @@
 # For your own app: `docker build --build-arg PACKAGE=my-server --build-arg WEB=web -t my-server .` (WEB is the web
 # app directory to build and embed, or "" for none).
 
+# The same versions as mise.toml (Rust) and .bun-version (Bun), which CI uses: its `gates` job checks that they agree.
 ARG RUST_VERSION=1.99
-ARG BUN_VERSION=1
+ARG BUN_VERSION=1.4.4
 
 FROM oven/bun:${BUN_VERSION} AS bun
 

@@ -1,5 +1,6 @@
 # Gates, the static musl release binary and the Docker image.
 #
+#   msrv    the published crates build with the oldest Rust they claim to (`rust-version` in Cargo.toml).
 #   gates   every check of README "Development": rustfmt, Rust tests and clippy (no warnings; also the library without
 #           its default features), the macro tests, the TS type check of generated code, the TS packages, the
 #           committed dashboard build, and the end-to-end tests (dashboard, todo example, chat example) in Chromium.
@@ -77,7 +78,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -98,6 +99,12 @@ jobs:
         run: |
           test -z "${LIBSQLITE3_FLAGS:-}" || { echo "LIBSQLITE3_FLAGS must come from .cargo/config.toml"; exit 1; }
           grep -q 'LIBSQLITE3_FLAGS' .cargo/config.toml
+
+      - name: one Rust and one Bun everywhere (mise.toml and .bun-version, the Dockerfile's defaults)
+        run: |
+          rust="$(sed -n 's/^rust = "\(.*\)"/\1/p' mise.toml)"
+          grep -qx "ARG RUST_VERSION=$rust" Dockerfile || { echo "Dockerfile's RUST_VERSION is not mise.toml's $rust"; exit 1; }
+          grep -qx "ARG BUN_VERSION=$(cat .bun-version)" Dockerfile || { echo "Dockerfile's BUN_VERSION is not .bun-version's"; exit 1; }
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -182,6 +189,31 @@ jobs:
           path: ${{ runner.temp }}/e2e-shots
           if-no-files-found: ignore
 
+  # The crates people depend on build with the Rust that `rust-version` in Cargo.toml promises.
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the minimum supported Rust
+        id: msrv
+        run: |
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: cargo check with it
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: cargo check --locked -p rxferrix -p rxferrix-macros -p rxferrix-cli --all-targets
+
   olap:
     runs-on: ubuntu-24.04
     # DuckDB's C++ is compiled once on a cold cache (by clippy; the tests reuse it): ~25 minutes; a few with the cache.
@@ -230,7 +262,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -281,7 +313,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -336,7 +368,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -377,7 +409,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       # Trusted publishing needs npm 11.5.1 or later.
       - uses: actions/setup-node@v4

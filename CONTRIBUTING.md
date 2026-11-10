@@ -83,9 +83,15 @@ The documentation site lives in `docs/` (VitePress): `bun run docs:dev` serves i
 `bun run docs:build` builds it. A push to `master` that changes `docs/` publishes it to GitHub Pages
 ([`.github/workflows/docs.yml`](.github/workflows/docs.yml)).
 
+## Toolchain versions
+
+- The crates' minimum Rust version is `rust-version` in the root `Cargo.toml`. CI's `msrv` job builds the published crates with exactly that version; raise it there when the code starts to need a newer one.
+- CI and the Docker image build with the Rust in `mise.toml` and the Bun in `.bun-version`; the `Dockerfile` repeats both as defaults, and CI fails when they differ. Change them together.
+- A pull request that changes behaviour adds a line to `Unreleased` in [CHANGELOG.md](CHANGELOG.md). Report security problems as [SECURITY.md](SECURITY.md) describes.
+
 ## Releasing
 
-The three crates and three npm packages share one version. Choose the next version, update the manifests, then commit and tag it. For example:
+The three crates and three npm packages share one version. Choose the next version, rename the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) to it with the date (and start a new, empty `Unreleased`), update the manifests, then commit and tag it. For example:
 
 ```sh
 bun scripts/version.ts 0.10.0          # Cargo.toml, package.json files, CLIENT_VERSION, lockfiles, dashboard build

@@ -255,7 +255,8 @@ impl SyncWorker {
     fn deliver(&mut self, permit: mpsc::OwnedPermit<ServerMessage>) -> Result<(), Fatal> {
         let (update, more, overflowed) = self.mailbox.take_one();
         if overflowed {
-            return Err(Fatal("connection dropped: the client is not keeping up with updates".into()));
+            let why = self.mailbox.dropped_because();
+            return Err(Fatal(why.unwrap_or("connection dropped: the client is not keeping up with updates").into()));
         }
         self.undelivered = more;
         if let Some(update) = update {
@@ -303,7 +304,9 @@ impl SyncWorker {
                     )));
                 }
                 let mut forwarded = Vec::with_capacity(modifications.len());
-                let mut added_bytes = 0;
+                // About what the forwarded modifications hold, for the manager's queue (`MAX_QUEUED_MODIFY_BYTES`).
+                const ENTRY_BYTES: usize = 32;
+                let mut bytes = 0;
                 for m in modifications {
                     match &m {
                         QuerySetModification::Add { query_id, args, .. } => {
@@ -324,13 +327,17 @@ impl SyncWorker {
                             }
                             self.live.insert(*query_id, size);
                             self.live_args_bytes += size;
-                            added_bytes += size;
+                            bytes += ENTRY_BYTES + size;
+                            if let QuerySetModification::Add { udf_path, .. } = &m {
+                                bytes += udf_path.len();
+                            }
                             forwarded.push(m);
                         }
                         QuerySetModification::Remove { query_id } => {
                             // Removing an id that isn't live is harmless (e.g. a client racing a reconnect); ignore it.
                             if let Some(size) = self.live.remove(query_id) {
                                 self.live_args_bytes -= size;
+                                bytes += ENTRY_BYTES;
                                 forwarded.push(m);
                             }
                         }
@@ -338,7 +345,7 @@ impl SyncWorker {
                 }
                 self.query_set = new_version;
                 // The manager answers with an update at querySet = new_version carrying the first results.
-                self.conn.modify(new_version, forwarded, added_bytes).await?;
+                self.conn.modify(new_version, forwarded, bytes).await?;
             }
             ClientMessage::Authenticate { base_version, token } => {
                 if base_version != self.identity_version {

@@ -134,8 +134,8 @@ impl Manager {
             && !conn.waiting
             && let Some(cmd) = conn.deferred.pop_front()
         {
-            if let Command::Modify { args_bytes, .. } = &cmd {
-                conn.deferred_args -= args_bytes;
+            if let Command::Modify { bytes, .. } = &cmd {
+                conn.deferred_bytes -= bytes;
             }
             self.apply(cmd);
         }

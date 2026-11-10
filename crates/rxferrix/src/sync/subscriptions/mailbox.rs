@@ -46,6 +46,8 @@ pub struct Mailbox {
 struct MailboxState {
     queue: VecDeque<Update>,
     overflowed: bool,
+    /// Why, when it isn't for having too many updates unread.
+    reason: Option<&'static str>,
 }
 
 impl Mailbox {
@@ -91,6 +93,21 @@ impl Mailbox {
     pub(super) fn overflow(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).overflowed = true;
         let _ = self.doorbell.try_send(());
+    }
+
+    /// [`Mailbox::overflow`], for a reason of its own that the client is told ([`Mailbox::dropped_because`]).
+    pub(super) fn overflow_because(&self, reason: &'static str) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.overflowed = true;
+            state.reason = Some(reason);
+        }
+        let _ = self.doorbell.try_send(());
+    }
+
+    /// Why the connection was dropped, if it wasn't for leaving too many updates unread.
+    pub fn dropped_because(&self) -> Option<&'static str> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).reason
     }
 
     /// Take every queued update, and whether the connection was dropped for being too slow.

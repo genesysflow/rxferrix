@@ -147,6 +147,15 @@ type Job = (Arc<str>, Value, Identity, Option<QueryValue>);
 /// How many version-changing updates (or commands waiting for its queries) a connection may have outstanding before
 /// it is dropped as too slow.
 pub const MAILBOX_LIMIT: usize = 1024;
+/// How much the query-set changes a connection has queued (while it waits for its queries) may hold before it is
+/// dropped: twice what its live queries may. A connection's live arguments are capped as each message arrives
+/// (`worker::MAX_QUERY_ARGS_BYTES`), but a client that replaces one query by the next in every message stays under
+/// that while the messages pile up. Twice, so that a client near the cap that swaps its queries once while it waits
+/// is not dropped for it.
+pub const MAX_QUEUED_MODIFY_BYTES: usize = 2 * crate::sync::worker::MAX_QUERY_ARGS_BYTES;
+/// What a client dropped for [`MAX_QUEUED_MODIFY_BYTES`] is told.
+pub(crate) const QUEUED_TOO_MUCH: &str =
+    "connection dropped: too many query-set changes sent while earlier ones were still being answered";
 
 /// A generation uses one more runner (snapshot and thread) per this many queued jobs, up to the number of readers
 /// (extra snapshots are only taken from idle readers) and of runtime threads.
@@ -186,13 +195,14 @@ pub enum Command {
         conn: ConnId,
         mailbox: Arc<Mailbox>,
     },
-    /// Apply these modifications (in order) and answer with an update at `query_set`. `args_bytes`: the size of the
-    /// arguments of the queries they add, which counts while the command waits its turn (`Conn::deferred_args`).
+    /// Apply these modifications (in order) and answer with an update at `query_set`. `bytes`: about what they hold
+    /// in memory (the paths and arguments of the queries they add, a little per entry), which counts while the
+    /// command waits its turn ([`MAX_QUEUED_MODIFY_BYTES`]).
     Modify {
         conn: ConnId,
         query_set: u64,
         modifications: Vec<QuerySetModification>,
-        args_bytes: usize,
+        bytes: usize,
     },
     /// The connection's identity is now `identity`, at identity version `version`.
     Authenticate {
@@ -318,9 +328,9 @@ impl Connection {
         &self,
         query_set: u64,
         modifications: Vec<QuerySetModification>,
-        args_bytes: usize,
+        bytes: usize,
     ) -> Result<(), ManagerClosed> {
-        self.send(Command::Modify { conn: self.id, query_set, modifications, args_bytes }).await
+        self.send(Command::Modify { conn: self.id, query_set, modifications, bytes }).await
     }
 
     pub async fn authenticate(&self, version: u64, identity: Identity) -> Result<(), ManagerClosed> {

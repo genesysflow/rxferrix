@@ -1527,13 +1527,14 @@ pub async fn restore_point_in_time(
     options: &backup::RestoreOptions,
 ) -> crate::Result<(backup::RestoreReport, PointInTimeInfo)> {
     let _lock = super::DirLock::acquire(dir)?;
-    backup::finish_interrupted_restore(dir)?;
-    let scratch = tempfile::Builder::new().prefix(".rxferrix-pitr-").tempdir_in(dir)?;
+    backup::finish_or_forget_interrupted_restore(dir)?;
+    let scratch = tempfile::Builder::new().prefix(backup::PITR_SCRATCH_PREFIX).tempdir_in(dir)?;
     let staging = scratch.path().join("staged");
     std::fs::create_dir_all(&staging)?;
     let (manifest, info) = prepare_point_in_time(target, scratch.path(), &staging, point, options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
-    let report = backup::apply_staged_durably(&staging, dir, manifest, options.storage_dir.clone(), &previous)?;
+    let report =
+        backup::apply_staging_in(scratch, Some("staged"), dir, manifest, options.storage_dir.clone(), &previous)?;
     Ok((report, info))
 }
 

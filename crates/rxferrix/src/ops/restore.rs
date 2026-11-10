@@ -348,6 +348,8 @@ pub fn apply_pending(dir: &Path, storage_dir: Option<PathBuf>) -> crate::Result<
     std::fs::remove_file(dir.join(MARKER)).context("removing the pending-restore marker")?;
     sync_dir(dir);
     std::fs::remove_dir_all(&staging).with_context(|| format!("removing {}", staging.display()))?;
+    // As after an offline restore: each `pre-restore-*` is a full copy of the data it replaced.
+    backup::prune_pre_restore(dir);
     tracing::warn!(
         source = marker.source,
         ts = marker.ts,

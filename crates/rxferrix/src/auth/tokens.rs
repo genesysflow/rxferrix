@@ -99,11 +99,10 @@ impl Keys {
     /// that raced another tab's, can be answered again with what the first one got (`store::rotate_refresh_token`).
     /// Without the server's key nobody can tell a token's successor; 256 bits, like a random one.
     pub fn next_refresh_token(&self, current: &str) -> String {
-        let mut hasher = blake3::Hasher::new_keyed(&self.hash);
-        // Tokens are base64url: nothing they hash under ([`Keys::hash_token`]) starts like this.
-        hasher.update(b"rxferrix refresh token successor\0");
-        hasher.update(current.as_bytes());
-        BASE64URL_NOPAD.encode(hasher.finalize().as_bytes())
+        // A key of its own, derived from the hashing key: what [`Keys::hash_token`] computes for some input (it
+        // hashes whatever a client presents) is never a successor.
+        let key = blake3::derive_key("rxferrix auth v1 refresh token successor", &self.hash);
+        BASE64URL_NOPAD.encode(blake3::keyed_hash(&key, current.as_bytes()).as_bytes())
     }
 
     /// Sign access token claims.

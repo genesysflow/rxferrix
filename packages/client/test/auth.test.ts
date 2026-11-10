@@ -295,6 +295,44 @@ describe("RxFerrixAuth", () => {
     expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-fresh");
   });
 
+  it("asks again next to a refresh that is slow, and uses the answer that comes first", async () => {
+    storage.setItem(KEY, stored("a", Date.now() - 1000));
+    const fresh = tokens("fresh");
+    const answers: ((r: Response) => void)[] = [];
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => answers.push(resolve))) as unknown as typeof globalThis.fetch;
+    new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await settle();
+    expect(answers.length).toBe(1);
+    // Unanswered after 3 seconds: asked again, the first request still out (it is slow, not lost).
+    vi.advanceTimersByTime(3_000);
+    await settle();
+    expect(answers.length).toBe(2);
+    // The slow first one answers after all: used, nothing was given up.
+    answers[0]!(new Response(JSON.stringify(fresh), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const sent = await openAndDrain();
+    expect(sent[1]).toEqual({ type: "Authenticate", baseVersion: 0, token: fresh.accessToken });
+    vi.advanceTimersByTime(20_000);
+    await settle();
+    expect(answers.length).toBe(2);
+    expect(JSON.parse(storage.getItem(KEY)!).refreshToken).toBe("refresh-fresh");
+  });
+
+  it("does not refresh with an older pair left in storage", async () => {
+    const now = Date.now();
+    storage.setItem(KEY, stored("a", now - 1000));
+    const { fetch, calls } = mockFetch({
+      "/api/auth/refresh": () => {
+        storage.setItem(KEY, stored("older", now - 60_000)); // not newer than ours: a rotated token
+        return authError(401, "stale_refresh_token");
+      },
+    });
+    const auth = new RxFerrixAuth(client, { storage, fetch, syncTabs: false });
+    await openAndDrain();
+    expect(calls.map((c) => c.body?.refreshToken)).toEqual(["refresh-a"]);
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(auth.state().isAuthenticated).toBe(false);
+  });
+
   it("asks for the refresh once more when no answer comes, with the same token", async () => {
     storage.setItem(KEY, stored("a", Date.now() - 1000));
     const fresh = tokens("fresh");

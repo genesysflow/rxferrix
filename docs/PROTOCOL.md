@@ -276,8 +276,8 @@ endpoints' error shape, without `logLines`).
   already-rotated refresh token revokes the whole session (reuse detection), except within 10 seconds of its rotation
   (`refresh_reuse_grace`): then the same refresh is answered again with the same new refresh token (the first answer
   was lost on the way, or two tabs refreshed at once), or, if that successor was rotated too, with
-  `stale_refresh_token`; either way the session survives. The client gives a refresh request 4 seconds and asks once
-  more, so its second attempt falls inside that window. Sessions expire after 30 days without a refresh (sliding). Impersonation sessions (minted by an
+  `stale_refresh_token`; either way the session survives. While a refresh is unanswered the client sends the same
+  request again after 3 and 6 seconds, next to the ones still out, and uses the first answer; it gives up after 10. Sessions expire after 30 days without a refresh (sliding). Impersonation sessions (minted by an
   admin, `impersonatedBy` set) have a fixed expiry that refreshing never extends.
 - **External tokens** (`AuthConfig::jwt`, docs/CONTRACT.md §1.5): a JWT from a configured issuer (Clerk, Auth0,
   Supabase, any OIDC provider) is accepted wherever an access token is, on `Authenticate` and as an HTTP Bearer token.

@@ -401,6 +401,20 @@ async fn refresh_rotation_reuse_detection_and_sign_out() {
     assert_eq!((s, code_of(&stale)), (401, "stale_refresh_token"));
     let (s, _) = http2.post("/api/auth/refresh", json!({ "refreshToken": token(&c, "refreshToken") })).await;
     assert_eq!(s, 200, "the session survives");
+    // Past the window, a rotated token is reuse: the session is revoked, its current token included.
+    let brief = config(&mailer).refresh_reuse_grace(Duration::from_millis(300));
+    let t3 = TestApp::with_auth(brief).await.unwrap();
+    let http3 = Http::new(t3.serve().await.unwrap());
+    let first = http3.sign_up("erin@example.com", "correct horse").await;
+    let (_, next) = http3.post("/api/auth/refresh", json!({ "refreshToken": token(&first, "refreshToken") })).await;
+    let (s, _) = http3.post("/api/auth/refresh", json!({ "refreshToken": token(&first, "refreshToken") })).await;
+    assert_eq!(s, 200, "inside the window");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (s, reused) = http3.post("/api/auth/refresh", json!({ "refreshToken": token(&first, "refreshToken") })).await;
+    assert_eq!((s, code_of(&reused)), (401, "refresh_token_reused"));
+    let (s, _) = http3.post("/api/auth/refresh", json!({ "refreshToken": token(&next, "refreshToken") })).await;
+    assert_eq!(s, 401, "revoked");
+
     // Sessions don't share successors: another session's tokens are its own.
     let other = http2.sign_in("dave@example.com", "correct horse").await.1;
     let (_, other_next) =

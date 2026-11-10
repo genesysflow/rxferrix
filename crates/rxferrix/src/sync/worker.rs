@@ -303,6 +303,7 @@ impl SyncWorker {
                     )));
                 }
                 let mut forwarded = Vec::with_capacity(modifications.len());
+                let mut added_bytes = 0;
                 for m in modifications {
                     match &m {
                         QuerySetModification::Add { query_id, args, .. } => {
@@ -323,6 +324,7 @@ impl SyncWorker {
                             }
                             self.live.insert(*query_id, size);
                             self.live_args_bytes += size;
+                            added_bytes += size;
                             forwarded.push(m);
                         }
                         QuerySetModification::Remove { query_id } => {
@@ -336,7 +338,7 @@ impl SyncWorker {
                 }
                 self.query_set = new_version;
                 // The manager answers with an update at querySet = new_version carrying the first results.
-                self.conn.modify(new_version, forwarded).await?;
+                self.conn.modify(new_version, forwarded, added_bytes).await?;
             }
             ClientMessage::Authenticate { base_version, token } => {
                 if base_version != self.identity_version {

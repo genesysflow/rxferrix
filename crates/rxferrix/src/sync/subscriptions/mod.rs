@@ -186,11 +186,13 @@ pub enum Command {
         conn: ConnId,
         mailbox: Arc<Mailbox>,
     },
-    /// Apply these modifications (in order) and answer with an update at `query_set`.
+    /// Apply these modifications (in order) and answer with an update at `query_set`. `args_bytes`: the size of the
+    /// arguments of the queries they add, which counts while the command waits its turn (`Conn::deferred_args`).
     Modify {
         conn: ConnId,
         query_set: u64,
         modifications: Vec<QuerySetModification>,
+        args_bytes: usize,
     },
     /// The connection's identity is now `identity`, at identity version `version`.
     Authenticate {
@@ -312,8 +314,13 @@ impl Connection {
         self.id
     }
 
-    pub async fn modify(&self, query_set: u64, modifications: Vec<QuerySetModification>) -> Result<(), ManagerClosed> {
-        self.send(Command::Modify { conn: self.id, query_set, modifications }).await
+    pub async fn modify(
+        &self,
+        query_set: u64,
+        modifications: Vec<QuerySetModification>,
+        args_bytes: usize,
+    ) -> Result<(), ManagerClosed> {
+        self.send(Command::Modify { conn: self.id, query_set, modifications, args_bytes }).await
     }
 
     pub async fn authenticate(&self, version: u64, identity: Identity) -> Result<(), ManagerClosed> {

@@ -96,6 +96,10 @@ struct Conn {
     /// Waiting for its queries before a command can be answered; later commands queue in `deferred`.
     waiting: bool,
     deferred: VecDeque<Command>,
+    /// The arguments held by the modifications in `deferred`: capped like a connection's live ones
+    /// (`worker::MAX_QUERY_ARGS_BYTES`). The worker's cap only sees what is live once each message is applied, and a
+    /// client that replaces one large query by the next stays under it while the messages pile up here.
+    deferred_args: usize,
     /// How many times every query of the set was valid at one ts (an update was due, whether or not anything changed).
     updates: u64,
     /// A query of its set finished stale twice without an update in between (see the module docs, Liveness).
@@ -120,6 +124,7 @@ impl Conn {
             cover: None,
             waiting: false,
             deferred: VecDeque::new(),
+            deferred_args: 0,
             updates: 0,
             starving: false,
             blocker: 0,
@@ -383,7 +388,11 @@ impl Manager {
                 // Unknown: dropped for being too slow; its worker is about to stop.
                 let Some(conn) = self.conns.get_mut(&c) else { return };
                 if conn.waiting {
-                    if conn.deferred.len() >= MAILBOX_LIMIT {
+                    if let Command::Modify { args_bytes, .. } = &cmd {
+                        conn.deferred_args += args_bytes;
+                    }
+                    let too_much = conn.deferred_args > crate::sync::worker::MAX_QUERY_ARGS_BYTES;
+                    if conn.deferred.len() >= MAILBOX_LIMIT || too_much {
                         self.kill(c);
                     } else {
                         conn.deferred.push_back(cmd);
@@ -398,7 +407,7 @@ impl Manager {
     /// Apply a command of a connection that is not waiting.
     fn apply(&mut self, cmd: Command) {
         match cmd {
-            Command::Modify { conn: c, query_set, modifications } => {
+            Command::Modify { conn: c, query_set, modifications, args_bytes: _ } => {
                 let Some(conn) = self.conns.get_mut(&c) else { return };
                 conn.query_set = query_set;
                 for m in modifications {

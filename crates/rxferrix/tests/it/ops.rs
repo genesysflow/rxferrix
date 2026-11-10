@@ -233,13 +233,22 @@ async fn restore_is_refused_while_locked_and_validates_before_swapping() {
     assert!(format!("{err:#}").contains("is in use"), "{err:#}");
     drop(lock);
 
-    // A corrupt archive is refused and the current database stays.
-    let mut bytes = std::fs::read(&archive).unwrap();
-    let mid = bytes.len() / 2;
-    bytes[mid] ^= 0xff;
+    // A corrupt archive is refused and the current database stays. The damage is a byte of the database itself (in
+    // its header, right after the magic string): a byte flipped anywhere in the compressed archive can also land where
+    // it changes no file's content (padding), and such an archive restores, correctly.
+    let mut plain = zstd::decode_all(std::fs::read(&archive).unwrap().as_slice()).unwrap();
+    let magic = b"SQLite format 3\0";
+    let header = plain.windows(magic.len()).position(|w| w == magic).expect("the archive holds a database");
+    plain[header + magic.len() + 8] ^= 0xff;
     let corrupt = target_dir.path().join("rxferrix-corrupt.tar.zst");
-    std::fs::write(&corrupt, &bytes).unwrap();
-    assert!(backup::restore(&corrupt, dest.path(), &RestoreOptions::default()).await.is_err());
+    std::fs::write(&corrupt, zstd::encode_all(plain.as_slice(), 3).unwrap()).unwrap();
+    let err = backup::restore(&corrupt, dest.path(), &RestoreOptions::default()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+    // So is a truncated one.
+    let truncated = target_dir.path().join("rxferrix-truncated.tar.zst");
+    let bytes = std::fs::read(&archive).unwrap();
+    std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+    assert!(backup::restore(&truncated, dest.path(), &RestoreOptions::default()).await.is_err());
     let not_a_backup = target_dir.path().join("rxferrix-junk.tar.zst");
     std::fs::write(&not_a_backup, b"junk").unwrap();
     assert!(backup::restore(&not_a_backup, dest.path(), &RestoreOptions::default()).await.is_err());
@@ -1315,9 +1324,22 @@ async fn staged_restore_is_applied_at_the_next_start() {
     }
     assert_eq!(pair_texts(dest.path()).await, ["keep me a", "keep me b"], "opening the app doesn't apply it");
 
+    // Copies that earlier restores left behind.
+    for t in ["20200101T000000Z", "20200102T000000Z", "20200103T000000Z"] {
+        std::fs::create_dir_all(dest.path().join(format!("pre-restore-{t}"))).unwrap();
+    }
+
     // The next start (serve calls this with the lock held, before opening the database).
     let report = restore::apply_pending(dest.path(), None).unwrap().expect("applied");
     assert!(report.previous.as_ref().unwrap().join("data.db").exists() && report.blobs_restored == 1);
+    let mut copies: Vec<String> = std::fs::read_dir(dest.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("pre-restore-"))
+        .collect();
+    copies.sort();
+    assert_eq!(copies.len(), 2, "only the two newest copies stay, as after an offline restore: {copies:?}");
+    assert_eq!(copies[0], "pre-restore-20200103T000000Z");
     assert!(!dest.path().join(restore::MARKER).exists() && !dest.path().join(restore::STAGED_DIR).exists());
     assert_eq!(pair_texts(dest.path()).await, ["one a", "one b"]);
     assert_eq!(std::fs::read(dest.path().join("auth_secret.key")).unwrap(), key_before, "the server's key stays");

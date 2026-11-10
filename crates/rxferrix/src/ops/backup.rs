@@ -628,10 +628,16 @@ pub(crate) async fn create_with_manifest(
     let (spec2, local2, source2) = (*spec, local.clone(), source.clone());
     let manifest = tokio::task::spawn_blocking(move || write_archive(&source2, &spec2, &local2, now)).await??;
     let bytes = std::fs::metadata(&local)?.len();
-    let name = archive_name_with_ts(now, scheduled, manifest.ts);
+    // `now` was read before the copy was taken, and commits made in between are in it. The time in the name must
+    // not be earlier than what the archive holds: a point-in-time restore picks its base snapshot by it, and one
+    // "from before" the requested time would bring along commits from after it. Rounded up (names keep whole
+    // milliseconds), and never later than the clock is now: commit times only grow, so after the clock was set back
+    // they run ahead of it, and a name from the future would hold up the next snapshot and tie with it in rotation.
+    let at = now.max(manifest.commit_time.min(app.db().clock().now_ms())).ceil();
+    let name = archive_name_with_ts(at, scheduled, manifest.ts);
     target.upload_file(&local, &name).await.with_context(|| format!("storing the backup in {}", target.location))?;
     tracing::info!(name, bytes, ts = manifest.ts, target = %target.location, "backup written");
-    Ok((BackupInfo { name, bytes, created_at: now, scheduled, ts: Some(manifest.ts) }, manifest))
+    Ok((BackupInfo { name, bytes, created_at: at, scheduled, ts: Some(manifest.ts) }, manifest))
 }
 
 /// The settings of scheduled backups: the args of the [`run_scheduled`] cron.
@@ -916,12 +922,23 @@ pub fn apply_staged(
             let name = &blob.path["storage/".len()..];
             let (src, dest) = (staging.join(&blob.path), storage.join(name));
             if src.exists() && !dest.exists() {
+                // Across filesystems (`--storage-dir` elsewhere) a rename fails: copy, under another name until the
+                // copy is whole. A copy cut short (a full disk) would otherwise pass for the blob the next time.
                 std::fs::rename(&src, &dest)
-                    .or_else(|_| std::fs::copy(&src, &dest).map(|_| ()))
+                    .or_else(|_| {
+                        let partial = storage.join(format!(".{name}.restoring"));
+                        std::fs::copy(&src, &partial)?;
+                        // On disk before it gets its name: the marker of this restore is removed once the names are
+                        // there, and a power loss must not leave a name with half a blob behind it.
+                        std::fs::File::open(&partial)?.sync_all()?;
+                        std::fs::rename(&partial, &dest)
+                    })
                     .with_context(|| format!("restoring the blob {name}"))?;
                 blobs_restored += 1;
             }
         }
+        // The blobs' names, as the data directory's own entries are synced by the caller.
+        sync_dir(&storage)?;
     }
     let previous = (!moved_aside.is_empty() || previous.exists()).then(|| previous.to_path_buf());
     Ok(RestoreReport { manifest, previous, blobs_restored })
@@ -930,12 +947,58 @@ pub fn apply_staged(
 /// Restore `archive` into the data directory `dir` (offline). See the module docs.
 pub async fn restore(archive: &Path, dir: &Path, options: &RestoreOptions) -> crate::Result<RestoreReport> {
     let _lock = super::DirLock::acquire(dir)?;
-    finish_interrupted_restore(dir)?;
+    finish_or_forget_interrupted_restore(dir)?;
     let staging = tempfile::Builder::new().prefix(".rxferrix-restore-").tempdir_in(dir)?;
     let manifest = prepare(archive, staging.path(), options.skip_verify).await?;
     let previous = dir.join(format!("pre-restore-{}", super::file_timestamp(crate::db::wall_clock_ms())));
-    apply_staged_durably(staging.path(), dir, manifest, options.storage_dir.clone(), &previous)
+    apply_temp_staging(staging, dir, manifest, options.storage_dir.clone(), &previous)
 }
+
+/// [`apply_staged_durably`] from a temporary directory holding the staged files (they may be in a subdirectory of
+/// it), which goes away with the restore, unless moving the files fails part way: then the data directory is half
+/// restored, exactly as after a crash, and the staged files must stay for the next run to finish with
+/// ([`finish_interrupted_restore`]). Dropping the directory with the error would delete what hasn't moved yet.
+pub(crate) fn apply_temp_staging(
+    scratch: tempfile::TempDir,
+    dir: &Path,
+    manifest: Manifest,
+    storage_dir: Option<PathBuf>,
+    previous: &Path,
+) -> crate::Result<RestoreReport> {
+    apply_staging_in(scratch, None, dir, manifest, storage_dir, previous)
+}
+
+/// [`apply_temp_staging`] with the staged files in `scratch/<sub>`.
+pub(crate) fn apply_staging_in(
+    scratch: tempfile::TempDir,
+    sub: Option<&str>,
+    dir: &Path,
+    manifest: Manifest,
+    storage_dir: Option<PathBuf>,
+    previous: &Path,
+) -> crate::Result<RestoreReport> {
+    let staging = match sub {
+        Some(sub) => scratch.path().join(sub),
+        None => scratch.path().to_path_buf(),
+    };
+    match apply_staged_durably(&staging, dir, manifest, storage_dir, previous) {
+        Ok(report) => Ok(report),
+        // Before the marker exists nothing has moved: the staged files can go.
+        Err(e) if !dir.join(RESTORING_MARKER).exists() => Err(e),
+        Err(e) => {
+            let kept = scratch.keep();
+            Err(e.context(format!(
+                "the restore stopped while moving files into place, so the data directory is half restored. Fix the \
+                 cause and start the server to finish it, or run `restore` again (with other options if they were \
+                 the cause): a new restore replaces what this one left. The files still to move are in {}",
+                kept.display()
+            )))
+        }
+    }
+}
+
+/// The name a point-in-time restore's scratch directory starts with (`ops::replicate`).
+pub(crate) const PITR_SCRATCH_PREFIX: &str = ".rxferrix-pitr-";
 
 /// Written in the data directory while [`apply_staged_durably`] moves files: what to finish if the process dies.
 const RESTORING_MARKER: &str = "restoring.json";
@@ -981,6 +1044,41 @@ pub fn apply_staged_durably(
     Ok(report)
 }
 
+/// [`finish_interrupted_restore`] for a new restore of the whole directory. An interrupted one that can't be finished
+/// (its staged files are gone, or it fails again for the reason it failed the first time: a `--storage-dir` that
+/// can't be written, say, which the marker remembers) would otherwise stand in the way of the very command that
+/// repairs the directory. The new restore replaces everything it would have moved, so it is abandoned with a
+/// warning: its marker and staged files go, the files it moved aside stay in their `pre-restore-*` copy.
+pub fn finish_or_forget_interrupted_restore(dir: &Path) -> crate::Result<()> {
+    let Err(error) = finish_interrupted_restore(dir) else { return Ok(()) };
+    // A marker that can't be read says nothing about what is safe: refuse, as a start does.
+    let path = dir.join(RESTORING_MARKER);
+    let Some(marker) = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice::<RestoringMarker>(&raw).ok())
+    else {
+        return Err(error);
+    };
+    tracing::warn!(
+        staging = %marker.staging.display(),
+        previous = %marker.previous.display(),
+        "an earlier restore was interrupted and can't be finished ({error:#}); this restore replaces what it left"
+    );
+    std::fs::remove_file(&path)?;
+    sync_dir(dir)?;
+    remove_staging(&marker.staging);
+    Ok(())
+}
+
+/// Remove an applied (or abandoned) restore's staging directory. A point-in-time restore stages inside its scratch
+/// directory (the downloads it replayed), which goes with it.
+fn remove_staging(staging: &Path) {
+    let _ = std::fs::remove_dir_all(staging);
+    if let Some(scratch) = staging.parent()
+        && scratch.file_name().is_some_and(|name| name.to_string_lossy().starts_with(PITR_SCRATCH_PREFIX))
+    {
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+}
+
 /// Finish a restore that [`apply_staged_durably`] began and a crash interrupted: moving files is idempotent (what is
 /// still in the staging directory goes into place, the old files it replaces aside). Call it with the data directory
 /// locked, before anything opens the database. Does nothing without a marker.
@@ -993,17 +1091,41 @@ pub fn finish_interrupted_restore(dir: &Path) -> crate::Result<()> {
         Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
     };
     let marker: RestoringMarker = serde_json::from_slice(&raw).context("reading the interrupted restore's marker")?;
+    // The marker goes before the staged files do, so a crash never leaves it without them. Finishing "with nothing
+    // left to move" here would start the server on a directory that is missing whatever hadn't moved.
+    if !marker.staging.exists() {
+        bail!(
+            "a restore of {} was interrupted and its staged files are gone ({}): the data directory may be missing \
+             files. Restore the archive again (that replaces the half-restored files; the ones the interrupted \
+             restore moved aside are in {}), or delete {} to use the directory as it is",
+            dir.display(),
+            marker.staging.display(),
+            marker.previous.display(),
+            path.display()
+        );
+    }
     tracing::warn!(staging = %marker.staging.display(), "finishing a restore that was interrupted");
-    apply_staged(&marker.staging, dir, marker.manifest, marker.storage_dir, &marker.previous)?;
+    let storage_dir = marker.storage_dir.clone();
+    apply_staged(&marker.staging, dir, marker.manifest, marker.storage_dir, &marker.previous).with_context(|| {
+        format!(
+            "finishing the restore that was interrupted ({}; its staged files are in {}, the files it replaced in \
+             {}, and it restores blobs into {}). Fix the cause and start again, or run `restore` with the archive \
+             again: a new restore abandons this one and replaces what it left",
+            path.display(),
+            marker.staging.display(),
+            marker.previous.display(),
+            storage_dir.unwrap_or_else(|| dir.join("storage")).display(),
+        )
+    })?;
     sync_dir(dir)?;
     std::fs::remove_file(&path)?;
     sync_dir(dir)?;
-    let _ = std::fs::remove_dir_all(&marker.staging);
+    remove_staging(&marker.staging);
     Ok(())
 }
 
 /// Delete `pre-restore-*` directories beyond the newest [`PRE_RESTORE_KEPT`] (their names sort by time).
-fn prune_pre_restore(dir: &Path) {
+pub(crate) fn prune_pre_restore(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut copies: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -1093,6 +1215,103 @@ mod tests {
         assert!(!data.join(RESTORING_MARKER).exists() && !staging.exists());
         // Nothing to do the next time.
         finish_interrupted_restore(data).unwrap();
+    }
+
+    fn manifest_with(files: Vec<ManifestFile>) -> Manifest {
+        Manifest {
+            format: MANIFEST_FORMAT.into(),
+            version: MANIFEST_VERSION,
+            created_at: 0.0,
+            rxferrix_version: String::new(),
+            ts: 1,
+            commit_time: 0.0,
+            storage: "included".into(),
+            missing_blobs: 0,
+            files,
+        }
+    }
+
+    /// An error while the files move (here: the blobs' directory can't be made) is not a crash, but leaves the data
+    /// directory in the same state: half restored. What was staged must survive it, so that the next run finishes.
+    #[test]
+    fn a_restore_that_fails_while_moving_files_keeps_what_it_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        std::fs::write(data.join("data.db"), "old").unwrap();
+        let staging = tempfile::Builder::new().prefix(".rxferrix-restore-").tempdir_in(data).unwrap();
+        let staged = staging.path().to_path_buf();
+        std::fs::write(staged.join("data.db"), "restored").unwrap();
+        std::fs::create_dir_all(staged.join("storage")).unwrap();
+        std::fs::write(staged.join("storage/blob1"), "a blob").unwrap();
+        let manifest =
+            manifest_with(vec![ManifestFile { path: "storage/blob1".into(), bytes: 6, sha256: String::new() }]);
+        // A file where the blobs' directory should go.
+        let blocked = data.join("blocked");
+        std::fs::write(&blocked, "in the way").unwrap();
+        let storage_dir = Some(blocked.join("blobs"));
+        let previous = data.join("pre-restore-x");
+
+        let err = apply_temp_staging(staging, data, manifest, storage_dir.clone(), &previous).unwrap_err();
+        assert!(format!("{err:#}").contains("half restored"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(data.join("data.db")).unwrap(), "restored", "the database was swapped");
+        assert!(data.join(RESTORING_MARKER).exists(), "still to be finished");
+        assert!(staged.join("storage/blob1").exists(), "the blob it didn't get to is still staged");
+
+        // While the cause lasts, a start refuses and says where things are.
+        let err = format!("{:#}", finish_interrupted_restore(data).unwrap_err());
+        assert!(err.contains(RESTORING_MARKER) && err.contains("pre-restore-x") && err.contains("blobs"), "{err}");
+        assert!(data.join(RESTORING_MARKER).exists() && staged.join("storage/blob1").exists());
+
+        // With the obstacle gone, the next start finishes it.
+        std::fs::remove_file(&blocked).unwrap();
+        finish_interrupted_restore(data).unwrap();
+        assert_eq!(std::fs::read_to_string(blocked.join("blobs/blob1")).unwrap(), "a blob");
+        assert!(!data.join(RESTORING_MARKER).exists() && !staged.exists());
+    }
+
+    /// A restore that keeps failing for a reason its marker remembers (the blobs' directory) must not block the
+    /// command that repairs the directory: a new restore abandons it.
+    #[test]
+    fn a_new_restore_abandons_an_interrupted_one_that_cannot_be_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        std::fs::write(data.join("data.db"), "old").unwrap();
+        let staging = tempfile::Builder::new().prefix(".rxferrix-restore-").tempdir_in(data).unwrap();
+        let staged = staging.path().to_path_buf();
+        std::fs::write(staged.join("data.db"), "restored").unwrap();
+        std::fs::create_dir_all(staged.join("storage")).unwrap();
+        std::fs::write(staged.join("storage/blob1"), "a blob").unwrap();
+        let manifest =
+            manifest_with(vec![ManifestFile { path: "storage/blob1".into(), bytes: 6, sha256: String::new() }]);
+        let blocked = data.join("blocked");
+        std::fs::write(&blocked, "in the way").unwrap();
+        let previous = data.join("pre-restore-x");
+        apply_temp_staging(staging, data, manifest, Some(blocked.join("blobs")), &previous).unwrap_err();
+
+        finish_or_forget_interrupted_restore(data).unwrap();
+        assert!(!data.join(RESTORING_MARKER).exists() && !staged.exists(), "abandoned");
+        assert_eq!(std::fs::read_to_string(previous.join("data.db")).unwrap(), "old", "what it replaced stays");
+    }
+
+    /// The marker without the files it points to: the restore can't be finished, and saying nothing would start the
+    /// server on a directory that is missing whatever hadn't moved yet.
+    #[test]
+    fn an_interrupted_restore_whose_staged_files_are_gone_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let marker = RestoringMarker {
+            staging: data.join(".rxferrix-restore-gone"),
+            previous: data.join("pre-restore-x"),
+            storage_dir: None,
+            manifest: manifest_with(Vec::new()),
+        };
+        std::fs::write(data.join(RESTORING_MARKER), serde_json::to_vec(&marker).unwrap()).unwrap();
+        let err = finish_interrupted_restore(data).unwrap_err();
+        assert!(format!("{err:#}").contains("staged files are gone"), "{err:#}");
+        assert!(data.join(RESTORING_MARKER).exists(), "it stays an error until someone decides");
+        // A new restore replaces everything the lost one would have: it may go ahead.
+        finish_or_forget_interrupted_restore(data).unwrap();
+        assert!(!data.join(RESTORING_MARKER).exists());
     }
 
     #[test]

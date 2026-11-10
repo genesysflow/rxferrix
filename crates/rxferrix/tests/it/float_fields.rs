@@ -20,6 +20,7 @@ pub mod readings {
 
     #[table(name = "float_readings")]
     #[index(by_value = [value])]
+    #[index(by_samples = [samples])]
     #[search_index(search_note, search = note, filter = [value])]
     #[aggregate(per_value, group = [value], sum = [weight])]
     pub struct Reading {
@@ -88,6 +89,12 @@ pub mod readings {
             .collect()
             .await?
             .len())
+    }
+
+    #[internal_query]
+    pub async fn raw_samples_are(ctx: &QueryCtx, samples: Value) -> Result<usize> {
+        let q = ctx.db.query_table("float_readings").with_index("by_samples", |r| r.eq("samples", samples));
+        Ok(q.collect().await?.len())
     }
 
     #[internal_query]
@@ -169,4 +176,19 @@ async fn untyped_bounds_on_float_fields_compare_as_floats() {
     // `_creationTime` is a float too (milliseconds).
     assert_eq!(t.query::<raw_created_after>((json!(0),)).await.unwrap(), 1);
     assert_eq!(t.query::<raw_created_after>((json!(9_000_000_000_000_i64),)).await.unwrap(), 0);
+}
+
+/// Imported documents are written with the ids and numbers their file has: JSON written elsewhere, whole numbers as
+/// integers.
+#[tokio::test]
+async fn imported_whole_numbers_are_stored_as_floats() {
+    use rxferrix::ops::export::{self, ImportOptions};
+    let t = TestApp::new().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("float_readings.jsonl");
+    std::fs::write(&file, format!("{}\n", reading("imported", 11))).unwrap();
+    export::import_path(t.app(), &file, None, &ImportOptions::default()).await.unwrap();
+    assert_found_at(&t, 11.0, "imported").await;
+    // A list bound, as an untyped filter would give it: compared as the field stores it.
+    assert_eq!(t.query::<raw_samples_are>((json!([1, 2.5]),)).await.unwrap(), 1);
 }

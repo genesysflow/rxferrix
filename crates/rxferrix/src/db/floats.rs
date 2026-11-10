@@ -59,21 +59,33 @@ impl Floats {
         }
     }
 
-    /// Is the document field `name` a float? `_creationTime` is one in every table.
-    fn is_float_field(floats: Option<&Floats>, name: &str) -> bool {
-        name == CREATION_TIME_FIELD
-            || matches!(floats, Some(Floats::Fields(fields))
-                if fields.iter().any(|(field, at)| field == name && *at == Floats::Here))
+    /// Whether [`Floats::apply`] would change `value`.
+    fn changes(&self, value: &Value) -> bool {
+        match (self, value) {
+            (Floats::Here, Value::Number(n)) => !n.is_f64(),
+            (Floats::Each(inner), Value::Array(items)) => items.iter().any(|item| inner.changes(item)),
+            (Floats::Fields(fields), Value::Object(object)) => {
+                fields.iter().any(|(name, inner)| object.get(name).is_some_and(|value| inner.changes(value)))
+            }
+            _ => false,
+        }
     }
 
     /// The value to compare the document field `field` with, given `bound` (a range bound, a group or a filter
-    /// value): an integer bound on a float field is that float, since the field's values are floats.
+    /// value): the bound as the field would store it, since that is what the keys were built from. An integer bound
+    /// on a float field is that float, and so are the integers of a bound on a list or an object with floats in it.
+    /// `_creationTime` is a float in every table.
     pub fn bound<'a>(floats: Option<&Floats>, field: &str, bound: &'a Value) -> Cow<'a, Value> {
-        match bound {
-            Value::Number(n) if !n.is_f64() && Floats::is_float_field(floats, field) => {
-                let mut n = n.clone();
-                to_float(&mut n);
-                Cow::Owned(Value::Number(n))
+        let at = match floats {
+            _ if field == CREATION_TIME_FIELD => Some(&Floats::Here),
+            Some(Floats::Fields(fields)) => fields.iter().find(|(name, _)| name == field).map(|(_, at)| at),
+            _ => None,
+        };
+        match at {
+            Some(at) if at.changes(bound) => {
+                let mut bound = bound.clone();
+                at.apply(&mut bound);
+                Cow::Owned(bound)
             }
             _ => Cow::Borrowed(bound),
         }
@@ -163,6 +175,13 @@ mod tests {
         assert!(bound("_creationTime", json!(5)).is_f64());
         assert!(bound("count", json!(5)).is_i64());
         assert!(bound("samples", json!(5)).is_i64(), "a list of floats is not a float");
+        assert_eq!(serde_json::to_string(&bound("samples", json!([1, 2.5]))).unwrap(), "[1.0,2.5]");
+        assert_eq!(
+            serde_json::to_string(&bound("spans", json!([{ "low": 1, "label": "a" }]))).unwrap(),
+            r#"[{"label":"a","low":1.0}]"#
+        );
+        let untouched = json!([1.5, 2.5]);
+        assert!(matches!(Floats::bound(floats.as_ref(), "samples", &untouched), Cow::Borrowed(_)));
         assert_eq!(bound("value", json!("x")), json!("x"));
         assert!(Floats::bound(None, "_creationTime", &json!(5)).is_f64(), "also in a table without a definition");
     }

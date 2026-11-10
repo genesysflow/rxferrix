@@ -65,7 +65,9 @@ pub struct TaskSummary {
 
 The client gets a named `TaskSummary` type with `openCount` and `latestText`. The macro provides serde and TypeScript derives through framework re-exports. Field doc comments become generated JSDoc.
 
-A field declared `f32` or `f64` always stores a float. A whole number written into it as a JSON integer, such as `ctx.db.patch(id, json!({ "score": 5 }))` or a document saved in the dashboard, is stored as `5.0`, so indexes, aggregates, and search filters on the field see one kind of number. Documents written by 0.12.0 or earlier may still hold an integer in such a field and are not found by `eq` or range queries on it until they are written again.
+A field declared `f32` or `f64` stores a float. A whole number written into it as a JSON integer, such as `ctx.db.patch(id, json!({ "score": 5 }))` or a document saved in the dashboard, is stored as `5.0`, so indexes, aggregates, and search filters on the field see one kind of number. This covers the fields whose shape the table knows: `f32` and `f64`, `Option` and `Vec` of them, and the float fields of nested `#[object]` types. It does not reach inside types the table only knows as JSON, such as a newtype around `f64` that is not an `#[object]`, a map, or a field with `#[serde(with = ...)]`.
+
+Documents are not rewritten when this rule starts to apply to them. A document written by 0.12.0 or earlier, or one that held an integer while the field was declared as an integer type (`i64` changed to `f64` without a migration), keeps its integer until it is written again. Until then, `eq` and range queries on the field do not find it, and neither does a dashboard filter. Rewrite such documents with a [migration](migrations.md) that patches the field.
 
 For dates and UUIDs, enable the `chrono` or `uuid` feature on `rxferrix` and add the corresponding crate to your app to name its types. Use serde support as needed. Dates serialize as strings according to the type's serde format; `DateTime<Utc>` uses RFC 3339. `ctx.now()` remains `f64` epoch milliseconds.
 

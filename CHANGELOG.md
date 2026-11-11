@@ -4,6 +4,8 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+## 0.13.0 - 2026-11-11
+
 ### Changed: check these when upgrading
 
 - **`admin` commands are offline.** `admin create`, `admin reset-password` and `admin disable-2fa` refuse a data directory a server is using; stop the server first. A running server still creates its first administrator through the setup link it prints. Changing an administrator's password therefore needs the server stopped. (#100)

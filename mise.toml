@@ -1,4 +1,5 @@
 [tools]
 # The Rust that CI tests with and the Dockerfile builds with (its RUST_VERSION; CI checks that they agree). The
 # crates' minimum is `rust-version` in Cargo.toml.
-rust = "1.99"
+# rustfmt and clippy are named: a runner's rustup installs a toolchain it doesn't have yet without them.
+rust = { version = "1.99", components = "rustfmt,clippy" }

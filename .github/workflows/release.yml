@@ -102,7 +102,7 @@ jobs:
 
       - name: one Rust and one Bun everywhere (mise.toml and .bun-version, the Dockerfile's defaults)
         run: |
-          rust="$(sed -n 's/^rust = "\([0-9.]*\)"$/\1/p' mise.toml)"
+          rust="$(sed -n 's/^rust = { version = "\([0-9.]*\)".*/\1/p' mise.toml)"
           test -n "$rust" || { echo "no rust version in mise.toml"; exit 1; }
           grep -qx "ARG RUST_VERSION=$rust" Dockerfile || { echo "Dockerfile's RUST_VERSION is not mise.toml's $rust"; exit 1; }
           grep -qx "ARG BUN_VERSION=$(cat .bun-version)" Dockerfile || { echo "Dockerfile's BUN_VERSION is not .bun-version's"; exit 1; }

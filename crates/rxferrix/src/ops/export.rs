@@ -186,6 +186,61 @@ pub fn csv_value(value: Option<&Value>) -> String {
     }
 }
 
+/// For a CSV that will be opened in a spreadsheet: text a user typed into the app must not run as a formula when an
+/// administrator opens the export. A cell is a formula when it starts with `=`, `+`, `-`, `@`, a tab or a carriage
+/// return, so:
+///
+/// - every top-level string that starts like that gets a `'` in front, and so does a field name (the header row);
+///   numbers are left alone (`-5` stays a number), and nested values are written as JSON, which starts with a bracket;
+/// - in every string, nested ones included, such a character right after a `;` or a tab gets one too: where the list
+///   separator is `;` (much of Europe), a spreadsheet splits the line there whatever the file says, and what follows
+///   starts a cell.
+///
+/// The result doesn't import back as it was: it is for reading.
+pub fn defuse_formulas(doc: Value) -> Value {
+    const TRIGGERS: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
+    fn after_separators(text: &mut String) {
+        if !text.contains([';', '\t']) {
+            return;
+        }
+        let mut out = String::with_capacity(text.len() + 2);
+        let mut after_separator = false;
+        for c in text.chars() {
+            if after_separator && TRIGGERS.contains(&c) {
+                out.push('\'');
+            }
+            out.push(c);
+            after_separator = c == ';' || c == '\t';
+        }
+        *text = out;
+    }
+    fn cell(mut text: String) -> String {
+        after_separators(&mut text);
+        if text.starts_with(TRIGGERS) {
+            text.insert(0, '\'');
+        }
+        text
+    }
+    fn nested(value: &mut Value) {
+        match value {
+            Value::String(text) => after_separators(text),
+            Value::Array(items) => items.iter_mut().for_each(nested),
+            Value::Object(fields) => fields.values_mut().for_each(nested),
+            _ => {}
+        }
+    }
+    let Value::Object(fields) = doc else { return doc };
+    let mut out = Map::with_capacity(fields.len());
+    for (name, mut value) in fields {
+        match &mut value {
+            Value::String(text) => *text = cell(std::mem::take(text)),
+            other => nested(other),
+        }
+        out.insert(cell(name), value);
+    }
+    Value::Object(out)
+}
+
 /// Write one CSV record (fields joined by commas, terminated by CRLF).
 pub fn write_csv_record<W: Write>(out: &mut W, fields: impl IntoIterator<Item = String>) -> std::io::Result<()> {
     let mut first = true;
@@ -1021,6 +1076,43 @@ pub async fn import_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_a_spreadsheet_would_run_gets_a_quote() {
+        let doc = serde_json::json!({
+            "_id": "abc", "formula": "=HYPERLINK(\"http://x\")", "plus": "+1", "minus": "-1", "at": "@SUM(A1)",
+            "tab": "\tx", "plain": "a = b", "number": -5, "list": ["=1"], "nested": { "f": "=1" }, "none": null,
+        });
+        let safe = defuse_formulas(doc);
+        for (field, expected) in [
+            ("formula", "'=HYPERLINK(\"http://x\")"),
+            ("plus", "'+1"),
+            ("minus", "'-1"),
+            ("at", "'@SUM(A1)"),
+            ("tab", "'\tx"),
+            ("plain", "a = b"),
+            ("_id", "abc"),
+        ] {
+            assert_eq!(safe[field], expected, "{field}");
+        }
+        // Numbers stay numbers; what is nested is written as JSON, which starts with a bracket.
+        assert_eq!(safe["number"], -5);
+        assert_eq!(csv_value(safe.get("list")), "[\"=1\"]");
+        assert_eq!(csv_value(safe.get("nested")), "{\"f\":\"=1\"}");
+        // Where the list separator is `;`, a spreadsheet starts a cell after each one, in nested text too; and a
+        // field's name is a cell of the header row.
+        let doc = serde_json::json!({
+            "text": "x;=cmd|' /C calc'!A0", "tabbed": "a\t@b;c", "fine": "a; =b", "list": ["k;+1"], "=name": 1,
+            "_id": "abc",
+        });
+        let safe = defuse_formulas(doc);
+        assert_eq!(safe["text"], "x;'=cmd|' /C calc'!A0");
+        assert_eq!(safe["tabbed"], "a\t'@b;c");
+        assert_eq!(safe["fine"], "a; =b");
+        assert_eq!(safe["list"], serde_json::json!(["k;'+1"]));
+        assert_eq!(safe["'=name"], 1);
+        assert!(safe.get("=name").is_none());
+    }
 
     #[test]
     fn csv_escaping() {

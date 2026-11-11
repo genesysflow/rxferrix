@@ -197,9 +197,20 @@ export function saveBlob({ blob, filename }: Download, doc: Document = document)
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-/** `GET /api/admin/export/{table}?format=…`: the whole table from one snapshot (secrets of system tables masked). */
-export function exportTable(auth: RxFerrixAuth, table: string, format: ExportFormat): Promise<Download> {
-  return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}`, `${table}.${format}`);
+/**
+ * `GET /api/admin/export/{table}?format=…`: the whole table from one snapshot (secrets of system tables masked).
+ * `spreadsheet` (CSV only): text a spreadsheet would run as a formula gets a leading `'`.
+ */
+export function exportTable(
+  auth: RxFerrixAuth,
+  table: string,
+  format: ExportFormat,
+  spreadsheet = false,
+): Promise<Download> {
+  const variant = spreadsheet ? "&spreadsheet=true" : "";
+  // A name of its own: importing the spreadsheet file as the table's CSV would write its `'`s back.
+  const name = spreadsheet ? `${table}.sheet.${format}` : `${table}.${format}`;
+  return download(auth, `/api/admin/export/${encodeURIComponent(table)}?format=${format}${variant}`, name);
 }
 
 /** `POST /api/admin/import/{table}?mode=…&format=…` with a JSONL or CSV body (CSV as exported, with a header). */

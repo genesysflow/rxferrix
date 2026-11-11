@@ -10,6 +10,8 @@ Please do not open a public issue for a security problem.
 
 Report it privately through GitHub: on the repository's **Security** tab, choose **Report a vulnerability**. The report is visible only to the maintainers.
 
+If that button is not there, open an issue that asks for a private contact and says nothing about the problem itself.
+
 Include what you can of:
 
 - the version (or commit) and how the server is run (flags, storage backend, behind a proxy or not);

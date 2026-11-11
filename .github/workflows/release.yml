@@ -14,8 +14,8 @@
 #   docker       the Dockerfile (FROM scratch), smoke-tested, alongside the gates; docker-push pushes it to ghcr.io
 #                for v* tags once both passed (from the layer cache).
 #   publish-crates, publish-npm
-#                for v* tags once the gates and olap passed: the crates to crates.io, the @rxferrix packages to npm
-#                (with provenance), at the tag's version (`scripts/version.ts` must print it). Trusted publishing: no
+#                for v* tags once the gates and olap passed (the crates also wait for msrv): the crates to
+#                crates.io, the @rxferrix packages to npm (with provenance), at the tag's version (`scripts/version.ts` must print it). Trusted publishing: no
 #                token is stored; each crate and package names this workflow as its trusted publisher (README,
 #                "Releasing"). A version already published is skipped, so a failed run can be rerun.
 #
@@ -102,7 +102,8 @@ jobs:
 
       - name: one Rust and one Bun everywhere (mise.toml and .bun-version, the Dockerfile's defaults)
         run: |
-          rust="$(sed -n 's/^rust = "\(.*\)"/\1/p' mise.toml)"
+          rust="$(sed -n 's/^rust = "\([0-9.]*\)"$/\1/p' mise.toml)"
+          test -n "$rust" || { echo "no rust version in mise.toml"; exit 1; }
           grep -qx "ARG RUST_VERSION=$rust" Dockerfile || { echo "Dockerfile's RUST_VERSION is not mise.toml's $rust"; exit 1; }
           grep -qx "ARG BUN_VERSION=$(cat .bun-version)" Dockerfile || { echo "Dockerfile's BUN_VERSION is not .bun-version's"; exit 1; }
 
@@ -196,13 +197,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Exactly the version named (1.95 is 1.95.0, not the newest 1.95.x), and the default from here on, so that the
+      # cache below is keyed by it and not by whatever stable the runner image has.
       - name: the minimum supported Rust
-        id: msrv
         run: |
-          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
-          test -n "$msrv"
+          msrv="$(sed -n 's/^rust-version = "\([0-9.]*\)"$/\1/p' Cargo.toml)"
+          test -n "$msrv" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          case "$msrv" in *.*.*) ;; *) msrv="$msrv.0" ;; esac
           rustup toolchain install "$msrv" --profile minimal
-          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          rustup default "$msrv"
+          rustc --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -210,8 +214,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: cargo check with it
-        env:
-          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
         run: cargo check --locked -p rxferrix -p rxferrix-macros -p rxferrix-cli --all-targets
 
   olap:
@@ -350,7 +352,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" dist/todo-server-olap --clobber
 
   publish-crates:
-    needs: [gates, olap]
+    needs: [gates, olap, msrv]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 60

@@ -127,7 +127,7 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 - Replication ships commits while snapshots are taken, and notices lost segments. (#30)
 - Subscriptions that timed out run again on a timer. (#32)
 - One connection can no longer hold the subscription frontier indefinitely. (#35)
-- Client: query results are frozen so they cannot corrupt the diff base; auth races are closed; a mutation the server would no longer recognize is not sent again. (#36, #37, #38, #45)
+- Client: query results are frozen so they cannot corrupt the diff base; auth races are closed; a mutation the server would no longer recognize is not sent again. (#36, #37, #38)
 - Dashboard: five UI races and traps. (#39)
 - TypeScript codegen: output directory from the environment, optional fields, function docs, 64-bit integers. (#40)
 - Macros: clearer errors for types that cannot cross the wire, and two silent mistakes are refused. (#42)
@@ -137,7 +137,7 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 - Shorthands for errors meant for the client (`ensure_user!` and friends). (#43)
 - `chrono` and `uuid` features. (#44)
-- React and Svelte: `skip`, and keeping the previous result while new arguments load. (#46)
+- React and Svelte can keep the previous result while a query's new arguments load. (#46)
 - One-parameter functions take their argument bare. (#51)
 - Let's Encrypt and thumbnails are optional features. (#54)
 - Client, testing and type mapping guides. (#50)

@@ -5,6 +5,8 @@ import type { Logger } from "./logging.js";
 export const SERVER_INACTIVITY_TIMEOUT_MS = 30_000;
 const INITIAL_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 16_000;
+/** `FatalError`s closer together than this are one streak ({@link WebSocketManager.reconnectAfterFatal}). */
+const FATAL_STREAK_MS = 60_000;
 /**
  * A socket that hasn't opened after this long is dropped and retried (a black-holed connect would otherwise hang
  * forever). As long as the silence threshold: a server that takes longer than that to accept is as good as down.
@@ -65,6 +67,9 @@ export class WebSocketManager {
   private _hasEverConnected = false;
   private lastCloseReason: string | null = null;
   private retries = 0;
+  /** `FatalError`s in the current streak, and when the last one came. */
+  private fatalErrors = 0;
+  private lastFatalAt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -146,6 +151,22 @@ export class WebSocketManager {
     this.logger.debug(`reconnecting: ${reason}`);
     this.closeCurrent(reason);
     this.scheduleReconnect(reason);
+  }
+
+  /**
+   * The server refused something this client sent and ended the socket (`FatalError`). The client will send it
+   * again, or something like it, on the next socket, so each refusal that follows the last within a minute waits
+   * longer than the one before: nothing a healthy-looking socket says in between (its first Transition arrives
+   * before the refusal) starts the delays over.
+   */
+  reconnectAfterFatal(reason: string): void {
+    if (this._state === "stopped") return;
+    const now = Date.now();
+    if (now - this.lastFatalAt > FATAL_STREAK_MS) this.fatalErrors = 0;
+    this.lastFatalAt = now;
+    this.retries = Math.max(this.retries, this.fatalErrors);
+    this.fatalErrors += 1;
+    this.reconnect(reason);
   }
 
   /** Permanently closes the socket. */

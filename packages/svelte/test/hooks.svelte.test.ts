@@ -95,8 +95,8 @@ describe("useQuery", () => {
         baseVersion: 1,
         newVersion: 2,
         modifications: [
-          { type: "Add", queryId: 1, udfPath: "todos:get", args: { id: "b" } },
           { type: "Remove", queryId: 0 },
+          { type: "Add", queryId: 1, udfPath: "todos:get", args: { id: "b" } },
         ],
       },
     ]);

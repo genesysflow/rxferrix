@@ -97,9 +97,9 @@ describe("usePaginatedQuery", () => {
     expect(status()).toBe("LoadingFirstPage loading");
     expect(items()).toEqual([]);
     expect(sentModifications()).toEqual([
-      { type: "Add", queryId: 3, udfPath: "messages:list", args: { channel: "b", paginationOpts: { numItems: 2, cursor: null } } },
       { type: "Remove", queryId: 1 },
       { type: "Remove", queryId: 2 },
+      { type: "Add", queryId: 3, udfPath: "messages:list", args: { channel: "b", paginationOpts: { numItems: 2, cursor: null } } },
     ]);
     deliver({ querySet: 4, ts: 3 }, [update(3, page(["b1"], "e", true))]);
     expect(items()).toEqual(["b1"]);

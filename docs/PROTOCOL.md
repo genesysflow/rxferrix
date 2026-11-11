@@ -83,7 +83,8 @@ The sync protocol is version 1. It uses WebSocket at `GET /api/sync`, with one U
 { "type": "ActionResponse", "requestId": 1, "success": true,  "result": "…", "logLines": [] }
 { "type": "ActionResponse", "requestId": 1, "success": false, "errorMessage": "…", "errorData": null, "logLines": [] }
 
-// Unrecoverable for this socket. The server closes it after sending. The client reconnects with backoff.
+// Unrecoverable for this socket. The server closes it after sending. The client reconnects, waiting longer after
+// each FatalError that follows the last within a minute (what the server refused is usually sent again).
 { "type": "FatalError", "error": "…" }
 // The token of an Authenticate was rejected, the socket's token expired, or its session ended while the socket was
 // open (guarantee 10). error is one of "malformed access token", "invalid access token signature", "access token
@@ -209,12 +210,15 @@ The server bounds per-socket resource use with these limits:
 - At most 1024 live queries per socket (`MAX_QUERIES`): a `ModifyQuerySet` past it is a `FatalError`. The client
   refuses the 1025th distinct query up front (`too_many_queries`) rather than having every reconnect repeat the error.
 - At most 8 MiB of arguments (as JSON) over all live queries of a socket (`MAX_QUERY_ARGS_BYTES`): an `Add` past it
-  is a `FatalError`.
+  is a `FatalError`. The client refuses the query that would cross it up front (`args_too_large`), and puts the
+  removes of a `ModifyQuerySet` before its adds, so a set near the cap can be swapped in one message.
 - At most 16 MiB of query-set changes sent while earlier ones are still being answered (`MAX_QUEUED_MODIFY_BYTES`:
   the paths and arguments of the queries they add): past it the socket is closed with a `FatalError`. A client that
   waits for each `ModifyQuerySet`'s Transition, or that only adds queries, never reaches it.
 - Messages of at most 2 MiB (`MAX_MESSAGE_BYTES`, like the HTTP API's request bodies): a larger one is a
-  `FatalError`; past 4 MiB the socket closes without reading the rest.
+  `FatalError`; past 4 MiB the socket closes without reading the rest. The client refuses arguments that don't fit
+  in one message up front (`args_too_large`), and sends a query set that doesn't (it is re-added whole on every new
+  socket) as several `ModifyQuerySet`s, each one version after the last.
 - At most 64 mutations and actions running per socket (`MAX_IN_FLIGHT`): past it, the server holds the next one and
   stops reading the socket until one finishes (later messages queue in the client and TCP rather than in the server,
   and keep their order). Meanwhile it goes on sending Transitions and Pings and ending the socket on token expiry or

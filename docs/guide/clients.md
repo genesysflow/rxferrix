@@ -163,6 +163,6 @@ React has `useRxFerrixAuth`, `useAuthActions`, and `useCurrentUser`; Svelte has 
 
 `useConnectionState()` returns connection/request state in React. Svelte returns an object whose `.current` is reactive. Use this to show connection loss or pending work.
 
-Request failures are `RxFerrixError` objects. Expected server errors preserve the `UserError` code, message, and data. Client errors include `ConnectionLost`, `ClientClosed`, `OutcomeUnknown`, and `too_many_queries`.
+Request failures are `RxFerrixError` objects. Expected server errors preserve the `UserError` code, message, and data. Client errors include `ConnectionLost`, `ClientClosed`, `OutcomeUnknown`, `too_many_queries`, and `args_too_large` (arguments that do not fit in one 2 MiB message; the call is refused before anything is sent).
 
 Unanswered mutations are retried only within the supported window and identity. An `OutcomeUnknown` means the mutation may already have committed. Actions interrupted by connection loss reject with `ConnectionLost` and are not automatically retried. See [reconnect behavior](/guide/things-to-know#reconnects-and-retries) before adding application retries.

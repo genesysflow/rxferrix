@@ -7,6 +7,7 @@ import type {
 } from "./api.js";
 import { normalizeArgs, queryToken, type QueryToken } from "./canonical.js";
 import { CLIENT_CLOSED, RxFerrixError } from "./errors.js";
+import { MAX_QUERY_ARGS_BYTES, tooLarge, tooMuchWatched } from "./limits.js";
 import { LocalQuerySet } from "./local_query_set.js";
 import { createLogger, type Logger } from "./logging.js";
 import {
@@ -166,15 +167,19 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 /** The server's limit of live queries per socket; past it, a `ModifyQuerySet` is a fatal error (docs/PROTOCOL.md). */
 export const MAX_LIVE_QUERIES = 1024;
 
-/** The error for function args that can't be encoded as JSON (a cycle, a BigInt, ...), or null. */
-function unserializable(args: Record<string, unknown>): RxFerrixError | null {
+/**
+ * The error for function args that can't be sent: not encodable as JSON (a cycle, a BigInt, ...), or too large for
+ * one message. Null if they can.
+ */
+function unsendable(udfPath: string, args: Record<string, unknown>): RxFerrixError | null {
+  let json: string;
   try {
-    JSON.stringify(args);
-    return null;
+    json = JSON.stringify(args);
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     return new RxFerrixError(`Arguments can't be serialized as JSON: ${detail}`, { code: "invalid_args", cause: e });
   }
+  return tooLarge(udfPath, json);
 }
 
 interface AuthState {
@@ -218,6 +223,8 @@ export class RxFerrixClient {
    * still shows results from the old socket, so it is not "at" the new socket's ts; mutation completion waits.
    */
   private resyncQuerySetVersion: number | null = null;
+  /** A new socket opened and its first query-set flush hasn't gone out yet ({@link flushQuerySet}). */
+  private awaitingFirstFlush = false;
 
   // Auth
   private auth: AuthState | null = null;
@@ -360,6 +367,14 @@ export class RxFerrixClient {
         { code: "too_many_queries" },
       );
     }
+    const cost = this.localQueries.costOf(token);
+    if (cost > 0) {
+      // The same goes for a query whose arguments no message can carry (the token holds their canonical JSON), and
+      // for the one that takes the set past what the server lets a socket watch.
+      const large = tooLarge(udfPath, token);
+      if (large) throw large;
+      if (this.localQueries.argsBytes + cost > MAX_QUERY_ARGS_BYTES) throw tooMuchWatched(udfPath);
+    }
     let set = this.listeners.get(token);
     if (!set) {
       set = new Set();
@@ -393,12 +408,26 @@ export class RxFerrixClient {
   }
 
   private flushQuerySet(): void {
-    const { message, removed } = this.localQueries.flush(this.ws.canSend());
+    const canSend = this.ws.canSend();
+    const { messages, removed } = this.localQueries.flush(canSend);
     if (removed.length > 0) {
       for (const queryId of removed) this.remoteQueries.remove(queryId);
       this.recomputeAndNotify();
     }
-    if (message) this.ws.send(message);
+    for (const message of messages) this.ws.send(message);
+    if (canSend && this.awaitingFirstFlush) {
+      // The first flush a new socket lets through re-adds every query. Until their results arrive from this socket
+      // the view still shows the previous socket's: a mutation that completed there must not settle against them.
+      // (Decided here, not when the socket opens: its sends may be held back then, for a fresh token.)
+      this.awaitingFirstFlush = false;
+      const resent = this.localQueries.sentQuerySetVersion;
+      this.resyncQuerySetVersion = resent > 0 ? resent : null;
+      if (resent === 0) {
+        // Nothing is watched, so there is no view a mutation could be ahead of, and nothing on this socket will
+        // bring a Transition for the ones that completed on the last: they are done.
+        this.finishMutations(this.requests.removeCompleted(Number.MAX_SAFE_INTEGER));
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -415,9 +444,9 @@ export class RxFerrixClient {
     if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const args = normalizeArgs(argsAndOptions[0]);
     const options = argsAndOptions[1] as MutationOptions<ArgsOf<M>> | undefined;
-    // Checked before it is queued: a message that can't be encoded would otherwise be retried on every socket and
-    // block every later request behind it.
-    const invalid = unserializable(args);
+    // Checked before it is queued: a message that can't be encoded, or that the server refuses for its size, would
+    // otherwise be retried on every socket and block every later request behind it.
+    const invalid = unsendable(ref._path, args);
     if (invalid) return Promise.reject(invalid);
     const requestId = this.requests.allocateRequestId();
     const message: MutationMessage = { type: "Mutation", requestId, udfPath: ref._path, args };
@@ -437,7 +466,7 @@ export class RxFerrixClient {
   action<A extends FunctionReference<"action">>(ref: A, ...args: OptionalArgs<A>): Promise<OutputOf<A>> {
     if (this.closed) return Promise.reject(new RxFerrixError("Client is closed", { code: CLIENT_CLOSED }));
     const normalized = normalizeArgs(args[0]);
-    const invalid = unserializable(normalized);
+    const invalid = unsendable(ref._path, normalized);
     if (invalid) return Promise.reject(invalid);
     const requestId = this.requests.allocateRequestId();
     const message: ActionMessage = { type: "Action", requestId, udfPath: ref._path, args: normalized };
@@ -619,10 +648,11 @@ export class RxFerrixClient {
     this.identityVersion = 0;
     this.serverToken = null;
     this.awaitingAuthConfirmation = null;
+    // The view still shows the previous socket's results until the re-added queries report from this socket
+    // (`flushQuerySet` says from which query set version on).
+    this.awaitingFirstFlush = true;
+    this.resyncQuerySetVersion = null;
     this.syncToServer();
-    // The view still shows the previous socket's results until the re-added queries report from this socket.
-    const resent = this.localQueries.sentQuerySetVersion;
-    this.resyncQuerySetVersion = resent > 0 ? resent : null;
   }
 
   /** Sends everything the server does not know yet, in protocol order: Authenticate, ModifyQuerySet, requests. */
@@ -663,7 +693,7 @@ export class RxFerrixClient {
       }
       case "FatalError":
         this.logger.error(`server reported a fatal error: ${message.error}`);
-        this.ws.reconnect(`FatalError: ${message.error}`);
+        this.ws.reconnectAfterFatal(`FatalError: ${message.error}`);
         return;
       case "AuthError":
         this.onAuthError(message);
@@ -677,7 +707,7 @@ export class RxFerrixClient {
 
   /** The ts the local view is consistent with, or null while resyncing after a reconnect. */
   private observedTs(): number | null {
-    return this.resyncQuerySetVersion === null ? this.remoteQueries.version.ts : null;
+    return this.resyncQuerySetVersion === null && !this.awaitingFirstFlush ? this.remoteQueries.version.ts : null;
   }
 
   private onTransition(message: TransitionMessage): void {

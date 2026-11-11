@@ -2,6 +2,7 @@
 name = "rxferrix"
 description = "A single-binary reactive backend: typed Rust queries, mutations and actions, live over WebSockets, with auth, file storage, scheduling, search and an admin dashboard"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -4,6 +4,12 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+## 0.13.1 - 2026-11-11
+
+### Fixed
+
+- The dashboard drew `://` and other character runs as ligatures with a ligature font (JetBrains Mono, which `ui-monospace` resolves to on many Linux desktops), so `https://example.com` looked like it had one slash. Monospace text shows as typed. (#115)
+
 ## 0.13.0 - 2026-11-11
 
 ### Changed: check these when upgrading

@@ -511,13 +511,38 @@ fn format_object(inner: &str, depth: usize) -> String {
     out
 }
 
+/// Where the comment at the start of `text` (which starts with `/*`) ends: the index just past its `*/`.
+///
+/// A doc comment as ts-rs lays out `///` lines (`/**`, one ` * line` per line of text, ` */` on a line of its own)
+/// ends at that last line, not at the first `*/`: the text is the app's own doc comment, which may hold one (a cron
+/// expression, a glob), and ts-rs writes it out as it is. Only while the lines look like that, though: a `/** .. */`
+/// block comment in the Rust source arrives as written, with whatever indentation and closing it has, and reading on
+/// past its end would run into the next field's comment and take the field along.
+fn comment_end(text: &str) -> Option<usize> {
+    if let Some(body) = text.strip_prefix("/**\n") {
+        let mut offset = "/**\n".len();
+        for line in body.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if trimmed == "*/" {
+                return Some(offset + line.find("*/")? + 2);
+            }
+            // Not a ` * line`: this isn't that layout (or the comment ended earlier, on a line with text).
+            if !trimmed.starts_with('*') {
+                break;
+            }
+            offset += line.len();
+        }
+    }
+    text.get(2..)?.find("*/").map(|end| 2 + end + 2)
+}
+
 /// `ts` without its `/* .. */` comments.
 fn without_comments(ts: &str) -> String {
     let mut out = String::with_capacity(ts.len());
     let mut rest = ts;
     while let Some(start) = rest.find("/*") {
         out.push_str(&rest[..start]);
-        rest = rest[start + 2..].find("*/").map_or("", |end| &rest[start + 2 + end + 2..]);
+        rest = comment_end(&rest[start..]).map_or("", |end| &rest[start + end..]);
     }
     out.push_str(rest);
     out
@@ -532,7 +557,9 @@ fn trim_blank_lines(lines: &[String]) -> &[String] {
 
 /// `/** text */` for one line, a `/**` / ` * line` / ` */` block otherwise; each line starts with `pad`.
 fn jsdoc(lines: &[String], pad: &str) -> String {
-    match lines {
+    // `*/` in the text (a cron expression, a glob) would end the comment there and leave the rest as code.
+    let lines: Vec<String> = lines.iter().map(|line| line.replace("*/", "*\\/")).collect();
+    match lines.as_slice() {
         [] => String::new(),
         [line] => format!("{pad}/** {line} */\n"),
         lines => {
@@ -581,14 +608,15 @@ fn split_top_level(s: &str) -> Vec<&str> {
 /// The JSDoc comments at the start of an object type item (as text lines), and the rest of it.
 fn leading_docs(mut item: &str) -> (Vec<String>, &str) {
     let mut lines = Vec::new();
-    while let Some(rest) = item.strip_prefix("/**") {
-        let Some(end) = rest.find("*/") else { break };
-        for line in rest[..end].lines() {
+    while item.starts_with("/**") {
+        let Some(end) = comment_end(item) else { break };
+        // (`/**/` is a comment of four characters with nothing in it.)
+        for line in item.get(3..end - 2).unwrap_or("").lines() {
             let line = line.trim();
             let line = line.strip_prefix('*').map_or(line, |l| l.strip_prefix(' ').unwrap_or(l));
             lines.push(line.trim_end().to_string());
         }
-        item = rest[end + 2..].trim_start();
+        item = item[end..].trim_start();
     }
     while lines.first().is_some_and(String::is_empty) {
         lines.remove(0);
@@ -611,11 +639,9 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
 
 /// The index just past the `/* .. */` comment starting at `start`.
 fn skip_comment(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 2;
-    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-        i += 1;
-    }
-    (i + 2).min(bytes.len())
+    // Comments start and end on ASCII, so the slice is on a character boundary.
+    let text = std::str::from_utf8(&bytes[start..]).unwrap_or("");
+    comment_end(text).map_or(bytes.len(), |end| start + end)
 }
 
 /// The index just past the `}` matching the `{` at `start` (or the end of the input).
@@ -734,6 +760,28 @@ mod tests {
         // A documented object nested in a documented one.
         let ts = "{ \n/**\n * Outer.\n */\no: { \n/**\n * Inner.\n */\ni: string, }, }";
         assert_eq!(format_ts(ts, 0), "{\n  /** Outer. */\n  o: {\n    /** Inner. */\n    i: string,\n  },\n}");
+        // A `*/` in the text (ts-rs writes a doc comment out as it is): the comment ends at its last line, and the
+        // one written here can't be ended by its text.
+        let ts = "{ \n/**\n * Files like `src/**/*.rs`, every */5 minutes.\n */\nglob: string, n: number, }";
+        assert_eq!(
+            format_ts(ts, 0),
+            "{\n  /** Files like `src/**\\/*.rs`, every *\\/5 minutes. */\n  glob: string,\n  n: number,\n}"
+        );
+        assert_eq!(jsdoc(&["a */ b".to_string(), "c".to_string()], ""), "/**\n * a *\\/ b\n * c\n */\n");
+        // A `/** .. */` block comment in the Rust source arrives as written (indented, closed wherever it was):
+        // each comment ends where it does, and the fields after it stay fields.
+        let ts = "{ \n/**\n     * Foo.\n     */\na: string, \n/**\n * Bar.\n */\nb: number, c: boolean, }";
+        assert_eq!(format_ts(ts, 0), "{\n  /** Foo. */\n  a: string,\n  /** Bar. */\n  b: number,\n  c: boolean,\n}");
+        let ts = "{ \n/**\n * One\n * two */\na: string, \n/**\n * Bar.\n */\nb: number, }";
+        assert_eq!(
+            format_ts(ts, 0),
+            "{\n  /**\n   * One\n   * two\n   */\n  a: string,\n  /** Bar. */\n  b: number,\n}"
+        );
+        // A text line that starts like the end (`#[doc = "/x"]`) is text.
+        let ts = "{ \n/**\n */x\n */\na: string, b: number, }";
+        assert_eq!(format_ts(ts, 0), "{\n  /** /x */\n  a: string,\n  b: number,\n}");
+        // An empty comment is no docs, and nothing to slice.
+        assert_eq!(leading_docs("/**/ a: string"), (Vec::new(), "a: string"));
         // Without docs: unchanged, braces in strings too.
         for ts in ["{ a: \"{,}\", b: Array<{ c: number, }>, }", "Array<X> | null", "{  }"] {
             assert_eq!(format_ts(ts, 1), ts);

@@ -807,6 +807,7 @@
   textarea {
     width: 100%;
     font-family: var(--mono);
+    font-variant-ligatures: none;
   }
   [aria-invalid="true"] {
     border-color: var(--err);

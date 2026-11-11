@@ -172,6 +172,7 @@
   }
   .name.system {
     font-family: var(--mono);
+    font-variant-ligatures: none;
     font-size: 12.5px;
   }
   .mig {

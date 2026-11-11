@@ -239,6 +239,7 @@
   }
   .hint {
     font-family: var(--mono);
+    font-variant-ligatures: none;
     font-size: 11px;
     color: var(--faint);
     overflow: hidden;
@@ -277,6 +278,7 @@
   }
   textarea.json {
     font-family: var(--mono);
+    font-variant-ligatures: none;
     font-size: 12.5px;
   }
   .null-box::placeholder {
@@ -300,6 +302,7 @@
   .toggle {
     flex: none;
     font-family: var(--mono);
+    font-variant-ligatures: none;
     font-size: 11.5px;
     color: var(--muted);
   }

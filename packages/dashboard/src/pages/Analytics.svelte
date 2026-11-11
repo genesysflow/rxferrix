@@ -246,6 +246,7 @@
   }
   textarea {
     font-family: var(--mono, monospace);
+    font-variant-ligatures: none;
     font-size: 13px;
     width: 100%;
     resize: vertical;

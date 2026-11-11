@@ -38,6 +38,7 @@
   .bool,
   .number {
     font-family: var(--mono);
+    font-variant-ligatures: none;
     font-size: 12.5px;
     font-variant-numeric: tabular-nums;
   }

@@ -4,10 +4,11 @@
   import { dashboard } from "../lib/api.js";
   import { dashboardContext } from "../lib/context.js";
   import Modal from "../components/Modal.svelte";
+  import AccountSessions from "./AccountSessions.svelte";
 
   /**
    * The signed-in administrator's own account: two-factor authentication with an authenticator app (TOTP) and
-   * recovery codes, through the same `/api/auth/mfa/*` endpoints apps use for their users.
+   * recovery codes, through the same `/api/auth/mfa/*` endpoints apps use for their users, and the account's sessions.
    */
   const ctx = dashboardContext();
   const me = useQuery(dashboard.me, () => ({}));
@@ -201,6 +202,8 @@
         from the Users page.
       </p>
     </section>
+
+    <AccountSessions />
   </div>
 </div>
 

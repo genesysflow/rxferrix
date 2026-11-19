@@ -2,6 +2,7 @@
   import { RxFerrixError } from "@rxferrix/client";
   import { useMutation, useQuery } from "@rxferrix/svelte";
   import { dashboard } from "../lib/api.js";
+  import { ticking, sessionExpired } from "../lib/clock.svelte.js";
   import { dashboardContext } from "../lib/context.js";
   import { formatAgo, formatTime } from "../lib/format.js";
 
@@ -12,6 +13,7 @@
   const revokeSession = useMutation(dashboard.revokeSession);
   // Sessions being revoked: dimmed until the live list drops them.
   let revoking = $state<Set<string>>(new Set());
+  const clock = ticking();
 
   async function revoke(id: string) {
     if (!confirm("Revoke this session? Whoever uses it is signed out at once, on every connection it has open.")) return;
@@ -39,8 +41,8 @@
     <thead><tr><th>Last used</th><th>Kind</th><th>Client</th><th>IP</th><th>Expires</th><th></th></tr></thead>
     <tbody>
       {#each sessions.data ?? [] as s (s._id)}
-        <tr class:expired={s.expired} class:revoking={revoking.has(s._id)}>
-          <td title={formatTime(s.lastUsedAt)}>{formatAgo(s.lastUsedAt)}</td>
+        <tr class:expired={sessionExpired(s, clock.now)} class:revoking={revoking.has(s._id)}>
+          <td title={formatTime(s.lastUsedAt)}>{formatAgo(s.lastUsedAt, clock.now)}</td>
           <td>
             {#if s.impersonatedBy}
               <span class="badge imp" title={`An impersonation session, opened by administrator ${s.impersonatedBy}`}
@@ -52,7 +54,7 @@
           </td>
           <td class="ua" title={s.userAgent ?? ""}>{s.userAgent ?? "—"}</td>
           <td class="mono">{s.ip ?? "—"}</td>
-          <td>{s.expired ? "expired" : formatTime(s.expiresAt)}</td>
+          <td>{sessionExpired(s, clock.now) ? "expired" : formatTime(s.expiresAt)}</td>
           <td>
             <button class="small danger" onclick={() => revoke(s._id)} disabled={revoking.has(s._id)}
               >{revoking.has(s._id) ? "Revoking…" : "Revoke"}</button

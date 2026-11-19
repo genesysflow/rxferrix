@@ -17,6 +17,7 @@ import Login from "../src/pages/Login.svelte";
 import Logs from "../src/pages/Logs.svelte";
 import Overview from "../src/pages/Overview.svelte";
 import Settings from "../src/pages/Settings.svelte";
+import UserSessions from "../src/pages/UserSessions.svelte";
 import Workflows from "../src/pages/Workflows.svelte";
 
 let target: HTMLElement;
@@ -42,6 +43,7 @@ afterEach(() => {
   mounted = null;
   target.remove();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 async function settle() {
@@ -980,6 +982,151 @@ describe("Account page", () => {
     await settle();
     expect(auth.disableMfa).toHaveBeenCalledWith("aaaaa-bbbbb");
     expect(mfa()).toContain("off");
+    client.close();
+  });
+});
+
+describe("Account sessions", () => {
+  it("lists the administrator's sessions and revokes another one", async () => {
+    const server = new FakeServer();
+    const client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    const toast = vi.fn();
+    const auth = { getMfaStatus: vi.fn(async () => ({ enabled: false, pending: false, recoveryCodesLeft: 0, methods: [] })) };
+    const ctx = { auth, tables: [], tableByNumber: () => undefined, toast };
+    vi.stubGlobal("confirm", () => true);
+    // The page's clock ticks with setInterval; fake it (and Date) but not setTimeout, which `settle` uses.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    mounted = mount(Account, {
+      target,
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await settle();
+    const added = server
+      .drain()
+      .flatMap((m) => (m.type === "ModifyQuerySet" ? m.modifications : []))
+      .filter((m) => m.type === "Add");
+    const listId = added.find((m) => m.udfPath === "_system/dashboard:my_sessions")!.queryId;
+    const now = Date.now();
+    const session = (id: string, current: boolean, userAgent: string | null) => ({
+      _id: id,
+      _creationTime: now - 3_600_000,
+      expiresAt: now + 86_400_000,
+      lastUsedAt: now - 60_000,
+      userAgent,
+      ip: "203.0.113.7",
+      expired: false,
+      current,
+    });
+    server.transition({ querySet: 1, ts: 1 }, [
+      {
+        type: "QueryUpdated",
+        queryId: listId,
+        value: [
+          session("s-here", true, "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"),
+          session("s-other", false, "curl/8.10.1"),
+        ],
+      },
+    ]);
+    await settle();
+    const rows = [...target.querySelectorAll("[data-testid=account-sessions] li")];
+    expect(rows.map((r) => r.querySelector(".client")!.textContent!.replace(/\s+/g, " ").trim())).toEqual([
+      "Firefox on Linux this browser",
+      "curl/8.10.1",
+    ]);
+    // This browser's own session has no Revoke button: signing out ends it.
+    expect(rows[0]!.querySelector("button")).toBeNull();
+    expect(rows[1]!.textContent).toContain("203.0.113.7");
+
+    rows[1]!.querySelector("button")!.click();
+    await settle();
+    const revoke = server.drain().find((m) => m.type === "Mutation")!;
+    expect(revoke).toMatchObject({ udfPath: "_system/dashboard:revoke_session", args: { session: "s-other" } });
+    if (revoke.type !== "Mutation") throw new Error("unreachable");
+    server.push({ type: "MutationResponse", requestId: revoke.requestId, success: true, result: null, ts: 2 });
+    server.transition({ ts: 2 });
+    await settle();
+    expect(toast).toHaveBeenCalledWith("Session revoked: that browser was signed out");
+    // The live list drops the revoked session.
+    server.transition({ querySet: 1, ts: 3 }, [
+      { type: "QueryUpdated", queryId: listId, value: [session("s-here", true, null)] },
+    ]);
+    await settle();
+    const left = [...target.querySelectorAll("[data-testid=account-sessions] li")];
+    expect(left).toHaveLength(1);
+    expect(left[0]!.textContent).toContain("this browser");
+    expect(target.querySelector("[data-testid=account-sessions] li button")).toBeNull();
+
+    // A session whose expiry passes while the page is open shows as expired without the query rerunning.
+    {
+      server.transition({ querySet: 1, ts: 4 }, [
+        {
+          type: "QueryUpdated",
+          queryId: listId,
+          value: [session("s-here", true, null), { ...session("s-old", false, null), expiresAt: Date.now() + 10_000 }],
+        },
+      ]);
+      await settle();
+      const old = () => target.querySelectorAll("[data-testid=account-sessions] li")[1]!;
+      expect(old().textContent).not.toContain("expired");
+      vi.advanceTimersByTime(30_000);
+      flushSync();
+      expect(old().classList.contains("expired")).toBe(true);
+      expect(old().textContent).toContain("expired");
+    }
+    client.close();
+  });
+});
+
+describe("User sessions", () => {
+  it("shows a session as expired once its expiry passes, without the query rerunning", async () => {
+    const server = new FakeServer();
+    const client = new RxFerrixClient("http://localhost:3210", { webSocketConstructor: server.WebSocket, unsavedChangesWarning: false });
+    const ctx = { auth: {}, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    // The clock ticks with setInterval; fake it (and Date) but not setTimeout, which `settle` uses.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    mounted = mount(UserSessions, {
+      target,
+      props: { user: "u1" },
+      context: new Map<unknown, unknown>([
+        [Symbol.for("@rxferrix/svelte:client"), client],
+        [DASHBOARD_CONTEXT, ctx],
+      ]),
+    });
+    server.open();
+    await settle();
+    const add = server
+      .drain()
+      .flatMap((m) => (m.type === "ModifyQuerySet" ? m.modifications : []))
+      .find((m) => m.type === "Add" && m.udfPath === "_system/dashboard:user_sessions")!;
+    if (add.type !== "Add") throw new Error("unreachable");
+    expect(add.args).toEqual({ user: "u1" });
+    const now = Date.now();
+    const session = (id: string, expiresAt: number) => ({
+      _id: id,
+      _creationTime: now - 3_600_000,
+      expiresAt,
+      lastUsedAt: now - 60_000,
+      userAgent: null,
+      ip: null,
+      expired: false,
+      impersonatedBy: null,
+    });
+    server.transition({ querySet: 1, ts: 1 }, [
+      { type: "QueryUpdated", queryId: add.queryId, value: [session("s-long", now + 86_400_000), session("s-soon", now + 10_000)] },
+    ]);
+    await settle();
+    const rows = () => [...target.querySelectorAll("[data-testid=sessions] tbody tr")];
+    expect(rows().map((r) => r.classList.contains("expired"))).toEqual([false, false]);
+    expect(rows()[1]!.textContent).not.toContain("expired");
+
+    vi.advanceTimersByTime(30_000);
+    flushSync();
+    expect(rows().map((r) => r.classList.contains("expired"))).toEqual([false, true]);
+    expect(rows()[1]!.textContent).toContain("expired");
     client.close();
   });
 });

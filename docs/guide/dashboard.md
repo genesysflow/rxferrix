@@ -45,7 +45,7 @@ You can run as a user through a short-lived, audited impersonation session. The 
 | Environment | Add or update reactive app variables read through `ctx.env`. |
 | Settings | Configure auth providers, SMTP, redirects, sign-ups, email templates, CORS, trusted proxy headers, and request rate limits. |
 | Audit log | Review administrator edits, settings changes, impersonation, function runs, and recovery operations. |
-| Account | Manage the administrator's own second factor and recovery codes. |
+| Account | Manage the administrator's own second factor and recovery codes, and see and revoke the administrator's own sessions. |
 
 Settings fixed by code, flags, or process environment appear as read-only. Other settings apply without restarting. Secrets can be replaced without being shown again.
 

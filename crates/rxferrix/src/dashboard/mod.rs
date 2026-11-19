@@ -16,6 +16,7 @@
 //! | `run_function` | action | Run any function by path with JSON args, optionally as a given user (through a real, audited, short-lived session). |
 //! | `users`, `user_sessions`, `revoke_session`, `delete_user`, `reset_mfa` | query / mutation | The Users page. |
 //! | `me` | query | The signed-in admin. |
+//! | `my_sessions` | query | The signed-in admin's sessions (the Account page; revoked with `revoke_session`). |
 //!
 //! Secrets are never returned and system tables are mostly read-only; see [`secrets`]. Every write is recorded in the
 //! audit log (`crate::audit`) in its own transaction. Settings are in `crate::settings`, the audit log's query in
@@ -876,6 +877,54 @@ pub struct AdminSummary {
     /// Two-factor authentication is enabled for this administrator.
     #[serde(default)]
     pub mfa_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(crate = "::rxferrix::__private::ts_rs", rename_all = "camelCase")]
+pub struct AdminSessionSummary {
+    #[serde(rename = "_id")]
+    #[ts(rename = "_id")]
+    pub id: String,
+    #[serde(rename = "_creationTime")]
+    #[ts(rename = "_creationTime")]
+    pub creation_time: f64,
+    pub expires_at: f64,
+    pub last_used_at: f64,
+    pub user_agent: Option<String>,
+    pub ip: Option<String>,
+    pub expired: bool,
+    /// The session this call was made with (the browser asking).
+    pub current: bool,
+}
+
+/// The signed-in administrator's sessions, most recently used first (no token hashes), with the caller's own marked
+/// `current`. Each one is ended with `revoke_session`.
+#[query]
+pub async fn my_sessions(ctx: &QueryCtx) -> Result<Vec<AdminSessionSummary>> {
+    let admin: Id<Admin> = ctx.auth.require_admin()?;
+    let current = ctx.auth.session_id();
+    let now = ctx.now().max(crate::db::wall_clock_ms());
+    let mut sessions: Vec<AdminSessionSummary> = ctx
+        .db
+        .query::<Session>()
+        .with_index(Session::by_admin, |q| q.eq(Session::admin, Some(admin)))
+        .collect()
+        .await?
+        .into_iter()
+        .map(|s| AdminSessionSummary {
+            id: s.id.to_string(),
+            creation_time: s.creation_time,
+            expires_at: s.expires_at,
+            last_used_at: s.last_used_at,
+            expired: s.expires_at <= now,
+            current: current == Some(s.id),
+            user_agent: s.value.user_agent,
+            ip: s.value.ip,
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.last_used_at.total_cmp(&a.last_used_at));
+    Ok(sessions)
 }
 
 /// The signed-in administrator (live: reruns when their second factor changes).

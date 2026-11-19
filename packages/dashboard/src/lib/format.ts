@@ -213,3 +213,34 @@ export function documentMatches(doc: Record<string, unknown>, needle: string): b
   };
   return Object.values(doc).some(visit);
 }
+
+/** A short "Firefox on Linux" for a `User-Agent` header, or null when it names no known browser. */
+export function describeUserAgent(ua: string | null | undefined): string | null {
+  if (!ua) return null;
+  const browser = /Edg(e|A|iOS)?\//.test(ua)
+    ? "Edge"
+    : /OPR\/|Opera/.test(ua)
+      ? "Opera"
+      : /Firefox\/|FxiOS\//.test(ua)
+        ? "Firefox"
+        : /Chrome\/|CriOS\//.test(ua)
+          ? "Chrome"
+          : /Safari\//.test(ua)
+            ? "Safari"
+            : null;
+  if (!browser) return null;
+  const os = /iPhone|iPad|iPod/.test(ua)
+    ? "iOS"
+    : /Android/.test(ua)
+      ? "Android"
+      : /CrOS/.test(ua)
+        ? "ChromeOS"
+        : /Mac OS X|Macintosh/.test(ua)
+          ? "macOS"
+          : /Windows/.test(ua)
+            ? "Windows"
+            : /Linux/.test(ua)
+              ? "Linux"
+              : null;
+  return os ? `${browser} on ${os}` : browser;
+}

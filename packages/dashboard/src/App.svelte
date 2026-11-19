@@ -101,7 +101,7 @@
         { page: "environment", label: "Environment", icon: "environment", keywords: "env variables secrets api keys config" },
         { page: "settings", label: "Settings", icon: "settings", keywords: "smtp oauth cors redirect signups tokens" },
         { page: "audit", label: "Audit log", icon: "audit", keywords: "history changes" },
-        { page: "account", label: "Account", icon: "account", keywords: "two-factor 2fa mfa authenticator totp recovery codes security" },
+        { page: "account", label: "Account", icon: "account", keywords: "two-factor 2fa mfa authenticator totp recovery codes security sessions revoke devices" },
       ],
     },
   ];

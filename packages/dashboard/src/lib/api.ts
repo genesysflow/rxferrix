@@ -130,6 +130,19 @@ export interface SessionSummary {
   impersonatedBy: string | null;
 }
 
+/** One of the signed-in administrator's sessions (`my_sessions`). */
+export interface AdminSessionSummary {
+  _id: string;
+  _creationTime: number;
+  expiresAt: number;
+  lastUsedAt: number;
+  userAgent: string | null;
+  ip: string | null;
+  expired: boolean;
+  /** The session this browser is signed in with. */
+  current: boolean;
+}
+
 export interface DeletedUser {
   sessions: number;
   accounts: number;
@@ -172,6 +185,8 @@ export const dashboard = {
   /** Remove a user's second factor (lost authenticator and recovery codes); audited as `reset_mfa`. */
   resetMfa: m<{ user: string }, null>("reset_mfa"),
   me: q<Record<string, never>, AdminSummary | null>("me"),
+  /** The signed-in administrator's sessions, most recently used first; revoked with `revokeSession`. */
+  mySessions: q<Record<string, never>, AdminSessionSummary[]>("my_sessions"),
 } as const;
 
 /** A stored file (`FileSummary` in crates/rxferrix/src/storage/mod.rs). */

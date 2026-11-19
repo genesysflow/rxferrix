@@ -2334,6 +2334,7 @@ are called over the normal sync protocol (or the HTTP function API), so every da
 | `delete_user` | mutation | `{ user }` → `{ sessions, accounts, credentials, verificationCodes, mfaFactors }`: the user and everything auth keeps for them, in one transaction. App documents referencing the user are left alone. |
 | `reset_mfa` | mutation | `{ user }` → `null`. Removes the user's second factor (lost authenticator and recovery codes): their next sign-in needs no code. `not_found`, `mfa_not_enabled`. |
 | `me` | query | `{}` → `{ _id, email, mfaEnabled } \| null` of the signed-in admin (live). |
+| `my_sessions` | query | `{}` → `[{ _id, _creationTime, expiresAt, lastUsedAt, userAgent, ip, expired, current }]`: the signed-in admin's sessions, most recently used first (no token hashes; `current` marks the session of the call). Ended with `revoke_session`. For the Account page. |
 
 Write errors (schema validation, unknown table, missing document) are user errors with codes `invalid_document` /
 `not_found`, carrying the engine's message (e.g. ``inserted document … does not match table `todos`; nothing was

@@ -132,6 +132,7 @@ async fn system_functions_and_admin_endpoints_are_admin_only() {
         ("query", "users", json!({ "paginationOpts": { "numItems": 10, "cursor": null } })),
         ("query", "user_sessions", json!({ "user": user_id })),
         ("query", "me", json!({})),
+        ("query", "my_sessions", json!({})),
         ("mutation", "insert_document", json!({ "table": "dash_items", "document": {} })),
         ("mutation", "patch_document", json!({ "id": user_id, "patch": {} })),
         ("mutation", "replace_document", json!({ "id": user_id, "document": {} })),
@@ -752,6 +753,39 @@ async fn users_sessions_revoke_and_delete() {
     let sessions = http.ok("query", &path("documents"), page("_sessions"), &admin).await;
     assert!(sessions["page"].as_array().unwrap().iter().all(|s| s["user"].is_null()), "only admin sessions remain");
     assert_eq!(t.app().db().verify_indexes().await.unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn admin_lists_and_revokes_own_sessions() {
+    let (_t, http, first, _user, _) = setup().await;
+    let (s, second) = http
+        .post("/api/auth/admin/signin", None, json!({ "email": "admin@example.com", "password": "admin password" }))
+        .await;
+    assert_eq!(s, 200, "{second}");
+    let second = second["accessToken"].as_str().unwrap().to_string();
+
+    // Both tokens see the same two sessions (the user's is not among them), each with its own marked current.
+    let current_of = |list: &Value| {
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert!(list.iter().all(|s| s.get("refreshTokenHash").is_none() && s["expired"] == false));
+        let current: Vec<_> = list.iter().filter(|s| s["current"] == true).map(|s| s["_id"].clone()).collect();
+        assert_eq!(current.len(), 1, "{list:?}");
+        current[0].clone()
+    };
+    let mine = current_of(&http.ok("query", &path("my_sessions"), json!({}), &first).await);
+    let theirs = current_of(&http.ok("query", &path("my_sessions"), json!({}), &second).await);
+    assert_ne!(mine, theirs);
+
+    // Revoking the other session signs it out; the list keeps only the caller's.
+    http.ok("mutation", &path("revoke_session"), json!({ "session": theirs }), &first).await;
+    let left = http.ok("query", &path("my_sessions"), json!({}), &first).await;
+    assert_eq!(
+        left.as_array().unwrap().iter().map(|s| (&s["_id"], &s["current"])).collect::<Vec<_>>(),
+        [(&mine, &json!(true))]
+    );
+    let (s, b) = http.call("query", &path("my_sessions"), json!({}), Some(&second)).await;
+    assert_eq!(s, 401, "{b}");
 }
 
 #[tokio::test]

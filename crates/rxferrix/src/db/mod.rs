@@ -75,10 +75,15 @@ pub fn default_readers() -> usize {
 pub const DEFAULT_WRITER_CACHE_SIZE: u64 = 32 << 20;
 
 /// Group commit: the most mutations one batch takes before it commits, even with more waiting.
-pub const MAX_BATCH: usize = 64;
+///
+/// With commits waiting for the disk (the default), one fsync (about 1 ms on an NVMe SSD) covers a batch, so the batch
+/// size caps throughput. Measured on btrfs with one-insert mutations (2026-11-20): 64 mutations and 2 ms held it at
+/// 23k mutations/s with fsync; 256 and 4 ms reach 45-47k/s with 256 writers (8 ms adds nothing), with the same
+/// throughput at 16 and 64 writers and p99 at 64 writers 4-5 ms instead of 3.5 ms (`docs/DESIGN.md`, Measurements).
+pub const MAX_BATCH: usize = 256;
 /// Group commit: a batch older than this (since its first mutation began) commits at the next release, so the first
 /// mutation's caller isn't kept waiting by a long queue.
-pub const MAX_BATCH_AGE: Duration = Duration::from_millis(2);
+pub const MAX_BATCH_AGE: Duration = Duration::from_millis(4);
 /// Group commit: a write transaction whose label (the mutation's path) has recently taken longer than this commits
 /// the open batch before it starts, so the mutations already in the batch don't wait for it.
 pub const SLOW_WRITE: Duration = Duration::from_micros(500);
@@ -116,9 +121,9 @@ pub struct OpenOptions {
     pub skip_schema_check: bool,
     /// Journal every commit's document changes from the start ([`journal`]; replication).
     pub journal: bool,
-    /// Wait for each commit to reach the disk (SQLite `synchronous = FULL`) instead of only the OS (`NORMAL`, the
-    /// default: a process crash loses nothing, a power loss may lose the last commits). With group commit this is one
-    /// fsync per batch of mutations.
+    /// Wait for each commit to reach the disk (SQLite `synchronous = FULL`, the default) instead of only the OS
+    /// (`NORMAL`: a process crash loses nothing, a power loss may lose the last commits). With group commit this is
+    /// one fsync per batch of mutations.
     pub fsync_commits: bool,
     /// The most memory, in bytes, the writer connection's page cache may use ([`DEFAULT_WRITER_CACHE_SIZE`]).
     pub writer_cache_size: u64,
@@ -133,7 +138,7 @@ impl Default for OpenOptions {
             readers: default_readers(),
             skip_schema_check: false,
             journal: false,
-            fsync_commits: false,
+            fsync_commits: true,
             writer_cache_size: DEFAULT_WRITER_CACHE_SIZE,
             prechecked: None,
         }
@@ -161,7 +166,8 @@ impl Database {
         options: &OpenOptions,
         migrations: &[(String, String)],
     ) -> anyhow::Result<Database> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
+        crate::ops::backup::create_dir_all_synced(dir)
+            .with_context(|| format!("creating data dir {}", dir.display()))?;
         configure_sqlite();
         search::vector::register_extension();
         let path = dir.join("data.db");

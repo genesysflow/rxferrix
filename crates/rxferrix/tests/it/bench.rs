@@ -370,8 +370,9 @@ fn call(path: String, args: serde_json::Value) -> (String, serde_json::Value) {
 }
 
 async fn write_app(options: rxferrix::AppOptions) -> TestApp {
-    // BENCH_FSYNC=1: commits wait for the disk (`AppOptions::fsync_commits`).
-    let fsync_commits = std::env::var("BENCH_FSYNC").is_ok_and(|v| !v.is_empty() && v != "0");
+    // BENCH_FSYNC=0 (or false, no, off): commits don't wait for the disk (`AppOptions::fsync_commits`, on by default).
+    let fsync_commits = std::env::var("BENCH_FSYNC")
+        .map_or(true, |v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"));
     TestApp::with_options(rxferrix::AppOptions { dev: false, fsync_commits, ..options }).await.unwrap()
 }
 
@@ -422,8 +423,8 @@ async fn subscribers(app: &rxferrix::App, clients: u64, queries: u64) -> Vec<tok
 /// inserts per mutation; read 100 documents
 /// (an index range) then insert; every writer incrementing one counter (checked: no lost updates); with continuous
 /// replication's journal; with 100 subscribed clients; and fast writers queued behind a mutation that awaits 20 ms. In-process
-/// (`App::execute_mutation`): no JSON over a socket. SQLite runs in WAL mode with `synchronous = NORMAL`, so a commit
-/// doesn't wait for fsync (`BENCH_FSYNC=1`: it does; point `TMPDIR` at a real disk to measure that). Tunable:
+/// (`App::execute_mutation`): no JSON over a socket. SQLite runs in WAL mode with `synchronous = FULL`, so a commit
+/// waits for fsync: point `TMPDIR` at a real disk to measure that (`BENCH_FSYNC=0`: `NORMAL`, it doesn't). Tunable:
 /// `BENCH_SECS` (2 per scenario), `BENCH_ONLY` (scenarios: insert, idempotent, bigargs, many, scan, counter, replication,
 /// subscribers, slow), `BENCH_WRITERS` (for insert: 1,4,16,64).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

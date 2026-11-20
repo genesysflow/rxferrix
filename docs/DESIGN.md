@@ -34,13 +34,13 @@ A query holds a read-only connection for its run and reads one snapshot timestam
 
 Mutations run serially on the writer. Queued mutations may share a group commit, with one savepoint per mutation. A failed mutation rolls back its savepoint; a failed batch commit fails the batch. Successful writes still get individual commit timestamps, and callers receive success only after commit.
 
-Groups are bounded by 64 mutations or two milliseconds. A recently slow mutation causes the current group to commit before it begins. This protects earlier fast mutations from waiting for it, but while it runs it still holds the single writer.
+Groups are bounded by 256 mutations or four milliseconds. A recently slow mutation causes the current group to commit before it begins. This protects earlier fast mutations from waiting for it, but while it runs it still holds the single writer.
 
 External I/O belongs in actions. The context API separates transactional reads/writes from external work, but Rust is not sandboxed: the framework cannot prevent an app from making an inappropriate network call or blocking a thread. Timeouts are enforced at await points.
 
 Actions have no transaction. Each runtime query or mutation they call is separate. An external side effect cannot be rolled back if an action later fails.
 
-WAL checkpoints normally run off the write path. Default durability is `synchronous = NORMAL`; `--fsync-commits` waits for disk durability, with a shared fsync for a group.
+WAL checkpoints normally run off the write path. By default a commit waits for the disk (`synchronous = FULL`), with one fsync shared by a group of mutations; `--fsync-commits=false` (`synchronous = NORMAL`) acknowledges once the OS has the commit.
 
 ## Reactivity
 
@@ -88,6 +88,11 @@ Release builds on one machine, from development (dates are when they were taken)
 - **Writes (2026-10-10, NVMe SSD, encrypted btrfs):** one-insert mutations at 8.9k/s with 1 writer, 16.2k/s with 16
   and 18.7k/s with 64 (p99 0.2 / 3.5 / 11 ms); with `--fsync-commits` 1.1k, 7.3k and 12.5k/s. Moving checkpoints off
   the writer raised these from 5.8k, 9.7k and 11.6k/s.
+- **Group commit with fsync (2026-11-20, encrypted btrfs, about 0.9 ms per fsync):** groups of up to 64 mutations
+  and 2 ms held commits that wait for the disk at 23k mutations/s, however many writers. Up to 256 and 4 ms: 45-47k/s
+  with 256 writers (65k/s without waiting for the disk, same caps); the same throughput at 16 and 64 writers (9.7k
+  and 22-24k/s), with p99 at 64 writers 4-5 ms instead of 3.5 ms. Mutations arriving at a fixed rate: 46k/s before
+  latency climbs, from 23k/s.
 - **Indexes (2026-10-15, `bench_indexes`):** all indexes share `index_entries`. Filling it with 3.3M entries of
   other indexes took a lookup on a small table's index from 22.5 to 25.3 µs (the SQLite read alone stayed at 2.5 µs;
   the B-tree gained one level). Each index costs writes: 16 writers inserted 22k documents/s with 1 index, 12k with

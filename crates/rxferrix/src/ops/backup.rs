@@ -368,6 +368,8 @@ pub fn write_archive(source: &SnapshotSource, spec: &BackupSpec, out: &Path, now
     let file = encoder.finish()?;
     file.sync_all()?;
     partial.persist(out).with_context(|| format!("writing {}", out.display()))?;
+    // The archive's name in its directory, so a power loss right after "Wrote ..." doesn't take it away.
+    sync_dir(out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))?;
     Ok(manifest)
 }
 
@@ -396,7 +398,8 @@ impl BackupTarget {
     pub fn parse(location: &str, data_dir: &Path) -> crate::Result<BackupTarget> {
         let backend = StorageBackend::parse(location).context("invalid backup target")?;
         let config = StorageConfig { backend, ..Default::default() };
-        let (store, prefix, _) = config.build_store(data_dir)?;
+        // A backup reported as written is on the disk (a local directory target).
+        let (store, prefix, _) = config.build_store(data_dir, true)?;
         Ok(BackupTarget { store, prefix, location: location.to_string() })
     }
 
@@ -1152,9 +1155,51 @@ pub(crate) fn sync_dir(dir: &Path) -> crate::Result<()> {
     Ok(())
 }
 
+/// `create_dir_all`, then persist the entry of every directory it created in its parent: without that, a power loss
+/// can take a new directory away with every file in it, however durably those were written. Directories that already
+/// existed are left alone.
+pub(crate) fn create_dir_all_synced(dir: &Path) -> std::io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    // The topmost ancestor that is missing: everything from there down is created here.
+    let mut missing = dir;
+    while let Some(parent) = missing.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+        missing = parent;
+    }
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        let mut created = Some(dir);
+        while let Some(d) = created {
+            let parent = d.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            std::fs::File::open(parent)?.sync_all()?;
+            created = (d != missing).then_some(parent);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = missing;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_dir_all_synced_creates_missing_levels_only() {
+        let root = tempfile::tempdir().unwrap();
+        let deep = root.path().join("a/b/c");
+        create_dir_all_synced(&deep).unwrap();
+        assert!(deep.is_dir());
+        // Existing directories (the whole path, or some of it) are fine.
+        create_dir_all_synced(&deep).unwrap();
+        create_dir_all_synced(&root.path().join("a/b/d")).unwrap();
+        assert!(root.path().join("a/b/d").is_dir());
+        // A path that names a file is an error, as with `create_dir_all`.
+        std::fs::write(root.path().join("f"), b"").unwrap();
+        assert!(create_dir_all_synced(&root.path().join("f/g")).is_err());
+    }
 
     /// A copy's journal rows are removed; the file is only rewritten (VACUUM) when they were a large part of it.
     #[test]

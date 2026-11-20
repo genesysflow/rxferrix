@@ -31,6 +31,8 @@ impl TestApp {
         Self::with_options(AppOptions {
             dev: true,
             determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK),
+            // A temporary directory: waiting for the disk would only slow the tests down.
+            fsync_commits: false,
             ..Default::default()
         })
         .await
@@ -95,6 +97,7 @@ impl TestApp {
             dev: true,
             auth,
             determinism_check: Some(crate::runtime::DEV_DETERMINISM_CHECK),
+            fsync_commits: false,
             ..Default::default()
         })
         .await

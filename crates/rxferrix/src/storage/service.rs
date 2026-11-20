@@ -199,15 +199,17 @@ impl<T: std::hash::Hash + Eq> Drop for InFlight<'_, T> {
 
 impl StorageService {
     /// Open the configured backend. `public_url` is the fallback base URL (the auth public URL); `key` signs upload
-    /// URLs.
+    /// URLs. `fsync`: a local directory syncs each blob to the disk before its upload is answered
+    /// (`AppOptions::fsync_commits`).
     pub(crate) fn new(
         data_dir: &std::path::Path,
         config: StorageConfig,
         public_url: Option<&str>,
         key: [u8; 32],
         clock: Arc<crate::db::Clock>,
+        fsync: bool,
     ) -> crate::Result<StorageService> {
-        let (store, prefix, signer) = config.build_store(data_dir)?;
+        let (store, prefix, signer) = config.build_store(data_dir, fsync)?;
         let base_url = config
             .public_url
             .as_deref()

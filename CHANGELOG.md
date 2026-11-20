@@ -4,6 +4,14 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+### Changed: check these when upgrading
+
+- **Commits wait for the disk by default.** `--fsync-commits` (`AppOptions::fsync_commits`, `RXFERRIX_FSYNC_COMMITS`) is now on, so a power loss or OS crash no longer loses acknowledged writes. Files uploaded to local storage are synced to the disk before the upload is answered too (they weren't even with `--fsync-commits`), as are offline imports' blobs and backups written to a local directory. `TestApp::new` and `TestApp::with_auth` keep commits off the disk: their data is temporary. Each write is acknowledged about one fsync later (about 1 ms on an NVMe SSD), and one writer alone gets about 1k mutations/s; concurrent writers share each fsync. `--fsync-commits=false` brings back the previous behavior. Point-in-time restores and takeover copies still replay without waiting for the disk, and are synced before they replace the database. (#118)
+
+### Performance
+
+- Group commit takes up to 256 mutations and 4 ms per batch, from 64 and 2 ms. With commits waiting for the disk, the batch size had capped throughput at about 23k one-insert mutations/s; it now reaches about 45-47k/s with 256 writers. Throughput with 16 and 64 writers is unchanged; p99 latency at 64 writers rose from 3.5 to 4-5 ms in the same benchmark. (#118)
+
 ## 0.14.1 - 2026-11-20
 
 ### Security

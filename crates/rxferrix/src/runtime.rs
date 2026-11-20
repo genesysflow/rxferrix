@@ -269,9 +269,9 @@ pub struct AppOptions {
     /// How long, and within how much memory, query results stay cached after their last subscriber leaves
     /// (`sync::subscriptions`, "Query cache").
     pub query_cache: QueryCacheOptions,
-    /// Wait for each commit to reach the disk before answering (SQLite `synchronous = FULL`). Default: off (`NORMAL`
-    /// in WAL mode): a process crash loses nothing, but a power loss or OS crash may lose the last commits. With group
-    /// commit, one fsync covers a whole batch of mutations.
+    /// Wait for each commit to reach the disk before answering (SQLite `synchronous = FULL`). Default: on. With group
+    /// commit, one fsync covers a whole batch of mutations. Off (`NORMAL` in WAL mode), a process crash still loses
+    /// nothing, but a power loss or OS crash may lose the last commits.
     pub fsync_commits: bool,
     /// The most memory, in bytes, the page cache of the connection all writes go through may use. Default: 32 MiB
     /// ([`crate::db::DEFAULT_WRITER_CACHE_SIZE`], which has the measurements); pages are only allocated as they are
@@ -331,7 +331,7 @@ impl Default for AppOptions {
             scheduler: Default::default(),
             ops: Default::default(),
             query_cache: QueryCacheOptions::default(),
-            fsync_commits: false,
+            fsync_commits: true,
             writer_cache_size: crate::db::DEFAULT_WRITER_CACHE_SIZE,
             determinism_check: None,
             olap: Default::default(),
@@ -595,6 +595,7 @@ impl App {
             public_url.as_deref(),
             *auth.keys.storage_key(),
             db.shared_clock(),
+            options.fsync_commits,
         )?;
         let storage = Arc::new(storage);
         let readers = db.readers();

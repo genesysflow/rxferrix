@@ -64,4 +64,4 @@ Scheduled jobs, crons, and workflow steps do not carry the user identity that re
 
 The database belongs on local disk and has one active server writer. Takeover prepares a replacement, rather than scaling writes across machines. Replication supports recovery rather than active replicas serving the app.
 
-By default, a process crash preserves committed data, while power or OS failure may lose recent commits. Use `--fsync-commits` when acknowledgement must wait for disk durability. Keep [backups](/operations/backups) and retain `auth_secret.key` independently.
+By default, a write is acknowledged only once it is on disk, so neither a process crash nor a power or OS failure loses it; files uploaded to local storage are synced before the upload is answered too. `--fsync-commits=false` acknowledges sooner, at the risk of losing the most recent commits on a power or OS failure. Keep [backups](/operations/backups) and retain `auth_secret.key` independently.

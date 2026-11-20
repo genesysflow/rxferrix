@@ -599,7 +599,10 @@ fn carried_state(source: &rusqlite::Connection, journal_copied_to: u64) -> crate
 /// Open a copy of the database with `tables`: what a takeover does to its copy, and `check`.
 fn open_staged(staging: &Path, tables: &[crate::schema::TableDef]) -> crate::Result<Database> {
     let migrations = crate::migrations::declared(tables)?;
-    let options = OpenOptions { readers: 2, ..Default::default() };
+    // The copy replays the live server's commits one transaction each while it catches up: waiting for the disk after
+    // each could leave it unable to keep up with a busy server. It is a scratch copy until [`swap`], which folds its
+    // WAL into the file (and so onto the disk) before moving it in place.
+    let options = OpenOptions { readers: 2, fsync_commits: false, ..Default::default() };
     Database::open_with_migrations(staging, tables, &options, &migrations)
 }
 

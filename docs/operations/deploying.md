@@ -130,7 +130,7 @@ For dashboard-triggered restarts, configure `--restart-exit-code 75` (or `RXFERR
 
 ## Choose durability and capacity settings
 
-SQLite uses WAL with `synchronous = NORMAL` by default. A process crash preserves committed writes, but power loss or an OS crash may lose recent commits. `--fsync-commits` waits for disk durability before acknowledging writes; group commit shares the cost across queued mutations.
+SQLite uses WAL with `synchronous = FULL` by default: a write is acknowledged once it is on disk, and group commit shares each fsync across the mutations queued behind it. `--fsync-commits=false` (or `RXFERRIX_FSYNC_COMMITS=false`) switches to `synchronous = NORMAL`. A process crash still preserves committed writes, but power loss or an OS crash may lose recent commits. In exchange, each write is acknowledged about one fsync sooner, and single-writer throughput is higher.
 
 Writes use one connection; `--writer-cache-size` defaults to 32 MB. Read concurrency defaults to about 1.5 connections per available core and can be changed with `--readers`. Queries averaging at least 5 ms share a limited slow lane so they cannot consume all read slots. Measure your workload before changing these settings.
 

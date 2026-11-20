@@ -86,7 +86,7 @@ Run a command's `--help` for its full options. Always pass the same `--dir` used
 | `--auth-redirect-url URL` | Allowed frontend auth return URL; repeatable. |
 | `--migrate` | Run pending migrations in the background after startup. |
 | `--takeover[=require\|auto]` | Replace the server using the same data directory. |
-| `--fsync-commits` | Wait for disk durability before acknowledging commits. |
+| `--fsync-commits[=false]` | Wait for disk durability before acknowledging commits (default on; `=false` turns it off). |
 | `--metrics` | Expose Prometheus metrics at `/metrics`. |
 | `--backup-every 6h` | Enable scheduled backups. |
 | `--replicate-to LOCATION` | Enable continuous replication. |

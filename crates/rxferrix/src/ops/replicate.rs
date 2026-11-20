@@ -1450,7 +1450,11 @@ pub async fn prepare_point_in_time(
     let dir = staging.to_path_buf();
     let db = tokio::task::spawn_blocking(move || {
         let tables = crate::runtime::registered_tables();
-        let options = crate::db::OpenOptions { readers: 1, skip_schema_check: true, ..Default::default() };
+        // One transaction per replayed commit: waiting for the disk after each would make long restores many times
+        // slower, and a restore interrupted half way is started over anyway. The staged copy reaches the disk when
+        // its WAL is folded into the file below (`close_wal`, `verify`), before it is moved in place.
+        let options =
+            crate::db::OpenOptions { readers: 1, skip_schema_check: true, fsync_commits: false, ..Default::default() };
         crate::db::Database::open_with_migrations(&dir, &tables, &options, &[])
     })
     .await?

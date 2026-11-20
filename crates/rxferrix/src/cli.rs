@@ -256,9 +256,12 @@ struct ServeArgs {
     #[arg(long, env = "RXFERRIX_QUERY_CACHE_TTL", value_name = "DURATION", default_value = "30m")]
     #[arg(value_parser = parse_duration)]
     query_cache_ttl: Duration,
-    /// Wait for each commit to reach the disk before answering (SQLite synchronous=FULL). Without it a process crash
-    /// loses nothing, but a power loss or OS crash may lose the last commits. One fsync covers a batch of mutations.
-    #[arg(long, env = "RXFERRIX_FSYNC_COMMITS")]
+    /// Wait for each commit to reach the disk before answering (SQLite synchronous=FULL), the default. One fsync
+    /// covers a batch of mutations. `--fsync-commits=false` answers once the OS has the commit: a process crash still
+    /// loses nothing, but a power loss or OS crash may lose the last commits.
+    #[arg(long, env = "RXFERRIX_FSYNC_COMMITS", value_name = "BOOL", num_args = 0..=1, default_value_t = true)]
+    #[arg(default_missing_value = "true", action = clap::ArgAction::Set)]
+    #[arg(value_parser = clap::builder::BoolishValueParser::new())]
     fsync_commits: bool,
     /// Memory for the page cache of the database connection all writes go through, e.g. `32MB`, `128MB`. Taken as
     /// it is used. Writes that change many index entries (many indexes, or several documents per mutation) are the
@@ -1432,9 +1435,14 @@ mod tests {
         let Some(Command::Serve(a)) = cli.command else { panic!("serve") };
         assert_eq!((a.query_cache_size, a.query_cache_ttl), (1 << 30, Duration::from_secs(7200)));
         assert!(parse(&["serve", "--query-cache-size", "lots"]).is_err());
-        assert!(!a.fsync_commits);
+        assert!(a.fsync_commits, "commits wait for the disk by default");
         let Some(Command::Serve(a)) = parse(&["serve", "--fsync-commits"]).unwrap().command else { panic!("serve") };
         assert!(a.fsync_commits);
+        for off in ["--fsync-commits=false", "--fsync-commits=0", "--fsync-commits=no", "--fsync-commits=off"] {
+            let Some(Command::Serve(a)) = parse(&["serve", off]).unwrap().command else { panic!("serve") };
+            assert!(!a.fsync_commits, "{off}");
+        }
+        assert!(parse(&["serve", "--fsync-commits=sometimes"]).is_err());
         assert_eq!(a.writer_cache_size, crate::db::DEFAULT_WRITER_CACHE_SIZE);
         let args = ["serve", "--writer-cache-size", "128MB"];
         let Some(Command::Serve(a)) = parse(&args).unwrap().command else { panic!("serve") };

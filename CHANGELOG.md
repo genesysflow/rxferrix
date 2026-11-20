@@ -6,11 +6,11 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ### Changed: check these when upgrading
 
-- **Commits wait for the disk by default.** `--fsync-commits` (`AppOptions::fsync_commits`, `RXFERRIX_FSYNC_COMMITS`) is now on, so a power loss or OS crash no longer loses acknowledged writes. Each write is acknowledged about one fsync later (about 1 ms on an NVMe SSD), and one writer alone gets about 1k mutations/s; concurrent writers share each fsync. `--fsync-commits=false` brings back the previous behavior. Point-in-time restores and takeover copies still replay without waiting for the disk, and are synced before they replace the database.
+- **Commits wait for the disk by default.** `--fsync-commits` (`AppOptions::fsync_commits`, `RXFERRIX_FSYNC_COMMITS`) is now on, so a power loss or OS crash no longer loses acknowledged writes. Each write is acknowledged about one fsync later (about 1 ms on an NVMe SSD), and one writer alone gets about 1k mutations/s; concurrent writers share each fsync. `--fsync-commits=false` brings back the previous behavior. Point-in-time restores and takeover copies still replay without waiting for the disk, and are synced before they replace the database. (#118)
 
 ### Performance
 
-- Group commit takes up to 256 mutations and 4 ms per batch, from 64 and 2 ms. With commits waiting for the disk, the batch size had capped throughput at about 23k one-insert mutations/s; it now reaches about 47k/s, close to commits that don't wait for the disk. Latency with 16 and 64 writers is unchanged.
+- Group commit takes up to 256 mutations and 4 ms per batch, from 64 and 2 ms. With commits waiting for the disk, the batch size had capped throughput at about 23k one-insert mutations/s; it now reaches about 47k/s, close to commits that don't wait for the disk. Latency with 16 and 64 writers is unchanged. (#118)
 
 ## 0.14.1 - 2026-11-20
 

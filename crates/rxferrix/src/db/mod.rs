@@ -78,8 +78,8 @@ pub const DEFAULT_WRITER_CACHE_SIZE: u64 = 32 << 20;
 ///
 /// With commits waiting for the disk (the default), one fsync (about 1 ms on an NVMe SSD) covers a batch, so the batch
 /// size caps throughput. Measured on btrfs with one-insert mutations (2026-11-20): 64 mutations and 2 ms held it at
-/// 23k mutations/s with fsync; 256 and 4 ms reach 47k/s with 256 writers (8 ms adds nothing), close to the 45k/s
-/// of commits that don't wait for the disk, with the same latency at 16 and 64 writers.
+/// 23k mutations/s with fsync; 256 and 4 ms reach 45-47k/s with 256 writers (8 ms adds nothing), with the same
+/// throughput at 16 and 64 writers and p99 at 64 writers 4-5 ms instead of 3.5 ms (`docs/DESIGN.md`, Measurements).
 pub const MAX_BATCH: usize = 256;
 /// Group commit: a batch older than this (since its first mutation began) commits at the next release, so the first
 /// mutation's caller isn't kept waiting by a long queue.

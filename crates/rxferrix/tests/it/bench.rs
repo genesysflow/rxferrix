@@ -370,8 +370,9 @@ fn call(path: String, args: serde_json::Value) -> (String, serde_json::Value) {
 }
 
 async fn write_app(options: rxferrix::AppOptions) -> TestApp {
-    // BENCH_FSYNC=0: commits don't wait for the disk (`AppOptions::fsync_commits`, on by default).
-    let fsync_commits = std::env::var("BENCH_FSYNC").map_or(true, |v| v != "0");
+    // BENCH_FSYNC=0 (or false, no, off): commits don't wait for the disk (`AppOptions::fsync_commits`, on by default).
+    let fsync_commits = std::env::var("BENCH_FSYNC")
+        .map_or(true, |v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"));
     TestApp::with_options(rxferrix::AppOptions { dev: false, fsync_commits, ..options }).await.unwrap()
 }
 

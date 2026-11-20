@@ -595,6 +595,7 @@ impl App {
             public_url.as_deref(),
             *auth.keys.storage_key(),
             db.shared_clock(),
+            options.fsync_commits,
         )?;
         let storage = Arc::new(storage);
         let readers = db.readers();

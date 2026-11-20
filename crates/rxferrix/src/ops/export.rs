@@ -328,7 +328,8 @@ impl BlobStore {
     }
 
     pub fn from_config(config: &crate::storage::StorageConfig, data_dir: &Path) -> crate::Result<BlobStore> {
-        let (store, prefix, _) = config.build_store(data_dir)?;
+        // An offline import commits its documents waiting for the disk: their blobs get there first.
+        let (store, prefix, _) = config.build_store(data_dir, true)?;
         Ok(BlobStore { store, prefix })
     }
 

@@ -270,14 +270,16 @@ impl StorageConfig {
 
     /// Build the object store and the key prefix blobs live under.
     /// The object store, the blobs' prefix in it, and what presigns direct download URLs (S3 itself; else
-    /// [`StorageConfig::signer`]).
-    pub(crate) fn build_store(&self, data_dir: &std::path::Path) -> crate::Result<BuiltStore> {
+    /// [`StorageConfig::signer`]). With `fsync`, a local directory syncs each blob (and its directory) to the disk
+    /// before the write returns, so a blob is on disk before the commit that refers to it.
+    pub(crate) fn build_store(&self, data_dir: &std::path::Path, fsync: bool) -> crate::Result<BuiltStore> {
         match &self.backend {
             StorageBackend::Local(dir) => {
                 let dir = dir.clone().unwrap_or_else(|| data_dir.join("storage"));
                 std::fs::create_dir_all(&dir).with_context(|| format!("creating storage dir {}", dir.display()))?;
                 let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)
-                    .with_context(|| format!("opening storage dir {}", dir.display()))?;
+                    .with_context(|| format!("opening storage dir {}", dir.display()))?
+                    .with_fsync(fsync);
                 Ok((Arc::new(store), String::new(), self.signer.clone()))
             }
             StorageBackend::S3 { bucket, prefix } => {
@@ -321,6 +323,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_store_syncs_blobs_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        for fsync in [false, true] {
+            let (store, _, _) = StorageConfig::local(dir.path()).build_store(dir.path(), fsync).unwrap();
+            assert!(format!("{store:?}").contains(&format!("fsync: {fsync}")), "{store:?}");
+        }
+    }
+
+    #[test]
     fn parse_locations() {
         assert!(matches!(StorageBackend::parse("s3://bucket/a/b/").unwrap(),
             StorageBackend::S3 { ref bucket, ref prefix } if bucket == "bucket" && prefix == "a/b"));
@@ -340,11 +351,11 @@ mod tests {
     fn s3_store_builds_offline() {
         // Building the client makes no request; credentials are resolved lazily.
         let config = StorageConfig::s3("my-bucket", "/uploads/");
-        let (store, prefix, signer) = config.build_store(std::path::Path::new("/nonexistent")).unwrap();
+        let (store, prefix, signer) = config.build_store(std::path::Path::new("/nonexistent"), true).unwrap();
         assert_eq!(prefix, "uploads");
         assert!(store.to_string().contains("my-bucket"), "{store}");
         assert!(signer.is_some(), "S3 presigns download URLs by itself");
-        let local = StorageConfig::local("/tmp/x").build_store(std::path::Path::new("/nonexistent"));
+        let local = StorageConfig::local("/tmp/x").build_store(std::path::Path::new("/nonexistent"), true);
         assert!(local.is_ok_and(|(_, _, signer)| signer.is_none()), "local storage doesn't");
     }
 }

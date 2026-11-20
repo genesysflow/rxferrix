@@ -276,7 +276,10 @@ impl StorageConfig {
         match &self.backend {
             StorageBackend::Local(dir) => {
                 let dir = dir.clone().unwrap_or_else(|| data_dir.join("storage"));
-                std::fs::create_dir_all(&dir).with_context(|| format!("creating storage dir {}", dir.display()))?;
+                // A new storage root's entry in its parent reaches the disk too, or a power loss could take every
+                // blob in it away.
+                crate::ops::backup::create_dir_all_synced(&dir)
+                    .with_context(|| format!("creating storage dir {}", dir.display()))?;
                 let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)
                     .with_context(|| format!("opening storage dir {}", dir.display()))?
                     .with_fsync(fsync);

@@ -166,7 +166,8 @@ impl Database {
         options: &OpenOptions,
         migrations: &[(String, String)],
     ) -> anyhow::Result<Database> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
+        crate::ops::backup::create_dir_all_synced(dir)
+            .with_context(|| format!("creating data dir {}", dir.display()))?;
         configure_sqlite();
         search::vector::register_extension();
         let path = dir.join("data.db");

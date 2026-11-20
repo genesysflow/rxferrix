@@ -24,7 +24,8 @@ impl DirLock {
     /// Lock `dir` (created if missing), or fail at once if another process (or another `DirLock` in this one) holds
     /// it.
     pub fn acquire(dir: &Path) -> crate::Result<DirLock> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating data dir {}", dir.display()))?;
+        crate::ops::backup::create_dir_all_synced(dir)
+            .with_context(|| format!("creating data dir {}", dir.display()))?;
         let path = dir.join(LOCK_FILE);
         let mut file = OpenOptions::new()
             .read(true)

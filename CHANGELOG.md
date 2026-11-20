@@ -4,6 +4,10 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+### Security
+
+- lettre 0.11.24 (the SMTP client of the email sender): fixes RUSTSEC-2026-0560 to 0565, among them STARTTLS response injection by a man-in-the-middle and unbounded buffering of a server's reply. rustix 1.1.6 (RUSTSEC-2026-0486).
+
 ## 0.14.0 - 2026-11-20
 
 ### Added

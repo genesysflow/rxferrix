@@ -6,7 +6,7 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ### Security
 
-- lettre 0.11.24 (the SMTP client of the email sender): fixes RUSTSEC-2026-0560 to 0565, among them STARTTLS response injection by a man-in-the-middle and unbounded buffering of a server's reply. rustix 1.1.6 (RUSTSEC-2026-0486).
+- lettre 0.11.24 (the SMTP client of the email sender): fixes RUSTSEC-2026-0560 to 0565. The ones that matter most here: an address with a quoted local part, which sign-up accepts, could have its verification or password-reset email delivered to another mailbox (0563), and a bare CR or LF in a message's content could inject SMTP commands (0561). The others are STARTTLS response injection by a man-in-the-middle, unbounded buffering of a server's reply, and a panic on a display name containing CR or LF. rustix 1.1.6 (RUSTSEC-2026-0486). (#117)
 
 ## 0.14.0 - 2026-11-20
 

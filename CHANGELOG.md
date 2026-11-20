@@ -4,13 +4,15 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+## 0.14.0 - 2026-11-20
+
 ### Added
 
-- The dashboard's Account page lists the administrator's own sessions (browser, IP, last use, expiry), marks the current one, and can revoke the others; it is backed by the new `_system/dashboard:my_sessions` query.
+- The dashboard's Account page lists the administrator's own sessions (browser, IP, last use, expiry), marks the current one, and can revoke the others; it is backed by the new `_system/dashboard:my_sessions` query. (#116)
 
 ### Fixed
 
-- The dashboard's session lists (Users and Account) show a session as expired once its expiry passes while the page is open, instead of only after the list next changes.
+- The dashboard's session lists (Users and Account) show a session as expired once its expiry passes while the page is open, instead of only after the list next changes. (#116)
 
 ## 0.13.1 - 2026-11-11
 

@@ -4,6 +4,10 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+### Security
+
+- url 2.5.9: fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs. rxferrix's own calls (CORS origins in the settings, redirect targets in auth) check that the scheme is `http` or `https` first, and its dependencies don't call it, so it wasn't reachable here. (#120)
+
 ### Changed: check these when upgrading
 
 - **The recorded mutation responses moved to another table.** The responses kept for about ten minutes so that a mutation resent after a reconnect runs once are now in `_mutation_responses` (one packed row per commit, more when the responses are large) instead of `_mutation_dedup` (one row per response); the rows move over when the database first opens, and a takeover from an earlier version carries them as before. The server now keeps an index of them in memory: 20 to 40 bytes per WebSocket mutation of the last ten minutes, loaded when the database opens. That is 13 to 23 MiB at 1,000 mutations a second, 130 to 230 MiB at 10,000 (6 million responses, loaded in under a second), and after ten minutes at the 42,000 a second the benchmark below sustains, its process (server and load generator together) used 1.3 GiB, with 421 MiB in the table. Going back to an earlier version loses those ten minutes of responses: a mutation resent across the downgrade can run twice, and a takeover by an earlier version stops at its last step and serves the database as it was. (#119)

@@ -598,6 +598,9 @@ impl Index {
         if self.sessions.capacity() >= 1024 && self.sessions.len() < self.sessions.capacity() / 4 {
             self.sessions.shrink_to(self.sessions.len() * 2);
         }
+        if self.rows.capacity() >= 1024 && self.rows.len() < self.rows.capacity() / 4 {
+            self.rows.shrink_to(self.rows.len() * 2);
+        }
     }
 
     /// The open batch was rolled back: its responses were never recorded.
@@ -772,6 +775,16 @@ mod tests {
         index.committed(written);
     }
 
+    /// What the index holds on the heap: per session its id, a map slot and the queue's buffer; the list of rows; the
+    /// open batch's responses.
+    fn heap_bytes(index: &Index) -> usize {
+        let slot = std::mem::size_of::<(Box<str>, VecDeque<(u64, i64)>)>() + 1;
+        let sessions = index.sessions.iter().map(|(id, requests)| id.len() + requests.capacity() * 16);
+        let pending = index.pending.capacity() * std::mem::size_of::<(i64, Record)>()
+            + index.pending.iter().map(|(_, r)| r.session_id.capacity() + r.len()).sum::<usize>();
+        index.sessions.capacity() * slot + sessions.sum::<usize>() + index.rows.capacity() * 16 + pending
+    }
+
     fn row_count(conn: &Connection) -> i64 {
         conn.query_row(&format!("SELECT COUNT(*) FROM {TABLE}"), [], |r| r.get(0)).unwrap()
     }
@@ -870,12 +883,6 @@ mod tests {
     #[test]
     #[ignore]
     fn index_cost() {
-        // What the index holds on the heap: per session its id, a map slot and the queue's buffer.
-        fn heap_bytes(index: &Index) -> usize {
-            let slot = std::mem::size_of::<(Box<str>, VecDeque<(u64, i64)>)>() + 1;
-            let sessions = index.sessions.iter().map(|(id, requests)| id.len() + requests.capacity() * 16);
-            index.sessions.capacity() * slot + sessions.sum::<usize>() + index.rows.capacity() * 16
-        }
         // (sessions, responses of each): a few busy sessions, then many that each sent a few.
         for (sessions, each) in [(1_000u64, 6_000u64), (600_000, 10)] {
             let dir = tempfile::tempdir().unwrap();
@@ -956,6 +963,74 @@ mod tests {
         commit_at(&mut index, &conn, later);
         assert_eq!((index.len(), row_count(&conn)), (0, 0));
         assert!(index.sessions.is_empty() && index.rows.is_empty());
+    }
+
+    /// Three hours of traffic by a clock of its own, a batch a second: sessions that stay and send all the time,
+    /// sessions that send once and are gone, batches that roll back, a key recorded again. The index and the table
+    /// hold what the last [`RETENTION`] holds and no more, hour after hour, and give it back when the traffic ends.
+    #[test]
+    fn the_index_holds_no_more_than_the_retention_holds() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut index = Index::open(&conn).unwrap();
+        let retention = RETENTION.as_millis() as i64;
+        let batches_kept = (retention / 1_000) as usize + 1;
+        let (staying, passing, each) = (10u64, 10u64, 4u64);
+        let per_batch = (staying * each + passing) as usize;
+        let mut now = 1_000_000;
+        // The most it held (responses, sessions, rows of the table, bytes), per hour.
+        let mut most = Vec::new();
+        for hour in 0..3u64 {
+            let mut held = (0, 0, 0, 0);
+            for second in 0..3_600u64 {
+                let step = hour * 3_600 + second;
+                now += 1_000;
+                for session in 0..staying {
+                    for request in 0..each {
+                        index.add(success(&key(&format!("staying-{session}"), step * each + request), step));
+                    }
+                }
+                for session in 0..passing {
+                    index.add(success(&key(&format!("passing-{step}-{session}"), 1), step));
+                }
+                if step % 11 == 5 && step > 20 {
+                    // Recorded again while its first response is still on record (as an import does).
+                    index.add(success(&key("staying-0", (step - 10) * each), step));
+                }
+                if step % 7 == 3 {
+                    index.rolled_back();
+                    conn.execute_batch("BEGIN; ROLLBACK").unwrap();
+                } else {
+                    commit_at(&mut index, &conn, now);
+                }
+                held.0 = held.0.max(index.len());
+                held.1 = held.1.max(index.sessions.len());
+                held.2 = held.2.max(row_count(&conn) as usize);
+                if step % 30 == 0 {
+                    held.3 = held.3.max(heap_bytes(&index));
+                }
+                assert_eq!(index.rows.len(), row_count(&conn) as usize, "at {step}");
+            }
+            assert!(held.0 <= batches_kept * per_batch, "{held:?}");
+            assert!(held.1 <= staying as usize + batches_kept * passing as usize, "{held:?}");
+            assert!(held.2 <= batches_kept, "{held:?}");
+            most.push(held);
+        }
+        // Full after the first ten minutes: the later hours hold what the first did (the buffers may be sized
+        // differently, by a few percent).
+        assert_eq!((most[1].0, most[1].1, most[1].2), (most[2].0, most[2].1, most[2].2), "{most:?}");
+        assert!(most[2].3 <= most[1].3 + most[1].3 / 20, "{most:?}");
+        // The traffic ends: commits without responses (anything that writes) clear it, and the memory goes back.
+        let mut commits = 0;
+        while index.len() > 0 {
+            now += retention;
+            commit_at(&mut index, &conn, now);
+            commits += 1;
+            assert!(commits <= batches_kept / EXPIRE_ROWS + 2, "{} left after {commits} commits", index.len());
+        }
+        assert!(index.sessions.is_empty() && index.rows.is_empty() && index.pending.is_empty());
+        assert_eq!(row_count(&conn), 0);
+        // (What stays is a map and two buffers of a size that doesn't depend on what was held.)
+        assert!(heap_bytes(&index) < 128 << 10, "{} of {} bytes kept", heap_bytes(&index), most[2].3);
     }
 
     #[test]

@@ -4,6 +4,8 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+## 0.16.0 - 2026-11-24
+
 ### Security
 
 - url 2.5.9: fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs. rxferrix's own calls (CORS origins in the settings, redirect targets in auth) check that the scheme is `http` or `https` first, and its dependencies don't call it, so it wasn't reachable here. (#120)

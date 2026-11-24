@@ -19,8 +19,8 @@
 //!    accepting (the sockets stay open in the new process, so connections queue instead of being refused), closes
 //!    WebSockets with code 1012 ("service restart": clients reconnect at once), lets requests finish, seals its
 //!    database (no write may begin after that), and exits, releasing `<dir>/rxferrix.lock`.
-//! 5. The new process takes the lock, replays the last journal rows, copies what isn't journaled (the mutation dedup
-//!    table, so a retried mutation still runs once; replication and analytics positions; the journal itself for
+//! 5. The new process takes the lock, replays the last journal rows, copies what isn't journaled (the recorded mutation
+//!    responses, so a retried mutation still runs once; replication and analytics positions; the journal itself for
 //!    replication), checks that the copy is at the old database's ts, and swaps it in: the old `data.db` moves to
 //!    `<dir>/takeover/previous/`. Then it opens the app with the schema check already done and serves on the
 //!    inherited sockets. A crash during the swap is finished on the next start ([`recover`]). If this last step
@@ -490,13 +490,7 @@ impl Staged {
         let copied_to = self.journal_copied_to;
         self.db()
             .with_writer(move |c| {
-                for [session, request, created, response] in &carried.dedup {
-                    c.execute(
-                        "INSERT OR IGNORE INTO _mutation_dedup (session_id, request_id, created_ms, response) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![session, request, created, response],
-                    )?;
-                }
+                crate::db::dedup::import(c, carried.responses)?;
                 for (key, value) in &carried.meta {
                     match value {
                         Some(v) => storage::write_meta(c, key, v.clone())?,
@@ -533,8 +527,8 @@ impl Staged {
 
 /// What the old database has that the journal doesn't carry.
 struct Carried {
-    /// `(session_id, request_id, created_ms, response)`, as stored.
-    dedup: Vec<[rusqlite::types::Value; 4]>,
+    /// The mutation responses on record, each with the time it was recorded.
+    responses: Vec<(i64, crate::db::dedup::Record)>,
     meta: Vec<(&'static str, Option<rusqlite::types::Value>)>,
     last_creation_time: f64,
     /// The old database's journal rows written after the copy.
@@ -562,12 +556,7 @@ fn journal_max(conn: &rusqlite::Connection) -> crate::Result<u64> {
 /// What to carry from the old database; of its journal, the rows after `journal_copied_to` only.
 fn carried_state(source: &rusqlite::Connection, journal_copied_to: u64) -> crate::Result<Carried> {
     use rusqlite::OptionalExtension;
-    let mut dedup = Vec::new();
-    let mut stmt = source.prepare("SELECT session_id, request_id, created_ms, response FROM _mutation_dedup")?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        dedup.push([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]);
-    }
+    let responses = crate::db::dedup::read_all(source)?;
     let mut meta = Vec::new();
     for key in CARRIED_META {
         let v: Option<rusqlite::types::Value> =
@@ -593,7 +582,7 @@ fn carried_state(source: &rusqlite::Connection, journal_copied_to: u64) -> crate
         })
         .collect();
     let journal_floor = positions.into_iter().min().unwrap_or(u64::MAX);
-    Ok(Carried { dedup, meta, last_creation_time, journal: journal_rows, journal_from, journal_floor })
+    Ok(Carried { responses, meta, last_creation_time, journal: journal_rows, journal_from, journal_floor })
 }
 
 /// Open a copy of the database with `tables`: what a takeover does to its copy, and `check`.

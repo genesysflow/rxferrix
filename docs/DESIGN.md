@@ -32,9 +32,9 @@ SQLite WAL snapshots isolate readers; stored documents need only one current row
 
 A query holds a read-only connection for its run and reads one snapshot timestamp. The default pool size is about 1.5 readers per available core. Queries averaging at least 5 ms share a limited lane to keep slots available for faster reads.
 
-Mutations run serially on the writer. Queued mutations may share a group commit, with one savepoint per mutation. A failed mutation rolls back its savepoint; a failed batch commit fails the batch. Successful writes still get individual commit timestamps, and callers receive success only after commit.
+Mutations run serially on the writer. Queued mutations may share a group commit, with one savepoint per mutation. A failed mutation rolls back its savepoint (the first one of a group has the group's transaction to itself until another joins); a failed batch commit fails the batch, and so does an error on which SQLite ends the transaction by itself (a full disk, an I/O error): nothing else commits on the writer connection while a group is open. Successful writes still get individual commit timestamps, and callers receive success only after commit.
 
-Groups are bounded by 256 mutations or four milliseconds. A recently slow mutation causes the current group to commit before it begins. This protects earlier fast mutations from waiting for it, but while it runs it still holds the single writer.
+A group stays open while writes are queued, for up to four milliseconds, or four times as long as the last commit took where commits are slow (at most 32 ms and 4096 mutations). Its age is checked each time a mutation finishes, so a mutation that runs long keeps the group open until it ends. A recently slow mutation causes the current group to commit before it begins. This protects earlier fast mutations from waiting for it, but while it runs it still holds the single writer.
 
 External I/O belongs in actions. The context API separates transactional reads/writes from external work, but Rust is not sandboxed: the framework cannot prevent an app from making an inappropriate network call or blocking a thread. Timeouts are enforced at await points.
 
@@ -93,6 +93,14 @@ Release builds on one machine, from development (dates are when they were taken)
   with 256 writers (65k/s without waiting for the disk, same caps); the same throughput at 16 and 64 writers (9.7k
   and 22-24k/s), with p99 at 64 writers 4-5 ms instead of 3.5 ms. Mutations arriving at a fixed rate: 46k/s before
   latency climbs, from 23k/s.
+- **Transfers over WebSockets (2026-11-24, `bench_transfer`, encrypted btrfs with fsync, about 3 ms per fsync that
+  day):** a mutation that reads two of 100,000 accounts and writes both, 64 sockets with 40 calls in flight each,
+  medians of three 8-second runs. Accounts picked uniformly: 13.3k transfers/s, about 17.5k/s once the recorded
+  responses of a commit went into one row instead of one row per response, 28.3k/s once a group could stay open four
+  times as long as the last commit took (groups of 1800 instead of 230). Most transfers between a few hot accounts:
+  22.2k, about 35k and 52.5k/s. With 1024 sockets and 3 calls in flight each: 9.0k to 20.1k/s and 13.2k to 30.3k/s.
+  On tmpfs (no disk cost) only the first change counts: 36.6k to 50.1k/s and 40.2k to 60.8k/s. Run for minutes, every
+  build (the one before these changes too) loses about a tenth after two to three minutes on this disk.
 - **Indexes (2026-10-15, `bench_indexes`):** all indexes share `index_entries`. Filling it with 3.3M entries of
   other indexes took a lookup on a small table's index from 22.5 to 25.3 µs (the SQLite read alone stayed at 2.5 µs;
   the B-tree gained one level). Each index costs writes: 16 writers inserted 22k documents/s with 1 index, 12k with

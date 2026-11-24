@@ -494,7 +494,9 @@ impl Default for AppOptions { /* the defaults above, dev = false */ }
   holding the writer lock.
 - **Idempotency.** `App::execute_mutation(path, args, &identity, Some(&IdempotencyKey { session_id, request_id }))`
   runs a mutation at most once per key and replays the recorded response for repeats. The response is recorded in
-  the mutation's own write transaction, in the raw table `_mutation_dedup` of `data.db`, and kept about 10 minutes.
+  the mutation's own write transaction, in the raw table `_mutation_responses` of `data.db` (one row per commit,
+  holding the responses of the mutations that committed together, or several rows when those are large; an index in memory, loaded when the database
+  opens, says which row has a key's response), and kept about 10 minutes.
   The sync worker uses this for every WS mutation; see PROTOCOL.md guarantee 7. The runtime scopes the stored key
   to the caller (`IdempotencyKey::scoped_to(identity)`, prefixing `Identity::principal_key()`), so a response is
   only ever replayed to the identity that ran the mutation.
@@ -1690,12 +1692,13 @@ pub struct MigrationReport {   // camelCase JSON
 - **Mutations commit in groups.** Mutations that queue for the writer share one SQLite transaction, each in its own
   savepoint: one that fails rolls back alone, and every mutation still gets its own ts (consecutive across those that
   write). A caller gets its result only after the shared `COMMIT`; if that commit fails, every mutation in it fails
-  and nothing of them is kept. Two consequences: a mutation whose caller goes away after it finished but before the
+  and nothing of them is kept (the same if SQLite ends the group's transaction before that, as it does on a full disk
+  or an I/O error). Two consequences: a mutation whose caller goes away after it finished but before the
   commit is still committed (its idempotency record too, so a retry replays its response), and a duplicate request
   waits for the original's commit before replaying. A mutation that recently took over 0.5 ms (tracked per path)
   commits the open group before it starts, so fast mutations are not held back by a slow one queued behind them;
-  the slow one still blocks every write while it runs (`rxferrix::db` module docs, `MAX_BATCH`, `MAX_BATCH_AGE`,
-  `SLOW_WRITE`).
+  the slow one still blocks every write while it runs (`rxferrix::db` module docs, `MAX_BATCH`, `BATCH_AGE`,
+  `BATCH_AGE_COMMITS`, `MAX_BATCH_AGE`, `SLOW_WRITE`).
 - **Query cache.** A query's result is reused, not recomputed, while nothing it read has changed: by every subscriber
   of the same query (always), by the next subscriber after the last one left, and by HTTP queries and
   `ctx.run_query`. After its last subscriber leaves, a result stays cached until a commit writes into what it read
@@ -2658,8 +2661,9 @@ listening sockets with `SCM_RIGHTS` (roles `main`, `redirect`) and, under system
 for 100 ms (`App::begin_drain`), closes WebSockets with 1012 and ends admin log streams (`App::begin_close`), stops
 gracefully (up to 10 s for open requests), flushes the execution log, seals its database (`Database::seal`: no write
 transaction can begin) and exits. The new process waits for the socket to close, takes `rxferrix.lock`, replays the last
-rows, checks that the copy's ts equals the database's, copies `_mutation_dedup` rows, the replication and analytics
-`_meta` positions and `_journal` (trimmed to what those consumers still need), raises `last_creation_time` if needed,
+rows, checks that the copy's ts equals the database's, copies the recorded mutation responses
+(`_mutation_responses`), the replication and analytics `_meta` positions and `_journal` (trimmed to what those
+consumers still need), raises `last_creation_time` if needed,
 then swaps: `<dir>/takeover/swapping` marks it, `data.db*` moves to `takeover/previous/`, the copy moves in, the
 marker goes; a start that finds the marker finishes the move (`takeover::recover`). If anything in this last step
 fails, the new process logs it, completes a swap that had begun (or drops the copy) and opens the database as the

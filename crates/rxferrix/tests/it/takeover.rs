@@ -26,16 +26,41 @@ struct Serving {
     stopped: tokio::task::JoinHandle<()>,
 }
 
+/// For a test to act at the moment a new process asks a server for its sockets (it has copied and caught up with
+/// the database by then): the server says so, and goes on serving until told (or for 10 s).
+struct AtHandover {
+    reached: tokio::sync::oneshot::Receiver<()>,
+    go_on: tokio::sync::oneshot::Sender<()>,
+}
+
 async fn serve(dir: &Path, lock: DirLock, app: App, listen: Listen, inherited: tls::Inherited) -> Serving {
+    serve_pausing(dir, lock, app, listen, inherited, false).await.0
+}
+
+async fn serve_pausing(
+    dir: &Path,
+    lock: DirLock,
+    app: App,
+    listen: Listen,
+    inherited: tls::Inherited,
+    pause: bool,
+) -> (Serving, Option<AtHandover>) {
     let server = tls::start_with(rxferrix::server::router(app.clone()), &listen, inherited).await.unwrap();
     let addr = server.addr;
     let control = Control::start(app.clone(), dir, server.listener_fds(), server.listener_addrs()).await.unwrap();
     let pauser = server.pauser();
     let a = app.clone();
+    let (reached, reached_rx) = tokio::sync::oneshot::channel();
+    let (go_on, go_on_rx) = tokio::sync::oneshot::channel();
+    let at_handover = pause.then_some(AtHandover { reached: reached_rx, go_on });
     let stopped = tokio::spawn(async move {
         server
             .run_until(async {
                 control.handover_requested().await;
+                if pause {
+                    let _ = reached.send(());
+                    let _ = tokio::time::timeout(Duration::from_secs(10), go_on_rx).await;
+                }
                 a.begin_drain();
                 pauser.stop_accepting();
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -49,7 +74,7 @@ async fn serve(dir: &Path, lock: DirLock, app: App, listen: Listen, inherited: t
         drop(a);
         drop(lock);
     });
-    Serving { app, addr, stopped }
+    (Serving { app, addr, stopped }, at_handover)
 }
 
 async fn start_old(dir: &Path) -> Serving {
@@ -80,24 +105,33 @@ async fn add(client: &reqwest::Client, addr: SocketAddr, text: &str) -> Result<V
 
 /// Send a mutation over a WebSocket as session `session` with `request_id`; returns the MutationResponse.
 async fn ws_mutation(addr: SocketAddr, session: &str, request_id: u64, text: &str) -> Value {
+    try_ws_mutation(addr, session, request_id, text).await.expect("no MutationResponse")
+}
+
+/// [`ws_mutation`], or `None` if the connection failed or closed before the response (a server handing over).
+async fn try_ws_mutation(addr: SocketAddr, session: &str, request_id: u64, text: &str) -> Option<Value> {
+    tokio::time::timeout(Duration::from_secs(10), ws_mutation_once(addr, session, request_id, text)).await.ok()?
+}
+
+async fn ws_mutation_once(addr: SocketAddr, session: &str, request_id: u64, text: &str) -> Option<Value> {
     use futures::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync")).await.ok()?;
     let connect = json!({ "type": "Connect", "sessionId": session, "connectionCount": 0, "lastCloseReason": null,
                           "clientVersion": "0.1.0" });
-    ws.send(Message::text(connect.to_string())).await.unwrap();
+    ws.send(Message::text(connect.to_string())).await.ok()?;
     let mutation = json!({ "type": "Mutation", "requestId": request_id, "udfPath": todos::add::path(),
                            "args": { "text": text } });
-    ws.send(Message::text(mutation.to_string())).await.unwrap();
+    ws.send(Message::text(mutation.to_string())).await.ok()?;
     while let Some(frame) = ws.next().await {
         if let Ok(Message::Text(t)) = frame {
             let v: Value = serde_json::from_str(t.as_str()).unwrap();
             if v["type"] == "MutationResponse" {
-                return v;
+                return Some(v);
             }
         }
     }
-    panic!("no MutationResponse");
+    None
 }
 
 async fn count(app: &App) -> usize {
@@ -115,9 +149,13 @@ fn tables_with(todos_def: TableDef) -> Vec<TableDef> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_takeover_under_load_refuses_nothing_loses_nothing_and_can_happen_again() {
     let dir = tempfile::tempdir().unwrap();
-    let old = start_old(dir.path()).await;
+    let lock = DirLock::acquire(dir.path()).unwrap();
+    let app = App::open(dir.path(), AppOptions { dev: true, ..Default::default() }).await.unwrap();
+    let listen = Listen::Http("127.0.0.1:0".parse().unwrap());
+    let (old, at_handover) = serve_pausing(dir.path(), lock, app, listen, Vec::new(), true).await;
+    let at_handover = at_handover.unwrap();
     let addr = old.addr;
-    for i in 0..49 {
+    for i in 0..48 {
         add(&reqwest::Client::new(), addr, &format!("before {i}")).await.unwrap();
     }
     // A WebSocket mutation leaves a dedup record (session, request id): it must survive the takeover.
@@ -158,17 +196,66 @@ async fn a_takeover_under_load_refuses_nothing_loses_nothing_and_can_happen_agai
             })
         })
         .collect();
+    // And mutations over WebSockets, one after the other, as a client sends them: their responses are recorded while
+    // the new process already has its copy of the database, and must be carried over too. One the old server didn't
+    // answer any more is sent again below, as a client does after reconnecting.
+    let over_sockets = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            let mut sent = Vec::new();
+            while !stop.load(Ordering::SeqCst) {
+                let request = 100 + sent.len() as u64;
+                let answer = try_ws_mutation(addr, "during-session", request, &format!("socket {request}")).await;
+                sent.push((request, answer.filter(|a| a["success"] == true)));
+            }
+            sent
+        }
+    });
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let new = take_over(dir.path(), addr, rxferrix::runtime::registered_tables()).await.unwrap();
+    // When the new process asks for the sockets, it has its copy of the database: the response of a mutation the old
+    // server answers from then on is only in the old database, for the new process to carry over at the end.
+    let (new, at_the_handover) =
+        tokio::join!(take_over(dir.path(), addr, rxferrix::runtime::registered_tables()), async {
+            at_handover.reached.await.unwrap();
+            let response = ws_mutation(addr, "dedup-session", 8, "at the handover").await;
+            at_handover.go_on.send(()).unwrap();
+            response
+        });
+    let new = new.unwrap();
+    assert_eq!(at_the_handover["success"], true, "{at_the_handover}");
     old.stopped.await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     stop.store(true, Ordering::SeqCst);
     for w in writers {
         w.await.unwrap();
     }
+    let over_sockets = over_sockets.await.unwrap();
     let failures = failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{} request(s) failed: {:?}", failures.len(), &failures[..failures.len().min(3)]);
-    assert_eq!(count(&new.app).await, 50 + ok.load(Ordering::SeqCst), "every acknowledged write is there");
+    // Every socket mutation again with its key: the ones that were answered get the same answer, the others run now
+    // unless they had committed. Either way each ran exactly once: one todo with its text (`find` fails on two),
+    // the one the answer names.
+    let mut sent: Vec<(&str, u64, String, Option<Value>)> = vec![
+        ("dedup-session", 7, "over the socket".into(), Some(first.clone())),
+        ("dedup-session", 8, "at the handover".into(), Some(at_the_handover)),
+    ];
+    sent.extend(over_sockets.iter().map(|(r, answer)| ("during-session", *r, format!("socket {r}"), answer.clone())));
+    for (session, request, text, answer) in &sent {
+        let again = ws_mutation(addr, session, *request, text).await;
+        assert_eq!(again["success"], true, "request {request}: {again}");
+        if let Some(answer) = answer {
+            let same = (&again["result"], &again["ts"]) == (&answer["result"], &answer["ts"]);
+            assert!(same, "request {request} got another answer after the takeover: {again} for {answer}");
+        }
+        let todo = new.app.query::<todos::find>((text.clone(),)).await;
+        let todo = todo.unwrap_or_else(|e| panic!("request {request} ({text}) didn't run exactly once: {e:#}"));
+        assert_eq!(json!(todo.id.to_string()), again["result"], "request {request}");
+    }
+    assert_eq!(
+        count(&new.app).await,
+        50 + ok.load(Ordering::SeqCst) + over_sockets.len(),
+        "every acknowledged write is there, and every socket mutation once"
+    );
     // The client retries its mutation after reconnecting: answered from the dedup record, not run again.
     let before = count(&new.app).await;
     let retried = ws_mutation(addr, "dedup-session", 7, "over the socket").await;

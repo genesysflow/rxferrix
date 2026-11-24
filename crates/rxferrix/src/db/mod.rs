@@ -7,7 +7,8 @@
 //!   reads go through the same connection and therefore see its own writes.
 //! * **Group commit.** Mutations that queue for the writer share one SQLite transaction (a *batch*): each runs in its
 //!   own savepoint (rolled back alone if it fails), and whoever releases the lock commits the batch unless another
-//!   write is already waiting to continue it (up to [`MAX_BATCH`] mutations or [`MAX_BATCH_AGE`]). A mutation's caller
+//!   write is already waiting to continue it (up to [`MAX_BATCH`] mutations, and for [`BATCH_AGE`] or longer where
+//!   commits are slow, see [`BATCH_AGE_COMMITS`]). A mutation's caller
 //!   gets its result only after the batch commits, and every mutation still gets its own ts; the commit, the `_meta`
 //!   update and the page writes to the WAL are paid once per batch instead of once per mutation. A mutation known to
 //!   be slow (over [`SLOW_WRITE`] lately, per path) commits the batch before it starts instead of joining it, so it
@@ -22,6 +23,7 @@
 //! for the duration of synchronous SQLite calls, never across an `.await`.
 
 pub mod aggregate;
+mod batch_guard;
 pub mod catalog;
 pub mod checkpoint;
 pub mod dedup;
@@ -74,16 +76,36 @@ pub fn default_readers() -> usize {
 /// they are used. Only the writer gets it: a reader's cache starts over whenever another connection has committed.
 pub const DEFAULT_WRITER_CACHE_SIZE: u64 = 32 << 20;
 
-/// Group commit: the most mutations one batch takes before it commits, even with more waiting.
+/// Group commit: the most mutations one batch takes before it commits, even with more waiting. A bound on what one
+/// commit holds; how long a batch stays open ([`BATCH_AGE`]) is what normally ends it.
 ///
-/// With commits waiting for the disk (the default), one fsync (about 1 ms on an NVMe SSD) covers a batch, so the batch
-/// size caps throughput. Measured on btrfs with one-insert mutations (2026-11-20): 64 mutations and 2 ms held it at
-/// 23k mutations/s with fsync; 256 and 4 ms reach 45-47k/s with 256 writers (8 ms adds nothing), with the same
-/// throughput at 16 and 64 writers and p99 at 64 writers 4-5 ms instead of 3.5 ms (`docs/DESIGN.md`, Measurements).
-pub const MAX_BATCH: usize = 256;
+/// It was 256 before: with more mutations queued than that (1024 writers of one-insert mutations, or sockets with
+/// many calls in flight), batches filled in about a millisecond and the writer spent most of its time committing them
+/// (`bench_writes`, 2026-11-24, btrfs with fsync, 1024 writers, medians of three runs: 46.4k mutations/s at p50 22 ms
+/// and p99 27 ms with 256; 68.2k/s at p50 15 ms and p99 19 ms with this bound and [`BATCH_AGE_COMMITS`]; unchanged
+/// at 64 and 256 writers).
+pub const MAX_BATCH: usize = 4096;
 /// Group commit: a batch older than this (since its first mutation began) commits at the next release, so the first
-/// mutation's caller isn't kept waiting by a long queue.
-pub const MAX_BATCH_AGE: Duration = Duration::from_millis(4);
+/// mutation's caller isn't kept waiting by a long queue. Longer where commits are slow: see [`BATCH_AGE_COMMITS`].
+pub const BATCH_AGE: Duration = Duration::from_millis(4);
+/// Group commit: a batch may stay open this many times as long as the last commit took, if that is longer than
+/// [`BATCH_AGE`] (and up to [`MAX_BATCH_AGE`]). A commit has a cost that doesn't depend on the batch (the fsync, about
+/// 3 ms on an encrypted btrfs NVMe SSD) and one per page written, which grows slower than the batch (mutations of
+/// one batch often write the same pages): with a fixed 4 ms, a writer that always had a queue spent more time
+/// committing than running mutations. With this, commits take about a fifth of its time where their cost is mostly
+/// the fsync, and where commits are fast (no fsync, a fast disk) batches stay as short as before.
+///
+/// Measured with `bench_transfer` (2026-11-24, 64 sockets with 40 calls in flight each, btrfs with fsync; medians of
+/// three runs): transfers between accounts picked uniformly went from 17.4k/s (batches of 230 open for 4 ms, then
+/// 7 ms in the commit) to 28.1k/s (1800 open for 29 ms, 22 ms in the commit), with p50 latency from 135 to 66 ms and
+/// p99 unchanged (16 later runs: 59 to 106 ms from run to run, 80 ms their median, at 26.9k/s); between a few hot accounts from 34.3k to 52.2k/s. A fixed 16 ms gave 23.7k and 50.1k/s, a fixed
+/// 32 ms 27.9k and 45.8k/s, twice the last commit 27.9k and 43.0k/s. With a queue no longer than a batch (64 sockets
+/// with one call in flight, `bench_writes` with up to 256 writers) nothing changes: those batches end when nobody is
+/// waiting.
+pub const BATCH_AGE_COMMITS: u32 = 4;
+/// Group commit: the longest a batch stays open, however slow commits are. Like [`BATCH_AGE`], it is checked when a
+/// mutation finishes: one that runs long keeps the batch open until it ends.
+pub const MAX_BATCH_AGE: Duration = Duration::from_millis(32);
 /// Group commit: a write transaction whose label (the mutation's path) has recently taken longer than this commits
 /// the open batch before it starts, so the mutations already in the batch don't wait for it.
 pub const SLOW_WRITE: Duration = Duration::from_micros(500);
@@ -181,7 +203,7 @@ impl Database {
             "cache_size",
             -i64::try_from(options.writer_cache_size >> 10).unwrap_or(i64::MAX),
         )?;
-        dedup::ensure_schema(&writer)?;
+        let responses = dedup::Index::open(&writer)?;
         writer.execute_batch(journal::DDL)?;
         let catalog = catalog::reconcile(&mut writer, tables)?;
         let migrating = match &options.prechecked {
@@ -206,13 +228,18 @@ impl Database {
         }
         let checkpointer = checkpoint::Checkpointer::start(&path)?;
         checkpoint::install_hook(&writer, checkpointer.signal());
+        let batch_guard = Arc::new(batch_guard::BatchGuard::default());
+        batch_guard::install(&writer, &batch_guard);
         Ok(Database {
             writer: Arc::new(WriterShared {
                 lock: Arc::new(tokio::sync::Mutex::new(Writer {
                     conn: writer,
                     batch: None,
                     committed_meta: None,
+                    responses,
+                    last_commit: Duration::ZERO,
                     checkpoint: checkpointer.signal().clone(),
+                    batch_guard,
                 })),
                 waiting: AtomicUsize::new(0),
                 durations: Mutex::new(std::collections::HashMap::new()),
@@ -266,9 +293,16 @@ impl Database {
         self.writer.sealed.store(true, Ordering::SeqCst);
         let finished = self.writer.commit_batch(&mut guard);
         finish_members(finished);
-        let ts = storage::read_meta_u64(&guard, storage::META_TS)?;
+        // (Still in a transaction if that commit and its rollback both failed: the ts read below would be one that
+        // isn't committed.)
+        let ts = (|| {
+            if !guard.is_autocommit() {
+                guard.execute_batch("ROLLBACK")?;
+            }
+            storage::read_meta_u64(&guard, storage::META_TS)
+        })();
         self.writer.release(guard);
-        Ok(ts)
+        ts
     }
 
     /// The change journal's switch and size ([`journal`]).
@@ -295,13 +329,29 @@ impl Database {
         guard.committed_meta = None;
         guard.execute_batch("BEGIN IMMEDIATE")?;
         let result = match f(&guard) {
-            Ok(r) => guard.execute_batch("COMMIT").map(|()| r).map_err(Into::into),
+            Ok(r) => guard.execute_batch("COMMIT").map(|()| r).map_err(|e| {
+                // A commit can fail and leave its transaction open: what `f` wrote must not be read below.
+                if !guard.is_autocommit() {
+                    let _ = guard.execute_batch("ROLLBACK");
+                }
+                e.into()
+            }),
             Err(e) => {
                 let _ = guard.execute_batch("ROLLBACK");
                 Err(e)
             }
         };
+        // `f` may have imported mutation responses ([`dedup::import`]). (Not read while a transaction is still open,
+        // which takes a commit and its rollback both failing: the connection would show what isn't committed.)
+        let writer = &mut *guard;
+        let resynced = if writer.conn.is_autocommit() {
+            writer.responses.resync(&writer.conn)
+        } else {
+            writer.responses.mark_stale();
+            Err(anyhow::anyhow!("a transaction was left open on the writer connection"))
+        };
         self.writer.release(guard);
+        resynced.context("reloading the recorded mutation responses")?;
         result
     }
 
@@ -474,13 +524,23 @@ impl Database {
             label: label.to_string(),
             began: Instant::now(),
         };
-        if conn.writer().batch.is_some() && self.writer.expected(label) > SLOW_WRITE {
+        // (A batch that lost its transaction isn't left open for a waiter, see `release`; checked here all the same,
+        // since joining one would begin a transaction of this write's own.)
+        if conn.writer().batch.is_some() && (self.writer.expected(label) > SLOW_WRITE || conn.writer().batch_lost()) {
             let finished = self.writer.commit_batch(conn.writer_mut());
             finish_members(finished);
         }
         if conn.writer().batch.is_none() {
+            if conn.writer().responses.is_stale() {
+                // Not before the recorded responses are known again: a repeat would run a second time.
+                let writer = conn.writer_mut();
+                if !writer.conn.is_autocommit() {
+                    writer.conn.execute_batch("ROLLBACK")?;
+                }
+                writer.responses.resync(&writer.conn).context("loading the recorded mutation responses")?;
+            }
             let batch = conn.writer().begin_batch()?;
-            conn.writer_mut().batch = Some(batch);
+            conn.writer_mut().open_batch(batch);
             // Nothing else is in the batch yet: undoing this transaction is rolling back the whole SQLite transaction,
             // which spares the savepoint's two statements when there is no queue to batch with.
             conn.undo = Undo::Transaction;
@@ -521,8 +581,15 @@ pub(crate) struct Writer {
     /// The batch `_meta` values (ts, time, last creation time) as last committed through this writer, so a batch
     /// begins without reading them; `None` when unknown (after [`Database::with_writer`], which may write them).
     committed_meta: Option<(u64, f64, f64)>,
+    /// The mutation responses on record, and the open batch's ([`dedup`]).
+    responses: dedup::Index,
+    /// How long the last batch took to commit, for [`BATCH_AGE_COMMITS`].
+    last_commit: Duration,
     /// What the connection's WAL hook nudges ([`checkpoint::install_hook`]); dropped after `conn`.
     checkpoint: Arc<checkpoint::Signal>,
+    /// What the connection's commit and rollback hooks read ([`batch_guard`]): whether `batch` is open, and whether
+    /// its transaction is gone. Dropped after `conn`.
+    batch_guard: Arc<batch_guard::BatchGuard>,
 }
 
 impl std::ops::Deref for Writer {
@@ -533,6 +600,25 @@ impl std::ops::Deref for Writer {
 }
 
 impl Writer {
+    /// The batch that [`Writer::begin_batch`] began is open from here on: nothing but its commit may commit
+    /// ([`batch_guard`]).
+    fn open_batch(&mut self, batch: Batch) {
+        self.batch_guard.opened();
+        self.batch = Some(batch);
+    }
+
+    /// The open batch, which ends here: its `COMMIT` or a `ROLLBACK` follows.
+    fn close_batch(&mut self) -> Option<Batch> {
+        self.batch_guard.closed();
+        self.batch.take()
+    }
+
+    /// SQLite ended the transaction of the batch that is open, or that [`Writer::close_batch`] just closed (it does
+    /// on a full disk, an I/O error, when out of memory): the batch's writes are gone, and none of it can be kept.
+    fn batch_lost(&self) -> bool {
+        self.batch_guard.lost() || self.conn.is_autocommit()
+    }
+
     fn begin_batch(&self) -> anyhow::Result<Batch> {
         // Open only if a previous holder's commit and its rollback both failed; be defensive anyway.
         if !self.conn.is_autocommit() {
@@ -567,10 +653,12 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         // A batch nobody committed (only if a release path failed): undo it; its callers already got an error.
+        self.batch_guard.closed();
         if self.batch.is_some() && !self.conn.is_autocommit() {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
         checkpoint::remove_hook(&self.conn);
+        batch_guard::remove(&self.conn);
     }
 }
 
@@ -599,7 +687,8 @@ struct Member {
 }
 
 /// The writer lock, and who is waiting for it. Group commit's rule: a holder releasing the lock commits the open batch
-/// unless another write is already waiting for the lock (and the batch is below [`MAX_BATCH`] and [`MAX_BATCH_AGE`]);
+/// unless another write is already waiting for the lock (and the batch is below [`MAX_BATCH`] and younger than
+/// [`BATCH_AGE`], or than [`BATCH_AGE_COMMITS`] times the last commit);
 /// then that one continues it. A waiter that gives up (its future dropped), or a release that races with one, commits
 /// a batch nobody will continue ([`WriterShared::commit_orphaned`]).
 pub(crate) struct WriterShared {
@@ -663,9 +752,11 @@ impl WriterShared {
 
     /// End a turn at the writer: commit the batch, or leave it open for a waiting write to continue.
     fn release(&self, mut guard: OwnedMutexGuard<Writer>) {
-        let young = |b: &Batch| b.members.len() < MAX_BATCH && b.started.elapsed() < MAX_BATCH_AGE;
+        let age = (guard.last_commit * BATCH_AGE_COMMITS).clamp(BATCH_AGE, MAX_BATCH_AGE);
+        let young = |b: &Batch| b.members.len() < MAX_BATCH && b.started.elapsed() < age;
         let continue_batch = guard.batch.as_ref().is_some_and(young) && self.waiting.load(Ordering::SeqCst) > 0;
-        if !continue_batch {
+        // A batch whose transaction SQLite ended fails here (`commit_batch`), not in the hands of the next write.
+        if !continue_batch || guard.batch_lost() {
             let finished = self.commit_batch(&mut guard);
             drop(guard);
             finish_members(finished);
@@ -691,18 +782,27 @@ impl WriterShared {
     }
 
     /// Commit the open batch (if any): `_meta` gets the batch's last ts, then `COMMIT`; the members' write-log entries
-    /// are appended in ts order, still under the lock. On failure the whole batch rolls back and every member gets the
-    /// error. Returns the members, for [`finish_members`] (after releasing the lock).
+    /// are appended in ts order, still under the lock. The members' recorded responses ([`dedup`]) are written right
+    /// before the `COMMIT`, as one row. On failure the whole batch rolls back and every member gets the error. Returns
+    /// the members, for [`finish_members`] (after releasing the lock).
     fn commit_batch(&self, writer: &mut Writer) -> Vec<Member> {
-        let Some(mut batch) = writer.batch.take() else { return Vec::new() };
-        let committed = (|| -> anyhow::Result<()> {
+        let Some(mut batch) = writer.close_batch() else { return Vec::new() };
+        let started = Instant::now();
+        let committed = (|| -> anyhow::Result<dedup::Written> {
+            // What follows would be written without the batch's writes: a recorded response for a mutation that
+            // wasn't applied.
+            anyhow::ensure!(!writer.batch_lost(), "{LOST}");
             if batch.ts != batch.begin_ts {
                 storage::write_batch_meta(&writer.conn, batch.ts, batch.time, batch.last_creation_time)?;
             }
-            storage::exec_cached(&writer.conn, "COMMIT")
+            let responses = writer.responses.write_pending(&writer.conn)?;
+            storage::exec_cached(&writer.conn, "COMMIT")?;
+            Ok(responses)
         })();
         match committed {
-            Ok(()) => {
+            Ok(responses) => {
+                writer.last_commit = started.elapsed();
+                writer.responses.committed(responses);
                 writer.committed_meta = Some((batch.ts, batch.time, batch.last_creation_time));
                 for member in &batch.members {
                     self.journal.add_pending_bytes(member.journaled);
@@ -712,6 +812,7 @@ impl WriterShared {
             Err(e) => {
                 tracing::error!("commit failed: {e:#}");
                 writer.committed_meta = None;
+                writer.responses.rolled_back();
                 if !writer.conn.is_autocommit()
                     && let Err(e) = writer.conn.execute_batch("ROLLBACK")
                 {
@@ -752,6 +853,9 @@ pub(crate) struct WriterGuard {
     began: Instant,
 }
 
+/// The error of a batch whose transaction SQLite ended ([`Writer::batch_lost`]).
+const LOST: &str = "SQLite ended the transaction (a full disk or an I/O error does that): nothing of it was kept";
+
 /// How a [`WriterGuard`] undoes its transaction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Undo {
@@ -785,20 +889,34 @@ impl WriterGuard {
             Undo::Nothing => {}
             Undo::Transaction => {
                 let writer = self.writer_mut();
-                writer.batch = None;
-                if let Err(e) = writer.conn.execute_batch("ROLLBACK") {
+                writer.close_batch();
+                writer.responses.rolled_back();
+                // (Nothing to roll back if SQLite ended the transaction itself, unless a statement after that left
+                // one open: `batch_guard`.)
+                if !writer.conn.is_autocommit()
+                    && let Err(e) = writer.conn.execute_batch("ROLLBACK")
+                {
                     tracing::error!("rollback failed: {e}");
                 }
             }
             Undo::Savepoint => {
-                let undone = storage::exec_cached(self, "ROLLBACK TO mutation")
-                    .and_then(|()| storage::exec_cached(self, "RELEASE mutation"));
+                let undone = if self.writer().batch_lost() {
+                    Err(anyhow::anyhow!("{LOST}"))
+                } else {
+                    storage::exec_cached(self, "ROLLBACK TO mutation")
+                        .and_then(|()| storage::exec_cached(self, "RELEASE mutation"))
+                };
                 if let Err(e) = undone {
-                    // The batch's transaction is in an unknown state: roll all of it back (its members get the error).
+                    // The batch's transaction is gone or in an unknown state: roll all of it back (its members get
+                    // the error).
                     tracing::error!("rollback to savepoint failed: {e:#}");
                     let writer = self.writer_mut();
-                    let _ = writer.conn.execute_batch("ROLLBACK");
-                    if let Some(batch) = writer.batch.take() {
+                    let batch = writer.close_batch();
+                    if !writer.conn.is_autocommit() {
+                        let _ = writer.conn.execute_batch("ROLLBACK");
+                    }
+                    writer.responses.rolled_back();
+                    if let Some(batch) = batch {
                         for mut member in batch.members {
                             member.result = Err(format!("rolled back: {e:#}"));
                             member.on_commit.clear();
@@ -810,19 +928,31 @@ impl WriterGuard {
         }
     }
 
-    /// Keep this transaction's writes: release the savepoint into the batch, add the member, and release the lock.
-    fn finish(mut self, member: Member, ts: u64, time: f64, last_creation_time: f64) -> anyhow::Result<()> {
+    /// Keep this transaction's writes: release the savepoint into the batch, add the member (and the response to
+    /// record for it, [`dedup`]), and release the lock.
+    fn finish(
+        mut self,
+        member: Member,
+        (ts, time, last_creation_time): (u64, f64, f64),
+        response: Option<dedup::Record>,
+    ) -> anyhow::Result<()> {
+        // This transaction's writes are gone with the batch's (dropping `self` fails the batch).
+        anyhow::ensure!(!self.writer().batch_lost(), "{LOST}");
         if self.undo == Undo::Savepoint {
             storage::exec_cached(&self, "RELEASE mutation")?;
         }
         self.undo = Undo::Nothing;
-        let batch = self.writer_mut().batch.as_mut().expect("a batch is open");
+        let writer = self.writer_mut();
+        let batch = writer.batch.as_mut().expect("a batch is open");
         if member.entry.is_some() {
             batch.ts = ts;
             batch.time = time;
             batch.last_creation_time = last_creation_time;
         }
         batch.members.push(member);
+        if let Some(response) = response {
+            writer.responses.add(response);
+        }
         Ok(())
     }
 }
@@ -975,27 +1105,44 @@ impl WriteTxn {
         self.on_commit.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
     }
 
-    /// Commit, running `before_commit(conn, commit_ts)` inside the transaction first (used to record the mutation's
-    /// response for idempotency atomically with its writes). Returns the new ts, or the current ts if no document
-    /// was written (then ts is not bumped), once the batch holding this transaction has committed (group commit:
-    /// see the module docs). If that commit fails, so does this, and nothing of this transaction is kept.
+    /// Commit. Returns the new ts, or the current ts if no document was written (then ts is not bumped), once the
+    /// batch holding this transaction has committed (group commit: see the module docs). If that commit fails, so
+    /// does this, and nothing of this transaction is kept. `before_commit(conn, commit_ts)` runs inside the
+    /// transaction first.
     pub(crate) async fn commit_with(
         &self,
         before_commit: impl FnOnce(&Connection, u64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<u64> {
+        self.commit_inner(|conn, ts| before_commit(conn, ts).map(|()| None)).await
+    }
+
+    /// [`WriteTxn::commit_with`] for a mutation that returned `value`: with `key`, its response is recorded for
+    /// idempotency ([`dedup`]) in the same SQLite transaction as its writes.
+    pub(crate) async fn commit_recording(
+        &self,
+        key: Option<&dedup::IdempotencyKey>,
+        value: &Value,
+    ) -> anyhow::Result<u64> {
+        self.commit_inner(|_, ts| key.map(|key| dedup::Record::success(key, value, ts)).transpose()).await
+    }
+
+    async fn commit_inner(
+        &self,
+        before_commit: impl FnOnce(&Connection, u64) -> anyhow::Result<Option<dedup::Record>>,
     ) -> anyhow::Result<u64> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut state = state.context("the mutation's transaction has already finished")?;
         let (done, committed) = tokio::sync::oneshot::channel();
         let on_commit = std::mem::take(&mut *self.on_commit.lock().unwrap_or_else(|e| e.into_inner()));
         let ts = if state.writes.is_empty() && !state.force_ts_bump {
-            before_commit(&state.conn, state.prev_ts)?;
+            let response = before_commit(&state.conn, state.prev_ts)?;
             let member = Member { entry: None, journaled: 0, on_commit, done, result: Ok(()) };
-            let (ts, now, lct) = (state.prev_ts, state.now, state.last_creation_time);
-            state.take_conn().finish(member, ts, now, lct)?;
-            ts
+            let meta = (state.prev_ts, state.now, state.last_creation_time);
+            state.take_conn().finish(member, meta, response)?;
+            meta.0
         } else {
             let ts = state.prev_ts + 1;
-            before_commit(&state.conn, ts)?;
+            let response = before_commit(&state.conn, ts)?;
             // In the same SQLite transaction as the writes and the ts bump: journaled exactly once, or not at all.
             let journaled = match state.journal.take() {
                 Some(changes) => {
@@ -1007,8 +1154,8 @@ impl WriteTxn {
             };
             let entry = Some(CommitEntry { ts, writes: std::mem::take(&mut state.writes) });
             let member = Member { entry, journaled, on_commit, done, result: Ok(()) };
-            let (now, lct) = (state.now, state.last_creation_time);
-            state.take_conn().finish(member, ts, now, lct)?;
+            let meta = (ts, state.now, state.last_creation_time);
+            state.take_conn().finish(member, meta, response)?;
             ts
         };
         match committed.await {
@@ -1023,19 +1170,34 @@ impl WriteTxn {
         drop(self.state.lock().unwrap_or_else(|e| e.into_inner()).take());
     }
 
-    /// Roll back, then run `f` while still holding the writer lock. `f`'s writes are kept: they commit with the
-    /// batch (or at once, if this transaction began it), without waiting for it here.
-    pub(crate) fn rollback_then(&self, f: impl FnOnce(&Connection) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    /// Roll back, then record `error` as the response for `key` ([`dedup`]) while still holding the writer lock, so
+    /// a retry gets the same error. It commits with the batch, without waiting for it here, or at once if no batch
+    /// is open (this transaction began it).
+    pub(crate) fn rollback_recording(&self, key: &dedup::IdempotencyKey, error: &crate::Error) -> anyhow::Result<()> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut state = state.context("the mutation's transaction has already finished")?;
         state.conn.rollback_savepoint();
-        f(&state.conn)
+        let record = dedup::Record::error(key, error)?;
+        let writer = state.conn.writer_mut();
+        writer.responses.add(record);
+        if writer.batch.is_none() {
+            writer.responses.commit_alone(&writer.conn)?;
+        }
+        Ok(())
     }
 }
 
 impl WriteState {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// The response on record for `key` ([`dedup`]), from a batch that committed or from the open one.
+    pub(crate) fn recorded_response(
+        &self,
+        key: &dedup::IdempotencyKey,
+    ) -> anyhow::Result<Option<dedup::StoredResponse>> {
+        self.conn.writer().responses.lookup(&self.conn, key)
     }
 
     /// The writer guard, for [`WriterGuard::finish`]; this state is spent.
@@ -1436,5 +1598,208 @@ mod tests {
             let cache = |c: &Connection| Ok(c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0))?);
             assert_eq!(db.with_writer(cache).await.unwrap(), -expected_kib);
         }
+    }
+
+    /// A database with a table `t` and a raw table `u` whose key 1 is taken: inserting it again with `OR ROLLBACK`
+    /// makes SQLite end the open transaction by itself, as it does on a full disk or an I/O error
+    /// ([`lose_transaction`]).
+    async fn lossy(journal: bool) -> (tempfile::TempDir, Arc<Database>) {
+        let def = crate::schema::TableDef {
+            name: "t",
+            indexes: vec![],
+            search_indexes: vec![],
+            vector_indexes: vec![],
+            ts: || "{ }".into(),
+            validate: |_| Ok(()),
+            shape: crate::shape::Shape::unknown,
+            aggregates: vec![],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(dir.path(), &[def], &OpenOptions { journal, ..Default::default() }).unwrap();
+        db.with_writer(|c| Ok(c.execute_batch("CREATE TABLE u (k PRIMARY KEY); INSERT INTO u VALUES (1);")?))
+            .await
+            .unwrap();
+        // Batches stay open for a waiting write as long as they may, so the tests' writes share one.
+        db.writer.lock.lock().await.last_commit = MAX_BATCH_AGE;
+        (dir, Arc::new(db))
+    }
+
+    fn lose_transaction(txn: &WriteTxn) {
+        let lost = txn.with_state(|s| Ok(s.conn().execute("INSERT OR ROLLBACK INTO u VALUES (1)", [])?));
+        assert!(lost.is_err());
+        assert!(txn.with_state(|s| Ok(s.conn().is_autocommit())).unwrap(), "SQLite ended the transaction");
+    }
+
+    async fn insert(txn: &Arc<WriteTxn>) -> crate::Result<String> {
+        query::MutationDb::new(txn.clone()).insert_raw("t", serde_json::json!({})).await
+    }
+
+    fn key(request_id: u64) -> dedup::IdempotencyKey {
+        dedup::IdempotencyKey { session_id: "s".into(), request_id }
+    }
+
+    /// What is durable, as another connection sees it: documents, journal rows, rows of `u`, the `_meta` ts.
+    fn durable(dir: &Path) -> (i64, i64, i64, u64) {
+        let conn = Connection::open(dir.join("data.db")).unwrap();
+        let count = |table: &str| conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+        let ts = storage::read_meta_u64(&conn, storage::META_TS).unwrap();
+        (count("documents"), count("_journal"), count("u"), ts)
+    }
+
+    async fn recorded(db: &Database, request_id: u64) -> bool {
+        let txn = db.begin_write().await.unwrap();
+        let response = txn.with_state(|s| s.recorded_response(&key(request_id))).unwrap();
+        txn.rollback();
+        response.is_some()
+    }
+
+    async fn wait_for_a_waiter(db: &Database) {
+        while db.writer.waiting.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// One more document, journal row and ts than `before`.
+    fn one_more((documents, journal, raw, ts): (i64, i64, i64, u64), journaled: bool) -> (i64, i64, i64, u64) {
+        (documents + 1, journal + journaled as i64, raw, ts + 1)
+    }
+
+    #[tokio::test]
+    async fn a_mutation_that_goes_on_after_sqlite_ended_its_transaction_keeps_nothing() {
+        let (dir, db) = lossy(true).await;
+        let before = durable(dir.path());
+        let txn = db.begin_write().await.unwrap();
+        insert(&txn).await.unwrap();
+        lose_transaction(&txn);
+        // It doesn't stop at the error: a document, a statement of its own (as the file storage runs them), a commit.
+        let _ = insert(&txn).await;
+        let _ = txn.with_state(|s| Ok(s.conn().execute("INSERT INTO u VALUES (2)", [])?));
+        let _ = insert(&txn).await;
+        let committed = txn.commit_recording(Some(&key(1)), &serde_json::json!("done")).await;
+        assert!(committed.is_err(), "told that it committed: {committed:?}");
+        assert_eq!(durable(dir.path()), before);
+        assert!(!recorded(&db, 1).await);
+        // The next one is on its own, at the next ts.
+        let txn = db.begin_write().await.unwrap();
+        insert(&txn).await.unwrap();
+        assert_eq!(txn.commit_recording(Some(&key(2)), &serde_json::json!("done")).await.unwrap(), before.3 + 1);
+        assert_eq!(durable(dir.path()), one_more(before, true));
+        assert!(recorded(&db, 2).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_mutation_does_not_continue_a_batch_sqlite_ended() {
+        // Without the journal, the first one runs no statement after losing the transaction.
+        let (dir, db) = lossy(false).await;
+        let before = durable(dir.path());
+        let first = db.begin_write().await.unwrap();
+        insert(&first).await.unwrap();
+        let second = tokio::spawn({
+            let db = db.clone();
+            async move {
+                // Under a label of its own: a write expected to be slow commits the open batch before it begins.
+                let txn = db.begin_write_as("second").await?;
+                insert(&txn).await?;
+                txn.commit_recording(Some(&key(2)), &serde_json::json!("second")).await
+            }
+        });
+        wait_for_a_waiter(&db).await;
+        lose_transaction(&first);
+        let first = first.commit_recording(Some(&key(1)), &serde_json::json!("first")).await;
+        let second = second.await.unwrap();
+        assert!(first.is_err(), "told that it committed: {first:?}");
+        assert!(!recorded(&db, 1).await);
+        // The second is told it committed exactly when its writes are there; and they are, in a batch of its own.
+        let expected = if second.is_ok() { one_more(before, false) } else { before };
+        assert_eq!(durable(dir.path()), expected, "{second:?}");
+        assert_eq!(recorded(&db, 2).await, second.is_ok());
+        assert_eq!(second.ok(), Some(before.3 + 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_joined_mutation_that_loses_the_transaction_fails_its_batch() {
+        let (dir, db) = lossy(true).await;
+        let before = durable(dir.path());
+        let first = db.begin_write().await.unwrap();
+        insert(&first).await.unwrap();
+        let second = tokio::spawn({
+            let db = db.clone();
+            async move { db.begin_write_as("second").await.unwrap() }
+        });
+        wait_for_a_waiter(&db).await;
+        let first =
+            tokio::spawn(async move { first.commit_recording(Some(&key(1)), &serde_json::json!("first")).await });
+        let second = second.await.unwrap();
+        // (On a machine too slow for that, the first one's batch committed before the second began.)
+        let joined = second.with_state(|s| Ok(s.conn.undo == Undo::Savepoint)).unwrap();
+        lose_transaction(&second);
+        let _ = insert(&second).await;
+        let second = second.commit_recording(Some(&key(2)), &serde_json::json!("second")).await;
+        let first = first.await.unwrap();
+        assert!(second.is_err(), "told that it committed: {second:?}");
+        assert_eq!(first.is_ok(), !joined, "{first:?}");
+        assert_eq!(durable(dir.path()), if joined { before } else { one_more(before, true) });
+        assert_eq!((recorded(&db, 1).await, recorded(&db, 2).await), (!joined, false));
+        // The writer goes on from what is there.
+        let txn = db.begin_write().await.unwrap();
+        insert(&txn).await.unwrap();
+        let ts = txn.commit_with(|_, _| Ok(())).await.unwrap();
+        assert_eq!(ts, before.3 + 1 + !joined as u64);
+    }
+
+    fn response(request_id: u64) -> (i64, dedup::Record) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        (now, dedup::Record::success(&key(request_id), &serde_json::json!("carried"), 1).unwrap())
+    }
+
+    /// `with_writer`'s commit can fail and leave its transaction open (a deferred constraint, here): what it wrote
+    /// is rolled back before the recorded responses are read again, not found by them and gone later.
+    #[tokio::test]
+    async fn bookkeeping_whose_commit_fails_leaves_nothing() {
+        let (dir, db) = lossy(false).await;
+        db.writer
+            .lock
+            .lock()
+            .await
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id PRIMARY KEY);
+             CREATE TABLE child (parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED);",
+            )
+            .unwrap();
+        let before = durable(dir.path());
+        let failed = db
+            .with_writer(|c| {
+                dedup::import(c, vec![response(7)])?;
+                c.execute("INSERT INTO child VALUES (1)", [])?;
+                Ok(())
+            })
+            .await;
+        let failed = format!("{:#}", failed.unwrap_err());
+        assert!(failed.contains("FOREIGN KEY"), "{failed}");
+        assert!(db.writer.lock.lock().await.is_autocommit(), "rolled back at once");
+        assert!(!recorded(&db, 7).await);
+        let txn = db.begin_write().await.unwrap();
+        insert(&txn).await.unwrap();
+        txn.commit_with(|_, _| Ok(())).await.unwrap();
+        assert_eq!(durable(dir.path()), one_more(before, false));
+    }
+
+    /// The recorded responses couldn't be read again after an import: no mutation begins until they can, since a
+    /// repeat of a mutation whose response was imported would run a second time.
+    #[tokio::test]
+    async fn no_write_begins_while_the_recorded_responses_are_unknown() {
+        let (_dir, db) = lossy(false).await;
+        // The import commits; reading the table after it fails (it is gone, standing in for a read error).
+        let imported = db
+            .with_writer(|c| {
+                dedup::import(c, vec![response(7)])?;
+                Ok(c.execute_batch("ALTER TABLE _mutation_responses RENAME TO elsewhere")?)
+            })
+            .await;
+        assert!(imported.is_err());
+        assert!(db.begin_write().await.is_err());
+        db.writer.lock.lock().await.execute_batch("ALTER TABLE elsewhere RENAME TO _mutation_responses").unwrap();
+        assert!(recorded(&db, 7).await);
     }
 }

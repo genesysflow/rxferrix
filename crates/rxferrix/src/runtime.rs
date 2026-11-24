@@ -12,7 +12,7 @@ use anyhow::Context;
 use futures::FutureExt;
 use serde_json::Value;
 
-use crate::db::dedup::{self, IdempotencyKey};
+use crate::db::dedup::IdempotencyKey;
 use crate::db::query::{MutationDb, QueryDb, Source};
 use crate::db::readset::ReadSet;
 use crate::db::{Database, Snapshot};
@@ -1087,7 +1087,7 @@ impl App {
         };
         // Checked under the writer lock, so a concurrent duplicate waits for the first and then finds its response.
         if let Some(key) = idempotency_key {
-            match txn.with_state(|s| dedup::lookup(s.conn(), key)) {
+            match txn.with_state(|s| s.recorded_response(key)) {
                 Ok(None) => {}
                 Ok(Some(stored)) => {
                     // Not before the original's batch has committed (group commit): if that commit failed, the
@@ -1149,19 +1149,13 @@ impl App {
                     Ok((value, self.db().write_log().latest()))
                 }
                 Ok(value) => {
-                    let ts = txn
-                        .commit_with(|conn, ts| match idempotency_key {
-                            Some(key) => dedup::record_success(conn, key, &value, ts),
-                            None => Ok(()),
-                        })
-                        .await
-                        .context("commit failed")?;
+                    let ts = txn.commit_recording(idempotency_key, &value).await.context("commit failed")?;
                     Ok((value, ts))
                 }
                 Err(e) => {
                     match idempotency_key {
                         Some(key) => {
-                            if let Err(record_err) = txn.rollback_then(|conn| dedup::record_error(conn, key, &e)) {
+                            if let Err(record_err) = txn.rollback_recording(key, &e) {
                                 tracing::warn!(
                                     path,
                                     "could not record a failed mutation for deduplication: {record_err:#}"

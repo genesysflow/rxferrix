@@ -41,6 +41,7 @@ export async function check(client: RxFerrixClient, taskId: Id<"tasks">, noteId:
       | "ann_items"
       | "attachments"
       | "audited_items"
+      | "bench_balances"
       | "bench_aggregated"
       | "bench_idx_1"
       | "bench_idx_32"

@@ -163,6 +163,70 @@ async fn concurrent_duplicates_run_once() {
     }
 }
 
+/// A failed mutation's error is recorded too: its duplicate gets it without running, whether it shares the batch
+/// with the original or comes later, and the successes batched with the failures keep their own responses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_duplicates_of_failures_get_the_same_error() {
+    let t = TestApp::new().await.unwrap();
+    let fails = |i: u64| i.is_multiple_of(2);
+    let run = |i: u64| {
+        let app = t.app().clone();
+        async move {
+            let key = IdempotencyKey { session_id: "dup-fail".into(), request_id: i };
+            let args = json!({ "marker": format!("f{i}"), "fail": fails(i) });
+            app.execute_mutation(&fns::gc_pair::path(), args, &Identity::default(), Some(&key)).await.result
+        }
+    };
+    let tasks: Vec<_> = (0..40u64).flat_map(|i| [i, i]).map(|i| (i, tokio::spawn(run(i)))).collect();
+    let mut ts = std::collections::HashMap::new();
+    for (i, task) in tasks {
+        match task.await.unwrap() {
+            Ok((_, at)) => {
+                assert!(!fails(i), "f{i} should have failed");
+                assert_eq!(*ts.entry(i).or_insert(at), at, "both copies of f{i} report the same commit");
+            }
+            Err(e) => assert!(fails(i) && format!("{e:#}").contains("failed on purpose"), "f{i}: {e:#}"),
+        }
+    }
+    for i in 0..40 {
+        assert_eq!(count(&t, &format!("f{i}")).await, if fails(i) { 0 } else { 2 }, "f{i}");
+    }
+    // Later copies: answered from the record (a second run of a success would leave four documents).
+    for i in [0, 1] {
+        assert_eq!(run(i).await.is_ok(), i == 1);
+        assert_eq!(count(&t, &format!("f{i}")).await, i * 2);
+    }
+}
+
+/// The recorded responses are loaded when the database opens: a mutation resent after a restart is answered from its
+/// record, with the same commit ts, and a new request of the same session runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicates_are_recognized_after_a_restart() {
+    let mut t = TestApp::new().await.unwrap();
+    let call = |t: &TestApp, request_id: u64, marker: &str, fail: bool| {
+        let (app, args) = (t.app().clone(), json!({ "marker": marker, "fail": fail }));
+        async move {
+            let key = IdempotencyKey { session_id: "restarted".into(), request_id };
+            app.execute_mutation(&fns::gc_pair::path(), args, &Identity::default(), Some(&key)).await.result
+        }
+    };
+    let (_, first) = call(&t, 1, "r1", false).await.unwrap();
+    call(&t, 2, "r2", true).await.unwrap_err();
+    for round in 0..2 {
+        t = t.restart().await.unwrap();
+        let (_, again) = call(&t, 1, "r1", false).await.unwrap();
+        assert_eq!(again, first, "round {round}");
+        let failed = call(&t, 2, "r2", false).await.unwrap_err();
+        assert!(
+            format!("{failed:#}").contains("failed on purpose"),
+            "the recorded error, not a second run: {failed:#}"
+        );
+        assert_eq!((count(&t, "r1").await, count(&t, "r2").await), (2, 0));
+    }
+    call(&t, 3, "r3", false).await.unwrap();
+    assert_eq!(count(&t, "r3").await, 2);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_slow_mutation_commits_the_batch_before_it_runs() {
     let t = TestApp::new().await.unwrap();

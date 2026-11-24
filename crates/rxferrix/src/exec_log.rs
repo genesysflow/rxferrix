@@ -7,7 +7,8 @@
 //! subscribers ([`Logs::subscribe`]).
 //!
 //! Retention ([`LogRetention`], from [`AppOptions`](crate::AppOptions)): rows older than `max_age`, and the oldest
-//! rows beyond `max_rows`, are deleted at startup and then every `trim_interval`.
+//! rows beyond `max_rows`, are deleted at startup, then every `trim_interval`, and whenever an eighth of `max_rows`
+//! has been written since ([`TRIM_SHARE`]), so a busy server trims a little at a time.
 //!
 //! `aux.db` also holds the scheduler's job history (`crate::scheduler::history`), written through the same writer
 //! thread ([`Logs::write_with`]).
@@ -38,6 +39,11 @@ pub const MAX_ARGS_BYTES: usize = 2048;
 const CHANNEL_CAPACITY: usize = 8192;
 /// Entries inserted per transaction at most.
 const BATCH: usize = 512;
+/// The log is also trimmed once this share of `max_rows` has been written since the last trim (and at least
+/// [`BATCH`] rows). Trimming on the timer alone, a server running 50,000 mutations a second deleted up to 3 million
+/// rows once a minute, and the disk was busy with that for 4 to 5 seconds: mutations, which wait for the same disk,
+/// fell from 50k/s to 2k/s meanwhile (`bench_transfer` run for 5 minutes, 2026-11-24).
+const TRIM_SHARE: u64 = 8;
 /// Capacity of the live-tail broadcast; slow subscribers see `RecvError::Lagged`.
 const BROADCAST_CAPACITY: usize = 1024;
 /// Default and maximum `LogFilter::limit`.
@@ -67,9 +73,11 @@ CREATE INDEX IF NOT EXISTS _logs_by_path ON _logs (path, id);
 pub struct LogRetention {
     /// Rows older than this are deleted. Default: 7 days.
     pub max_age: Duration,
-    /// At most this many rows are kept (the oldest are deleted first). Default: 200 000.
+    /// At most this many rows are kept (the oldest are deleted first). Default: 200 000. Between two trims the log
+    /// holds what was written since as well: an eighth of this, and at least 512 rows.
     pub max_rows: u64,
-    /// How often trimming runs (it also runs at startup). Default: 1 minute.
+    /// How often trimming runs at least (it also runs at startup, and whenever an eighth of `max_rows` has been written
+    /// since the last time). Default: 1 minute.
     pub trim_interval: Duration,
 }
 
@@ -498,6 +506,8 @@ impl Logs {
 
 fn writer_loop(mut conn: Connection, rx: Receiver<Msg>, shared: Arc<Shared>, retention: LogRetention) {
     let mut next_trim = Instant::now() + retention.trim_interval;
+    // Rows written since the last trim, and how many of them call for the next ([`TRIM_SHARE`]).
+    let (mut written, trim_after) = (0u64, (retention.max_rows / TRIM_SHARE).max(BATCH as u64));
     let mut batch: Vec<LogEntry> = Vec::new();
     let mut replies: Vec<(oneshot::Sender<()>, bool)> = Vec::new();
     loop {
@@ -524,6 +534,7 @@ fn writer_loop(mut conn: Connection, rx: Receiver<Msg>, shared: Arc<Shared>, ret
         if !batch.is_empty() {
             match insert_batch(&mut conn, &mut batch) {
                 Ok(()) => {
+                    written += batch.len() as u64;
                     for e in batch.drain(..) {
                         let _ = shared.live.send(e);
                     }
@@ -535,12 +546,13 @@ fn writer_loop(mut conn: Connection, rx: Receiver<Msg>, shared: Arc<Shared>, ret
                 }
             }
         }
-        want_trim |= replies.iter().any(|(_, trim)| *trim) || Instant::now() >= next_trim;
+        want_trim |= replies.iter().any(|(_, trim)| *trim) || Instant::now() >= next_trim || written >= trim_after;
         if want_trim {
             if let Err(e) = trim(&conn, &retention) {
                 tracing::warn!("execution log: trimming failed: {e:#}");
             }
             next_trim = Instant::now() + retention.trim_interval;
+            written = 0;
         }
         for (reply, _) in replies.drain(..) {
             let _ = reply.send(());
@@ -853,6 +865,28 @@ mod tests {
             let plan: Vec<String> = stmt.query_map([0], |r| r.get(3)).unwrap().map(Result::unwrap).collect();
             assert!(plan[0].starts_with("SEARCH _logs USING INDEX _logs_by_timestamp"), "{plan:?}");
         }
+    }
+
+    /// A busy server doesn't wait for the timer to trim: the log stays near `max_rows` while it is written.
+    #[tokio::test]
+    async fn the_log_is_trimmed_as_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let retention = LogRetention { max_rows: 100, trim_interval: Duration::from_secs(3600), ..Default::default() };
+        let logs = Logs::open(&dir.path().join("aux.db"), retention).unwrap();
+        let now = crate::db::wall_clock_ms() as i64;
+        for round in 0..8 {
+            for i in 0..500 {
+                logs.record(entry("todos:list", FunctionKind::Query, LogOutcome::Success, i, now));
+            }
+            logs.flush().await.unwrap();
+            assert_eq!(logs.dropped(), 0, "round {round}");
+        }
+        // 4000 written; without a trim on the way, all of them would still be there. At most `max_rows` and what was
+        // written since the last trim (under two batches) are: nothing of the first half.
+        let first_half = LogFilter { before_id: Some(2001), limit: Some(1), ..Default::default() };
+        assert!(logs.query(first_half).await.unwrap().is_empty());
+        let newest = logs.query(LogFilter { limit: Some(1), ..Default::default() }).await.unwrap();
+        assert_eq!(newest[0].id, 4000);
     }
 
     #[tokio::test]

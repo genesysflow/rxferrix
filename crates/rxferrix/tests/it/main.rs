@@ -15,6 +15,7 @@ mod bench_features;
 mod bench_indexes;
 mod bench_network;
 mod bench_readers;
+mod bench_transfer;
 mod bytes;
 mod catalog;
 mod codegen;

@@ -1029,6 +1029,8 @@ mod tests {
         }
         assert!(index.sessions.is_empty() && index.rows.is_empty() && index.pending.is_empty());
         assert_eq!(row_count(&conn), 0);
+        // (Both stop shrinking under 1024 entries. Kept at its largest, the list of rows would have 1024.)
+        assert!(index.sessions.capacity() < 1024 && index.rows.capacity() < 1024, "buffers kept at their largest");
         // (What stays is a map and two buffers of a size that doesn't depend on what was held.)
         assert!(heap_bytes(&index) < 128 << 10, "{} of {} bytes kept", heap_bytes(&index), most[2].3);
     }

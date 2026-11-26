@@ -323,8 +323,9 @@
               empty="No function calls yet."
               series={[
                 { label: "Calls", color: "var(--series-1)", values: points.map((p) => p.calls) },
-                { label: "Server errors", color: "var(--err)", values: points.map((p) => p.serverErrors) },
+                // Server errors last: drawn on top where the two lines meet.
                 { label: "User errors", color: "var(--warn)", values: points.map((p) => p.userErrors) },
+                { label: "Server errors", color: "var(--err)", values: points.map((p) => p.serverErrors) },
               ]}
             />
           </Panel>
@@ -346,8 +347,9 @@
               max={100}
               empty="No function calls yet."
               series={[
-                { label: "Server errors", color: "var(--err)", values: points.map((p) => (p.calls ? (p.serverErrors / p.calls) * 100 : null)) },
+                // Server errors last: drawn on top where the two lines meet.
                 { label: "User errors", color: "var(--warn)", values: points.map((p) => (p.calls ? (p.userErrors / p.calls) * 100 : null)) },
+                { label: "Server errors", color: "var(--err)", values: points.map((p) => (p.calls ? (p.serverErrors / p.calls) * 100 : null)) },
               ]}
             />
           </Panel>

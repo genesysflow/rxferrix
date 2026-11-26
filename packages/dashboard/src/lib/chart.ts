@@ -45,6 +45,31 @@ export function fillBuckets(series: Timeseries, maxBuckets = 2000): ChartPoint[]
   return out;
 }
 
+/**
+ * Stack bar segments upward from the baseline `y0` (SVG y grows downward), `pxPerUnit` pixels per unit, in order,
+ * leaving out empty ones. Every segment is at least 1px tall and starts above the one below it, after a `gap` taken
+ * out of its own height: on a scale where one call is a fraction of a pixel, a call still shows, and no segment covers
+ * another or reaches below the baseline.
+ */
+export function stackSegments<K>(
+  y0: number,
+  pxPerUnit: number,
+  segments: readonly { key: K; n: number }[],
+  gap = 1,
+): { key: K; y: number; height: number }[] {
+  const out: { key: K; y: number; height: number }[] = [];
+  let bottom = y0;
+  for (const { key, n } of segments) {
+    if (!(n > 0)) continue;
+    const g = out.length ? gap : 0;
+    const height = Math.max(1, n * pxPerUnit - g);
+    bottom -= g;
+    out.push({ key, y: bottom - height, height });
+    bottom -= height;
+  }
+  return out;
+}
+
 export interface Totals {
   calls: number;
   errors: number;

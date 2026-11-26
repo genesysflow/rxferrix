@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TimePoint } from "../src/lib/api.js";
-import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, timeTicks, totals, type ChartPoint } from "../src/lib/chart.js";
+import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, stackSegments, timeTicks, totals, type ChartPoint } from "../src/lib/chart.js";
 
 const point = (t: number, calls: number, userErrors: number, p50Us: number, p95Us: number, serverErrors = 0): TimePoint => ({
   t,
@@ -64,6 +64,26 @@ describe("totals", () => {
       serverErrorRate: 0,
       worstP95: null,
     });
+  });
+});
+
+describe("stackSegments", () => {
+  it("stacks at the scale's heights, with a 1px gap taken out of each upper segment", () => {
+    expect(stackSegments(100, 10, [{ key: "ok", n: 3 }, { key: "user", n: 0 }, { key: "server", n: 2 }])).toEqual([
+      { key: "ok", y: 70, height: 30 },
+      { key: "server", y: 50, height: 19 },
+    ]);
+  });
+
+  it("keeps tiny segments visible, apart, and above the baseline", () => {
+    // 1000 calls on a 150px axis: one call is 0.15px.
+    const segs = stackSegments(150, 0.15, [{ key: "ok", n: 998 }, { key: "user", n: 1 }, { key: "server", n: 1 }]);
+    expect(segs.map((s) => s.key)).toEqual(["ok", "user", "server"]);
+    for (const s of segs) expect(s.height).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < segs.length; i++) expect(segs[i]!.y + segs[i]!.height).toBeLessThan(segs[i - 1]!.y);
+    const [one] = stackSegments(150, 0.15, [{ key: "server", n: 1 }]);
+    expect(one!.y + one!.height).toBe(150);
+    expect(stackSegments(150, 0.15, [{ key: "ok", n: 0 }])).toEqual([]);
   });
 });
 

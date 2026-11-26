@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { linePath, nearestIndex, niceTicks, scale, timeLabel, type ChartPoint } from "../lib/chart.js";
+  import { linePath, nearestIndex, niceTicks, scale, stackSegments, timeLabel, type ChartPoint } from "../lib/chart.js";
 
   /**
    * A small SVG time chart over filled buckets (lib/chart.ts): `latency` draws p50 and p95 lines (ms; gaps where a
@@ -103,17 +103,8 @@
           {@const ok = p.calls - p.errors}
           {@const bx = x(p.t) + 1}
           <!-- Stacked from the bottom: successful calls, user errors, server errors; a 1px gap between segments. -->
-          {#each [{ cls: "s1", from: 0, n: ok }, { cls: "warn", from: ok, n: p.userErrors }, { cls: "err", from: ok + p.userErrors, n: p.serverErrors }] as seg (seg.cls)}
-            {#if seg.n > 0}
-              <rect
-                class="bar {seg.cls}"
-                x={bx}
-                width={barWidth}
-                y={y(seg.from + seg.n)}
-                height={Math.max(1, y(seg.from) - y(seg.from + seg.n) - (seg.from > 0 ? 1 : 0))}
-                rx={Math.min(2, barWidth / 2)}
-              />
-            {/if}
+          {#each stackSegments(y(0), y(0) - y(1), [{ key: "s1", n: ok }, { key: "warn", n: p.userErrors }, { key: "err", n: p.serverErrors }]) as seg (seg.key)}
+            <rect class="bar {seg.key}" x={bx} width={barWidth} y={seg.y} height={seg.height} rx={Math.min(2, barWidth / 2)} />
           {/each}
         {/if}
       {/each}

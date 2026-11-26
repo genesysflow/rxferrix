@@ -100,10 +100,11 @@
 
   const appFunctions = $derived((stats?.functions ?? []).filter((f) => !f.path.startsWith("_system")));
   const byCalls = $derived([...appFunctions].sort((a, b) => b.calls - a.calls).slice(0, 8));
+  /** Server errors first: user errors (a `UserError`, bad args) are the callers' doing, not the app's. */
   const byErrors = $derived(
     [...appFunctions]
       .filter((f) => f.errors > 0)
-      .sort((a, b) => b.errors - a.errors)
+      .sort((a, b) => b.serverErrors - a.serverErrors || b.userErrors - a.userErrors)
       .slice(0, 8),
   );
   /** Queries and mutations by p95: actions are left out, as they mostly wait on other services. */
@@ -197,19 +198,47 @@
   {/if}
 {/snippet}
 
-{#snippet fnTable(rows: FunctionStats[], empty: string)}
+{#snippet errorCount(f: FunctionStats, outcome: "userError" | "serverError", n: number)}
+  {#if n > 0}
+    <a href={href("logs", [], { fn: f.path, outcome })} onclick={link} title="The {outcome === 'serverError' ? 'server' : 'user'} errors of {f.path}">{n}</a>
+  {:else}{n}{/if}
+{/snippet}
+
+<!-- `split`: a column each for server and user errors, in place of p50 ("Most errors"); otherwise one Errors column,
+     red when some were server errors, amber when all were the callers' (the split in its tooltip). -->
+{#snippet fnTable(rows: FunctionStats[], empty: string, split = false)}
   {#if rows.length === 0}
     <p class="muted small">{empty}</p>
   {:else}
     <table class="grid">
-      <thead><tr><th>Function</th><th>Calls</th><th>Errors</th><th>p50</th><th>p95</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Function</th><th>Calls</th>
+          {#if split}
+            <th title="Failed through the server: a bug, a panic, a timeout, a failed commit">Server errors</th>
+            <th title="Failed through the caller: a UserError, invalid args, an unknown function">User errors</th>
+          {:else}
+            <th>Errors</th><th>p50</th>
+          {/if}
+          <th>p95</th>
+        </tr>
+      </thead>
       <tbody>
         {#each rows as f (f.path)}
           <tr>
             <td><a href={href("functions", [], { fn: f.path })} onclick={link} class="mono">{f.path}</a></td>
             <td>{f.calls}</td>
-            <td class:error-text={f.errors > 0}>{f.errors}</td>
-            <td>{formatDuration(f.p50Us)}</td>
+            {#if split}
+              <td class:error-text={f.serverErrors > 0}>{@render errorCount(f, "serverError", f.serverErrors)}</td>
+              <td class:warn-text={f.userErrors > 0}>{@render errorCount(f, "userError", f.userErrors)}</td>
+            {:else}
+              <td
+                class:error-text={f.serverErrors > 0}
+                class:warn-text={f.serverErrors === 0 && f.userErrors > 0}
+                title={f.errors > 0 ? `${f.serverErrors} server errors · ${f.userErrors} user errors` : undefined}>{f.errors}</td
+              >
+              <td>{formatDuration(f.p50Us)}</td>
+            {/if}
             <td>{formatDuration(f.p95Us)}</td>
           </tr>
         {/each}
@@ -280,7 +309,10 @@
 
       {#snippet functionsBody()}
         <div class="charts">
-          <Panel title="Function Calls" help="Calls of every app function per 15 minutes, and how many of them failed.">
+          <Panel
+            title="Function Calls"
+            help="Calls of every app function per 15 minutes, and how many of them failed: server errors (a bug, a panic, a timeout, a failed commit) and user errors (a UserError, invalid args, an unknown function: the caller's doing)."
+          >
             {#snippet actions()}<span class="total">{count(sum.calls)} calls</span>{/snippet}
             <LineChart
               label="Function calls"
@@ -291,12 +323,21 @@
               empty="No function calls yet."
               series={[
                 { label: "Calls", color: "var(--series-1)", values: points.map((p) => p.calls) },
-                { label: "Errors", color: "var(--err)", values: points.map((p) => p.errors) },
+                { label: "Server errors", color: "var(--err)", values: points.map((p) => p.serverErrors) },
+                { label: "User errors", color: "var(--warn)", values: points.map((p) => p.userErrors) },
               ]}
             />
           </Panel>
-          <Panel title="Failure Rate" help="The share of app function calls that threw (user and server errors), per 15 minutes.">
-            {#snippet actions()}<span class="total" class:error-text={sum.errors > 0}>{percent(sum.errorRate * 100)} overall</span>{/snippet}
+          <Panel
+            title="Failure Rate"
+            help="The share of app function calls that failed, per 15 minutes: through the server (a bug, a panic, a timeout, a failed commit) or through the caller (a UserError, invalid args, an unknown function)."
+          >
+            {#snippet actions()}
+              <span class="total" data-testid="failure-rate">
+                <span class:error-text={sum.serverErrors > 0}>{percent(sum.serverErrorRate * 100)} server</span> ·
+                <span class:warn-text={sum.userErrors > 0}>{percent(sum.userErrorRate * 100)} user</span>
+              </span>
+            {/snippet}
             <LineChart
               label="Failure rate"
               times={pointTimes}
@@ -304,7 +345,10 @@
               format={percent}
               max={100}
               empty="No function calls yet."
-              series={[{ label: "All functions", color: "var(--err)", values: points.map((p) => (p.calls ? (p.errors / p.calls) * 100 : null)) }]}
+              series={[
+                { label: "Server errors", color: "var(--err)", values: points.map((p) => (p.calls ? (p.serverErrors / p.calls) * 100 : null)) },
+                { label: "User errors", color: "var(--warn)", values: points.map((p) => (p.calls ? (p.userErrors / p.calls) * 100 : null)) },
+              ]}
             />
           </Panel>
           <Panel title="Latency" help="The median (p50) and 95th percentile (p95) duration of app function calls, per 15 minutes.">
@@ -326,8 +370,8 @@
           <Panel title="Busiest functions" help="The app functions called most in the last 24 hours.">
             {@render fnTable(byCalls, "No function calls in the last 24 hours.")}
           </Panel>
-          <Panel title="Most errors" help="The app functions that failed most in the last 24 hours.">
-            {@render fnTable(byErrors, "No errors in the last 24 hours.")}
+          <Panel title="Most errors" help="The app functions that failed most in the last 24 hours: by server errors, then by user errors.">
+            {@render fnTable(byErrors, "No errors in the last 24 hours.", true)}
           </Panel>
         </div>
         <div class="tables slow-panel">

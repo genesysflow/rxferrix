@@ -8,11 +8,13 @@
 
   /**
    * `?fn=<path>`: only that function (the function view links here). `?minUs=<µs>`: only calls at least that slow (the
-   * Overview's slowest functions link here).
+   * Overview's slowest functions link here). `?outcome=userError|serverError|success`: only those outcomes (the
+   * Overview's error counts link here).
    */
   let { route }: { route: Route } = $props();
   const fn = $derived(route.params.get("fn"));
   const minParam = $derived(route.params.get("minUs") ?? "");
+  const outcomeParam = $derived(route.params.get("outcome") ?? "");
 
   /** The "slower than" choices, in µs. */
   const THRESHOLDS: [string, string][] = [
@@ -26,6 +28,9 @@
   let pathPrefix = $state("");
   let kind = $state<LogFilter["kind"]>("");
   let outcome = $state<LogFilter["outcome"]>("");
+  $effect.pre(() => {
+    outcome = outcomeParam === "success" || outcomeParam === "userError" || outcomeParam === "serverError" ? outcomeParam : "";
+  });
   let minUs = $state("");
   $effect.pre(() => {
     minUs = /^\d+$/.test(minParam) ? minParam : "";

@@ -3,7 +3,8 @@
 
   /**
    * A small SVG time chart over filled buckets (lib/chart.ts): `latency` draws p50 and p95 lines (ms; gaps where a
-   * bucket had no calls), `volume` draws calls per bucket as bars with the errors stacked on top. Hovering shows a
+   * bucket had no calls), `volume` draws calls per bucket as bars with the user errors, then the server errors, stacked on
+   * top. Hovering shows a
    * crosshair and one tooltip with every value of that bucket.
    */
   let {
@@ -72,7 +73,8 @@
         <span class="key"><span class="swatch line s2"></span>p95</span>
       {:else}
         <span class="key"><span class="swatch s1"></span>calls</span>
-        <span class="key"><span class="swatch err"></span>errors</span>
+        <span class="key"><span class="swatch warn"></span>user errors</span>
+        <span class="key"><span class="swatch err"></span>server errors</span>
       {/if}
     </span>
   </figcaption>
@@ -100,19 +102,19 @@
         {#if p.calls > 0}
           {@const ok = p.calls - p.errors}
           {@const bx = x(p.t) + 1}
-          {#if ok > 0}
-            <rect class="bar s1" x={bx} width={barWidth} y={y(ok)} height={Math.max(1, y(0) - y(ok))} rx={Math.min(2, barWidth / 2)} />
-          {/if}
-          {#if p.errors > 0}
-            <rect
-              class="bar err"
-              x={bx}
-              width={barWidth}
-              y={y(p.calls)}
-              height={Math.max(1, y(ok) - y(p.calls) - (ok > 0 ? 1 : 0))}
-              rx={Math.min(2, barWidth / 2)}
-            />
-          {/if}
+          <!-- Stacked from the bottom: successful calls, user errors, server errors; a 1px gap between segments. -->
+          {#each [{ cls: "s1", from: 0, n: ok }, { cls: "warn", from: ok, n: p.userErrors }, { cls: "err", from: ok + p.userErrors, n: p.serverErrors }] as seg (seg.cls)}
+            {#if seg.n > 0}
+              <rect
+                class="bar {seg.cls}"
+                x={bx}
+                width={barWidth}
+                y={y(seg.from + seg.n)}
+                height={Math.max(1, y(seg.from) - y(seg.from + seg.n) - (seg.from > 0 ? 1 : 0))}
+                rx={Math.min(2, barWidth / 2)}
+              />
+            {/if}
+          {/each}
         {/if}
       {/each}
     {:else}
@@ -142,7 +144,10 @@
     {@const left = x(hovered.t + bucket / 2)}
     <div class="tooltip" style:left={`${Math.min(Math.max(left, 90), width - 90)}px`} role="status">
       <div class="when">{clock(hovered.t)} – {clock(hovered.t + bucket).slice(6)}</div>
-      <div><strong>{hovered.calls}</strong> calls{#if hovered.errors}, <strong class="error-text">{hovered.errors}</strong> errors{/if}</div>
+      <div>
+        <strong>{hovered.calls}</strong> calls{#if hovered.userErrors}, <strong class="warn-text">{hovered.userErrors}</strong> user errors{/if}{#if hovered.serverErrors},
+          <strong class="error-text">{hovered.serverErrors}</strong> server errors{/if}
+      </div>
       <div><strong>{ms(hovered.p50)}</strong> p50 · <strong>{ms(hovered.p95)}</strong> p95</div>
     </div>
   {/if}
@@ -192,6 +197,9 @@
   .swatch.err {
     background: var(--err);
   }
+  .swatch.warn {
+    background: var(--warn);
+  }
   svg {
     display: block;
     touch-action: none;
@@ -237,6 +245,9 @@
   }
   .bar.err {
     fill: var(--err);
+  }
+  .bar.warn {
+    fill: var(--warn);
   }
   .crosshair {
     stroke: var(--muted);

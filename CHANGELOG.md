@@ -6,7 +6,7 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ### Changed
 
-- The dashboard tells user errors from server errors. Before, its charts and counts added them together, so a function rejecting bad input looked like a failing server. A user error is a `UserError`, invalid args or an unknown function: the caller's doing. A server error is a bug, a panic, a timeout or a failed commit. The execution log already records which kind each failure is.
+- The dashboard tells user errors from server errors. Before, its charts and counts added them together, so a function rejecting bad input looked like a failing server. A user error is a `UserError`, invalid args or an unknown function: the caller's doing. A server error is a bug, a panic, a timeout or a failed commit. The execution log already records which kind each failure is. (#121)
   - **Overview:** the Function Calls and Failure Rate charts draw server errors (red) and user errors (amber) as separate lines, and the failure rate gives both percentages. "Most errors" ranks functions by server errors, then user errors, in a column each; each count links to the Logs page filtered to that function and outcome. "Busiest functions" colours its Errors count red when any were server errors and amber when all were user errors.
   - **A function's Activity:** the totals count server and user errors separately, and the calls chart stacks the two kinds in their own colours.
   - **Logs page:** it takes `?outcome=userError|serverError|success`.

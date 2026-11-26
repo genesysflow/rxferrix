@@ -4,6 +4,8 @@ Notable changes to RxFerrix, newest first. Versions before 0.8.0 are in the git 
 
 ## Unreleased
 
+## 0.17.0 - 2026-11-26
+
 ### Changed
 
 - The dashboard tells user errors from server errors. Before, its charts and counts added them together, so a function rejecting bad input looked like a failing server. A user error is a `UserError`, invalid args or an unknown function: the caller's doing. A server error is a bug, a panic, a timeout or a failed commit. The execution log already records which kind each failure is. (#121)

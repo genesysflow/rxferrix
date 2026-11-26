@@ -530,10 +530,10 @@ describe("Workflows page", () => {
 
 describe("TimeChart", () => {
   const points: ChartPoint[] = [
-    { t: 0, calls: 3, errors: 1, p50: 1, p95: 4 },
-    { t: 60_000, calls: 0, errors: 0, p50: null, p95: null },
-    { t: 120_000, calls: 5, errors: 0, p50: 2, p95: 3 },
-    { t: 180_000, calls: 2, errors: 0, p50: 1.5, p95: 2 },
+    { t: 0, calls: 3, errors: 2, userErrors: 1, serverErrors: 1, p50: 1, p95: 4 },
+    { t: 60_000, calls: 0, errors: 0, userErrors: 0, serverErrors: 0, p50: null, p95: null },
+    { t: 120_000, calls: 5, errors: 1, userErrors: 1, serverErrors: 0, p50: 2, p95: 3 },
+    { t: 180_000, calls: 2, errors: 0, userErrors: 0, serverErrors: 0, p50: 1.5, p95: 2 },
   ];
 
   it("draws latency lines with gaps and a legend", () => {
@@ -549,11 +549,17 @@ describe("TimeChart", () => {
     expect(target.querySelector("svg")?.getAttribute("aria-label")).toBe("Latency");
   });
 
-  it("stacks errors on calls", () => {
+  it("stacks user errors, then server errors, on calls", () => {
     mounted = mount(TimeChart, { target, props: { points, bucket: 60_000, variant: "volume", label: "Calls" } });
     flushSync();
     expect(target.querySelectorAll("rect.bar.s1")).toHaveLength(3); // buckets with successful calls
+    expect(target.querySelectorAll("rect.bar.warn")).toHaveLength(2);
     expect(target.querySelectorAll("rect.bar.err")).toHaveLength(1);
+    // In the first bucket (1 ok, 1 user error, 1 server error): the server errors on top.
+    const top = (cls: string) => Number(target.querySelector(`rect.bar.${cls}`)?.getAttribute("y"));
+    expect(top("err")).toBeLessThan(top("warn"));
+    expect(top("warn")).toBeLessThan(top("s1"));
+    expect(target.querySelector("figcaption")?.textContent).toMatch(/calls.*user errors.*server errors/s);
     const ticks = [...target.querySelectorAll("text.axis")].map((t) => t.textContent);
     expect(ticks).toContain("0");
     expect(ticks).toContain("6");
@@ -700,6 +706,56 @@ describe("Overview page", () => {
     expect(ticks).not.toContain("100%");
   });
 
+  it("tells user errors from server errors, and ranks functions by server errors first", async () => {
+    const overview = {
+      now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
+      tables: 3, documents: 10, registeredFunctions: 5, sockets: 0, subscriptions: 0, droppedLogEntries: 0,
+      files: [], commitsPerSecond: 0, queueDepth: 0, runningJobs: 0, metricsEnabled: false,
+    };
+    const fn = (path: string, userErrors: number, serverErrors: number) => ({
+      path, kind: "mutation", calls: 100, errors: userErrors + serverErrors, userErrors, serverErrors, p50Us: 1, p95Us: 1, maxUs: 1,
+    });
+    const functions = [fn("gates:unlock", 40, 0), fn("orders:pay", 1, 2), fn("todos:add", 0, 0)];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/admin/stats/timeseries?")) {
+          const q = new URLSearchParams(url.split("?")[1]);
+          const bucket = Number(q.get("bucket"));
+          const since = Number(q.get("since"));
+          const until = Number(q.get("until"));
+          // 200 calls: 8 user errors (4%), 1 server error (0.5%).
+          const points = [{ t: since, calls: 200, errors: 9, userErrors: 8, serverErrors: 1, p50Us: 500, p95Us: 900, maxUs: 1000 }];
+          return new Response(JSON.stringify({ path: null, bucket, since, until, points }));
+        }
+        return new Response(JSON.stringify({ since: 0, functions, overview }));
+      }),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    mounted = mount(Overview, { target, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    const rate = target.querySelector("[data-testid=failure-rate]");
+    expect(rate?.textContent?.replace(/\s+/g, " ").trim()).toBe("0.5% server · 4% user");
+    expect(rate?.querySelector(".error-text")?.textContent).toBe("0.5% server");
+    // "Busiest functions" lists all three; "Most errors" only those that failed.
+    const table = [...target.querySelectorAll("table")].find((t) => t.textContent?.includes("gates:unlock") && !t.textContent?.includes("todos:add"));
+    expect(table).toBeDefined();
+    const rows = [...table!.querySelectorAll("tbody tr")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent?.trim()));
+    // orders:pay has fewer failures but a server error: listed first.
+    expect(rows.map((r) => r[0])).toEqual(["orders:pay", "gates:unlock"]);
+    expect(rows[0]!.slice(2, 4)).toEqual(["2", "1"]);
+    // "Busiest functions" keeps one Errors column, red when some were server errors, amber when none were.
+    const busiest = [...target.querySelectorAll("table")].find((t) => t.textContent?.includes("todos:add"))!;
+    const errorsCell = (path: string) =>
+      [...busiest.querySelectorAll("tbody tr")].find((r) => r.textContent?.includes(path))!.querySelectorAll("td")[2]!;
+    expect(errorsCell("orders:pay").className).toContain("error-text");
+    expect(errorsCell("gates:unlock").className).toContain("warn-text");
+    expect(errorsCell("gates:unlock").getAttribute("title")).toBe("0 server errors · 40 user errors");
+    const links = [...table!.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    expect(links.some((h) => h?.endsWith("logs?fn=orders%3Apay&outcome=serverError"))).toBe(true);
+    expect(links.some((h) => h?.endsWith("logs?fn=gates%3Aunlock&outcome=userError"))).toBe(true);
+  });
+
   it("hides background jobs from the function charts and tables, and remembers it", async () => {
     const overview = {
       now: Date.now(), startedAt: Date.now() - 1000, version: "0.1.0", dev: false, ts: 42, commitTime: Date.now(),
@@ -816,6 +872,25 @@ describe("Logs page", () => {
     await new Promise((r) => setTimeout(r, 300));
     await settle();
     expect(query(urls.filter((u) => u.startsWith("/api/admin/logs?")).at(-1)!).has("minDurationUs")).toBe(false);
+  });
+
+  it("starts filtered to the outcome in ?outcome= (the Overview's error counts link here)", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        if (url.startsWith("/api/admin/logs/stream")) return new Response("event: ready\ndata: {}\n\n");
+        return new Response(JSON.stringify({ entries: [] }));
+      }),
+    );
+    const ctx = { auth: { getAccessToken: async () => "token" }, tables: [], tableByNumber: () => undefined, toast: vi.fn() };
+    const route = { page: "logs" as const, rest: [], params: new URLSearchParams("fn=orders:pay&outcome=serverError") };
+    mounted = mount(Logs, { target, props: { route }, context: new Map<unknown, unknown>([[DASHBOARD_CONTEXT, ctx]]) });
+    await settle();
+    expect(target.querySelector<HTMLSelectElement>("select[aria-label=Outcome]")!.value).toBe("serverError");
+    const history = urls.find((u) => u.startsWith("/api/admin/logs?"))!;
+    expect(new URLSearchParams(history.split("?")[1]).get("outcome")).toBe("serverError");
   });
 });
 

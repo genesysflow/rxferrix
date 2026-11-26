@@ -47,6 +47,7 @@
 
   const points = $derived(series ? fillBuckets(series) : []);
   const sum = $derived(totals(points));
+  const pct = (rate: number) => `${(rate * 100).toFixed(rate < 0.1 ? 1 : 0)}%`;
   const p50s = $derived(
     series && series.points.length
       ? [...series.points].sort((a, b) => a.p50Us - b.p50Us)[Math.floor(series.points.length / 2)]!.p50Us
@@ -67,7 +68,12 @@
     {#if series}
       <span class="stats" data-testid="activity-totals">
         <span><strong>{sum.calls}</strong> calls</span>
-        <span class:error-text={sum.errors > 0}><strong>{sum.errors}</strong> errors{#if sum.calls}&nbsp;({(sum.errorRate * 100).toFixed(sum.errorRate < 0.1 ? 1 : 0)}%){/if}</span>
+        <span class:error-text={sum.serverErrors > 0} title="Failed through the server: a bug, a panic, a timeout, a failed commit"
+          ><strong>{sum.serverErrors}</strong> server errors{#if sum.calls}&nbsp;({pct(sum.serverErrorRate)}){/if}</span
+        >
+        <span class:warn-text={sum.userErrors > 0} title="Failed through the caller: a UserError, invalid args, an unknown function"
+          ><strong>{sum.userErrors}</strong> user errors{#if sum.calls}&nbsp;({pct(sum.userErrorRate)}){/if}</span
+        >
         {#if p50s !== null}<span>typical p50 <strong>{formatDuration(p50s)}</strong></span>{/if}
         {#if sum.worstP95 !== null}<span>worst p95 <strong>{formatDuration(sum.worstP95 * 1000)}</strong></span>{/if}
       </span>
@@ -119,6 +125,9 @@
   }
   .stats .error-text strong {
     color: var(--err);
+  }
+  .stats .warn-text strong {
+    color: var(--warn);
   }
   .charts {
     display: grid;

@@ -9,7 +9,12 @@ export interface ChartPoint {
   /** The bucket's start (ms since the epoch). */
   t: number;
   calls: number;
+  /** `userErrors + serverErrors`. */
   errors: number;
+  /** Calls that failed through the caller: a `UserError`, invalid args, an unknown function. */
+  userErrors: number;
+  /** Calls that failed through the server: a bug, a panic, a timeout, a failed commit. */
+  serverErrors: number;
   /** Milliseconds; null for a bucket without executions. */
   p50: number | null;
   p95: number | null;
@@ -25,9 +30,42 @@ export function fillBuckets(series: Timeseries, maxBuckets = 2000): ChartPoint[]
     const p = byT.get(t);
     out.push(
       p
-        ? { t, calls: p.calls, errors: p.errors, p50: p.p50Us / 1000, p95: p.p95Us / 1000 }
-        : { t, calls: 0, errors: 0, p50: null, p95: null },
+        ? {
+            t,
+            calls: p.calls,
+            errors: p.errors,
+            userErrors: p.userErrors,
+            serverErrors: p.serverErrors,
+            p50: p.p50Us / 1000,
+            p95: p.p95Us / 1000,
+          }
+        : { t, calls: 0, errors: 0, userErrors: 0, serverErrors: 0, p50: null, p95: null },
     );
+  }
+  return out;
+}
+
+/**
+ * Stack bar segments upward from the baseline `y0` (SVG y grows downward), `pxPerUnit` pixels per unit, in order,
+ * leaving out empty ones. Every segment is at least 1px tall and starts above the one below it, after a `gap` taken
+ * out of its own height: on a scale where one call is a fraction of a pixel, a call still shows, and no segment covers
+ * another or reaches below the baseline.
+ */
+export function stackSegments<K>(
+  y0: number,
+  pxPerUnit: number,
+  segments: readonly { key: K; n: number }[],
+  gap = 1,
+): { key: K; y: number; height: number }[] {
+  const out: { key: K; y: number; height: number }[] = [];
+  let bottom = y0;
+  for (const { key, n } of segments) {
+    if (!(n > 0)) continue;
+    const g = out.length ? gap : 0;
+    const height = Math.max(1, n * pxPerUnit - g);
+    bottom -= g;
+    out.push({ key, y: bottom - height, height });
+    bottom -= height;
   }
   return out;
 }
@@ -35,22 +73,41 @@ export function fillBuckets(series: Timeseries, maxBuckets = 2000): ChartPoint[]
 export interface Totals {
   calls: number;
   errors: number;
+  userErrors: number;
+  serverErrors: number;
   /** Errors / calls (0 without calls). */
   errorRate: number;
+  /** User errors / calls (0 without calls). */
+  userErrorRate: number;
+  /** Server errors / calls (0 without calls). */
+  serverErrorRate: number;
   /** The slowest bucket's p95, ms (null without calls). */
   worstP95: number | null;
 }
 
 export function totals(points: readonly ChartPoint[]): Totals {
   let calls = 0;
-  let errors = 0;
+  let userErrors = 0;
+  let serverErrors = 0;
   let worstP95: number | null = null;
   for (const p of points) {
     calls += p.calls;
-    errors += p.errors;
+    userErrors += p.userErrors;
+    serverErrors += p.serverErrors;
     if (p.p95 !== null && (worstP95 === null || p.p95 > worstP95)) worstP95 = p.p95;
   }
-  return { calls, errors, errorRate: calls ? errors / calls : 0, worstP95 };
+  const rate = (n: number) => (calls ? n / calls : 0);
+  const errors = userErrors + serverErrors;
+  return {
+    calls,
+    errors,
+    userErrors,
+    serverErrors,
+    errorRate: rate(errors),
+    userErrorRate: rate(userErrors),
+    serverErrorRate: rate(serverErrors),
+    worstP95,
+  };
 }
 
 /**

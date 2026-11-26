@@ -385,6 +385,14 @@ table.grid tbody tr.selected {
 .error-text {
   color: var(--err);
 }
+.warn-text {
+  color: var(--warn);
+}
+/* A count that links somewhere keeps its error colour. */
+.error-text a,
+.warn-text a {
+  color: inherit;
+}
 .alert {
   padding: 8px 12px;
   border-radius: var(--radius);

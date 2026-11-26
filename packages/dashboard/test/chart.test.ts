@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { TimePoint } from "../src/lib/api.js";
-import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, timeTicks, totals, type ChartPoint } from "../src/lib/chart.js";
+import { fillBuckets, linePath, nearestIndex, niceTicks, rangeWindow, scale, stackSegments, timeTicks, totals, type ChartPoint } from "../src/lib/chart.js";
 
-const point = (t: number, calls: number, errors: number, p50Us: number, p95Us: number): TimePoint => ({
+const point = (t: number, calls: number, userErrors: number, p50Us: number, p95Us: number, serverErrors = 0): TimePoint => ({
   t,
   calls,
-  errors,
-  userErrors: errors,
-  serverErrors: 0,
+  errors: userErrors + serverErrors,
+  userErrors,
+  serverErrors,
   p50Us,
   p95Us,
   maxUs: p95Us,
@@ -20,12 +20,12 @@ describe("fillBuckets", () => {
       bucket: 60_000,
       since: 0,
       until: 300_000,
-      points: [point(60_000, 4, 1, 1500, 9000), point(240_000, 2, 0, 250, 400)],
+      points: [point(60_000, 4, 1, 1500, 9000, 2), point(240_000, 2, 0, 250, 400)],
     });
     expect(filled.map((p) => p.t)).toEqual([0, 60_000, 120_000, 180_000, 240_000]);
-    expect(filled[0]).toEqual({ t: 0, calls: 0, errors: 0, p50: null, p95: null });
-    expect(filled[1]).toEqual({ t: 60_000, calls: 4, errors: 1, p50: 1.5, p95: 9 });
-    expect(filled[4]).toEqual({ t: 240_000, calls: 2, errors: 0, p50: 0.25, p95: 0.4 });
+    expect(filled[0]).toEqual({ t: 0, calls: 0, errors: 0, userErrors: 0, serverErrors: 0, p50: null, p95: null });
+    expect(filled[1]).toEqual({ t: 60_000, calls: 4, errors: 3, userErrors: 1, serverErrors: 2, p50: 1.5, p95: 9 });
+    expect(filled[4]).toEqual({ t: 240_000, calls: 2, errors: 0, userErrors: 0, serverErrors: 0, p50: 0.25, p95: 0.4 });
   });
 
   it("ignores points outside the range and bad ranges, and caps the bucket count", () => {
@@ -38,14 +38,52 @@ describe("fillBuckets", () => {
 });
 
 describe("totals", () => {
-  it("sums calls and errors and finds the worst p95", () => {
+  it("sums calls, user and server errors apart, and finds the worst p95", () => {
     const pts: ChartPoint[] = [
-      { t: 0, calls: 10, errors: 1, p50: 1, p95: 4 },
-      { t: 1, calls: 0, errors: 0, p50: null, p95: null },
-      { t: 2, calls: 30, errors: 3, p50: 2, p95: 12 },
+      { t: 0, calls: 10, errors: 1, userErrors: 1, serverErrors: 0, p50: 1, p95: 4 },
+      { t: 1, calls: 0, errors: 0, userErrors: 0, serverErrors: 0, p50: null, p95: null },
+      { t: 2, calls: 30, errors: 3, userErrors: 1, serverErrors: 2, p50: 2, p95: 12 },
     ];
-    expect(totals(pts)).toEqual({ calls: 40, errors: 4, errorRate: 0.1, worstP95: 12 });
-    expect(totals([])).toEqual({ calls: 0, errors: 0, errorRate: 0, worstP95: null });
+    expect(totals(pts)).toEqual({
+      calls: 40,
+      errors: 4,
+      userErrors: 2,
+      serverErrors: 2,
+      errorRate: 0.1,
+      userErrorRate: 0.05,
+      serverErrorRate: 0.05,
+      worstP95: 12,
+    });
+    expect(totals([])).toEqual({
+      calls: 0,
+      errors: 0,
+      userErrors: 0,
+      serverErrors: 0,
+      errorRate: 0,
+      userErrorRate: 0,
+      serverErrorRate: 0,
+      worstP95: null,
+    });
+  });
+});
+
+describe("stackSegments", () => {
+  it("stacks at the scale's heights, with a 1px gap taken out of each upper segment", () => {
+    expect(stackSegments(100, 10, [{ key: "ok", n: 3 }, { key: "user", n: 0 }, { key: "server", n: 2 }])).toEqual([
+      { key: "ok", y: 70, height: 30 },
+      { key: "server", y: 50, height: 19 },
+    ]);
+  });
+
+  it("keeps tiny segments visible, apart, and above the baseline", () => {
+    // 1000 calls on a 150px axis: one call is 0.15px.
+    const segs = stackSegments(150, 0.15, [{ key: "ok", n: 998 }, { key: "user", n: 1 }, { key: "server", n: 1 }]);
+    expect(segs.map((s) => s.key)).toEqual(["ok", "user", "server"]);
+    for (const s of segs) expect(s.height).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < segs.length; i++) expect(segs[i]!.y + segs[i]!.height).toBeLessThan(segs[i - 1]!.y);
+    const [one] = stackSegments(150, 0.15, [{ key: "server", n: 1 }]);
+    expect(one!.y + one!.height).toBe(150);
+    expect(stackSegments(150, 0.15, [{ key: "ok", n: 0 }])).toEqual([]);
   });
 });
 
@@ -79,10 +117,10 @@ describe("niceTicks", () => {
 
 describe("paths and hit testing", () => {
   const pts: ChartPoint[] = [
-    { t: 0, calls: 1, errors: 0, p50: 1, p95: 2 },
-    { t: 10, calls: 1, errors: 0, p50: 3, p95: 4 },
-    { t: 20, calls: 0, errors: 0, p50: null, p95: null },
-    { t: 30, calls: 1, errors: 0, p50: 2, p95: 2 },
+    { t: 0, calls: 1, errors: 0, userErrors: 0, serverErrors: 0, p50: 1, p95: 2 },
+    { t: 10, calls: 1, errors: 0, userErrors: 0, serverErrors: 0, p50: 3, p95: 4 },
+    { t: 20, calls: 0, errors: 0, userErrors: 0, serverErrors: 0, p50: null, p95: null },
+    { t: 30, calls: 1, errors: 0, userErrors: 0, serverErrors: 0, p50: 2, p95: 2 },
   ];
   const x = scale(0, 40, 0, 400);
   const y = scale(0, 4, 100, 0);
